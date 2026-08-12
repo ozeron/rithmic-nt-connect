@@ -1,0 +1,29 @@
+# Secrets / local env
+.env
+.env.*
+!.env.example
+**/certs/
+*.pem
+*.key
+
+# Build / Python
+target/
+dist/
+build/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.so
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Generated protos (do not commit gated Rithmic protos unless license allows)
+vendor/rithmic-proto/
