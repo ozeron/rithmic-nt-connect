@@ -1,0 +1,128 @@
+"""Unit tests for SessionConfig / client config env mapping."""
+
+from __future__ import annotations
+
+import pytest
+
+from rithmic_connect import ConfigError, SessionConfig, VENUE
+from rithmic_connect.config import RithmicDataClientConfig, RithmicExecClientConfig
+from rithmic_connect.constants import DEFAULT_GATEWAY_URL, DEFAULT_SYSTEM_NAME
+
+
+def test_my046_env_maps_to_lucid_live() -> None:
+    cfg = SessionConfig.from_env(
+        {
+            "RITHMIC_USER": "alice",
+            "RITHMIC_PASSWORD": "s3cret-value",
+            "RITHMIC_SYSTEM": "LucidTrading",
+            "RITHMIC_GATEWAY": "wss://rprotocol.rithmic.com:443",
+            "RITHMIC_APP_NAME": "rithmic-connect",
+            "RITHMIC_APP_VERSION": "0.1.0",
+            "RITHMIC_SYMBOL": "NQ",
+            "RITHMIC_EXCHANGE": "CME",
+        }
+    )
+    assert cfg.user == "alice"
+    assert cfg.password == "s3cret-value"
+    assert cfg.system_name == DEFAULT_SYSTEM_NAME
+    assert cfg.url == DEFAULT_GATEWAY_URL
+    assert cfg.env == "Live"
+    assert cfg.symbol == "NQ"
+    assert cfg.exchange == "CME"
+
+
+def test_my046_defaults_system_and_gateway() -> None:
+    cfg = SessionConfig.from_env(
+        {
+            "RITHMIC_USER": "alice",
+            "RITHMIC_PASSWORD": "pw",
+        }
+    )
+    assert cfg.system_name == "LucidTrading"
+    assert cfg.url == "wss://rprotocol.rithmic.com:443"
+    assert cfg.env == "Live"
+
+
+def test_live_rs_style_env() -> None:
+    cfg = SessionConfig.from_env(
+        {
+            "RITHMIC_LIVE_USER": "live_user",
+            "RITHMIC_LIVE_PW": "live_pw",
+            "RITHMIC_LIVE_URL": "wss://rprotocol.rithmic.com:443",
+            "RITHMIC_LIVE_ALT_URL": "wss://alt.example:443",
+            "RITHMIC_LIVE_SYSTEM_NAME": "LucidTrading",
+            "RITHMIC_APP_NAME": "app",
+            "RITHMIC_APP_VERSION": "1",
+        }
+    )
+    assert cfg.env == "Live"
+    assert cfg.user == "live_user"
+    assert cfg.system_name == "LucidTrading"
+    assert cfg.beta_url == "wss://alt.example:443"
+
+
+def test_demo_rs_style_env() -> None:
+    cfg = SessionConfig.from_env(
+        {
+            "RITHMIC_DEMO_USER": "demo_user",
+            "RITHMIC_DEMO_PW": "demo_pw",
+            "RITHMIC_DEMO_URL": "wss://demo.example:443",
+            "RITHMIC_APP_NAME": "app",
+            "RITHMIC_APP_VERSION": "1",
+        }
+    )
+    assert cfg.env == "Demo"
+    assert cfg.user == "demo_user"
+    assert cfg.system_name == "Rithmic Paper Trading"
+
+
+def test_missing_credentials_clear_error_no_password_echo() -> None:
+    with pytest.raises(ConfigError) as exc:
+        SessionConfig.from_env({})
+    msg = str(exc.value)
+    assert "missing credentials" in msg.lower() or "RITHMIC_USER" in msg
+    assert "s3cret" not in msg
+
+
+def test_empty_user_rejected_without_echoing_password() -> None:
+    with pytest.raises(ConfigError) as exc:
+        SessionConfig(user="", password="top-secret-password")
+    msg = str(exc.value)
+    assert "user" in msg
+    assert "top-secret-password" not in msg
+
+
+def test_repr_redacts_password() -> None:
+    cfg = SessionConfig(user="u", password="top-secret-password")
+    text = repr(cfg)
+    assert "top-secret-password" not in text
+    assert "***" in text
+
+
+def test_to_dict_redacts_by_default() -> None:
+    cfg = SessionConfig(user="u", password="top-secret-password")
+    assert cfg.to_dict()["password"] == "***"
+    assert cfg.to_dict(redact=False)["password"] == "top-secret-password"
+
+
+def test_data_and_exec_config_from_env() -> None:
+    env = {
+        "RITHMIC_USER": "alice",
+        "RITHMIC_PASSWORD": "pw",
+        "RITHMIC_SYMBOL": "NQ",
+        "RITHMIC_EXCHANGE": "CME",
+    }
+    data = RithmicDataClientConfig.from_env(env)
+    exec_cfg = RithmicExecClientConfig.from_env(env)
+    assert data.venue == VENUE
+    assert data.instrument_ids == [f"NQ.{VENUE}"]
+    assert exec_cfg.session.user == "alice"
+    assert "pw" not in repr(data)
+    assert "pw" not in repr(exec_cfg)
+
+
+def test_package_imports_without_network() -> None:
+    import rithmic_connect
+
+    assert rithmic_connect.VENUE == "RITHMIC"
+    assert rithmic_connect.__version__

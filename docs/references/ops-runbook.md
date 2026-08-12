@@ -1,10 +1,11 @@
-# Ops runbook (stub)
+# Ops runbook
 
-Filled in during U7. Until then:
+1. Close MotiveWave / R|Trader (one Rithmic session per login).
+2. Copy `.env.example` → `.env` with LucidTrading credentials (`RITHMIC_USER` / `RITHMIC_PASSWORD` / `RITHMIC_SYSTEM=LucidTrading`).
+3. Build extension: `maturin develop`
+4. Unit tests: `cargo test -p rithmic-connect && pytest -q`
+5. Live smoke: `python scripts/smoke_lucid_nq.py` (exits `2` if credentials missing — CI-safe).
 
-1. Close MotiveWave / R|Trader (one session per login).
-2. Copy `.env.example` → `.env` with LucidTrading credentials.
-3. Set system to `LucidTrading` and gateway `wss://rprotocol.rithmic.com:443`.
-4. Run unit tests without network; run `scripts/smoke_lucid_nq.py` only with real creds.
+Phase 1 does **not** submit orders. The read-only exec client rejects order actions.
 
 See also: `docs/references/my046-rithmic-access.md`, `docs/references/plant-probe-2026-08-12.md`.

@@ -8,37 +8,50 @@ Unofficial **Rithmic R|Protocol** adapter compatible with NautilusTrader — Rus
 
 ## Status
 
-**Planning / Phase 1 design.** Requirements live in [`docs/plans/`](docs/plans/). Reference notes in [`docs/references/`](docs/references/).
+**Phase 1** targeting **NautilusTrader 1.231.x**: market data + instruments + read-only account/PnL. **No order routing.**
 
-Target runtime for Phase 1: **NautilusTrader 1.231.x** (Python `TradingNode`) with a **Rust** Rithmic client exposed via PyO3.
+Plan: [`docs/plans/2026-08-12-001-feature-rithmic-nt-adapter-plan.md`](docs/plans/2026-08-12-001-feature-rithmic-nt-adapter-plan.md)
 
-## Why a separate repo
+## Quick start
 
-Upstream RFC [#3768](https://github.com/nautechsystems/nautilus_trader/issues/3768) was closed: gated protos, conformance/`app_name`, and Rithmic’s intermediary access model make it a poor fit for **official** inclusion. Nautilus still documents an **External / Community** path for out-of-tree adapters (`ADAPTERS.md`).
+```bash
+# Rust extension + editable install
+maturin develop
 
-## Phases (product)
+# Unit tests (no live credentials)
+cargo test -p rithmic-connect
+pytest -q
 
-| Phase | Scope |
-| --- | --- |
-| **1** | Instruments + full MD plant (live, history, depth when available) for any configured symbol/exchange; best-effort account/positions via PnL plant. **No order routing.** Acceptance: NQ on LucidTrading. |
-| **2** | Order submit/cancel/fills + harden account reconcile (may need conformance-issued `app_name`). |
-
-## Layout (intended)
-
-```text
-rithmic-connect/
-├── crates/                 # Rust Rithmic client + Nautilus model mapping + PyO3
-├── python/rithmic_connect/ # LiveDataClient / factories / config
-├── docs/plans/             # Requirements + (later) implementation plans
-├── docs/references/        # Upstream decisions, plant probes, quirk notes
-└── scripts/                # Smoke / acceptance harnesses
+# Live LucidTrading smoke (close MotiveWave first)
+cp .env.example .env   # fill credentials
+python scripts/smoke_lucid_nq.py
 ```
 
-## Local references used while scoping
+Register on a `TradingNode`:
 
-- MY046 MotiveWave / LucidTrading harness (market-data verified): `../algotrading/quant-guild-work/projects/MY046_motivewave_simple_ls_demo`
-- Wire client candidates: [`pbeets/rithmic-rs`](https://github.com/pbeets/rithmic-rs), MY046 vendored Node client, `async_rithmic`
+```python
+from nautilus_trader.live.node import TradingNode
+from rithmic_connect import (
+    RithmicDataClientConfig,
+    RithmicExecClientConfig,
+    RithmicLiveDataClientFactory,
+    RithmicLiveExecClientFactory,
+    SessionConfig,
+    ADAPTER_NAME,
+)
+
+session = SessionConfig.from_env()
+# node = TradingNode(config=...)
+# node.add_data_client_factory(ADAPTER_NAME, RithmicLiveDataClientFactory)
+# node.add_exec_client_factory(f"{ADAPTER_NAME}-EXEC", RithmicLiveExecClientFactory)
+```
+
+## Ops
+
+- **One session per login** — close MotiveWave / R|Trader before connecting.
+- LucidTrading defaults: system `LucidTrading`, gateway `wss://rprotocol.rithmic.com:443`.
+- See [`docs/references/ops-runbook.md`](docs/references/ops-runbook.md).
 
 ## License
 
-Apache-2.0 (see `LICENSE`). Compatible with NautilusTrader community listing criteria (LGPL-compatible OSS).
+Apache-2.0 (see `LICENSE`).

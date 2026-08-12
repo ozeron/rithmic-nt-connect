@@ -1,0 +1,29 @@
+[package]
+name = "rithmic-connect"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Rust Rithmic R|Protocol session facade for rithmic-connect (Phase 1: MD + PnL, no orders)"
+readme = "../../README.md"
+repository = "https://github.com/ozeron/rithmic-connect"
+
+[lib]
+name = "rithmic_connect"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# Empty Cargo default so `cargo test -p rithmic-connect` does not link libpython.
+# Maturin builds enable `python` via pyproject.toml `[tool.maturin] features`.
+default = []
+python = ["dep:pyo3"]
+# Enabled automatically by maturin when building the extension module.
+extension-module = ["python", "pyo3/extension-module"]
+
+[dependencies]
+rithmic-rs = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+pyo3 = { version = "0.23", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
