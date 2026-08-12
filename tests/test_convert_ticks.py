@@ -9,6 +9,7 @@ from rithmic_connect._convert import (
     account_pnl_to_fields,
     bbo_to_fields,
     last_trade_to_fields,
+    order_book_to_fields,
 )
 from rithmic_connect.constants import VENUE
 
@@ -49,6 +50,19 @@ ACCOUNT_PNL_FIXTURE = {
     "closed_position_pnl": "75.50",
     "available_buying_power": "50000.00",
     "is_snapshot": True,
+}
+
+ORDER_BOOK_FIXTURE = {
+    "type": "order_book",
+    "symbol": "NQU6",
+    "exchange": "CME",
+    "update_type": 1,
+    "bid_price": [21012.0, 21011.75],
+    "bid_size": [3, 5],
+    "ask_price": [21012.25, 21012.5],
+    "ask_size": [2, 4],
+    "ssboe": 1_700_000_000,
+    "usecs": 300000,
 }
 
 
@@ -101,3 +115,26 @@ def test_partial_bbo_raises() -> None:
 def test_account_pnl_requires_account_id() -> None:
     with pytest.raises(ConvertError):
         account_pnl_to_fields({"account_balance": "1"})
+
+
+def test_order_book_fixture_to_fields() -> None:
+    fields = order_book_to_fields(ORDER_BOOK_FIXTURE)
+    assert fields["instrument_id"] == f"NQU6.{VENUE}"
+    assert fields["type"] == "order_book"
+    assert len(fields["levels"]) == 4
+    assert fields["levels"][0]["side"] == "BUY"
+    assert fields["levels"][0]["price"] == 21012.0
+    assert fields["levels"][-1]["side"] == "SELL"
+    assert fields["ts_event"] == 1_700_000_000 * 1_000_000_000 + 300000 * 1_000
+
+
+def test_order_book_empty_levels_raises() -> None:
+    with pytest.raises(ConvertError):
+        order_book_to_fields(
+            {
+                "symbol": "NQU6",
+                "bid_price": [],
+                "ask_price": [],
+                "ssboe": 1,
+            }
+        )

@@ -10,8 +10,12 @@ pub enum TickerEvent {
     LastTrade(LastTradeDto),
     /// Best bid / offer update.
     Bbo(BboDto),
+    /// Aggregated order-book summary levels.
+    OrderBook(OrderBookDto),
     /// Account-level PnL update.
     AccountPnl(AccountPnlDto),
+    /// Instrument-level PnL / position update.
+    InstrumentPnl(InstrumentPnlDto),
     /// Catch-all with type name for unhandled templates.
     Other {
         /// Discriminator / message variant name.
@@ -67,6 +71,56 @@ pub struct AccountPnlDto {
     pub is_snapshot: Option<bool>,
     pub ssboe: Option<i32>,
     pub usecs: Option<i32>,
+}
+
+/// Instrument PnL / position snapshot fields.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InstrumentPnlDto {
+    pub account_id: Option<String>,
+    pub symbol: Option<String>,
+    pub exchange: Option<String>,
+    pub product_code: Option<String>,
+    pub instrument_type: Option<String>,
+    pub open_position_pnl: Option<String>,
+    pub closed_position_pnl: Option<String>,
+    pub mtm_security: Option<String>,
+    pub is_snapshot: Option<bool>,
+    pub ssboe: Option<i32>,
+    pub usecs: Option<i32>,
+}
+
+/// Aggregated order-book summary (bid/ask level arrays).
+#[derive(Debug, Clone, PartialEq)]
+pub struct OrderBookDto {
+    pub symbol: Option<String>,
+    pub exchange: Option<String>,
+    pub update_type: Option<i32>,
+    pub bid_price: Vec<f64>,
+    pub bid_size: Vec<i32>,
+    pub ask_price: Vec<f64>,
+    pub ask_size: Vec<i32>,
+    pub ssboe: Option<i32>,
+    pub usecs: Option<i32>,
+    pub ts_event_ns: Option<u64>,
+}
+
+/// Reference-data fields used to build Nautilus instruments.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReferenceDataDto {
+    pub symbol: Option<String>,
+    pub exchange: Option<String>,
+    pub trading_symbol: Option<String>,
+    pub trading_exchange: Option<String>,
+    pub symbol_name: Option<String>,
+    pub product_code: Option<String>,
+    pub instrument_type: Option<String>,
+    pub underlying: Option<String>,
+    pub currency: Option<String>,
+    pub expiration_date: Option<String>,
+    pub tick_size: Option<f64>,
+    pub point_value: Option<f64>,
+    pub price_precision: u8,
+    pub is_tradable: bool,
 }
 
 /// Front-month resolution result.
@@ -127,6 +181,18 @@ impl From<&RithmicResponse> for TickerEvent {
                 ts_event_ns: ts_ns(b.ssboe, b.usecs),
                 is_snapshot: b.is_snapshot,
             }),
+            RithmicMessage::OrderBook(o) => Self::OrderBook(OrderBookDto {
+                symbol: o.symbol.clone(),
+                exchange: o.exchange.clone(),
+                update_type: o.update_type,
+                bid_price: o.bid_price.clone(),
+                bid_size: o.bid_size.clone(),
+                ask_price: o.ask_price.clone(),
+                ask_size: o.ask_size.clone(),
+                ssboe: o.ssboe,
+                usecs: o.usecs,
+                ts_event_ns: ts_ns(o.ssboe, o.usecs),
+            }),
             RithmicMessage::AccountPnLPositionUpdate(a) => Self::AccountPnl(AccountPnlDto {
                 account_id: a.account_id.clone(),
                 fcm_id: a.fcm_id.clone(),
@@ -143,6 +209,19 @@ impl From<&RithmicResponse> for TickerEvent {
                 ssboe: a.ssboe,
                 usecs: a.usecs,
             }),
+            RithmicMessage::InstrumentPnLPositionUpdate(i) => Self::InstrumentPnl(InstrumentPnlDto {
+                account_id: i.account_id.clone(),
+                symbol: i.symbol.clone(),
+                exchange: i.exchange.clone(),
+                product_code: i.product_code.clone(),
+                instrument_type: i.instrument_type.clone(),
+                open_position_pnl: i.open_position_pnl.clone(),
+                closed_position_pnl: i.closed_position_pnl.clone(),
+                mtm_security: i.mtm_security.clone(),
+                is_snapshot: i.is_snapshot,
+                ssboe: i.ssboe,
+                usecs: i.usecs,
+            }),
             other => Self::Other {
                 type_name: format!("{other:?}")
                     .split('(')
@@ -151,6 +230,35 @@ impl From<&RithmicResponse> for TickerEvent {
                     .to_string(),
                 source: resp.source.clone(),
             },
+        }
+    }
+}
+
+impl ReferenceDataDto {
+    pub(crate) fn from_response(resp: &RithmicResponse) -> Option<Self> {
+        use rithmic_rs::InstrumentInfo;
+        match &resp.message {
+            RithmicMessage::ResponseReferenceData(data) => {
+                let info = InstrumentInfo::try_from(data).ok()?;
+                let price_precision = info.price_precision();
+                Some(Self {
+                    symbol: Some(info.symbol),
+                    exchange: Some(info.exchange),
+                    trading_symbol: data.trading_symbol.clone(),
+                    trading_exchange: data.trading_exchange.clone(),
+                    symbol_name: info.name,
+                    product_code: info.product_code,
+                    instrument_type: info.instrument_type,
+                    underlying: info.underlying,
+                    currency: info.currency,
+                    expiration_date: info.expiration_date,
+                    tick_size: info.tick_size,
+                    point_value: info.point_value,
+                    price_precision,
+                    is_tradable: info.is_tradable,
+                })
+            }
+            _ => None,
         }
     }
 }

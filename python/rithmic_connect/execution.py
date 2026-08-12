@@ -98,7 +98,11 @@ class RithmicReadOnlyExecutionClient(LiveExecutionClient):
 
     async def _poll_loop(self) -> None:
         while True:
-            event = await asyncio.to_thread(self._session.poll_event)
+            poll_pnl = getattr(self._session, "poll_pnl_event", None)
+            if callable(poll_pnl):
+                event = await asyncio.to_thread(poll_pnl)
+            else:
+                event = await asyncio.to_thread(self._session.poll_event)
             if event is None:
                 await asyncio.sleep(0.05)
                 continue

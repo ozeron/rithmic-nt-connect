@@ -102,3 +102,62 @@ def account_pnl_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
         "is_snapshot": d.get("is_snapshot"),
         "venue": VENUE,
     }
+
+
+def order_book_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
+    """Map an OrderBook venue dict to OrderBookDeltas-oriented fields.
+
+    Produces a CLEAR + ADD snapshot for the provided bid/ask level arrays.
+    """
+    _require(d, "symbol")
+    symbol = str(d["symbol"])
+    exchange = d.get("exchange")
+    ts = _ts_ns(d)
+    if ts is None:
+        raise ConvertError("missing timestamp fields: ts_event_ns or ssboe")
+
+    bid_price = list(d.get("bid_price") or [])
+    bid_size = list(d.get("bid_size") or [])
+    ask_price = list(d.get("ask_price") or [])
+    ask_size = list(d.get("ask_size") or [])
+    if not bid_price and not ask_price:
+        raise ConvertError("order book has no bid/ask levels")
+
+    levels: list[dict[str, Any]] = []
+    for i, price in enumerate(bid_price):
+        size = bid_size[i] if i < len(bid_size) else 0
+        if price is None or size is None:
+            continue
+        levels.append(
+            {
+                "side": "BUY",
+                "price": float(price),
+                "size": float(size),
+                "order_id": i + 1,
+            }
+        )
+    for i, price in enumerate(ask_price):
+        size = ask_size[i] if i < len(ask_size) else 0
+        if price is None or size is None:
+            continue
+        levels.append(
+            {
+                "side": "SELL",
+                "price": float(price),
+                "size": float(size),
+                "order_id": 1_000_000 + i + 1,
+            }
+        )
+    if not levels:
+        raise ConvertError("order book levels empty after filtering")
+
+    return {
+        "type": "order_book",
+        "instrument_id": instrument_id_from_symbol(symbol, exchange),
+        "symbol": symbol,
+        "exchange": exchange,
+        "update_type": d.get("update_type"),
+        "levels": levels,
+        "ts_event": ts,
+        "venue": VENUE,
+    }

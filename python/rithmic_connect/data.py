@@ -16,9 +16,14 @@ from nautilus_trader.data.messages import UnsubscribeOrderBook
 from nautilus_trader.data.messages import UnsubscribeQuoteTicks
 from nautilus_trader.data.messages import UnsubscribeTradeTicks
 from nautilus_trader.live.data_client import LiveMarketDataClient
+from nautilus_trader.model.data import BookOrder
+from nautilus_trader.model.data import OrderBookDelta
+from nautilus_trader.model.data import OrderBookDeltas
 from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.data import TradeTick
 from nautilus_trader.model.enums import AggressorSide
+from nautilus_trader.model.enums import BookAction
+from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.identifiers import ClientId
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.identifiers import TradeId
@@ -29,6 +34,7 @@ from nautilus_trader.model.objects import Quantity
 from rithmic_connect._convert import ConvertError
 from rithmic_connect._convert import bbo_to_fields
 from rithmic_connect._convert import last_trade_to_fields
+from rithmic_connect._convert import order_book_to_fields
 from rithmic_connect.config import RithmicDataClientConfig
 from rithmic_connect.constants import ADAPTER_NAME
 from rithmic_connect.constants import VENUE
@@ -74,6 +80,37 @@ def fields_to_quote_tick(fields: dict[str, Any], ts_init: int) -> QuoteTick:
         int(fields["ts_event"]),
         ts_init,
     )
+
+
+def fields_to_order_book_deltas(fields: dict[str, Any], ts_init: int) -> OrderBookDeltas:
+    instrument_id = InstrumentId.from_str(fields["instrument_id"])
+    ts_event = int(fields["ts_event"])
+    deltas: list[OrderBookDelta] = [
+        OrderBookDelta.clear(instrument_id, 0, ts_event, ts_init),
+    ]
+    for level in fields["levels"]:
+        side = OrderSide.BUY if level["side"] == "BUY" else OrderSide.SELL
+        size = max(int(level["size"]), 0)
+        if size <= 0:
+            continue
+        order = BookOrder(
+            side,
+            _price(level["price"]),
+            Quantity.from_int(size),
+            int(level.get("order_id", 0)),
+        )
+        deltas.append(
+            OrderBookDelta(
+                instrument_id,
+                BookAction.ADD,
+                order,
+                0,
+                0,
+                ts_event,
+                ts_init,
+            )
+        )
+    return OrderBookDeltas(instrument_id=instrument_id, deltas=deltas)
 
 
 class RithmicDataClient(LiveMarketDataClient):
@@ -145,6 +182,9 @@ class RithmicDataClient(LiveMarketDataClient):
             elif etype == "bbo":
                 fields = bbo_to_fields(event)
                 self._handle_data(fields_to_quote_tick(fields, ts_init))
+            elif etype == "order_book":
+                fields = order_book_to_fields(event)
+                self._handle_data(fields_to_order_book_deltas(fields, ts_init))
         except ConvertError as exc:
             self._log.debug(f"skip event {etype}: {exc}")
 

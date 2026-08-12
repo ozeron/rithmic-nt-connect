@@ -2,6 +2,9 @@
 //!
 //! Intentionally omits any public place / cancel / modify order APIs.
 
+use std::future::Future;
+use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+
 use rithmic_rs::rti::messages::RithmicMessage;
 use rithmic_rs::{
     ConnectStrategy, RithmicHistoryPlant, RithmicHistoryPlantHandle, RithmicPnlPlant,
@@ -10,8 +13,31 @@ use rithmic_rs::{
 use tokio::sync::broadcast::error::TryRecvError;
 
 use crate::config::SessionConfig;
-use crate::dto::{FrontMonthDto, HistoryTickDto, TickerEvent};
+use crate::dto::{FrontMonthDto, HistoryTickDto, ReferenceDataDto, TickerEvent};
 use crate::error::{Error, Result};
+
+fn noop_waker() -> Waker {
+    fn clone(_: *const ()) -> RawWaker {
+        RawWaker::new(std::ptr::null(), &VTABLE)
+    }
+    fn wake(_: *const ()) {}
+    fn wake_by_ref(_: *const ()) {}
+    fn drop(_: *const ()) {}
+    static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, wake, wake_by_ref, drop);
+    // SAFETY: noop waker; never used to wake a task.
+    unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) }
+}
+
+/// Poll a future once without waiting (for non-blocking subscription drains).
+fn now_or_never<F: Future>(fut: F) -> Option<F::Output> {
+    let mut fut = std::pin::pin!(fut);
+    let waker = noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    match fut.as_mut().poll(&mut cx) {
+        Poll::Ready(v) => Some(v),
+        Poll::Pending => None,
+    }
+}
 
 struct TickerPlant {
     _plant: RithmicTickerPlant,
@@ -158,15 +184,21 @@ impl RithmicSession {
         Ok(())
     }
 
-    /// Subscribe to PnL updates and request a snapshot when account is configured.
-    pub async fn subscribe_pnl(&self) -> Result<()> {
-        let handle = self.pnl_handle()?;
-        check_response(handle.subscribe_pnl_updates().await?, "subscribe_pnl")?;
-        check_response(
-            handle.get_pnl_position_snapshot().await?,
-            "pnl_snapshot",
-        )?;
-        Ok(())
+    /// Fetch instrument reference data for a trading symbol/exchange.
+    pub async fn get_reference_data(
+        &self,
+        symbol: &str,
+        exchange: &str,
+    ) -> Result<ReferenceDataDto> {
+        let handle = self.ticker_handle()?;
+        let resp = handle.get_reference_data(symbol, exchange).await?;
+        check_response_ref(&resp, "get_reference_data")?;
+        ReferenceDataDto::from_response(&resp).ok_or_else(|| {
+            Error::Session(format!(
+                "get_reference_data: unexpected response {:?}",
+                resp.message
+            ))
+        })
     }
 
     /// Load all ticks in `[start_time_sec, end_time_sec]` via history `*_all`.
@@ -217,6 +249,17 @@ impl RithmicSession {
         Ok(responses.into_iter().map(|r| r.message).collect())
     }
 
+    /// Subscribe to PnL updates and request a snapshot when account is configured.
+    pub async fn subscribe_pnl(&self) -> Result<()> {
+        let handle = self.pnl_handle()?;
+        check_response(handle.subscribe_pnl_updates().await?, "subscribe_pnl")?;
+        check_response(
+            handle.get_pnl_position_snapshot().await?,
+            "pnl_snapshot",
+        )?;
+        Ok(())
+    }
+
     /// Non-blocking poll of the next ticker-plant subscription message.
     pub fn poll_event(&mut self) -> Result<Option<TickerEvent>> {
         let handle = self.ticker_handle_mut()?;
@@ -233,6 +276,25 @@ impl RithmicSession {
             Err(TryRecvError::Closed) => Err(Error::Session(
                 "ticker subscription channel closed".into(),
             )),
+        }
+    }
+
+    /// Non-blocking poll of the next PnL-plant subscription message.
+    pub fn poll_pnl_event(&mut self) -> Result<Option<TickerEvent>> {
+        let Some(pnl) = self.pnl.as_mut() else {
+            return Ok(None);
+        };
+        match now_or_never(pnl.handle.subscription_receiver.recv()) {
+            Some(Ok(resp)) => {
+                if let Some(err) = &resp.error {
+                    if err.is_connection_issue() {
+                        return Err(Error::Rithmic(err.to_string()));
+                    }
+                }
+                Ok(Some(TickerEvent::from(&resp)))
+            }
+            Some(Err(_)) => Err(Error::Session("pnl subscription channel closed".into())),
+            None => Ok(None),
         }
     }
 

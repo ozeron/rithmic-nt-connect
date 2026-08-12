@@ -8,7 +8,10 @@ use pyo3::types::{PyDict, PyList};
 use tokio::runtime::Runtime;
 
 use crate::config::SessionConfig;
-use crate::dto::{AccountPnlDto, BboDto, FrontMonthDto, HistoryTickDto, LastTradeDto, TickerEvent};
+use crate::dto::{
+    AccountPnlDto, BboDto, FrontMonthDto, HistoryTickDto, InstrumentPnlDto, LastTradeDto,
+    OrderBookDto, ReferenceDataDto, TickerEvent,
+};
 use crate::error::Error;
 use crate::session::RithmicSession;
 
@@ -110,11 +113,66 @@ fn account_pnl_dict(py: Python<'_>, a: AccountPnlDto) -> PyResult<Py<PyDict>> {
     Ok(d.unbind())
 }
 
+fn instrument_pnl_dict(py: Python<'_>, i: InstrumentPnlDto) -> PyResult<Py<PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("type", "instrument_pnl")?;
+    set_opt_str(&d, "account_id", i.account_id)?;
+    set_opt_str(&d, "symbol", i.symbol)?;
+    set_opt_str(&d, "exchange", i.exchange)?;
+    set_opt_str(&d, "product_code", i.product_code)?;
+    set_opt_str(&d, "instrument_type", i.instrument_type)?;
+    set_opt_str(&d, "open_position_pnl", i.open_position_pnl)?;
+    set_opt_str(&d, "closed_position_pnl", i.closed_position_pnl)?;
+    set_opt_str(&d, "mtm_security", i.mtm_security)?;
+    set_opt_bool(&d, "is_snapshot", i.is_snapshot)?;
+    set_opt_i32(&d, "ssboe", i.ssboe)?;
+    set_opt_i32(&d, "usecs", i.usecs)?;
+    Ok(d.unbind())
+}
+
+fn order_book_dict(py: Python<'_>, o: OrderBookDto) -> PyResult<Py<PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("type", "order_book")?;
+    set_opt_str(&d, "symbol", o.symbol)?;
+    set_opt_str(&d, "exchange", o.exchange)?;
+    set_opt_i32(&d, "update_type", o.update_type)?;
+    d.set_item("bid_price", o.bid_price)?;
+    d.set_item("bid_size", o.bid_size)?;
+    d.set_item("ask_price", o.ask_price)?;
+    d.set_item("ask_size", o.ask_size)?;
+    set_opt_i32(&d, "ssboe", o.ssboe)?;
+    set_opt_i32(&d, "usecs", o.usecs)?;
+    set_opt_u64(&d, "ts_event_ns", o.ts_event_ns)?;
+    Ok(d.unbind())
+}
+
+fn reference_data_dict(py: Python<'_>, r: ReferenceDataDto) -> PyResult<Py<PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("type", "reference_data")?;
+    set_opt_str(&d, "symbol", r.symbol)?;
+    set_opt_str(&d, "exchange", r.exchange)?;
+    set_opt_str(&d, "trading_symbol", r.trading_symbol)?;
+    set_opt_str(&d, "trading_exchange", r.trading_exchange)?;
+    set_opt_str(&d, "symbol_name", r.symbol_name)?;
+    set_opt_str(&d, "product_code", r.product_code)?;
+    set_opt_str(&d, "instrument_type", r.instrument_type)?;
+    set_opt_str(&d, "underlying", r.underlying)?;
+    set_opt_str(&d, "currency", r.currency)?;
+    set_opt_str(&d, "expiration_date", r.expiration_date)?;
+    set_opt_f64(&d, "tick_size", r.tick_size)?;
+    set_opt_f64(&d, "point_value", r.point_value)?;
+    d.set_item("price_precision", r.price_precision)?;
+    d.set_item("is_tradable", r.is_tradable)?;
+    Ok(d.unbind())
+}
+
 fn event_to_dict(py: Python<'_>, event: TickerEvent) -> PyResult<Py<PyDict>> {
     match event {
         TickerEvent::LastTrade(t) => last_trade_dict(py, t),
         TickerEvent::Bbo(b) => bbo_dict(py, b),
+        TickerEvent::OrderBook(o) => order_book_dict(py, o),
         TickerEvent::AccountPnl(a) => account_pnl_dict(py, a),
+        TickerEvent::InstrumentPnl(i) => instrument_pnl_dict(py, i),
         TickerEvent::Other { type_name, source } => {
             let d = PyDict::new(py);
             d.set_item("type", "other")?;
@@ -277,6 +335,17 @@ impl PySession {
         Python::with_gil(|py| front_month_dict(py, dto))
     }
 
+    fn get_reference_data(&self, symbol: &str, exchange: &str) -> PyResult<Py<PyDict>> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let dto = runtime()
+            .block_on(inner.get_reference_data(symbol, exchange))
+            .map_err(to_py_err)?;
+        Python::with_gil(|py| reference_data_dict(py, dto))
+    }
+
     /// Non-blocking poll; returns a dict or None.
     fn poll_event(&self, py: Python<'_>) -> PyResult<Option<Py<PyDict>>> {
         let mut inner = self
@@ -284,6 +353,18 @@ impl PySession {
             .lock()
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         match inner.poll_event().map_err(to_py_err)? {
+            Some(event) => Ok(Some(event_to_dict(py, event)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Non-blocking poll of the PnL plant; returns a dict or None.
+    fn poll_pnl_event(&self, py: Python<'_>) -> PyResult<Option<Py<PyDict>>> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        match inner.poll_pnl_event().map_err(to_py_err)? {
             Some(event) => Ok(Some(event_to_dict(py, event)?)),
             None => Ok(None),
         }
