@@ -312,6 +312,62 @@ impl PySession {
             Ok(list.unbind())
         })
     }
+
+    fn subscribe_order_book_summary(&self, symbol: &str, exchange: &str) -> PyResult<()> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        runtime()
+            .block_on(inner.subscribe_order_book_summary(symbol, exchange))
+            .map_err(to_py_err)
+    }
+
+    /// Load minute time bars for a window; returns opaque message dicts (Phase 1).
+    #[pyo3(signature = (symbol, exchange, start_time_sec, end_time_sec, bar_type=1, period=1))]
+    fn load_time_bars(
+        &self,
+        symbol: &str,
+        exchange: &str,
+        start_time_sec: i32,
+        end_time_sec: i32,
+        bar_type: i32,
+        period: i32,
+    ) -> PyResult<Py<PyList>> {
+        let _ = bar_type; // Phase 1: always MinuteBar
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let messages = runtime()
+            .block_on(inner.load_time_bars_all(
+                symbol,
+                exchange,
+                rithmic_rs::TimeBarType::MinuteBar,
+                period,
+                start_time_sec,
+                end_time_sec,
+            ))
+            .map_err(to_py_err)?;
+        Python::with_gil(|py| {
+            let list = PyList::empty(py);
+            for message in messages {
+                let d = PyDict::new(py);
+                d.set_item("type", "time_bar")?;
+                d.set_item("type_name", format!("{message:?}"))?;
+                list.append(d)?;
+            }
+            Ok(list.unbind())
+        })
+    }
+
+    fn subscribe_pnl(&self) -> PyResult<()> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        runtime().block_on(inner.subscribe_pnl()).map_err(to_py_err)
+    }
 }
 
 /// Register the PyO3 module `rithmic_connect._lib`.

@@ -128,29 +128,45 @@ class SessionConfig:
         app_name = _env_first(env, "RITHMIC_APP_NAME") or DEFAULT_APP_NAME
         app_version = _env_first(env, "RITHMIC_APP_VERSION") or DEFAULT_APP_VERSION
 
-        if _env_first(env, "RITHMIC_USER"):
-            user = _require_nonempty("RITHMIC_USER", _env_first(env, "RITHMIC_USER"))
+        if _env_first(env, "RITHMIC_USER", "RHITMIC_USERNAME", "RITHMIC_USERNAME"):
+            user = _require_nonempty(
+                "RITHMIC_USER",
+                _env_first(env, "RITHMIC_USER", "RHITMIC_USERNAME", "RITHMIC_USERNAME"),
+            )
             password = _require_nonempty(
-                "RITHMIC_PASSWORD", _env_first(env, "RITHMIC_PASSWORD")
+                "RITHMIC_PASSWORD",
+                _env_first(env, "RITHMIC_PASSWORD", "RHITMIC_PASSWORD"),
             )
             system_name = (
-                _env_first(env, "RITHMIC_SYSTEM", "RITHMIC_LIVE_SYSTEM_NAME")
+                _env_first(
+                    env,
+                    "RITHMIC_SYSTEM",
+                    "RITHMIC_SYSTEM_NAME",
+                    "RITHMIC_LIVE_SYSTEM_NAME",
+                )
                 or (DEFAULT_SYSTEM_NAME if prefer_lucid else "Rithmic 01")
             )
-            url = (
-                _env_first(env, "RITHMIC_GATEWAY", "RITHMIC_LIVE_URL")
-                or (DEFAULT_GATEWAY_URL if prefer_lucid else None)
-            )
+            # Prefer production LucidTrading gateway over legacy test URL when prefer_lucid
+            url = _env_first(env, "RITHMIC_GATEWAY", "RITHMIC_LIVE_URL")
+            if url is None:
+                legacy = _env_first(env, "RITHMIC_URL", "RHITMIC_URL")
+                if prefer_lucid and legacy and "rituz00100" in legacy:
+                    url = DEFAULT_GATEWAY_URL
+                    system_name = DEFAULT_SYSTEM_NAME
+                else:
+                    url = legacy
+            if url is None:
+                url = DEFAULT_GATEWAY_URL if prefer_lucid else None
             if url is None:
                 raise ConfigError("missing RITHMIC_GATEWAY / RITHMIC_LIVE_URL")
             beta_url = _env_first(env, "RITHMIC_LIVE_ALT_URL") or url
             account_id = _env_first(
-                env, "RITHMIC_ACCOUNT_ID", "ACCOUNT_ID", "RITHMIC_LIVE_ACCOUNT_ID"
+                env, "RITHMIC_ACCOUNT_ID", "ACCOUNT_ID", "RITHMIC_LIVE_ACCOUNT_ID", "RHITMIC_ACCOUNT_ID"
             )
             fcm_id = _env_first(env, "RITHMIC_FCM_ID", "FCM_ID", "RITHMIC_LIVE_FCM_ID")
             ib_id = _env_first(env, "RITHMIC_IB_ID", "IB_ID", "RITHMIC_LIVE_IB_ID")
-            symbol = _env_first(env, "RITHMIC_SYMBOL", "SYMBOL")
-            exchange = _env_first(env, "RITHMIC_EXCHANGE", "EXCHANGE")
+            symbol = _env_first(env, "RITHMIC_SYMBOL", "SYMBOL", "TEST_SYMBOL")
+            exchange = _env_first(env, "RITHMIC_EXCHANGE", "EXCHANGE", "TEST_EXCHANGE")
             return cls(
                 user=user,
                 password=password,
