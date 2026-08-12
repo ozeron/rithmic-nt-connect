@@ -7,13 +7,16 @@ requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 authors = [{ name = "rithmic-connect contributors" }]
 dependencies = [
-  # Pin during Phase 1 implementation planning
-  # "nautilus_trader==1.231.*",
+  # Phase 1 target (install when building the Nautilus clients in U4+):
+  # "nautilus_trader==1.231.0",
 ]
 
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0",
+]
+nautilus = [
+  "nautilus_trader==1.231.0",
 ]
 
 [build-system]
@@ -21,7 +24,11 @@ requires = ["maturin>=1.7,<2.0"]
 build-backend = "maturin"
 
 [tool.maturin]
-# Placeholder — crate path and module name decided in implementation planning
 manifest-path = "crates/rithmic-connect/Cargo.toml"
 module-name = "rithmic_connect._lib"
 python-source = "python"
+features = ["python", "extension-module"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["python"]

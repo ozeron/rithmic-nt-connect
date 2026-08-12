@@ -8,9 +8,11 @@ Unofficial **Rithmic R|Protocol** adapter compatible with NautilusTrader — Rus
 
 ## Status
 
-**Planning / Phase 1 design.** Requirements live in [`docs/plans/`](docs/plans/). Reference notes in [`docs/references/`](docs/references/).
+**Phase 1 in progress** (scaffold + Rust session facade + PyO3 bridge). Requirements live in [`docs/plans/`](docs/plans/). Reference notes in [`docs/references/`](docs/references/).
 
-Target runtime for Phase 1: **NautilusTrader 1.231.x** (Python `TradingNode`) with a **Rust** Rithmic client exposed via PyO3.
+Target runtime for Phase 1: **NautilusTrader 1.231.x** (Python `TradingNode`) with a **Rust** Rithmic client exposed via PyO3. Pin via optional extra: `pip install 'rithmic-connect[nautilus]'` → `nautilus_trader==1.231.0`.
+
+**Ops:** one Rithmic login session at a time — close MotiveWave / R|Trader before connecting.
 
 ## Why a separate repo
 
