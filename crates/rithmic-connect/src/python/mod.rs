@@ -124,6 +124,10 @@ fn instrument_pnl_dict(py: Python<'_>, i: InstrumentPnlDto) -> PyResult<Py<PyDic
     set_opt_str(&d, "open_position_pnl", i.open_position_pnl)?;
     set_opt_str(&d, "closed_position_pnl", i.closed_position_pnl)?;
     set_opt_str(&d, "mtm_security", i.mtm_security)?;
+    set_opt_i32(&d, "open_position_quantity", i.open_position_quantity)?;
+    set_opt_i32(&d, "closed_position_quantity", i.closed_position_quantity)?;
+    set_opt_i32(&d, "net_quantity", i.net_quantity)?;
+    set_opt_f64(&d, "avg_open_fill_price", i.avg_open_fill_price)?;
     set_opt_bool(&d, "is_snapshot", i.is_snapshot)?;
     set_opt_i32(&d, "ssboe", i.ssboe)?;
     set_opt_i32(&d, "usecs", i.usecs)?;

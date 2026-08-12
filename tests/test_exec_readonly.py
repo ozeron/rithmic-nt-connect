@@ -49,3 +49,36 @@ def test_wire_session_has_no_order_place_in_protocol_doc():
     assert "place_order" not in src
     assert "submit_order" not in src
     assert "cancel_order" not in src
+
+
+def test_instrument_pnl_to_position_fields():
+    from rithmic_connect._convert import instrument_pnl_to_fields
+
+    fields = instrument_pnl_to_fields(
+        {
+            "type": "instrument_pnl",
+            "account_id": "ACC1",
+            "symbol": "NQU6",
+            "exchange": "CME",
+            "net_quantity": -2,
+            "avg_open_fill_price": 21000.5,
+            "open_position_pnl": "12.5",
+        }
+    )
+    assert fields["position_side"] == "SHORT"
+    assert fields["quantity"] == 2
+    assert fields["instrument_id"] == "NQU6.RITHMIC"
+    assert fields["avg_px_open"] == 21000.5
+
+
+def test_instrument_pnl_flat_when_zero_net():
+    from rithmic_connect._convert import instrument_pnl_to_fields
+
+    fields = instrument_pnl_to_fields(
+        {
+            "symbol": "NQU6",
+            "net_quantity": 0,
+        }
+    )
+    assert fields["position_side"] == "FLAT"
+    assert fields["quantity"] == 0

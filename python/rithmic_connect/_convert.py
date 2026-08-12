@@ -161,3 +161,38 @@ def order_book_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
         "ts_event": ts,
         "venue": VENUE,
     }
+
+
+def instrument_pnl_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
+    """Map an InstrumentPnL venue dict to position-oriented fields."""
+    _require(d, "symbol")
+    symbol = str(d["symbol"])
+    exchange = d.get("exchange")
+    net = d.get("net_quantity")
+    if net is None:
+        open_qty = d.get("open_position_quantity")
+        net = open_qty if open_qty is not None else 0
+    net_i = int(net)
+    if net_i > 0:
+        side = "LONG"
+        qty = net_i
+    elif net_i < 0:
+        side = "SHORT"
+        qty = abs(net_i)
+    else:
+        side = "FLAT"
+        qty = 0
+    return {
+        "type": "instrument_pnl",
+        "account_id": d.get("account_id"),
+        "instrument_id": instrument_id_from_symbol(symbol, exchange),
+        "symbol": symbol,
+        "exchange": exchange,
+        "position_side": side,
+        "quantity": qty,
+        "avg_px_open": d.get("avg_open_fill_price"),
+        "open_position_pnl": d.get("open_position_pnl"),
+        "closed_position_pnl": d.get("closed_position_pnl"),
+        "is_snapshot": d.get("is_snapshot"),
+        "venue": VENUE,
+    }

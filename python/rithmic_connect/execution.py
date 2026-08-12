@@ -9,6 +9,7 @@ from typing import Any
 from nautilus_trader.cache.cache import Cache
 from nautilus_trader.common.component import LiveClock
 from nautilus_trader.common.component import MessageBus
+from nautilus_trader.core.uuid import UUID4
 from nautilus_trader.execution.messages import CancelAllOrders
 from nautilus_trader.execution.messages import CancelOrder
 from nautilus_trader.execution.messages import GenerateFillReports
@@ -24,19 +25,30 @@ from nautilus_trader.execution.reports import PositionStatusReport
 from nautilus_trader.live.execution_client import LiveExecutionClient
 from nautilus_trader.model.enums import AccountType
 from nautilus_trader.model.enums import OmsType
+from nautilus_trader.model.enums import PositionSide
 from nautilus_trader.model.identifiers import AccountId
 from nautilus_trader.model.identifiers import ClientId
+from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.identifiers import Venue
 from nautilus_trader.model.objects import AccountBalance
 from nautilus_trader.model.objects import Currency
 from nautilus_trader.model.objects import Money
+from nautilus_trader.model.objects import Quantity
 
 from rithmic_connect._convert import account_pnl_to_fields
+from rithmic_connect._convert import instrument_pnl_to_fields
 from rithmic_connect.config import RithmicExecClientConfig
 from rithmic_connect.constants import ADAPTER_NAME
 from rithmic_connect.constants import VENUE
 from rithmic_connect.providers import RithmicInstrumentProvider
 from rithmic_connect.session import WireSession
+
+
+_POSITION_SIDE = {
+    "LONG": PositionSide.LONG,
+    "SHORT": PositionSide.SHORT,
+    "FLAT": PositionSide.FLAT,
+}
 
 
 class RithmicReadOnlyExecutionClient(LiveExecutionClient):
@@ -70,6 +82,7 @@ class RithmicReadOnlyExecutionClient(LiveExecutionClient):
         self._session = session
         self._poll_task: asyncio.Task | None = None
         self._order_calls: list[str] = []
+        self._positions: dict[str, dict[str, Any]] = {}
 
     async def _connect(self) -> None:
         try:
@@ -106,8 +119,11 @@ class RithmicReadOnlyExecutionClient(LiveExecutionClient):
             if event is None:
                 await asyncio.sleep(0.05)
                 continue
-            if event.get("type") == "account_pnl":
+            etype = event.get("type")
+            if etype == "account_pnl":
                 self._publish_account(event)
+            elif etype == "instrument_pnl":
+                self._cache_position(event)
 
     def _publish_account(self, event: dict[str, Any]) -> None:
         fields = account_pnl_to_fields(event)
@@ -130,6 +146,42 @@ class RithmicReadOnlyExecutionClient(LiveExecutionClient):
             reported=True,
             ts_event=self._clock.timestamp_ns(),
             info={"rithmic_account_id": fields["account_id"]},
+        )
+
+    def _cache_position(self, event: dict[str, Any]) -> None:
+        try:
+            fields = instrument_pnl_to_fields(event)
+        except Exception as exc:  # noqa: BLE001
+            self._log.debug(f"skip instrument_pnl: {exc}")
+            return
+        self._positions[str(fields["instrument_id"])] = fields
+        account_raw = fields.get("account_id")
+        if account_raw and self.account_id is None:
+            self._set_account_id(AccountId(f"{VENUE}-{account_raw}"))
+
+    def _position_report_from_fields(
+        self,
+        fields: dict[str, Any],
+        ts_init: int,
+    ) -> PositionStatusReport | None:
+        if self.account_id is None:
+            account_raw = fields.get("account_id")
+            if not account_raw:
+                return None
+            self._set_account_id(AccountId(f"{VENUE}-{account_raw}"))
+        assert self.account_id is not None
+        side = _POSITION_SIDE.get(str(fields["position_side"]), PositionSide.FLAT)
+        avg = fields.get("avg_px_open")
+        avg_dec = Decimal(str(avg)) if avg is not None else None
+        return PositionStatusReport(
+            account_id=self.account_id,
+            instrument_id=InstrumentId.from_str(str(fields["instrument_id"])),
+            position_side=side,
+            quantity=Quantity.from_int(int(fields["quantity"])),
+            report_id=UUID4(),
+            ts_last=ts_init,
+            ts_init=ts_init,
+            avg_px_open=avg_dec,
         )
 
     def _reject_order(self, action: str) -> None:
@@ -181,5 +233,15 @@ class RithmicReadOnlyExecutionClient(LiveExecutionClient):
         self,
         command: GeneratePositionStatusReports,
     ) -> list[PositionStatusReport]:
-        _ = command
-        return []
+        ts_init = self._clock.timestamp_ns()
+        reports: list[PositionStatusReport] = []
+        instrument_filter = command.instrument_id
+        for fields in self._positions.values():
+            if instrument_filter is not None and str(fields["instrument_id"]) != str(
+                instrument_filter
+            ):
+                continue
+            report = self._position_report_from_fields(fields, ts_init)
+            if report is not None:
+                reports.append(report)
+        return reports
