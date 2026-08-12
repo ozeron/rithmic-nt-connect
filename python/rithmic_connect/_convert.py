@@ -196,3 +196,42 @@ def instrument_pnl_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
         "is_snapshot": d.get("is_snapshot"),
         "venue": VENUE,
     }
+
+
+def history_tick_to_trade_fields(d: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize a history_tick dict into last_trade_to_fields inputs."""
+    payload = dict(d)
+    if payload.get("trade_price") is None:
+        payload["trade_price"] = payload.get("close_price") or payload.get("open_price")
+    if payload.get("trade_size") is None:
+        payload["trade_size"] = payload.get("num_trades") or payload.get("volume") or 1
+    return last_trade_to_fields(payload)
+
+
+def time_bar_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
+    """Map a history_bar venue dict to Bar-oriented fields."""
+    _require(d, "open_price", "high_price", "low_price", "close_price")
+    symbol = d.get("symbol")
+    exchange = d.get("exchange")
+    ts = _ts_ns(d)
+    if ts is None and d.get("marker") is not None:
+        ts = int(d["marker"]) * 1_000_000_000
+    if ts is None:
+        raise ConvertError("missing timestamp fields: ts_event_ns, ssboe, or marker")
+    return {
+        "type": "bar",
+        "instrument_id": instrument_id_from_symbol(str(symbol), exchange) if symbol else None,
+        "symbol": symbol,
+        "exchange": exchange,
+        "open": float(d["open_price"]),
+        "high": float(d["high_price"]),
+        "low": float(d["low_price"]),
+        "close": float(d["close_price"]),
+        "volume": float(d.get("volume") or 0),
+        "num_trades": d.get("num_trades"),
+        "bar_type": d.get("bar_type"),
+        "period": d.get("period"),
+        "marker": d.get("marker"),
+        "ts_event": ts,
+        "venue": VENUE,
+    }

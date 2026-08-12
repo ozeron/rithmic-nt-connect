@@ -26,7 +26,7 @@ class WireSession(Protocol):
         exchange: str,
         start_ssboe: int,
         end_ssboe: int,
-        bar_type: int = 1,
+        bar_type: int = 2,
         period: int = 1,
     ) -> list[dict[str, Any]]: ...
     def subscribe_pnl(self) -> None: ...

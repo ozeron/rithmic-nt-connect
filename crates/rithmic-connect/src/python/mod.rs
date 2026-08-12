@@ -9,8 +9,8 @@ use tokio::runtime::Runtime;
 
 use crate::config::SessionConfig;
 use crate::dto::{
-    AccountPnlDto, BboDto, FrontMonthDto, HistoryTickDto, InstrumentPnlDto, LastTradeDto,
-    OrderBookDto, ReferenceDataDto, TickerEvent,
+    AccountPnlDto, BboDto, FrontMonthDto, HistoryBarDto, HistoryTickDto, InstrumentPnlDto,
+    LastTradeDto, OrderBookDto, ReferenceDataDto, TickerEvent,
 };
 use crate::error::Error;
 use crate::session::RithmicSession;
@@ -220,6 +220,26 @@ fn history_tick_dict(py: Python<'_>, t: HistoryTickDto) -> PyResult<Py<PyDict>> 
     Ok(d.unbind())
 }
 
+fn history_bar_dict(py: Python<'_>, b: HistoryBarDto) -> PyResult<Py<PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("type", "history_bar")?;
+    set_opt_str(&d, "symbol", b.symbol)?;
+    set_opt_str(&d, "exchange", b.exchange)?;
+    set_opt_i32(&d, "bar_type", b.bar_type)?;
+    set_opt_str(&d, "period", b.period)?;
+    set_opt_i32(&d, "marker", b.marker)?;
+    set_opt_f64(&d, "open_price", b.open_price)?;
+    set_opt_f64(&d, "high_price", b.high_price)?;
+    set_opt_f64(&d, "low_price", b.low_price)?;
+    set_opt_f64(&d, "close_price", b.close_price)?;
+    set_opt_u64(&d, "volume", b.volume)?;
+    set_opt_u64(&d, "num_trades", b.num_trades)?;
+    set_opt_u64(&d, "bid_volume", b.bid_volume)?;
+    set_opt_u64(&d, "ask_volume", b.ask_volume)?;
+    set_opt_u64(&d, "ts_event_ns", b.ts_event_ns)?;
+    Ok(d.unbind())
+}
+
 /// Python-facing Rithmic multi-plant session.
 #[pyclass(name = "Session")]
 pub struct PySession {
@@ -408,8 +428,8 @@ impl PySession {
             .map_err(to_py_err)
     }
 
-    /// Load minute time bars for a window; returns opaque message dicts (Phase 1).
-    #[pyo3(signature = (symbol, exchange, start_time_sec, end_time_sec, bar_type=1, period=1))]
+    /// Load minute time bars for a window; returns structured OHLCV dicts.
+    #[pyo3(signature = (symbol, exchange, start_time_sec, end_time_sec, bar_type=2, period=1))]
     fn load_time_bars(
         &self,
         symbol: &str,
@@ -419,16 +439,27 @@ impl PySession {
         bar_type: i32,
         period: i32,
     ) -> PyResult<Py<PyList>> {
-        let _ = bar_type; // Phase 1: always MinuteBar
+        let rithmic_bar_type = match bar_type {
+            1 => rithmic_rs::TimeBarType::SecondBar,
+            2 => rithmic_rs::TimeBarType::MinuteBar,
+            3 => rithmic_rs::TimeBarType::DailyBar,
+            4 => rithmic_rs::TimeBarType::WeeklyBar,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "unsupported bar_type {other}; expected 1=second, 2=minute, 3=daily, 4=weekly"
+                )));
+            }
+        };
+        let period = period.max(1);
         let inner = self
             .inner
             .lock()
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        let messages = runtime()
+        let bars = runtime()
             .block_on(inner.load_time_bars_all(
                 symbol,
                 exchange,
-                rithmic_rs::TimeBarType::MinuteBar,
+                rithmic_bar_type,
                 period,
                 start_time_sec,
                 end_time_sec,
@@ -436,11 +467,8 @@ impl PySession {
             .map_err(to_py_err)?;
         Python::with_gil(|py| {
             let list = PyList::empty(py);
-            for message in messages {
-                let d = PyDict::new(py);
-                d.set_item("type", "time_bar")?;
-                d.set_item("type_name", format!("{message:?}"))?;
-                list.append(d)?;
+            for bar in bars {
+                list.append(history_bar_dict(py, bar)?)?;
             }
             Ok(list.unbind())
         })

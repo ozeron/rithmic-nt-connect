@@ -5,7 +5,6 @@
 use std::future::Future;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
-use rithmic_rs::rti::messages::RithmicMessage;
 use rithmic_rs::{
     ConnectStrategy, RithmicHistoryPlant, RithmicHistoryPlantHandle, RithmicPnlPlant,
     RithmicPnlPlantHandle, RithmicTickerPlant, RithmicTickerPlantHandle, TimeBarType,
@@ -13,7 +12,7 @@ use rithmic_rs::{
 use tokio::sync::broadcast::error::TryRecvError;
 
 use crate::config::SessionConfig;
-use crate::dto::{FrontMonthDto, HistoryTickDto, ReferenceDataDto, TickerEvent};
+use crate::dto::{FrontMonthDto, HistoryBarDto, HistoryTickDto, ReferenceDataDto, TickerEvent};
 use crate::error::{Error, Result};
 
 fn noop_waker() -> Waker {
@@ -234,7 +233,7 @@ impl RithmicSession {
         bar_type_period: i32,
         start_time_sec: i32,
         end_time_sec: i32,
-    ) -> Result<Vec<RithmicMessage>> {
+    ) -> Result<Vec<HistoryBarDto>> {
         let handle = self.history_handle()?;
         let responses = handle
             .load_time_bars_all(
@@ -246,7 +245,10 @@ impl RithmicSession {
                 end_time_sec,
             )
             .await?;
-        Ok(responses.into_iter().map(|r| r.message).collect())
+        Ok(responses
+            .iter()
+            .filter_map(HistoryBarDto::from_response)
+            .collect())
     }
 
     /// Subscribe to PnL updates and request a snapshot when account is configured.

@@ -154,6 +154,28 @@ pub struct HistoryTickDto {
     pub ts_event_ns: Option<u64>,
 }
 
+/// Historical / replay time bar (OHLCV).
+#[derive(Debug, Clone, PartialEq)]
+pub struct HistoryBarDto {
+    pub symbol: Option<String>,
+    pub exchange: Option<String>,
+    /// Rithmic bar type enum value (1=second, 2=minute, 3=daily, 4=weekly).
+    pub bar_type: Option<i32>,
+    /// Period string from the plant (often the period count).
+    pub period: Option<String>,
+    /// Bar close marker in Unix seconds.
+    pub marker: Option<i32>,
+    pub open_price: Option<f64>,
+    pub high_price: Option<f64>,
+    pub low_price: Option<f64>,
+    pub close_price: Option<f64>,
+    pub volume: Option<u64>,
+    pub num_trades: Option<u64>,
+    pub bid_volume: Option<u64>,
+    pub ask_volume: Option<u64>,
+    pub ts_event_ns: Option<u64>,
+}
+
 fn ts_ns(ssboe: Option<i32>, usecs: Option<i32>) -> Option<u64> {
     let ssboe = ssboe?;
     Some(rithmic_to_unix_nanos(ssboe, usecs.unwrap_or(0)))
@@ -327,6 +349,56 @@ impl HistoryTickDto {
                 ssboe: t.ssboe,
                 usecs: t.usecs,
                 ts_event_ns: ts_ns(t.ssboe, t.usecs),
+            }),
+            _ => None,
+        }
+    }
+}
+
+impl HistoryBarDto {
+    pub(crate) fn from_response(resp: &RithmicResponse) -> Option<Self> {
+        match &resp.message {
+            RithmicMessage::ResponseTimeBarReplay(m) => {
+                // End-of-replay markers carry no OHLC.
+                if m.open_price.is_none()
+                    && m.high_price.is_none()
+                    && m.low_price.is_none()
+                    && m.close_price.is_none()
+                {
+                    return None;
+                }
+                Some(Self {
+                    symbol: m.symbol.clone(),
+                    exchange: m.exchange.clone(),
+                    bar_type: m.r#type,
+                    period: m.period.clone(),
+                    marker: m.marker,
+                    open_price: m.open_price,
+                    high_price: m.high_price,
+                    low_price: m.low_price,
+                    close_price: m.close_price,
+                    volume: m.volume,
+                    num_trades: m.num_trades,
+                    bid_volume: m.bid_volume,
+                    ask_volume: m.ask_volume,
+                    ts_event_ns: m.marker.map(|sec| rithmic_to_unix_nanos(sec, 0)),
+                })
+            }
+            RithmicMessage::TimeBar(m) => Some(Self {
+                symbol: m.symbol.clone(),
+                exchange: m.exchange.clone(),
+                bar_type: m.r#type,
+                period: m.period.clone(),
+                marker: m.marker,
+                open_price: m.open_price,
+                high_price: m.high_price,
+                low_price: m.low_price,
+                close_price: m.close_price,
+                volume: m.volume,
+                num_trades: m.num_trades,
+                bid_volume: m.bid_volume,
+                ask_volume: m.ask_volume,
+                ts_event_ns: m.marker.map(|sec| rithmic_to_unix_nanos(sec, 0)),
             }),
             _ => None,
         }

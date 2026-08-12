@@ -48,6 +48,9 @@ session = SessionConfig.from_env()
 
 Minimal ticks example: [`examples/live_nq_ticks.py`](examples/live_nq_ticks.py).
 
+History via the same session API: `load_ticks(...)` and `load_time_bars(...)`
+(also used by the data client's `_request_trade_ticks` / `_request_bars`).
+
 ## Ops
 
 - **One session per login** — close MotiveWave / R|Trader before connecting.
