@@ -153,8 +153,13 @@ def compare_ticks(
             "history_only": 0,
             "live_count": 0,
             "history_in_window": 0,
+            "unique_live_keys": 0,
+            "unique_history_keys": 0,
             "max_price_diff": None,
             "overlap_ratio": 0.0,
+            "live_only_samples": [],
+            "history_only_samples": [],
+            "notes": [],
         }
 
     live_start = live[0].ts_event_ns
@@ -169,43 +174,88 @@ def compare_ticks(
     for t in hist_in_window:
         hist_map[_tick_key(t.ts_event_ns, t.price)] = t
 
-    matched = 0
-    mismatched = 0
+    matched_keys = live_map.keys() & hist_map.keys()
+    live_only_keys = live_map.keys() - hist_map.keys()
+    hist_only_keys = hist_map.keys() - live_map.keys()
+    matched = len(matched_keys)
+
+    # Nearest-price diff only when the same timestamp exists on both sides but
+    # a live price is missing from history at that timestamp (not cross-product).
     max_diff = 0.0
-    # Exact key matches
-    for key in live_map.keys() & hist_map.keys():
-        matched += 1
-
-    # Same timestamp, different price → mismatch
-    live_by_ts: dict[int, list[float]] = {}
+    mismatched = 0
+    live_by_ts: dict[int, set[float]] = {}
+    hist_by_ts: dict[int, set[float]] = {}
     for t in live:
-        live_by_ts.setdefault(t.ts_event_ns, []).append(t.price)
-    hist_by_ts: dict[int, list[float]] = {}
+        live_by_ts.setdefault(t.ts_event_ns, set()).add(round(float(t.price), 6))
     for t in hist_in_window:
-        hist_by_ts.setdefault(t.ts_event_ns, []).append(t.price)
-    for ts in live_by_ts.keys() & hist_by_ts.keys():
-        for lp in live_by_ts[ts]:
-            for hp in hist_by_ts[ts]:
-                diff = abs(lp - hp)
-                max_diff = max(max_diff, diff)
-                if diff > price_tol and _tick_key(ts, lp) not in hist_map:
-                    mismatched += 1
+        hist_by_ts.setdefault(t.ts_event_ns, set()).add(round(float(t.price), 6))
+    for ts, live_prices in live_by_ts.items():
+        hist_prices = hist_by_ts.get(ts)
+        if not hist_prices:
+            continue
+        for lp in live_prices:
+            if any(abs(lp - hp) <= price_tol for hp in hist_prices):
+                continue
+            mismatched += 1
+            nearest = min(abs(lp - hp) for hp in hist_prices)
+            max_diff = max(max_diff, nearest)
 
-    live_only = len(live_map.keys() - hist_map.keys())
-    history_only = len(hist_map.keys() - live_map.keys())
+    # Fuzzy: same second + same price often means live truncated usecs (ssboe-only).
+    fuzzy_matched = 0
+    for ts, price in live_only_keys:
+        sec = ts // 1_000_000_000
+        if any(
+            (hts // 1_000_000_000) == sec and abs(price - hprice) <= price_tol
+            for hts, hprice in hist_only_keys
+        ):
+            fuzzy_matched += 1
+
+    notes: list[str] = []
+    dup_extra = len(live) - len(live_map)
+    if dup_extra > 0:
+        notes.append(
+            f"{dup_extra} duplicate live rows collapsed by (ts,price) key "
+            f"({len(live)} events → {len(live_map)} unique)"
+        )
+    if fuzzy_matched:
+        notes.append(
+            f"{fuzzy_matched} live_only key(s) match history_only on same "
+            "UTC second+price (likely live usecs truncated to 0)"
+        )
+
     denom = max(len(live_map), 1)
     overlap_ratio = matched / denom
+
+    def _sample(keys: set[tuple[int, float]], src: dict[tuple[int, float], RecordedTick]) -> list[dict]:
+        out = []
+        for key in sorted(keys)[:5]:
+            t = src[key]
+            out.append(
+                {
+                    "ts_event_ns": t.ts_event_ns,
+                    "price": t.price,
+                    "size": t.size,
+                    "source": t.source,
+                }
+            )
+        return out
 
     return {
         "matched": matched,
         "mismatched": mismatched,
-        "live_only": live_only,
-        "history_only": history_only,
+        "live_only": len(live_only_keys),
+        "history_only": len(hist_only_keys),
+        "fuzzy_second_matches": fuzzy_matched,
         "live_count": len(live),
         "history_in_window": len(hist_in_window),
-        "max_price_diff": max_diff if (matched or mismatched) else None,
+        "unique_live_keys": len(live_map),
+        "unique_history_keys": len(hist_map),
+        "max_price_diff": max_diff if mismatched else 0.0,
         "overlap_ratio": round(overlap_ratio, 4),
         "live_window_ns": {"start": live_start, "end": live_end},
+        "live_only_samples": _sample(live_only_keys, live_map),
+        "history_only_samples": _sample(hist_only_keys, hist_map),
+        "notes": notes,
     }
 
 

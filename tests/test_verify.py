@@ -103,6 +103,25 @@ def test_compare_ticks_overlap():
     cmp = compare_ticks(live, hist)
     assert cmp["matched"] == 2
     assert cmp["overlap_ratio"] == 1.0
+    assert cmp["max_price_diff"] == 0.0
+
+
+def test_compare_detects_usec_truncation_as_fuzzy():
+    live = [
+        RecordedTick(1_700_000_010_000_000_000, 21000.25, 1.0, "live"),
+        RecordedTick(1_700_000_020_000_000_000, 21001.0, 1.0, "live"),
+    ]
+    hist = [
+        RecordedTick(1_700_000_010_132_738_000, 21000.25, 1.0, "history"),
+        RecordedTick(1_700_000_020_000_000_000, 21001.0, 1.0, "history"),
+    ]
+    cmp = compare_ticks(live, hist)
+    assert cmp["matched"] == 1
+    assert cmp["live_only"] == 1
+    assert cmp["history_only"] == 1
+    assert cmp["fuzzy_second_matches"] == 1
+    assert cmp["live_only_samples"][0]["price"] == 21000.25
+    assert any("usecs truncated" in n for n in cmp["notes"])
 
 
 def test_run_front_month_verify_writes_report(tmp_path: Path):
