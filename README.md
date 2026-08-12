@@ -51,6 +51,19 @@ Minimal ticks example: [`examples/live_nq_ticks.py`](examples/live_nq_ticks.py).
 History via the same session API: `load_ticks(...)` and `load_time_bars(...)`
 (also used by the data client's `_request_trade_ticks` / `_request_bars`).
 
+Front-month + live↔history verify (writes JSON for a frontend/API):
+
+```bash
+python scripts/verify_live_vs_history.py --root NQ --seconds 12 --out artifacts/verify.json
+```
+
+```python
+from rithmic_connect import resolve_front_month, run_front_month_verify
+# front = resolve_front_month(session, "NQ", "CME")
+# report = run_front_month_verify(session, root="NQ", exchange="CME")
+# report.to_dict()  # small JSON-friendly payload
+```
+
 ## Ops
 
 - **One session per login** — close MotiveWave / R|Trader before connecting.
