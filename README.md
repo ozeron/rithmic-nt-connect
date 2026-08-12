@@ -46,6 +46,8 @@ session = SessionConfig.from_env()
 # node.add_exec_client_factory(f"{ADAPTER_NAME}-EXEC", RithmicLiveExecClientFactory)
 ```
 
+Minimal ticks example: [`examples/live_nq_ticks.py`](examples/live_nq_ticks.py).
+
 ## Ops
 
 - **One session per login** — close MotiveWave / R|Trader before connecting.
