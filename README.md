@@ -12,9 +12,9 @@
 
 ## Status
 
-**Phase 1** (merged): market data + instruments + read-only account/PnL on NautilusTrader **1.231.x**.
+Out-of-tree adapter for NautilusTrader **1.231.x**: live ticks/quotes, history requests, futures instruments, read-only PnL, and **gated** order-plant submit/cancel/modify.
 
-**Phase 2** (in progress on `feat/phase2-order-routing`): order plant place/cancel/modify + Nautilus execution events. Trading is **off by default** (`enable_trading=False` / unset `RITHMIC_ENABLE_TRADING`). Live place is gated; use the dry-run harness first:
+Trading is **off by default** (`enable_trading=False` / unset `RITHMIC_ENABLE_TRADING`). Live place is gated; use the dry-run harness first. Scope vs done: [`docs/STATUS.md`](docs/STATUS.md).
 
 ```bash
 python scripts/verify_order_dry_run.py --seconds 5

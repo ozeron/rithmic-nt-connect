@@ -11,4 +11,7 @@ session / exec client when `enable_trading=True` (or `RITHMIC_ENABLE_TRADING=1`)
 Prefer `python scripts/verify_order_dry_run.py` before any live place. Never use
 `--live-place` until conformance / `app_name` authorization is confirmed.
 
+Current advertised scope vs done: [`../STATUS.md`](../STATUS.md).
+Phases / conventions: [`nautilus-adapter-phases.md`](nautilus-adapter-phases.md), [`nautilus-adapter-conventions.md`](nautilus-adapter-conventions.md).
+
 See also: `docs/references/my046-rithmic-access.md`, `docs/references/plant-probe-2026-08-12.md`.
