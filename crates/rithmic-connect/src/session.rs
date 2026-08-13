@@ -99,10 +99,10 @@ impl RithmicSession {
         &self.config
     }
 
-    /// Connect ticker + history plants (and PnL + order plants when account is configured).
+    /// Connect ticker + history plants (and PnL when account is configured).
     ///
-    /// Uses [`ConnectStrategy::Retry`]. Order plant connect/login fails assertively when
-    /// an account is present.
+    /// Uses [`ConnectStrategy::Retry`]. The order plant is **not** connected here —
+    /// call [`Self::ensure_order_plant`] (or any place/cancel/subscribe order API).
     pub async fn connect(&mut self) -> Result<()> {
         if self.ticker.is_some() {
             return Err(Error::Session("already connected".into()));
@@ -121,7 +121,6 @@ impl RithmicSession {
         check_response(history_handle.login().await?, "history login")?;
 
         let mut pnl = None;
-        let mut order = None;
         if let Some(account) = self.config.account() {
             let pnl_plant = RithmicPnlPlant::connect(&rc, ConnectStrategy::Retry).await?;
             let pnl_handle = pnl_plant.get_handle(&account);
@@ -129,15 +128,6 @@ impl RithmicSession {
             pnl = Some(PnlPlant {
                 _plant: pnl_plant,
                 handle: pnl_handle,
-            });
-
-            let order_plant =
-                RithmicOrderPlant::connect(&rc, ConnectStrategy::Retry).await?;
-            let order_handle = order_plant.get_handle(&account);
-            check_response(order_handle.login().await?, "order login")?;
-            order = Some(OrderPlant {
-                _plant: order_plant,
-                handle: order_handle,
             });
         }
 
@@ -150,7 +140,31 @@ impl RithmicSession {
             handle: history_handle,
         });
         self.pnl = pnl;
-        self.order = order;
+        // Order plant connects lazily on first order API use so Phase 1 MD+PnL
+        // sessions stay unchanged when trading is not enabled.
+        self.order = None;
+        Ok(())
+    }
+
+    /// Connect + login the order plant (idempotent). Requires account triple.
+    pub async fn ensure_order_plant(&mut self) -> Result<()> {
+        if self.order.is_some() {
+            return Ok(());
+        }
+        if self.ticker.is_none() {
+            return Err(Error::Session("session not connected".into()));
+        }
+        let account = self.config.account().ok_or_else(|| {
+            Error::Config("order plant requires account_id/fcm_id/ib_id".into())
+        })?;
+        let rc = self.config.to_rithmic_config()?;
+        let order_plant = RithmicOrderPlant::connect(&rc, ConnectStrategy::Retry).await?;
+        let order_handle = order_plant.get_handle(&account);
+        check_response(order_handle.login().await?, "order login")?;
+        self.order = Some(OrderPlant {
+            _plant: order_plant,
+            handle: order_handle,
+        });
         Ok(())
     }
 
@@ -293,7 +307,8 @@ impl RithmicSession {
     }
 
     /// Subscribe to order plant notifications (Rithmic + exchange).
-    pub async fn subscribe_order_updates(&self) -> Result<()> {
+    pub async fn subscribe_order_updates(&mut self) -> Result<()> {
+        self.ensure_order_plant().await?;
         let handle = self.order_handle()?;
         check_response(
             handle.subscribe_order_updates().await?,
@@ -305,7 +320,7 @@ impl RithmicSession {
     /// Place a new order on the order plant.
     #[allow(clippy::too_many_arguments)]
     pub async fn place_order(
-        &self,
+        &mut self,
         symbol: &str,
         exchange: &str,
         side: &str,
@@ -316,7 +331,7 @@ impl RithmicSession {
         trigger_price: Option<f64>,
         duration: &str,
     ) -> Result<()> {
-        let handle = self.order_handle()?;
+        self.ensure_order_plant().await?;
         let side: OrderSide = side
             .parse()
             .map_err(|e| Error::Config(format!("invalid order side: {e}")))?;
@@ -347,23 +362,25 @@ impl RithmicSession {
             builder = builder.trigger_price(t);
         }
         let order = builder.build()?;
+        let handle = self.order_handle()?;
         check_responses(handle.place_order(order).await?, "place_order")
     }
 
     /// Cancel an order by basket id.
-    pub async fn cancel_order(&self, basket_id: &str) -> Result<()> {
-        let handle = self.order_handle()?;
+    pub async fn cancel_order(&mut self, basket_id: &str) -> Result<()> {
+        self.ensure_order_plant().await?;
         let cancel = RithmicCancelOrder::new()
             .id(basket_id)
             .manual_or_auto(ManualOrAutoEntry::Auto)
             .build()?;
+        let handle = self.order_handle()?;
         check_responses(handle.cancel_order(cancel).await?, "cancel_order")
     }
 
     /// Modify an existing order.
     #[allow(clippy::too_many_arguments)]
     pub async fn modify_order(
-        &self,
+        &mut self,
         basket_id: &str,
         symbol: &str,
         exchange: &str,
@@ -372,7 +389,7 @@ impl RithmicSession {
         price: Option<f64>,
         trigger_price: Option<f64>,
     ) -> Result<()> {
-        let handle = self.order_handle()?;
+        self.ensure_order_plant().await?;
         let price_type: OrderType = price_type
             .parse()
             .map_err(|e| Error::Config(format!("invalid price type: {e}")))?;
@@ -391,15 +408,17 @@ impl RithmicSession {
             builder = builder.trigger_price(t);
         }
         let order = builder.build()?;
+        let handle = self.order_handle()?;
         check_responses(handle.modify_order(order).await?, "modify_order")
     }
 
     /// Cancel all working orders on the account.
-    pub async fn cancel_all_orders(&self) -> Result<()> {
-        let handle = self.order_handle()?;
+    pub async fn cancel_all_orders(&mut self) -> Result<()> {
+        self.ensure_order_plant().await?;
         let cmd = RithmicCancelAllOrders::new()
             .manual_or_auto(ManualOrAutoEntry::Auto)
             .build()?;
+        let handle = self.order_handle()?;
         check_response(handle.cancel_all_orders(cmd).await?, "cancel_all_orders")
     }
 

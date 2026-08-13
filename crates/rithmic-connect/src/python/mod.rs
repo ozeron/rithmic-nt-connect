@@ -563,7 +563,7 @@ impl PySession {
     }
 
     fn subscribe_order_updates(&self) -> PyResult<()> {
-        let inner = self
+        let mut inner = self
             .inner
             .lock()
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -596,7 +596,7 @@ impl PySession {
         trigger_price: Option<f64>,
         duration: &str,
     ) -> PyResult<()> {
-        let inner = self
+        let mut inner = self
             .inner
             .lock()
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -616,7 +616,7 @@ impl PySession {
     }
 
     fn cancel_order(&self, basket_id: &str) -> PyResult<()> {
-        let inner = self
+        let mut inner = self
             .inner
             .lock()
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -645,7 +645,7 @@ impl PySession {
         price: Option<f64>,
         trigger_price: Option<f64>,
     ) -> PyResult<()> {
-        let inner = self
+        let mut inner = self
             .inner
             .lock()
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -663,7 +663,7 @@ impl PySession {
     }
 
     fn cancel_all_orders(&self) -> PyResult<()> {
-        let inner = self
+        let mut inner = self
             .inner
             .lock()
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
