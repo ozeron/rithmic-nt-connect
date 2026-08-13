@@ -20,7 +20,7 @@ pub use config::{
 };
 pub use dto::{
     AccountPnlDto, BboDto, FrontMonthDto, HistoryBarDto, HistoryTickDto, InstrumentPnlDto,
-    LastTradeDto, OrderBookDto, OrderNotificationDto, ReferenceDataDto, TickerEvent,
+    LastTradeDto, OrderBookDto, OrderNotificationDto, ReferenceDataDto, PlantEvent,
 };
 pub use error::{Error, Result};
 pub use session::RithmicSession;

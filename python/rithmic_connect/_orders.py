@@ -1,20 +1,31 @@
-"""Order-side mapping helpers for Phase 2 (Nautilus ↔ Rithmic wire strings)."""
+"""Order mapping helpers and notification → action classification."""
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from dataclasses import dataclass
+from typing import Any, Literal, Mapping
 
 from rithmic_connect._convert import ConvertError
 from rithmic_connect._convert import _ts_ns
 from rithmic_connect._convert import instrument_id_from_symbol
 from rithmic_connect.constants import VENUE
 
+OrderActionKind = Literal[
+    "accepted",
+    "rejected",
+    "updated",
+    "canceled",
+    "triggered",
+    "filled",
+    "modify_rejected",
+    "cancel_rejected",
+]
+
 
 class OrderMapError(ValueError):
     """Raised when an order type/side/TIF cannot be mapped to Rithmic."""
 
 
-# Nautilus OrderType int / name → rithmic-rs OrderType as_str_name
 _ORDER_TYPE_TO_RITHMIC: dict[str, str] = {
     "MARKET": "MARKET",
     "LIMIT": "LIMIT",
@@ -31,18 +42,17 @@ _TIF_TO_RITHMIC: dict[str, str] = {
     "FOK": "FOK",
 }
 
-_EXCHANGE_FILL = 5
-_EXCHANGE_REJECT = 6
-_EXCHANGE_CANCEL = 3
-_EXCHANGE_TRIGGER = 4
-_EXCHANGE_NOT_MODIFIED = 7
-_EXCHANGE_NOT_CANCELLED = 8
 
-_RITHMIC_OPEN = 13
-_RITHMIC_MODIFIED = 14
-_RITHMIC_COMPLETE = 15
-_RITHMIC_MODIFICATION_FAILED = 16
-_RITHMIC_CANCELLATION_FAILED = 17
+@dataclass(frozen=True)
+class OrderAction:
+    kind: OrderActionKind
+    reason: str | None = None
+    quantity: Any | None = None
+    price: Any | None = None
+    trigger: Any | None = None
+    fill_qty: Any | None = None
+    fill_px: Any | None = None
+    trade_id: str | None = None
 
 
 def nautilus_side_to_rithmic(side: Any) -> str:
@@ -76,8 +86,7 @@ def nautilus_tif_to_rithmic(tif: Any) -> str:
 def order_notification_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
     """Normalize a wire order_notification dict for the exec client."""
     if d.get("type") not in (None, "order_notification"):
-        if d.get("source") not in ("rithmic", "exchange"):
-            raise ConvertError(f"unexpected order notification type: {d.get('type')!r}")
+        raise ConvertError(f"unexpected order notification type: {d.get('type')!r}")
     source = d.get("source")
     if source not in ("rithmic", "exchange"):
         raise ConvertError(f"order notification missing source: {source!r}")
@@ -85,9 +94,13 @@ def order_notification_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
     if not symbol:
         raise ConvertError("order notification missing symbol")
     ts = _ts_ns(d)
+    kind = d.get("kind")
+    if kind is None and d.get("notify_type_name") is not None:
+        kind = kind_from_notify(str(source), str(d.get("notify_type_name")), d.get("status"))
     return {
         "type": "order_notification",
         "source": source,
+        "kind": kind,
         "notify_type": d.get("notify_type"),
         "notify_type_name": d.get("notify_type_name"),
         "status": d.get("status"),
@@ -120,68 +133,43 @@ def order_notification_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _notification_matches(
-    fields: Mapping[str, Any],
+def kind_from_notify(
     source: str,
-    notify_type: int,
-    *names: str,
-) -> bool:
-    if fields.get("source") != source:
-        return False
-    name = fields.get("notify_type_name")
-    if name is not None and name in names:
-        return True
-    return fields.get("notify_type") == notify_type
-
-
-def is_exchange_fill(fields: Mapping[str, Any]) -> bool:
-    return _notification_matches(fields, "exchange", _EXCHANGE_FILL, "FILL")
-
-
-def is_exchange_reject(fields: Mapping[str, Any]) -> bool:
-    return _notification_matches(fields, "exchange", _EXCHANGE_REJECT, "REJECT")
-
-
-def is_exchange_cancel(fields: Mapping[str, Any]) -> bool:
-    return _notification_matches(fields, "exchange", _EXCHANGE_CANCEL, "CANCEL")
-
-
-def is_exchange_trigger(fields: Mapping[str, Any]) -> bool:
-    return _notification_matches(fields, "exchange", _EXCHANGE_TRIGGER, "TRIGGER")
-
-
-def is_exchange_not_modified(fields: Mapping[str, Any]) -> bool:
-    return _notification_matches(fields, "exchange", _EXCHANGE_NOT_MODIFIED, "NOT_MODIFIED")
-
-
-def is_exchange_not_cancelled(fields: Mapping[str, Any]) -> bool:
-    return _notification_matches(
-        fields, "exchange", _EXCHANGE_NOT_CANCELLED, "NOT_CANCELLED", "NOT_CANCELED"
-    )
-
-
-def is_rithmic_open(fields: Mapping[str, Any]) -> bool:
-    return _notification_matches(fields, "rithmic", _RITHMIC_OPEN, "OPEN")
-
-
-def is_rithmic_complete(fields: Mapping[str, Any]) -> bool:
-    return _notification_matches(fields, "rithmic", _RITHMIC_COMPLETE, "COMPLETE")
-
-
-def is_rithmic_modified(fields: Mapping[str, Any]) -> bool:
-    return _notification_matches(fields, "rithmic", _RITHMIC_MODIFIED, "MODIFIED")
-
-
-def is_rithmic_modify_failed(fields: Mapping[str, Any]) -> bool:
-    return _notification_matches(
-        fields, "rithmic", _RITHMIC_MODIFICATION_FAILED, "MODIFICATION_FAILED"
-    )
-
-
-def is_rithmic_cancel_failed(fields: Mapping[str, Any]) -> bool:
-    return _notification_matches(
-        fields, "rithmic", _RITHMIC_CANCELLATION_FAILED, "CANCELLATION_FAILED"
-    )
+    notify_type_name: str,
+    status: Any | None = None,
+) -> str | None:
+    """Map plant notify_type_name to a canonical action kind (also set in Rust)."""
+    name = notify_type_name.upper()
+    if source == "rithmic":
+        if name == "OPEN":
+            return "accepted"
+        if name == "MODIFIED":
+            return "updated"
+        if name == "MODIFICATION_FAILED":
+            return "modify_rejected"
+        if name == "CANCELLATION_FAILED":
+            return "cancel_rejected"
+        if name == "COMPLETE":
+            status_u = str(status or "").upper()
+            if status_u in {"CANCELLED", "CANCELED"}:
+                return "canceled"
+            return None
+        return None
+    if source == "exchange":
+        if name == "FILL":
+            return "filled"
+        if name == "REJECT":
+            return "rejected"
+        if name == "CANCEL":
+            return "canceled"
+        if name == "TRIGGER":
+            return "triggered"
+        if name == "NOT_MODIFIED":
+            return "modify_rejected"
+        if name in {"NOT_CANCELLED", "NOT_CANCELED"}:
+            return "cancel_rejected"
+        return None
+    return None
 
 
 def trade_id_from_fill_fields(fields: Mapping[str, Any], ts_event: int) -> str:
@@ -193,3 +181,48 @@ def trade_id_from_fill_fields(fields: Mapping[str, Any], ts_event: int) -> str:
     fill_sz = fields.get("fill_size")
     fill_px = fields.get("fill_price")
     return f"{basket}:{exch}:{ts_event}:{fill_sz}:{fill_px}"
+
+
+def notification_action(fields: Mapping[str, Any], order: Any) -> OrderAction | None:
+    """Classify a normalized notification into one emit action (or None to ignore)."""
+    kind = fields.get("kind")
+    if not kind:
+        return None
+    reason = fields.get("text") or fields.get("report_text") or fields.get("status")
+
+    if kind == "accepted":
+        return OrderAction(kind="accepted")
+    if kind == "rejected":
+        return OrderAction(kind="rejected", reason=str(reason or "REJECT"))
+    if kind == "modify_rejected":
+        return OrderAction(kind="modify_rejected", reason=str(reason or "NOT_MODIFIED"))
+    if kind == "cancel_rejected":
+        return OrderAction(kind="cancel_rejected", reason=str(reason or "NOT_CANCELLED"))
+    if kind == "updated":
+        qty_raw = fields.get("quantity")
+        qty = int(qty_raw) if qty_raw is not None else int(order.quantity)
+        price = fields.get("price")
+        trigger = fields.get("trigger_price")
+        return OrderAction(
+            kind="updated",
+            quantity=qty,
+            price=price,
+            trigger=trigger,
+        )
+    if kind == "canceled":
+        return OrderAction(kind="canceled")
+    if kind == "triggered":
+        return OrderAction(kind="triggered")
+    if kind == "filled":
+        fill_px = fields.get("fill_price")
+        fill_sz = fields.get("fill_size")
+        if fill_px is None or fill_sz is None:
+            return None
+        ts_event = int(fields.get("ts_event") or 0)
+        return OrderAction(
+            kind="filled",
+            fill_qty=int(fill_sz),
+            fill_px=fill_px,
+            trade_id=trade_id_from_fill_fields(fields, ts_event),
+        )
+    return None

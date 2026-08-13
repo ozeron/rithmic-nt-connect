@@ -12,12 +12,16 @@ use tokio::runtime::Runtime;
 use crate::config::SessionConfig;
 use crate::dto::{
     AccountPnlDto, BboDto, FrontMonthDto, HistoryBarDto, HistoryTickDto, InstrumentPnlDto,
-    LastTradeDto, OrderBookDto, OrderNotificationDto, ReferenceDataDto, TickerEvent,
+    LastTradeDto, OrderBookDto, OrderNotificationDto, ReferenceDataDto, PlantEvent,
 };
 use crate::error::Error;
 use crate::session::{
     RithmicSession, cancel_all_orders_on, cancel_order_on, modify_order_on, place_order_on,
 };
+
+pyo3::create_exception!(rithmic_connect, ChannelLaggedError, PyRuntimeError);
+pyo3::create_exception!(rithmic_connect, ChannelClosedError, PyRuntimeError);
+pyo3::create_exception!(rithmic_connect, NotConnectedError, PyRuntimeError);
 
 fn runtime() -> &'static Runtime {
     static RT: OnceLock<Runtime> = OnceLock::new();
@@ -27,6 +31,11 @@ fn runtime() -> &'static Runtime {
 fn to_py_err(err: Error) -> PyErr {
     match err {
         Error::Config(msg) => PyValueError::new_err(msg),
+        Error::ChannelLagged { plant, skipped } => {
+            ChannelLaggedError::new_err(format!("{plant}:{skipped}"))
+        }
+        Error::ChannelClosed { plant } => ChannelClosedError::new_err(plant),
+        Error::NotConnected { plant } => NotConnectedError::new_err(plant),
         other => PyRuntimeError::new_err(other.to_string()),
     }
 }
@@ -158,6 +167,7 @@ fn order_notification_dict(py: Python<'_>, n: OrderNotificationDto) -> PyResult<
     let d = PyDict::new(py);
     d.set_item("type", "order_notification")?;
     d.set_item("source", n.source)?;
+    set_opt_str(&d, "kind", n.kind)?;
     set_opt_i32(&d, "notify_type", n.notify_type)?;
     set_opt_str(&d, "notify_type_name", n.notify_type_name)?;
     set_opt_str(&d, "status", n.status)?;
@@ -208,15 +218,15 @@ fn reference_data_dict(py: Python<'_>, r: ReferenceDataDto) -> PyResult<Py<PyDic
     Ok(d.unbind())
 }
 
-fn event_to_dict(py: Python<'_>, event: TickerEvent) -> PyResult<Py<PyDict>> {
+fn event_to_dict(py: Python<'_>, event: PlantEvent) -> PyResult<Py<PyDict>> {
     match event {
-        TickerEvent::LastTrade(t) => last_trade_dict(py, t),
-        TickerEvent::Bbo(b) => bbo_dict(py, b),
-        TickerEvent::OrderBook(o) => order_book_dict(py, o),
-        TickerEvent::AccountPnl(a) => account_pnl_dict(py, a),
-        TickerEvent::InstrumentPnl(i) => instrument_pnl_dict(py, i),
-        TickerEvent::OrderNotification(n) => order_notification_dict(py, n),
-        TickerEvent::Other { type_name, source } => {
+        PlantEvent::LastTrade(t) => last_trade_dict(py, t),
+        PlantEvent::Bbo(b) => bbo_dict(py, b),
+        PlantEvent::OrderBook(o) => order_book_dict(py, o),
+        PlantEvent::AccountPnl(a) => account_pnl_dict(py, a),
+        PlantEvent::InstrumentPnl(i) => instrument_pnl_dict(py, i),
+        PlantEvent::OrderNotification(n) => order_notification_dict(py, n),
+        PlantEvent::Other { type_name, source } => {
             let d = PyDict::new(py);
             d.set_item("type", "other")?;
             d.set_item("type_name", type_name)?;
@@ -787,6 +797,9 @@ impl PySession {
 #[pymodule]
 fn _lib(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySession>()?;
+    m.add("ChannelLaggedError", m.py().get_type::<ChannelLaggedError>())?;
+    m.add("ChannelClosedError", m.py().get_type::<ChannelClosedError>())?;
+    m.add("NotConnectedError", m.py().get_type::<NotConnectedError>())?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

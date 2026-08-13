@@ -47,10 +47,12 @@ def test_execution_client_alias_preserved():
     assert RithmicReadOnlyExecutionClient is RithmicExecutionClient
 
 
-def test_exec_notifications_import_smoke():
-    from rithmic_connect._exec_notifications import route_order_notification
+def test_order_plant_and_errors_import_smoke():
+    from rithmic_connect._order_plant import OrderPlantPolicy
+    from rithmic_connect.errors import VenueQueryUnavailable
 
-    assert callable(route_order_notification)
+    assert OrderPlantPolicy().use_cache_order_reports()
+    assert issubclass(VenueQueryUnavailable, RuntimeError)
 
 
 def test_instrument_pnl_to_position_fields():

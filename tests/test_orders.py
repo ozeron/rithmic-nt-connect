@@ -1,24 +1,38 @@
-"""Unit tests for Phase 2 order mapping and readonly-vs-trading config."""
+"""Unit tests for Phase 2 order mapping and notification classification."""
 
 from __future__ import annotations
+
+from types import SimpleNamespace
 
 from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.enums import OrderType
 from nautilus_trader.model.enums import TimeInForce
+from nautilus_trader.model.objects import Price
+from nautilus_trader.model.objects import Quantity
 
+from rithmic_connect._convert import ConvertError
+from rithmic_connect._order_plant import OrderPlantPolicy
+from rithmic_connect._order_plant import OrderPlantState
 from rithmic_connect._orders import OrderMapError
-from rithmic_connect._orders import is_exchange_fill
-from rithmic_connect._orders import is_exchange_not_cancelled
-from rithmic_connect._orders import is_exchange_not_modified
-from rithmic_connect._orders import is_exchange_trigger
-from rithmic_connect._orders import is_rithmic_modified
-from rithmic_connect._orders import is_rithmic_open
+from rithmic_connect._orders import kind_from_notify
 from rithmic_connect._orders import nautilus_order_type_to_rithmic
 from rithmic_connect._orders import nautilus_side_to_rithmic
 from rithmic_connect._orders import nautilus_tif_to_rithmic
+from rithmic_connect._orders import notification_action
 from rithmic_connect._orders import order_notification_to_fields
+from rithmic_connect._orders import trade_id_from_fill_fields
 from rithmic_connect.config import RithmicExecClientConfig
 from rithmic_connect.config import SessionConfig
+
+
+def _order() -> SimpleNamespace:
+    return SimpleNamespace(
+        quantity=Quantity.from_int(1),
+        has_price=True,
+        price=Price.from_str("21000.0"),
+        has_trigger_price=False,
+        trigger_price=None,
+    )
 
 
 def test_side_type_tif_mapping():
@@ -40,14 +54,25 @@ def test_unsupported_order_type_raises():
     assert raised
 
 
-def test_order_notification_fields_require_symbol_and_source():
+def test_order_notification_requires_type_and_source():
+    try:
+        order_notification_to_fields(
+            {"type": "last_trade", "source": "rithmic", "symbol": "NQU6"}
+        )
+        raised = False
+    except ConvertError:
+        raised = True
+    assert raised
+
+
+def test_order_notification_fields_and_kind():
     fields = order_notification_to_fields(
         {
             "type": "order_notification",
             "source": "exchange",
             "symbol": "NQU6",
             "exchange": "CME",
-            "notify_type": 5,
+            "kind": "filled",
             "notify_type_name": "FILL",
             "fill_price": 21000.25,
             "fill_size": 1,
@@ -57,33 +82,81 @@ def test_order_notification_fields_require_symbol_and_source():
         }
     )
     assert fields["instrument_id"] == "NQU6.RITHMIC"
-    assert is_exchange_fill(fields)
+    assert fields["kind"] == "filled"
     assert fields["ts_event"] == 1_700_000_000 * 1_000_000_000
 
 
-def test_rithmic_open_detection():
-    fields = order_notification_to_fields(
+def test_kind_from_notify_covers_main_paths():
+    assert kind_from_notify("rithmic", "OPEN") == "accepted"
+    assert kind_from_notify("rithmic", "MODIFIED") == "updated"
+    assert kind_from_notify("exchange", "FILL") == "filled"
+    assert kind_from_notify("exchange", "REJECT") == "rejected"
+    assert kind_from_notify("exchange", "CANCEL") == "canceled"
+    assert kind_from_notify("exchange", "TRIGGER") == "triggered"
+    assert kind_from_notify("exchange", "NOT_MODIFIED") == "modify_rejected"
+    assert kind_from_notify("exchange", "NOT_CANCELLED") == "cancel_rejected"
+    assert kind_from_notify("rithmic", "COMPLETE", "CANCELLED") == "canceled"
+    assert kind_from_notify("rithmic", "COMPLETE", "FILLED") is None
+    assert kind_from_notify("exchange", "UNKNOWN") is None
+
+
+def test_notification_action_accept_reject_fill_cancel():
+    order = _order()
+    accepted = notification_action({"kind": "accepted"}, order)
+    assert accepted is not None and accepted.kind == "accepted"
+
+    rejected = notification_action({"kind": "rejected", "text": "nope"}, order)
+    assert rejected is not None and rejected.kind == "rejected" and rejected.reason == "nope"
+
+    filled = notification_action(
         {
-            "source": "rithmic",
-            "symbol": "NQU6",
-            "notify_type": 13,
-            "notify_type_name": "OPEN",
-            "basket_id": "B2",
-            "ssboe": 1_700_000_000,
-        }
+            "kind": "filled",
+            "fill_price": 100.5,
+            "fill_size": 2,
+            "basket_id": "B1",
+            "ts_event": 10,
+        },
+        order,
     )
-    assert is_rithmic_open(fields)
+    assert filled is not None and filled.kind == "filled"
+    assert filled.fill_qty == 2
+    assert filled.trade_id is not None
+
+    canceled = notification_action({"kind": "canceled"}, order)
+    assert canceled is not None and canceled.kind == "canceled"
+
+    assert notification_action({"kind": "filled", "fill_price": 1.0}, order) is None
+    assert notification_action({"kind": None}, order) is None
 
 
-def test_exchange_trigger_modified_not_modified_predicates():
-    assert is_exchange_trigger({"source": "exchange", "notify_type": 4, "notify_type_name": "TRIGGER"})
-    assert is_rithmic_modified({"source": "rithmic", "notify_type": 14, "notify_type_name": "MODIFIED"})
-    assert is_exchange_not_modified(
-        {"source": "exchange", "notify_type": 7, "notify_type_name": "NOT_MODIFIED"}
-    )
-    assert is_exchange_not_cancelled(
-        {"source": "exchange", "notify_type": 8, "notify_type_name": "NOT_CANCELLED"}
-    )
+def test_trade_id_unique_without_fill_id():
+    fields = {
+        "basket_id": "B1",
+        "exchange_order_id": "E1",
+        "fill_size": 1,
+        "fill_price": 100.0,
+    }
+    a = trade_id_from_fill_fields(fields, 100)
+    fields["fill_size"] = 2
+    b = trade_id_from_fill_fields(fields, 100)
+    assert a != b
+
+
+def test_order_plant_policy_matrix():
+    live = OrderPlantPolicy(OrderPlantState.LIVE)
+    assert live.allow_submit() and live.allow_modify() and live.allow_cancel()
+    assert live.use_cache_order_reports()
+    assert not live.fill_reports_available()
+
+    resync = OrderPlantPolicy(OrderPlantState.RESYNCING)
+    assert not resync.allow_submit()
+    assert not resync.allow_modify()
+    assert resync.allow_cancel()
+
+    down = OrderPlantPolicy(OrderPlantState.DISCONNECTED)
+    assert not down.allow_submit()
+    assert not down.allow_modify()
+    assert not down.allow_cancel()
 
 
 def test_exec_config_enable_trading_default_false():
@@ -102,15 +175,3 @@ def test_exec_config_from_env_enable_trading():
         }
     )
     assert cfg.enable_trading is True
-
-
-def test_wire_session_documents_order_apis():
-    import inspect
-
-    from rithmic_connect import session as sess_mod
-
-    src = inspect.getsource(sess_mod.WireSession)
-    assert "place_order" in src
-    assert "cancel_order" in src
-    assert "modify_order" in src
-    assert "poll_order_event" in src

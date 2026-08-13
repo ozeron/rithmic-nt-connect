@@ -1,6 +1,6 @@
 //! Unit tests for the Phase 2 session facade (no live network).
 
-use rithmic_connect::{RithmicSession, SessionConfig};
+use rithmic_connect::{Error, RithmicSession, SessionConfig};
 
 #[test]
 fn config_rejects_incomplete_lucid_settings() {
@@ -12,31 +12,6 @@ fn config_rejects_incomplete_lucid_settings() {
 }
 
 #[test]
-fn session_api_has_public_order_methods() {
-    let session_src = include_str!("../src/session.rs");
-    for required in [
-        "place_order",
-        "cancel_order",
-        "modify_order",
-        "cancel_all_orders",
-        "subscribe_order_updates",
-    ] {
-        assert!(
-            session_src.contains(&format!("pub async fn {required}")),
-            "session.rs must expose pub async fn {required}"
-        );
-    }
-    assert!(
-        session_src.contains("pub fn poll_order_event"),
-        "session.rs must expose pub fn poll_order_event"
-    );
-    assert!(
-        session_src.contains("RithmicOrderPlant"),
-        "session.rs must reference RithmicOrderPlant"
-    );
-}
-
-#[test]
 fn disconnected_session_methods_error_without_network() {
     let cfg = SessionConfig::builder()
         .user("alice")
@@ -45,7 +20,7 @@ fn disconnected_session_methods_error_without_network() {
         .unwrap();
     let mut session = RithmicSession::new(cfg);
     let err = session.poll_event().unwrap_err();
-    assert!(err.to_string().contains("not connected"));
+    assert!(matches!(err, Error::NotConnected { plant: "ticker" }));
 }
 
 #[tokio::test]
@@ -74,17 +49,15 @@ async fn disconnected_order_methods_error_without_network() {
         )
         .await
         .unwrap_err();
-    let msg = err.to_string();
     assert!(
-        msg.contains("not connected") || msg.contains("order plant"),
-        "unexpected place_order error: {msg}"
+        matches!(err, Error::NotConnected { plant: "ticker" | "order" }),
+        "unexpected place_order error: {err}"
     );
 
     let err = session.poll_order_event().unwrap_err();
-    let msg = err.to_string();
     assert!(
-        msg.contains("not connected") || msg.contains("order plant"),
-        "unexpected poll_order_event error: {msg}"
+        matches!(err, Error::NotConnected { plant: "order" }),
+        "unexpected poll_order_event error: {err}"
     );
 }
 

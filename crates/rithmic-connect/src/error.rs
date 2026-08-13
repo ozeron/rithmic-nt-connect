@@ -12,9 +12,32 @@ pub enum Error {
     #[error("config error: {0}")]
     Config(String),
 
-    /// Session is not connected / plant missing.
+    /// Session is not connected / plant missing (legacy string form).
     #[error("session error: {0}")]
     Session(String),
+
+    /// Plant subscription lagged; consumer must resync.
+    #[error("channel lagged: {plant}")]
+    ChannelLagged {
+        /// Plant name (`ticker`, `pnl`, `order`).
+        plant: &'static str,
+        /// Messages skipped by the broadcast receiver.
+        skipped: u64,
+    },
+
+    /// Plant subscription channel closed.
+    #[error("channel closed: {plant}")]
+    ChannelClosed {
+        /// Plant name (`ticker`, `pnl`, `order`).
+        plant: &'static str,
+    },
+
+    /// Required plant is not connected.
+    #[error("not connected: {plant}")]
+    NotConnected {
+        /// Plant name (`ticker`, `pnl`, `order`, `history`).
+        plant: &'static str,
+    },
 
     /// Underlying rithmic-rs / plant error.
     #[error("rithmic error: {0}")]

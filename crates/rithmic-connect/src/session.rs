@@ -16,7 +16,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::broadcast::error::TryRecvError;
 
 use crate::config::SessionConfig;
-use crate::dto::{FrontMonthDto, HistoryBarDto, HistoryTickDto, ReferenceDataDto, TickerEvent};
+use crate::dto::{FrontMonthDto, HistoryBarDto, HistoryTickDto, ReferenceDataDto, PlantEvent};
 use crate::error::{Error, Result};
 
 fn noop_waker() -> Waker {
@@ -153,7 +153,7 @@ impl RithmicSession {
             return Ok(());
         }
         if self.ticker.is_none() {
-            return Err(Error::Session("session not connected".into()));
+            return Err(Error::NotConnected { plant: "ticker" });
         }
         let account = self.config.account().ok_or_else(|| {
             Error::Config("order plant requires account_id/fcm_id/ib_id".into())
@@ -327,7 +327,7 @@ impl RithmicSession {
             return Ok(());
         }
         if self.ticker.is_none() {
-            return Err(Error::Session("session not connected".into()));
+            return Err(Error::NotConnected { plant: "ticker" });
         }
         let account = self.config.account().ok_or_else(|| {
             Error::Config("pnl plant requires account_id/fcm_id/ib_id".into())
@@ -428,7 +428,7 @@ impl RithmicSession {
     }
 
     /// Non-blocking poll of the next ticker-plant subscription message.
-    pub fn poll_event(&mut self) -> Result<Option<TickerEvent>> {
+    pub fn poll_event(&mut self) -> Result<Option<PlantEvent>> {
         let handle = self.ticker_handle_mut()?;
         match handle.subscription_receiver.try_recv() {
             Ok(resp) => {
@@ -437,17 +437,15 @@ impl RithmicSession {
                         return Err(Error::Rithmic(err.to_string()));
                     }
                 }
-                Ok(Some(TickerEvent::from(&resp)))
+                Ok(Some(PlantEvent::from(&resp)))
             }
             Err(TryRecvError::Empty) | Err(TryRecvError::Lagged(_)) => Ok(None),
-            Err(TryRecvError::Closed) => Err(Error::Session(
-                "ticker subscription channel closed".into(),
-            )),
+            Err(TryRecvError::Closed) => Err(Error::ChannelClosed { plant: "ticker" }),
         }
     }
 
     /// Non-blocking poll of the next PnL-plant subscription message.
-    pub fn poll_pnl_event(&mut self) -> Result<Option<TickerEvent>> {
+    pub fn poll_pnl_event(&mut self) -> Result<Option<PlantEvent>> {
         let Some(pnl) = self.pnl.as_mut() else {
             return Ok(None);
         };
@@ -458,20 +456,19 @@ impl RithmicSession {
                         return Err(Error::Rithmic(err.to_string()));
                     }
                 }
-                Ok(Some(TickerEvent::from(&resp)))
+                Ok(Some(PlantEvent::from(&resp)))
             }
-            Some(Err(RecvError::Lagged(skipped))) => Err(Error::Session(format!(
-                "pnl subscription lagged; skipped {skipped} messages — resync required"
-            ))),
-            Some(Err(RecvError::Closed)) => {
-                Err(Error::Session("pnl subscription channel closed".into()))
-            }
+            Some(Err(RecvError::Lagged(skipped))) => Err(Error::ChannelLagged {
+                plant: "pnl",
+                skipped,
+            }),
+            Some(Err(RecvError::Closed)) => Err(Error::ChannelClosed { plant: "pnl" }),
             None => Ok(None),
         }
     }
 
     /// Non-blocking poll of the next order-plant subscription message.
-    pub fn poll_order_event(&mut self) -> Result<Option<TickerEvent>> {
+    pub fn poll_order_event(&mut self) -> Result<Option<PlantEvent>> {
         let handle = self.order_handle_mut()?;
         match now_or_never(handle.subscription_receiver.recv()) {
             Some(Ok(resp)) => {
@@ -480,74 +477,73 @@ impl RithmicSession {
                         return Err(Error::Rithmic(err.to_string()));
                     }
                 }
-                Ok(Some(TickerEvent::from(&resp)))
+                Ok(Some(PlantEvent::from(&resp)))
             }
-            Some(Err(RecvError::Lagged(skipped))) => Err(Error::Session(format!(
-                "order subscription lagged; skipped {skipped} messages — resync required"
-            ))),
-            Some(Err(RecvError::Closed)) => Err(Error::Session(
-                "order subscription channel closed".into(),
-            )),
+            Some(Err(RecvError::Lagged(skipped))) => Err(Error::ChannelLagged {
+                plant: "order",
+                skipped,
+            }),
+            Some(Err(RecvError::Closed)) => Err(Error::ChannelClosed { plant: "order" }),
             None => Ok(None),
         }
     }
 
     /// Blocking receive of the next ticker message (async).
-    pub async fn recv_event(&mut self) -> Result<TickerEvent> {
+    pub async fn recv_event(&mut self) -> Result<PlantEvent> {
         let handle = self.ticker_handle_mut()?;
         let resp = handle
             .subscription_receiver
             .recv()
             .await
-            .map_err(|_| Error::Session("ticker subscription channel closed".into()))?;
+            .map_err(|_| Error::ChannelClosed { plant: "ticker" })?;
         if let Some(err) = &resp.error {
             if err.is_connection_issue() {
                 return Err(Error::Rithmic(err.to_string()));
             }
         }
-        Ok(TickerEvent::from(&resp))
+        Ok(PlantEvent::from(&resp))
     }
 
     fn ticker_handle(&self) -> Result<&RithmicTickerPlantHandle> {
         self.ticker
             .as_ref()
             .map(|t| &t.handle)
-            .ok_or_else(|| Error::Session("ticker plant not connected".into()))
+            .ok_or(Error::NotConnected { plant: "ticker" })
     }
 
     fn ticker_handle_mut(&mut self) -> Result<&mut RithmicTickerPlantHandle> {
         self.ticker
             .as_mut()
             .map(|t| &mut t.handle)
-            .ok_or_else(|| Error::Session("ticker plant not connected".into()))
+            .ok_or(Error::NotConnected { plant: "ticker" })
     }
 
     fn history_handle(&self) -> Result<&RithmicHistoryPlantHandle> {
         self.history
             .as_ref()
             .map(|h| &h.handle)
-            .ok_or_else(|| Error::Session("history plant not connected".into()))
+            .ok_or(Error::NotConnected { plant: "history" })
     }
 
     fn pnl_handle(&self) -> Result<&RithmicPnlPlantHandle> {
         self.pnl
             .as_ref()
             .map(|p| &p.handle)
-            .ok_or_else(|| Error::Session("pnl plant not connected (account required)".into()))
+            .ok_or(Error::NotConnected { plant: "pnl" })
     }
 
     fn order_handle(&self) -> Result<&RithmicOrderPlantHandle> {
         self.order
             .as_ref()
             .map(|o| &o.handle)
-            .ok_or_else(|| Error::Session("order plant not connected (account required)".into()))
+            .ok_or(Error::NotConnected { plant: "order" })
     }
 
     fn order_handle_mut(&mut self) -> Result<&mut RithmicOrderPlantHandle> {
         self.order
             .as_mut()
             .map(|o| &mut o.handle)
-            .ok_or_else(|| Error::Session("order plant not connected (account required)".into()))
+            .ok_or(Error::NotConnected { plant: "order" })
     }
 
     /// Clone a command handle for order I/O outside the session lock.

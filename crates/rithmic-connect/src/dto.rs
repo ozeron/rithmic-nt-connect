@@ -3,9 +3,9 @@
 use rithmic_rs::rti::messages::RithmicMessage;
 use rithmic_rs::{RithmicResponse, rithmic_to_unix_nanos};
 
-/// Dict-friendly ticker / PnL / order event for Python consumers.
+/// Dict-friendly plant event for Python consumers (ticker, PnL, orders).
 #[derive(Debug, Clone, PartialEq)]
-pub enum TickerEvent {
+pub enum PlantEvent {
     /// Last trade update.
     LastTrade(LastTradeDto),
     /// Best bid / offer update.
@@ -32,6 +32,8 @@ pub enum TickerEvent {
 pub struct OrderNotificationDto {
     /// `"rithmic"` or `"exchange"`.
     pub source: String,
+    /// Canonical action kind (`accepted`, `filled`, …) classified at the DTO boundary.
+    pub kind: Option<String>,
     pub notify_type: Option<i32>,
     pub notify_type_name: Option<String>,
     pub status: Option<String>,
@@ -217,7 +219,33 @@ fn ts_ns(ssboe: Option<i32>, usecs: Option<i32>) -> Option<u64> {
     Some(rithmic_to_unix_nanos(ssboe, usecs.unwrap_or(0)))
 }
 
-impl From<&RithmicResponse> for TickerEvent {
+fn order_kind(source: &str, notify_type_name: Option<&str>, status: Option<&str>) -> Option<String> {
+    let name = notify_type_name?.to_ascii_uppercase();
+    let kind = match (source, name.as_str()) {
+        ("rithmic", "OPEN") => "accepted",
+        ("rithmic", "MODIFIED") => "updated",
+        ("rithmic", "MODIFICATION_FAILED") => "modify_rejected",
+        ("rithmic", "CANCELLATION_FAILED") => "cancel_rejected",
+        ("rithmic", "COMPLETE") => {
+            let status_u = status.unwrap_or("").to_ascii_uppercase();
+            if status_u == "CANCELLED" || status_u == "CANCELED" {
+                "canceled"
+            } else {
+                return None;
+            }
+        }
+        ("exchange", "FILL") => "filled",
+        ("exchange", "REJECT") => "rejected",
+        ("exchange", "CANCEL") => "canceled",
+        ("exchange", "TRIGGER") => "triggered",
+        ("exchange", "NOT_MODIFIED") => "modify_rejected",
+        ("exchange", "NOT_CANCELLED" | "NOT_CANCELED") => "cancel_rejected",
+        _ => return None,
+    };
+    Some(kind.to_string())
+}
+
+impl From<&RithmicResponse> for PlantEvent {
     fn from(resp: &RithmicResponse) -> Self {
         match &resp.message {
             RithmicMessage::LastTrade(t) => Self::LastTrade(LastTradeDto {
@@ -294,8 +322,14 @@ impl From<&RithmicResponse> for TickerEvent {
                         .ok()
                         .map(|t| t.as_str_name().to_string())
                 });
+                let kind = order_kind(
+                    "rithmic",
+                    notify_type_name.as_deref(),
+                    n.status.as_deref(),
+                );
                 Self::OrderNotification(OrderNotificationDto {
                     source: "rithmic".into(),
+                    kind,
                     notify_type: n.notify_type,
                     notify_type_name,
                     status: n.status.clone(),
@@ -331,8 +365,14 @@ impl From<&RithmicResponse> for TickerEvent {
                         .ok()
                         .map(|t| t.as_str_name().to_string())
                 });
+                let kind = order_kind(
+                    "exchange",
+                    notify_type_name.as_deref(),
+                    n.status.as_deref(),
+                );
                 Self::OrderNotification(OrderNotificationDto {
                     source: "exchange".into(),
+                    kind,
                     notify_type: n.notify_type,
                     notify_type_name,
                     status: n.status.clone(),
