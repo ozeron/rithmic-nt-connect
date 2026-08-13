@@ -1,6 +1,6 @@
 //! Unit tests for the Phase 2 session facade (no live network).
 
-use rithmic_nt_connect::{Error, PlantSet, RithmicSession, SessionConfig};
+use rithmic_plants::{Error, PlantSet, RithmicSession, SessionConfig};
 
 #[test]
 fn config_rejects_incomplete_lucid_settings() {
