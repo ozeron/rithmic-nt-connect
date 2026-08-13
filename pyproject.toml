@@ -17,6 +17,10 @@ Repository = "https://github.com/ozeron/rithmic-nt-connect"
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0",
+  "protobuf>=5.0",
+]
+gateway = [
+  "protobuf>=5.0",
 ]
 nautilus = [
   "nautilus_trader==1.231.0",
