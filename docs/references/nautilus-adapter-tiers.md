@@ -22,9 +22,16 @@ Example listing: [mt5-connect](https://github.com/aulekator/mt5-connect).
 
 ## Naming (trademark)
 
-Do **not** use `nautilus-*` / `nautilus_trader` as a package or repo prefix.
-Approved shorthand for compatibility signal: `nt` (e.g. `rithmic-nt-community`).
-This repo uses **`rithmic-connect`** (venue-first, same pattern as `mt5-connect`).
+Upstream: [TRADEMARK.md](https://github.com/nautechsystems/nautilus_trader/blob/develop/TRADEMARK.md)
+([policy page](https://nautilustrader.io/legal/trademark-policy/)). Community listing:
+[ADAPTERS.md](https://github.com/nautechsystems/nautilus_trader/blob/develop/ADAPTERS.md).
+
+- Do **not** use `nautilus-*` / `nautilus_trader` as a package or repo prefix (`nautilus-*` is reserved).
+- Official not-compliant examples: `nautilus-mt5`, `nautilus-sinopac`.
+- Official compliant examples / listed community adapters: `mt5-connect`, `mt5-nt-community`, `sinopac-nt-community`.
+- Approved compatibility shorthand: `nt`.
+
+This repo uses **`rithmic-nt-connect`** (import / crate lib: `rithmic_nt_connect`).
 
 ## Python runtime seam (important)
 

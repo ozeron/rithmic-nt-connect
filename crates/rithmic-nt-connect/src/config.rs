@@ -9,7 +9,7 @@ pub const DEFAULT_LUCID_URL: &str = "wss://rprotocol.rithmic.com:443";
 /// Default system name for LucidTrading prop access.
 pub const DEFAULT_SYSTEM_NAME: &str = "LucidTrading";
 /// Default application name used for smoke / Phase 1 MD.
-pub const DEFAULT_APP_NAME: &str = "rithmic-connect";
+pub const DEFAULT_APP_NAME: &str = "rithmic-nt-connect";
 /// Default application version.
 pub const DEFAULT_APP_VERSION: &str = "0.1.0";
 

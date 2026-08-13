@@ -372,6 +372,8 @@ impl RithmicSession {
         price: Option<f64>,
         trigger_price: Option<f64>,
         duration: &str,
+        trail_by_ticks: Option<i32>,
+        trail_by_price_id: Option<i32>,
     ) -> Result<()> {
         self.ensure_order_plant().await?;
         place_order_on(
@@ -385,6 +387,8 @@ impl RithmicSession {
             price,
             trigger_price,
             duration,
+            trail_by_ticks,
+            trail_by_price_id,
         )
         .await
     }
@@ -406,6 +410,7 @@ impl RithmicSession {
         price_type: &str,
         price: Option<f64>,
         trigger_price: Option<f64>,
+        trail_by_ticks: Option<i32>,
     ) -> Result<()> {
         self.ensure_order_plant().await?;
         modify_order_on(
@@ -417,6 +422,7 @@ impl RithmicSession {
             price_type,
             price,
             trigger_price,
+            trail_by_ticks,
         )
         .await
     }
@@ -568,6 +574,8 @@ pub async fn place_order_on(
     price: Option<f64>,
     trigger_price: Option<f64>,
     duration: &str,
+    trail_by_ticks: Option<i32>,
+    trail_by_price_id: Option<i32>,
 ) -> Result<()> {
     let side: OrderSide = side
         .parse()
@@ -598,6 +606,10 @@ pub async fn place_order_on(
     if let Some(t) = trigger_price {
         builder = builder.trigger_price(t);
     }
+    if let Some(ticks) = trail_by_ticks {
+        let price_id = trail_by_price_id.unwrap_or(1);
+        builder = builder.trailing_stop_by(ticks, price_id);
+    }
     let order = builder.build()?;
     check_responses(handle.place_order(order).await?, "place_order")
 }
@@ -622,6 +634,7 @@ pub async fn modify_order_on(
     price_type: &str,
     price: Option<f64>,
     trigger_price: Option<f64>,
+    trail_by_ticks: Option<i32>,
 ) -> Result<()> {
     let price_type: OrderType = price_type
         .parse()
@@ -639,6 +652,9 @@ pub async fn modify_order_on(
     }
     if let Some(t) = trigger_price {
         builder = builder.trigger_price(t);
+    }
+    if let Some(ticks) = trail_by_ticks {
+        builder = builder.trail_by_ticks(ticks);
     }
     let order = builder.build()?;
     check_responses(handle.modify_order(order).await?, "modify_order")

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from rithmic_connect.session import WireSession
+from rithmic_nt_connect.session import WireSession
 
 
 class FrontMonthError(ValueError):

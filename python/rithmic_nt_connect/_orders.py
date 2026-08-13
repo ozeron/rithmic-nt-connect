@@ -5,10 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal, Mapping
 
-from rithmic_connect._convert import ConvertError
-from rithmic_connect._convert import _ts_ns
-from rithmic_connect._convert import instrument_id_from_symbol
-from rithmic_connect.constants import VENUE
+from rithmic_nt_connect._convert import ConvertError
+from rithmic_nt_connect._convert import _ts_ns
+from rithmic_nt_connect._convert import instrument_id_from_symbol
+from rithmic_nt_connect.constants import VENUE
 
 OrderActionKind = Literal[
     "accepted",
@@ -33,6 +33,9 @@ _ORDER_TYPE_TO_RITHMIC: dict[str, str] = {
     "STOP_LIMIT": "STOP_LIMIT",
     "MARKET_IF_TOUCHED": "MARKET_IF_TOUCHED",
     "LIMIT_IF_TOUCHED": "LIMIT_IF_TOUCHED",
+    # Nautilus trailing types → Rithmic stop + trailing_stop fields (not a separate price_type).
+    "TRAILING_STOP_MARKET": "STOP_MARKET",
+    "TRAILING_STOP_LIMIT": "STOP_LIMIT",
 }
 
 _TIF_TO_RITHMIC: dict[str, str] = {
@@ -41,6 +44,11 @@ _TIF_TO_RITHMIC: dict[str, str] = {
     "IOC": "IOC",
     "FOK": "FOK",
 }
+
+# Rithmic trail_by_price_id: 1 is the conventional default used by rithmic-rs examples.
+DEFAULT_TRAIL_BY_PRICE_ID: int = 1
+
+_TRAILING_ORDER_TYPES = frozenset({"TRAILING_STOP_MARKET", "TRAILING_STOP_LIMIT"})
 
 
 @dataclass(frozen=True)
@@ -55,6 +63,11 @@ class OrderAction:
     trade_id: str | None = None
 
 
+def _order_type_name(order_type: Any) -> str:
+    name = getattr(order_type, "name", None) or str(order_type)
+    return name.upper().removeprefix("ORDERTYPE.")
+
+
 def nautilus_side_to_rithmic(side: Any) -> str:
     name = getattr(side, "name", None) or str(side)
     name = name.upper().removeprefix("ORDERSIDE.")
@@ -66,12 +79,43 @@ def nautilus_side_to_rithmic(side: Any) -> str:
 
 
 def nautilus_order_type_to_rithmic(order_type: Any) -> str:
-    name = getattr(order_type, "name", None) or str(order_type)
-    name = name.upper().removeprefix("ORDERTYPE.")
+    name = _order_type_name(order_type)
     mapped = _ORDER_TYPE_TO_RITHMIC.get(name)
     if mapped is None:
         raise OrderMapError(f"unsupported order type for Rithmic: {order_type!r}")
     return mapped
+
+
+def is_trailing_order_type(order_type: Any) -> bool:
+    return _order_type_name(order_type) in _TRAILING_ORDER_TYPES
+
+
+def trailing_ticks_from_order(order: Any) -> int | None:
+    """Return trail-by-ticks for a Nautilus trailing stop, else ``None``.
+
+    Rithmic only accepts integer tick offsets (``TrailingOffsetType.TICKS``).
+    """
+    order_type = getattr(order, "order_type", None)
+    if order_type is None or not is_trailing_order_type(order_type):
+        return None
+    offset_type = getattr(order, "trailing_offset_type", None)
+    type_name = getattr(offset_type, "name", None) or str(offset_type)
+    type_name = str(type_name).upper().removeprefix("TRAILINGOFFSETTYPE.")
+    if type_name != "TICKS":
+        raise OrderMapError(
+            "Rithmic trailing stops require TrailingOffsetType.TICKS; "
+            f"got {offset_type!r}"
+        )
+    offset = getattr(order, "trailing_offset", None)
+    if offset is None:
+        raise OrderMapError("trailing stop missing trailing_offset")
+    ticks = int(offset)
+    if ticks < 1:
+        raise OrderMapError(f"trailing_offset must be >= 1 tick; got {offset!r}")
+    # Reject non-integral tick offsets (e.g. Decimal("1.5")).
+    if float(offset) != float(ticks):
+        raise OrderMapError(f"trailing_offset must be a whole tick count; got {offset!r}")
+    return ticks
 
 
 def nautilus_tif_to_rithmic(tif: Any) -> str:

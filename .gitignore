@@ -30,3 +30,6 @@ artifacts/
 
 # Generated protos (do not commit gated Rithmic protos unless license allows)
 vendor/rithmic-proto/
+
+# Local vendor checkouts (reference clients; not for redistribution)
+vendor/parbhatc-rithmic/

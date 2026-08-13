@@ -10,19 +10,19 @@ from nautilus_trader.model.enums import TimeInForce
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 
-from rithmic_connect._convert import ConvertError
-from rithmic_connect._order_plant import OrderPlantPolicy
-from rithmic_connect._order_plant import OrderPlantState
-from rithmic_connect._orders import OrderMapError
-from rithmic_connect._orders import kind_from_notify
-from rithmic_connect._orders import nautilus_order_type_to_rithmic
-from rithmic_connect._orders import nautilus_side_to_rithmic
-from rithmic_connect._orders import nautilus_tif_to_rithmic
-from rithmic_connect._orders import notification_action
-from rithmic_connect._orders import order_notification_to_fields
-from rithmic_connect._orders import trade_id_from_fill_fields
-from rithmic_connect.config import RithmicExecClientConfig
-from rithmic_connect.config import SessionConfig
+from rithmic_nt_connect._convert import ConvertError
+from rithmic_nt_connect._order_plant import OrderPlantPolicy
+from rithmic_nt_connect._order_plant import OrderPlantState
+from rithmic_nt_connect._orders import OrderMapError
+from rithmic_nt_connect._orders import kind_from_notify
+from rithmic_nt_connect._orders import nautilus_order_type_to_rithmic
+from rithmic_nt_connect._orders import nautilus_side_to_rithmic
+from rithmic_nt_connect._orders import nautilus_tif_to_rithmic
+from rithmic_nt_connect._orders import notification_action
+from rithmic_nt_connect._orders import order_notification_to_fields
+from rithmic_nt_connect._orders import trade_id_from_fill_fields
+from rithmic_nt_connect.config import RithmicExecClientConfig
+from rithmic_nt_connect.config import SessionConfig
 
 
 def _order() -> SimpleNamespace:
@@ -41,13 +41,45 @@ def test_side_type_tif_mapping():
     assert nautilus_order_type_to_rithmic(OrderType.LIMIT) == "LIMIT"
     assert nautilus_order_type_to_rithmic(OrderType.MARKET) == "MARKET"
     assert nautilus_order_type_to_rithmic(OrderType.STOP_LIMIT) == "STOP_LIMIT"
+    assert nautilus_order_type_to_rithmic(OrderType.TRAILING_STOP_MARKET) == "STOP_MARKET"
+    assert nautilus_order_type_to_rithmic(OrderType.TRAILING_STOP_LIMIT) == "STOP_LIMIT"
     assert nautilus_tif_to_rithmic(TimeInForce.DAY) == "DAY"
     assert nautilus_tif_to_rithmic(TimeInForce.GTC) == "GTC"
 
 
 def test_unsupported_order_type_raises():
     try:
-        nautilus_order_type_to_rithmic(OrderType.TRAILING_STOP_MARKET)
+        nautilus_order_type_to_rithmic(OrderType.MARKET_TO_LIMIT)
+        raised = False
+    except OrderMapError:
+        raised = True
+    assert raised
+
+
+def test_trailing_ticks_from_order():
+    from decimal import Decimal
+
+    from nautilus_trader.model.enums import TrailingOffsetType
+
+    from rithmic_nt_connect._orders import trailing_ticks_from_order
+
+    plain = SimpleNamespace(order_type=OrderType.STOP_MARKET)
+    assert trailing_ticks_from_order(plain) is None
+
+    trailing = SimpleNamespace(
+        order_type=OrderType.TRAILING_STOP_MARKET,
+        trailing_offset_type=TrailingOffsetType.TICKS,
+        trailing_offset=Decimal("20"),
+    )
+    assert trailing_ticks_from_order(trailing) == 20
+
+    bad_type = SimpleNamespace(
+        order_type=OrderType.TRAILING_STOP_LIMIT,
+        trailing_offset_type=TrailingOffsetType.PRICE,
+        trailing_offset=Decimal("5"),
+    )
+    try:
+        trailing_ticks_from_order(bad_type)
         raised = False
     except OrderMapError:
         raised = True

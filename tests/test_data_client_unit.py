@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from rithmic_connect.data import fields_to_order_book_deltas
-from rithmic_connect.data import fields_to_quote_tick
-from rithmic_connect.data import fields_to_trade_tick
-from rithmic_connect._convert import bbo_to_fields
-from rithmic_connect._convert import last_trade_to_fields
-from rithmic_connect._convert import order_book_to_fields
+from rithmic_nt_connect.data import fields_to_order_book_deltas
+from rithmic_nt_connect.data import fields_to_quote_tick
+from rithmic_nt_connect.data import fields_to_trade_tick
+from rithmic_nt_connect._convert import bbo_to_fields
+from rithmic_nt_connect._convert import last_trade_to_fields
+from rithmic_nt_connect._convert import order_book_to_fields
 
 
 def test_last_trade_fields_to_trade_tick():

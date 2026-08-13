@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import pytest
 
-from rithmic_connect._convert import ConvertError
-from rithmic_connect._convert import order_book_to_fields
-from rithmic_connect.constants import VENUE
-from rithmic_connect.data import fields_to_order_book_deltas
+from rithmic_nt_connect._convert import ConvertError
+from rithmic_nt_connect._convert import order_book_to_fields
+from rithmic_nt_connect.constants import VENUE
+from rithmic_nt_connect.data import fields_to_order_book_deltas
 
 
 ORDER_BOOK_SUMMARY = {

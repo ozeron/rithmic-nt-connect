@@ -1,10 +1,14 @@
-# rithmic-connect
+# rithmic-nt-connect
 
-Unofficial **Rithmic R|Protocol** adapter compatible with NautilusTrader — Rust client core, Python strategy surface.
+**Unofficial community Rithmic R|Protocol adapter for NautilusTrader** — Rust client core, Python strategy surface.
 
-> This is an independent community project. It is not affiliated with, endorsed by, or supported by Nautech Systems Pty Ltd or the official NautilusTrader project.
+> ⚠️ **Disclaimer:** This is an independent community project. It is **not** affiliated with, endorsed by, or supported by [Nautech Systems Pty Ltd](https://nautilustrader.io) or the official [NautilusTrader](https://nautilustrader.io) project.
 >
-> It is also not affiliated with, endorsed by, or supported by Rithmic, LLC.
+> It is also **not** affiliated with, endorsed by, or supported by Rithmic, LLC.
+
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Unofficial](https://img.shields.io/badge/NautilusTrader-unofficial%20community%20adapter-orange.svg)](https://nautilustrader.io)
 
 ## Status
 
@@ -24,7 +28,7 @@ python scripts/verify_order_dry_run.py --seconds 5
 maturin develop
 
 # Unit tests (no live credentials)
-cargo test -p rithmic-connect
+cargo test -p rithmic-nt-connect
 pytest -q
 
 # Live LucidTrading smoke (close MotiveWave first)
@@ -36,7 +40,7 @@ Register on a `TradingNode`:
 
 ```python
 from nautilus_trader.live.node import TradingNode
-from rithmic_connect import (
+from rithmic_nt_connect import (
     RithmicDataClientConfig,
     RithmicExecClientConfig,
     RithmicLiveDataClientFactory,
@@ -63,7 +67,7 @@ python scripts/verify_live_vs_history.py --root NQ --seconds 12 --out artifacts/
 ```
 
 ```python
-from rithmic_connect import resolve_front_month, run_front_month_verify
+from rithmic_nt_connect import resolve_front_month, run_front_month_verify
 # front = resolve_front_month(session, "NQ", "CME")
 # report = run_front_month_verify(session, root="NQ", exchange="CME")
 # report.to_dict()  # small JSON-friendly payload
@@ -73,8 +77,13 @@ from rithmic_connect import resolve_front_month, run_front_month_verify
 
 - **One session per login** — close MotiveWave / R|Trader before connecting.
 - LucidTrading defaults: system `LucidTrading`, gateway `wss://rprotocol.rithmic.com:443`.
+- Discover systems (no login): `python scripts/list_systems.py`
 - See [`docs/references/ops-runbook.md`](docs/references/ops-runbook.md).
 
 ## License
 
-Apache-2.0 (see `LICENSE`).
+Apache-2.0 — see [LICENSE](LICENSE) for details.
+
+---
+
+*This project is not affiliated with, endorsed by, or supported by Nautech Systems Pty Ltd or the NautilusTrader project.*

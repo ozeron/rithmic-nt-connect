@@ -1,4 +1,4 @@
-//! rithmic-connect — Phase 2 Rithmic session facade (MD + history + PnL + orders).
+//! rithmic-nt-connect — Phase 2 Rithmic session facade (MD + history + PnL + orders).
 //!
 //! This crate wraps [`rithmic-rs`] plants behind a small API consumed by the
 //! Python package via PyO3. Phase 2 adds order plant place / cancel / modify
@@ -10,6 +10,7 @@ pub mod config;
 pub mod dto;
 pub mod error;
 pub mod session;
+pub mod systems;
 
 #[cfg(feature = "python")]
 pub mod python;
@@ -24,3 +25,4 @@ pub use dto::{
 };
 pub use error::{Error, Result};
 pub use session::RithmicSession;
+pub use systems::{list_systems, normalize_gateway_url};

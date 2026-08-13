@@ -10,7 +10,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any, Mapping
 
-from rithmic_connect.constants import VENUE
+from rithmic_nt_connect.constants import VENUE
 
 
 class ConvertError(ValueError):

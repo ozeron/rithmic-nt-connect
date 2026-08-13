@@ -33,8 +33,8 @@ def _load_dotenv(path: Path) -> None:
 
 def main() -> int:
     _load_dotenv(ROOT / ".env")
-    from rithmic_connect.config import SessionConfig
-    from rithmic_connect.session import create_rust_session
+    from rithmic_nt_connect.config import SessionConfig
+    from rithmic_nt_connect.session import create_rust_session
 
     cfg = SessionConfig.from_env()
     session = create_rust_session(cfg)

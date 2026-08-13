@@ -1,9 +1,9 @@
 # Ops runbook
 
 1. Close MotiveWave / R|Trader (one Rithmic session per login).
-2. Copy `.env.example` → `.env` with LucidTrading credentials (`RITHMIC_USER` / `RITHMIC_PASSWORD` / `RITHMIC_SYSTEM=LucidTrading`).
+2. Copy `.env.example` → `.env` and set `RITHMIC_USER` / `RITHMIC_PASSWORD`.
 3. Build extension: `maturin develop`
-4. Unit tests: `cargo test -p rithmic-connect && pytest -q`
+4. Unit tests: `cargo test -p rithmic-nt-connect && pytest -q`
 5. Live smoke: `python scripts/smoke_lucid_nq.py` (exits `2` if credentials missing — CI-safe).
 
 Phase 1 does **not** submit orders by default. Phase 2 order APIs exist on the

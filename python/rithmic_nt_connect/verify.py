@@ -11,8 +11,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
-from rithmic_connect.front_month import resolve_front_month
-from rithmic_connect.session import WireSession
+from rithmic_nt_connect.front_month import resolve_front_month
+from rithmic_nt_connect.session import WireSession
 
 
 @dataclass

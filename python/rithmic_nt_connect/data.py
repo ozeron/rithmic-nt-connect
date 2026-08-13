@@ -35,17 +35,17 @@ from nautilus_trader.model.identifiers import Venue
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 
-from rithmic_connect._convert import ConvertError
-from rithmic_connect._convert import bbo_to_fields
-from rithmic_connect._convert import format_price_str
-from rithmic_connect._convert import last_trade_to_fields
-from rithmic_connect._convert import order_book_to_fields
-from rithmic_connect._convert import time_bar_to_fields
-from rithmic_connect.config import RithmicDataClientConfig
-from rithmic_connect.constants import ADAPTER_NAME
-from rithmic_connect.constants import VENUE
-from rithmic_connect.providers import RithmicInstrumentProvider
-from rithmic_connect.session import WireSession
+from rithmic_nt_connect._convert import ConvertError
+from rithmic_nt_connect._convert import bbo_to_fields
+from rithmic_nt_connect._convert import format_price_str
+from rithmic_nt_connect._convert import last_trade_to_fields
+from rithmic_nt_connect._convert import order_book_to_fields
+from rithmic_nt_connect._convert import time_bar_to_fields
+from rithmic_nt_connect.config import RithmicDataClientConfig
+from rithmic_nt_connect.constants import ADAPTER_NAME
+from rithmic_nt_connect.constants import VENUE
+from rithmic_nt_connect.providers import RithmicInstrumentProvider
+from rithmic_nt_connect.session import WireSession
 
 
 # Rithmic TimeBarType wire values.

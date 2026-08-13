@@ -12,11 +12,11 @@ from nautilus_trader.model.identifiers import StrategyId
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 
-from rithmic_connect._order_plant import OrderPlantPolicy
-from rithmic_connect._order_plant import OrderPlantState
-from rithmic_connect._orders import notification_action
-from rithmic_connect._orders import order_notification_to_fields
-from rithmic_connect.errors import VenueQueryUnavailable
+from rithmic_nt_connect._order_plant import OrderPlantPolicy
+from rithmic_nt_connect._order_plant import OrderPlantState
+from rithmic_nt_connect._orders import notification_action
+from rithmic_nt_connect._orders import order_notification_to_fields
+from rithmic_nt_connect.errors import VenueQueryUnavailable
 
 
 def _mock_order() -> SimpleNamespace:

@@ -68,9 +68,9 @@ def main(argv: list[str] | None = None) -> int:
     _load_dotenv_files()
 
     try:
-        from rithmic_connect.config import SessionConfig
-        from rithmic_connect.session import create_rust_session
-        from rithmic_connect.verify import run_front_month_verify
+        from rithmic_nt_connect.config import SessionConfig
+        from rithmic_nt_connect.session import create_rust_session
+        from rithmic_nt_connect.verify import run_front_month_verify
     except Exception as exc:  # noqa: BLE001
         print(f"import failed: {exc}", file=sys.stderr)
         return 1
