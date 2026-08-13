@@ -46,7 +46,10 @@ def _shared_session(
     *,
     plants: str,
 ) -> WireSession:
-    key = f"{config_session.user}:{config_session.system_name}:{config_session.url}"
+    key = (
+        f"{config_session.user}:{config_session.system_name}:{config_session.url}:"
+        f"{config_session.account_id}:{config_session.fcm_id}:{config_session.ib_id}"
+    )
     if key not in cache:
         cache[key] = create_rust_session(config_session, plants=plants)
         return cache[key]

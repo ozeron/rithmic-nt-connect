@@ -26,6 +26,7 @@ from nautilus_trader.model.events import OrderFilled
 from nautilus_trader.model.events import PositionChanged
 from nautilus_trader.model.events import PositionClosed
 from nautilus_trader.model.events import PositionOpened
+from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.instruments import Instrument
 from nautilus_trader.model.objects import Price
 from nautilus_trader.trading.strategy import Strategy
@@ -40,6 +41,8 @@ class NqFourBarConfig(StrategyConfig, frozen=True):
     log_events: bool = False
     log_commands: bool = False
     venue: str = VENUE
+    # When set, bind only this instrument (required if cache has multiple).
+    instrument_id: str | None = None
     request_lookback: bool = False
     sma_period: int = 20
     sma_lookback_days: int = 40
@@ -109,12 +112,34 @@ class NqFourBarStrategy(Strategy):
 
     def on_start(self) -> None:
         venue = self.config.venue
-        instruments = [inst for inst in self.cache.instruments() if str(inst.id.venue) == venue]
-        if not instruments:
-            self.log.error(f"no {venue} instruments in cache")
-            self.stop()
-            return
-        self._instrument = instruments[0]
+        if self.config.instrument_id:
+            instrument_id = InstrumentId.from_str(self.config.instrument_id)
+            instrument = self.cache.instrument(instrument_id)
+            if instrument is None:
+                self.log.error(f"instrument {instrument_id} not in cache")
+                self.stop()
+                return
+            self._instrument = instrument
+        else:
+            instruments = [
+                inst for inst in self.cache.instruments() if str(inst.id.venue) == venue
+            ]
+            if not instruments:
+                self.log.error(f"no {venue} instruments in cache")
+                self.stop()
+                return
+            if len(instruments) > 1:
+                nq = [inst for inst in instruments if str(inst.id.symbol).startswith("NQ")]
+                if len(nq) != 1:
+                    self.log.error(
+                        f"multiple {venue} instruments in cache; set "
+                        "NqFourBarConfig.instrument_id explicitly"
+                    )
+                    self.stop()
+                    return
+                self._instrument = nq[0]
+            else:
+                self._instrument = instruments[0]
         instrument_id = self._instrument.id
         self._daily_type = BarType.from_str(f"{instrument_id}-1-DAY-LAST-EXTERNAL")
         self._m1_ext = BarType.from_str(f"{instrument_id}-1-MINUTE-LAST-EXTERNAL")
@@ -160,6 +185,11 @@ class NqFourBarStrategy(Strategy):
         self._hist_m1 = 0
         self._sma_ready = False
         self._vwap_ready = False
+        self._last_close = None
+        self._down = 0
+        self._up = 0
+        self.bars = 0
+        self.fills = 0
 
     def on_historical_data(self, data) -> None:
         if not isinstance(data, Bar):

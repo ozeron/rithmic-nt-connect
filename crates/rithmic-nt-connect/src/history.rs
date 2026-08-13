@@ -57,7 +57,10 @@ pub fn unix_to_yyyymmdd_utc(unix_sec: i64) -> i32 {
 }
 
 /// Unix seconds at UTC midnight for `YYYYMMDD`.
-pub fn yyyymmdd_to_unix_utc(ymd: i32) -> i32 {
+///
+/// Returns `None` when the date falls outside the `i32` Unix-seconds range
+/// (before ~1901-12-14 or after ~2038-01-19).
+pub fn yyyymmdd_to_unix_utc(ymd: i32) -> Option<i32> {
     let y = ymd / 10_000;
     let m = (ymd / 100) % 100;
     let d = ymd % 100;
@@ -66,33 +69,31 @@ pub fn yyyymmdd_to_unix_utc(ymd: i32) -> i32 {
     let yoe = y.rem_euclid(400) as u32;
     let doy = (153 * (m + if m > 2 { -3 } else { 9 }) as u32 + 2) / 5 + d as u32 - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe as i32 - 719_468;
-    days * 86_400
+    let days = i64::from(era) * 146_097 + i64::from(doe) - 719_468;
+    i32::try_from(days * 86_400).ok()
 }
 
-/// `start_index` / `finish_index` for a time-bar replay.
+/// `start_index` / `finish_index` for a time-bar replay from a **Unix** window.
 ///
 /// Lucid daily/weekly replays use calendar `YYYYMMDD`, not Unix seconds.
-/// Minute/second bars keep Unix seconds.
-pub fn bar_replay_index(bar_type: TimeBarType, ts: i32) -> i32 {
+/// Minute/second bars keep Unix seconds. Always converts daily/weekly from
+/// Unix (do not pass pre-encoded YYYYMMDD here — use the value as-is on the
+/// wire only from callers that already speak calendar indexes).
+pub fn bar_replay_index(bar_type: TimeBarType, unix_sec: i32) -> i32 {
     match bar_type {
         TimeBarType::DailyBar | TimeBarType::WeeklyBar => {
-            if is_yyyymmdd(ts) {
-                ts
-            } else {
-                unix_to_yyyymmdd_utc(i64::from(ts))
-            }
+            unix_to_yyyymmdd_utc(i64::from(unix_sec))
         }
-        _ => ts,
+        _ => unix_sec,
     }
 }
 
 /// Daily/weekly markers are `YYYYMMDD`; convert those to Unix seconds.
-pub fn marker_to_ssboe(marker: i32) -> i32 {
+pub fn marker_to_ssboe(marker: i32) -> Option<i32> {
     if is_yyyymmdd(marker) {
         yyyymmdd_to_unix_utc(marker)
     } else {
-        marker
+        Some(marker)
     }
 }
 
@@ -124,12 +125,13 @@ pub fn window_slices(start: i32, end: i32, step_secs: i32) -> Vec<(i32, i32)> {
     out
 }
 
-/// `(ts_event_ns, close_price bits, num_trades)` for tick identity.
-pub fn tick_dedup_key(tick: &HistoryTickDto) -> (u64, u64, u64) {
+/// `(ts_event_ns, close_price bits, num_trades, volume)` for tick identity.
+pub fn tick_dedup_key(tick: &HistoryTickDto) -> (u64, u64, u64, u64) {
     (
         tick.ts_event_ns.unwrap_or(0),
         tick.close_price.map(f64::to_bits).unwrap_or(0),
         tick.num_trades.unwrap_or(0),
+        tick.volume.unwrap_or(0),
     )
 }
 
@@ -229,29 +231,32 @@ where
     F: FnMut(i32, i32) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<T>>>,
 {
-    let mut last_err: Option<Error> = None;
+    let mut last_transient: Option<Error> = None;
     let mut empty_tries = 0u32;
-    for attempt in 0..DEFAULT_TRANSIENT_RETRIES {
+    let mut transient_tries = 0u32;
+    loop {
         match load_slice(start, end).await {
             Ok(chunk) if !chunk.is_empty() => return Ok(chunk),
             Ok(chunk) => {
+                // Empty success clears a prior transient — do not revive it.
+                let _ = last_transient.take();
                 empty_tries += 1;
                 if empty_tries > DEFAULT_EMPTY_RETRIES {
                     return Ok(chunk);
                 }
-                sleep_backoff(attempt).await;
+                sleep_backoff(empty_tries.saturating_sub(1)).await;
             }
             Err(err) if is_transient(&err) => {
-                last_err = Some(err);
-                sleep_backoff(attempt).await;
+                last_transient = Some(err);
+                transient_tries += 1;
+                if transient_tries >= DEFAULT_TRANSIENT_RETRIES {
+                    return Err(last_transient.take().expect("transient recorded"));
+                }
+                sleep_backoff(transient_tries.saturating_sub(1)).await;
             }
             Err(err) => return Err(err),
         }
     }
-    if let Some(err) = last_err {
-        return Err(err);
-    }
-    Ok(Vec::new())
 }
 
 async fn sleep_backoff(attempt: u32) {
@@ -304,8 +309,10 @@ mod tests {
         let mut b = a.clone();
         b.volume = Some(99);
         let out = dedup_ticks(vec![a.clone(), b, a.clone()]);
-        assert_eq!(out.len(), 1);
+        // Same ts/price/trades but different volume → distinct rows.
+        assert_eq!(out.len(), 2);
         assert_eq!(out[0].volume, None);
+        assert_eq!(out[1].volume, Some(99));
     }
 
     #[test]
@@ -325,28 +332,40 @@ mod tests {
     #[test]
     fn unix_ymd_roundtrip_epoch() {
         assert_eq!(unix_to_yyyymmdd_utc(0), 19_700_101);
-        assert_eq!(yyyymmdd_to_unix_utc(19_700_101), 0);
+        assert_eq!(yyyymmdd_to_unix_utc(19_700_101), Some(0));
     }
 
     #[test]
     fn unix_ymd_roundtrip_sample() {
         let ymd = 20_260_813;
-        let unix = yyyymmdd_to_unix_utc(ymd);
+        let unix = yyyymmdd_to_unix_utc(ymd).expect("in range");
         assert_eq!(unix_to_yyyymmdd_utc(i64::from(unix)), ymd);
         assert_eq!(unix % 86_400, 0);
     }
 
     #[test]
     fn daily_replay_index_converts_unix() {
-        let unix = yyyymmdd_to_unix_utc(20_260_704);
+        let unix = yyyymmdd_to_unix_utc(20_260_704).expect("in range");
         assert_eq!(bar_replay_index(TimeBarType::DailyBar, unix), 20_260_704);
-        assert_eq!(bar_replay_index(TimeBarType::DailyBar, 20_260_704), 20_260_704);
+        // Unix seconds that numerically look like YYYYMMDD still convert (no heuristic).
+        assert_eq!(
+            bar_replay_index(TimeBarType::DailyBar, 20_200_101),
+            unix_to_yyyymmdd_utc(20_200_101)
+        );
         assert_eq!(bar_replay_index(TimeBarType::MinuteBar, unix), unix);
     }
 
     #[test]
+    fn yyyymmdd_out_of_i32_range_is_none() {
+        assert!(yyyymmdd_to_unix_utc(2_100_1231).is_none());
+    }
+
+    #[test]
     fn daily_marker_to_ssboe_is_utc_midnight() {
-        assert_eq!(marker_to_ssboe(20_260_812), yyyymmdd_to_unix_utc(20_260_812));
-        assert_eq!(marker_to_ssboe(1_720_000_000), 1_720_000_000);
+        assert_eq!(
+            marker_to_ssboe(20_260_812),
+            yyyymmdd_to_unix_utc(20_260_812)
+        );
+        assert_eq!(marker_to_ssboe(1_720_000_000), Some(1_720_000_000));
     }
 }

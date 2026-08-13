@@ -117,12 +117,29 @@ impl RithmicSession {
         self.plants
     }
 
-    /// Union extra plants into the set. If already connected, attach PnL now.
+    /// Union extra plants into the set. If already connected, attach any
+    /// newly requested plants that are not online yet.
     pub async fn request_plants(&mut self, extra: PlantSet) -> Result<()> {
         self.plants.ticker |= extra.ticker;
         self.plants.history |= extra.history;
         self.plants.pnl |= extra.pnl;
-        if self.plants.pnl && self.pnl.is_none() && self.ticker.is_some() {
+
+        let connected =
+            self.ticker.is_some() || self.history.is_some() || self.pnl.is_some();
+        if !connected {
+            return Ok(());
+        }
+
+        let rc = self.config.to_rithmic_config()?;
+        if self.plants.ticker && self.ticker.is_none() {
+            self.connect_or_rollback(connect_ticker(&rc), |s, p| s.ticker = Some(p))
+                .await?;
+        }
+        if self.plants.history && self.history.is_none() {
+            self.connect_or_rollback(connect_history(&rc), |s, p| s.history = Some(p))
+                .await?;
+        }
+        if self.plants.pnl && self.pnl.is_none() {
             self.ensure_pnl_plant().await?;
         }
         Ok(())
@@ -835,13 +852,9 @@ async fn load_tick_slice(
             end_time_sec,
         )
         .await?;
-    // Multi-response replay: skip error / marker frames; keep valid rows.
-    // Do not abort the whole slice on a single frame error.
-    Ok(responses
-        .iter()
-        .filter(|resp| resp.error.is_none())
-        .filter_map(HistoryTickDto::from_response)
-        .collect())
+    // Multi-response replay: keep valid rows; if nothing parsed and the plant
+    // reported an error on any frame, surface that instead of Ok([]).
+    collect_history_rows(responses, "load_ticks", HistoryTickDto::from_response)
 }
 
 async fn load_bar_slice(
@@ -865,11 +878,33 @@ async fn load_bar_slice(
             finish_index,
         )
         .await?;
-    Ok(responses
-        .iter()
-        .filter(|resp| resp.error.is_none())
-        .filter_map(HistoryBarDto::from_response)
-        .collect())
+    collect_history_rows(responses, "load_time_bars", HistoryBarDto::from_response)
+}
+
+fn collect_history_rows<T>(
+    responses: Vec<rithmic_rs::RithmicResponse>,
+    ctx: &str,
+    parse: impl Fn(&rithmic_rs::RithmicResponse) -> Option<T>,
+) -> Result<Vec<T>> {
+    let mut rows = Vec::new();
+    let mut first_err: Option<String> = None;
+    for resp in &responses {
+        if let Some(err) = &resp.error {
+            if first_err.is_none() {
+                first_err = Some(err.to_string());
+            }
+            continue;
+        }
+        if let Some(row) = parse(resp) {
+            rows.push(row);
+        }
+    }
+    if rows.is_empty() {
+        if let Some(err) = first_err {
+            return Err(Error::Rithmic(format!("{ctx}: {err}")));
+        }
+    }
+    Ok(rows)
 }
 
 fn update_bar_type(bar_type: i32) -> Result<request_time_bar_update::BarType> {

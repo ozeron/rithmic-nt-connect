@@ -2,7 +2,7 @@
 
 Date: 2026-08-13  
 Repo: `rithmic-nt-connect`  
-Status: code landed on `feat/intraday-sandbox-paper`; live Lucid proof still open (see `docs/STATUS.md` paper path)  
+Status: code landed on `feat/intraday-sandbox-paper`; sandbox Lucid proof done (2026-08-13); live EXTERNAL bar Lucid proof still open (see `docs/STATUS.md`)  
 
 ## Goal
 

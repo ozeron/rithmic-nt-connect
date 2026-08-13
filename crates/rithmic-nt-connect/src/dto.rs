@@ -637,7 +637,8 @@ impl HistoryTickDto {
 
 impl HistoryBarDto {
     /// Build a bar only when OHLC are present. Missing open/high/low are dropped
-    /// (never filled from close). Missing volume becomes 0 for settlement rows.
+    /// (never filled from close). Missing volume is allowed only for settlement
+    /// replay rows (`allow_missing_volume`); otherwise the row is dropped.
     fn from_ohlcv(
         symbol: Option<String>,
         exchange: Option<String>,
@@ -652,10 +653,17 @@ impl HistoryBarDto {
         num_trades: Option<u64>,
         bid_volume: Option<u64>,
         ask_volume: Option<u64>,
+        allow_missing_volume: bool,
     ) -> Option<Self> {
         let open_price = open_price?;
         let high_price = high_price?;
         let low_price = low_price?;
+        let volume = match volume {
+            Some(v) => v,
+            None if allow_missing_volume => 0,
+            None => return None,
+        };
+        let ssboe = crate::history::marker_to_ssboe(marker)?;
         Some(Self {
             symbol,
             exchange,
@@ -666,22 +674,20 @@ impl HistoryBarDto {
             high_price: Some(high_price),
             low_price: Some(low_price),
             close_price: Some(close_price),
-            volume: Some(volume.unwrap_or(0)),
+            volume: Some(volume),
             num_trades,
             bid_volume,
             ask_volume,
-            ts_event_ns: Some(rithmic_to_unix_nanos(
-                crate::history::marker_to_ssboe(marker),
-                0,
-            )),
+            ts_event_ns: Some(rithmic_to_unix_nanos(ssboe, 0)),
         })
     }
 
     pub(crate) fn from_response(resp: &RithmicResponse) -> Option<Self> {
         match &resp.message {
             RithmicMessage::ResponseTimeBarReplay(m) => {
-                // End-of-replay markers have no price. Daily rows may use
-                // settlement as close and omit volume — never invent OHLC.
+                // End-of-replay markers have no price. Settlement may stand in
+                // for close; volume may be omitted only on that settlement path.
+                let used_settlement = m.close_price.is_none() && m.settlement_price.is_some();
                 let close_price = m.close_price.or(m.settlement_price)?;
                 let marker = m.marker?;
                 Self::from_ohlcv(
@@ -698,6 +704,7 @@ impl HistoryBarDto {
                     m.num_trades,
                     m.bid_volume,
                     m.ask_volume,
+                    used_settlement,
                 )
             }
             RithmicMessage::TimeBar(m) => {
@@ -717,6 +724,7 @@ impl HistoryBarDto {
                     m.num_trades,
                     m.bid_volume,
                     m.ask_volume,
+                    false,
                 )
             }
             _ => None,
@@ -744,6 +752,7 @@ mod history_bar_tests {
             None,
             None,
             None,
+            false,
         )
         .is_none());
     }
@@ -764,13 +773,14 @@ mod history_bar_tests {
             None,
             None,
             None,
+            false,
         )
         .is_none());
     }
 
     #[test]
-    fn full_ohlc_parses_and_missing_volume_is_zero() {
-        let bar = HistoryBarDto::from_ohlcv(
+    fn missing_volume_dropped_unless_settlement_path() {
+        assert!(HistoryBarDto::from_ohlcv(
             Some("NQU6".into()),
             Some("CME".into()),
             Some(2),
@@ -784,12 +794,52 @@ mod history_bar_tests {
             None,
             None,
             None,
+            false,
+        )
+        .is_none());
+        let bar = HistoryBarDto::from_ohlcv(
+            Some("NQU6".into()),
+            Some("CME".into()),
+            Some(3),
+            Some("1".into()),
+            1_700_000_000,
+            100.0,
+            Some(99.0),
+            Some(101.0),
+            Some(98.5),
+            None,
+            None,
+            None,
+            None,
+            true,
+        )
+        .expect("settlement volume default");
+        assert_eq!(bar.volume, Some(0));
+    }
+
+    #[test]
+    fn full_ohlc_parses() {
+        let bar = HistoryBarDto::from_ohlcv(
+            Some("NQU6".into()),
+            Some("CME".into()),
+            Some(2),
+            Some("1".into()),
+            1_700_000_000,
+            100.0,
+            Some(99.0),
+            Some(101.0),
+            Some(98.5),
+            Some(12),
+            None,
+            None,
+            None,
+            false,
         )
         .expect("bar");
         assert_eq!(bar.open_price, Some(99.0));
         assert_eq!(bar.high_price, Some(101.0));
         assert_eq!(bar.low_price, Some(98.5));
         assert_eq!(bar.close_price, Some(100.0));
-        assert_eq!(bar.volume, Some(0));
+        assert_eq!(bar.volume, Some(12));
     }
 }

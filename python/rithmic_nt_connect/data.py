@@ -386,10 +386,12 @@ class RithmicDataClient(LiveMarketDataClient):
         self._poll_closing = False
         self._subscriptions: set[tuple[str, str]] = set()
         self._book_subscriptions: set[tuple[str, str]] = set()
-        self._bar_types: dict[tuple[str, str, int, int], BarType] = {}
+        # Wire key → one or more Nautilus BarTypes (60-MINUTE and 1-HOUR share a key).
+        self._bar_types: dict[tuple[str, str, int, int], set[BarType]] = {}
         self._instrument_routes: dict[str, tuple[str, str]] = {}
         self._history_poll_task: asyncio.Task | None = None
         self._resync_lock = asyncio.Lock()
+        self._resync_generation = 0
 
     async def _connect(self) -> None:
         await asyncio.to_thread(self._session.connect)
@@ -443,13 +445,17 @@ class RithmicDataClient(LiveMarketDataClient):
         await asyncio.to_thread(self._session.disconnect)
 
     async def _resync_ticker_subscription(self) -> None:
+        start_gen = self._resync_generation
         async with self._resync_lock:
+            if self._resync_generation != start_gen:
+                return
             await resync_ticker_session(
                 self._session,
-                self._subscriptions,
-                self._book_subscriptions,
+                set(self._subscriptions),
+                set(self._book_subscriptions),
                 set(self._bar_types),
             )
+            self._resync_generation += 1
 
     async def _poll_channel_loop(
         self,
@@ -530,13 +536,16 @@ class RithmicDataClient(LiveMarketDataClient):
                     fields_to_order_book_deltas(fields, ts_init, price_precision=prec)
                 )
             elif etype == "time_bar":
-                bar_type = self._bar_type_for_event(event)
-                if bar_type is None:
+                bar_types = self._bar_types_for_event(event)
+                if not bar_types:
                     self._log.debug(f"skip time_bar with no matching subscribe: {event.get('symbol')}")
                     return
                 fields = time_bar_to_fields(event)
-                prec = self._price_precision(bar_type.instrument_id)
-                self._handle_data(fields_to_bar(fields, bar_type, ts_init, price_precision=prec))
+                for bar_type in bar_types:
+                    prec = self._price_precision(bar_type.instrument_id)
+                    self._handle_data(
+                        fields_to_bar(fields, bar_type, ts_init, price_precision=prec)
+                    )
         except ConvertError as exc:
             self._log.debug(f"skip event {etype}: {exc}")
         except Exception as exc:  # noqa: BLE001 — never kill the poll loop
@@ -550,7 +559,7 @@ class RithmicDataClient(LiveMarketDataClient):
             )
         return self._instrument_routes[key]
 
-    def _bar_type_for_event(self, event: dict[str, Any]) -> BarType | None:
+    def _bar_types_for_event(self, event: dict[str, Any]) -> set[BarType]:
         symbol = str(event.get("symbol") or "")
         exchange = str(event.get("exchange") or "")
         rtype = int(event.get("bar_type") or 0)
@@ -559,7 +568,7 @@ class RithmicDataClient(LiveMarketDataClient):
             period = int(period_raw) if period_raw not in (None, "") else 1
         except (TypeError, ValueError):
             period = 1
-        return self._bar_types.get((symbol, exchange, rtype, period))
+        return set(self._bar_types.get((symbol, exchange, rtype, period), ()))
 
     async def _subscribe_trade_ticks(self, command: SubscribeTradeTicks) -> None:
         symbol, exchange = self._route(command.instrument_id)
@@ -607,7 +616,7 @@ class RithmicDataClient(LiveMarketDataClient):
             self._session.subscribe_time_bars, symbol, exchange, rtype, period
         )
         key = (symbol, exchange, rtype, period)
-        self._bar_types[key] = bar_type
+        self._bar_types.setdefault(key, set()).add(bar_type)
         self._ensure_history_poll_task()
 
     async def _unsubscribe_bars(self, command: UnsubscribeBars) -> None:
@@ -618,11 +627,15 @@ class RithmicDataClient(LiveMarketDataClient):
             return
         symbol, exchange = self._route(bar_type.instrument_id)
         rtype, period = bar_type_to_rithmic(bar_type)
-        await asyncio.to_thread(
-            self._session.unsubscribe_time_bars, symbol, exchange, rtype, period
-        )
         key = (symbol, exchange, rtype, period)
-        self._bar_types.pop(key, None)
+        mapped = self._bar_types.get(key)
+        if mapped is not None:
+            mapped.discard(bar_type)
+            if not mapped:
+                del self._bar_types[key]
+                await asyncio.to_thread(
+                    self._session.unsubscribe_time_bars, symbol, exchange, rtype, period
+                )
 
     async def _request_trade_ticks(self, request: RequestTradeTicks) -> None:
         symbol, exchange = self._route(request.instrument_id)
