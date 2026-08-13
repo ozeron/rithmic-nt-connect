@@ -11,14 +11,14 @@ from nautilus_trader.config import InstrumentProviderConfig
 from nautilus_trader.live.factories import LiveDataClientFactory
 from nautilus_trader.live.factories import LiveExecClientFactory
 
-from rithmic_connect.config import RithmicDataClientConfig
-from rithmic_connect.config import RithmicExecClientConfig
-from rithmic_connect.config import SessionConfig
-from rithmic_connect.data import RithmicDataClient
-from rithmic_connect.execution import RithmicExecutionClient
-from rithmic_connect.providers import RithmicInstrumentProvider
-from rithmic_connect.session import WireSession
-from rithmic_connect.session import create_rust_session
+from rithmic_nt_connect.config import RithmicDataClientConfig
+from rithmic_nt_connect.config import RithmicExecClientConfig
+from rithmic_nt_connect.config import SessionConfig
+from rithmic_nt_connect.data import RithmicDataClient
+from rithmic_nt_connect.execution import RithmicExecutionClient
+from rithmic_nt_connect.providers import RithmicInstrumentProvider
+from rithmic_nt_connect.session import WireSession
+from rithmic_nt_connect.session import create_rust_session
 
 
 def _pairs_from_session(session: SessionConfig) -> list[tuple[str, str]]:

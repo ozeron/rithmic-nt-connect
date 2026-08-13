@@ -1,7 +1,7 @@
-# rithmic-connect — functionality checklist
+# rithmic-nt-connect — functionality checklist
 
 Last updated: 2026-08-13  
-Repo: https://github.com/ozeron/rithmic-connect  
+Repo: https://github.com/ozeron/rithmic-nt-connect  
 
 Legend: **Done (main)** · **In PR** · **Partial** · **Not started** · **Out of scope / other repo**
 

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from rithmic_connect import ConfigError, SessionConfig, VENUE
-from rithmic_connect.config import RithmicDataClientConfig, RithmicExecClientConfig
-from rithmic_connect.constants import DEFAULT_GATEWAY_URL, DEFAULT_SYSTEM_NAME
+from rithmic_nt_connect import ConfigError, SessionConfig, VENUE
+from rithmic_nt_connect.config import RithmicDataClientConfig, RithmicExecClientConfig
+from rithmic_nt_connect.constants import DEFAULT_APP_NAME, DEFAULT_GATEWAY_URL, DEFAULT_SYSTEM_NAME
 
 
 def test_my046_env_maps_to_lucid_live() -> None:
@@ -16,7 +16,7 @@ def test_my046_env_maps_to_lucid_live() -> None:
             "RITHMIC_PASSWORD": "s3cret-value",
             "RITHMIC_SYSTEM": "LucidTrading",
             "RITHMIC_GATEWAY": "wss://rprotocol.rithmic.com:443",
-            "RITHMIC_APP_NAME": "rithmic-connect",
+            "RITHMIC_APP_NAME": "rithmic-nt-connect",
             "RITHMIC_APP_VERSION": "0.1.0",
             "RITHMIC_SYMBOL": "NQ",
             "RITHMIC_EXCHANGE": "CME",
@@ -41,6 +41,7 @@ def test_my046_defaults_system_and_gateway() -> None:
     assert cfg.system_name == "LucidTrading"
     assert cfg.url == "wss://rprotocol.rithmic.com:443"
     assert cfg.env == "Live"
+    assert cfg.app_name == DEFAULT_APP_NAME == "rithmic-nt-connect"
 
 
 def test_live_rs_style_env() -> None:
@@ -122,7 +123,9 @@ def test_data_and_exec_config_from_env() -> None:
 
 
 def test_package_imports_without_network() -> None:
-    import rithmic_connect
+    import rithmic_nt_connect
 
-    assert rithmic_connect.VENUE == "RITHMIC"
-    assert rithmic_connect.__version__
+    assert rithmic_nt_connect.VENUE == "RITHMIC"
+    assert rithmic_nt_connect.__version__
+    with pytest.raises(ModuleNotFoundError):
+        import rithmic_connect  # noqa: F401

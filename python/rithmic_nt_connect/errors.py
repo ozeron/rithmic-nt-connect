@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 try:
-    from rithmic_connect._lib import ChannelClosedError
-    from rithmic_connect._lib import ChannelLaggedError
-    from rithmic_connect._lib import NotConnectedError
+    from rithmic_nt_connect._lib import ChannelClosedError
+    from rithmic_nt_connect._lib import ChannelLaggedError
+    from rithmic_nt_connect._lib import NotConnectedError
 except ImportError:  # pragma: no cover
 
     class ChannelError(RuntimeError):

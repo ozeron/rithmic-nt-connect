@@ -18,7 +18,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install "pytest>=8" "nautilus_trader==1.231.0"
       - name: Cargo test
-        run: cargo test -p rithmic-connect
+        run: cargo test -p rithmic-nt-connect
       - name: Pytest (no secrets)
         env:
           PYTHONPATH: python

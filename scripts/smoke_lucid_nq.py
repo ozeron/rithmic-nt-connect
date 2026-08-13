@@ -43,7 +43,7 @@ def main() -> int:
     _load_dotenv_files()
 
     try:
-        from rithmic_connect.config import SessionConfig
+        from rithmic_nt_connect.config import SessionConfig
     except Exception as exc:  # noqa: BLE001
         print(f"import failed: {exc}", file=sys.stderr)
         return 1
@@ -55,7 +55,7 @@ def main() -> int:
         return 2
 
     try:
-        from rithmic_connect.session import create_rust_session
+        from rithmic_nt_connect.session import create_rust_session
     except Exception as exc:  # noqa: BLE001
         print(f"SMOKE FAIL: extension unavailable: {exc}", file=sys.stderr)
         print("Build with: maturin develop --features python", file=sys.stderr)

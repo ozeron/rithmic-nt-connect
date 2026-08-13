@@ -5,11 +5,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from rithmic_connect.front_month import FrontMonthError
-from rithmic_connect.front_month import resolve_front_month
-from rithmic_connect.verify import RecordedTick
-from rithmic_connect.verify import compare_ticks
-from rithmic_connect.verify import run_front_month_verify
+from rithmic_nt_connect.front_month import FrontMonthError
+from rithmic_nt_connect.front_month import resolve_front_month
+from rithmic_nt_connect.verify import RecordedTick
+from rithmic_nt_connect.verify import compare_ticks
+from rithmic_nt_connect.verify import run_front_month_verify
 
 
 class FakeSession:

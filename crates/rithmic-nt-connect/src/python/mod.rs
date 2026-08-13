@@ -9,7 +9,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use tokio::runtime::Runtime;
 
-use crate::config::SessionConfig;
+use crate::config::{DEFAULT_LUCID_URL, SessionConfig};
 use crate::dto::{
     AccountPnlDto, BboDto, FrontMonthDto, HistoryBarDto, HistoryTickDto, InstrumentPnlDto,
     LastTradeDto, OrderBookDto, OrderNotificationDto, ReferenceDataDto, PlantEvent,
@@ -19,9 +19,9 @@ use crate::session::{
     RithmicSession, cancel_all_orders_on, cancel_order_on, modify_order_on, place_order_on,
 };
 
-pyo3::create_exception!(rithmic_connect, ChannelLaggedError, PyRuntimeError);
-pyo3::create_exception!(rithmic_connect, ChannelClosedError, PyRuntimeError);
-pyo3::create_exception!(rithmic_connect, NotConnectedError, PyRuntimeError);
+pyo3::create_exception!(rithmic_nt_connect, ChannelLaggedError, PyRuntimeError);
+pyo3::create_exception!(rithmic_nt_connect, ChannelClosedError, PyRuntimeError);
+pyo3::create_exception!(rithmic_nt_connect, NotConnectedError, PyRuntimeError);
 
 fn runtime() -> &'static Runtime {
     static RT: OnceLock<Runtime> = OnceLock::new();
@@ -409,7 +409,7 @@ impl PySession {
         password,
         system_name="LucidTrading",
         url="wss://rprotocol.rithmic.com:443",
-        app_name="rithmic-connect",
+        app_name="rithmic-nt-connect",
         app_version="0.1.0",
         env="Live",
         account_id=None,
@@ -696,6 +696,8 @@ impl PySession {
         price=None,
         trigger_price=None,
         duration="DAY",
+        trail_by_ticks=None,
+        trail_by_price_id=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn place_order(
@@ -709,6 +711,8 @@ impl PySession {
         price: Option<f64>,
         trigger_price: Option<f64>,
         duration: &str,
+        trail_by_ticks: Option<i32>,
+        trail_by_price_id: Option<i32>,
     ) -> PyResult<()> {
         let _guard = self.begin_order_op()?;
         let handle = self.acquire_order_handle()?;
@@ -724,6 +728,8 @@ impl PySession {
                 price,
                 trigger_price,
                 duration,
+                trail_by_ticks,
+                trail_by_price_id,
             ))
             .map_err(to_py_err)
     }
@@ -744,6 +750,7 @@ impl PySession {
         price_type,
         price=None,
         trigger_price=None,
+        trail_by_ticks=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn modify_order(
@@ -755,6 +762,7 @@ impl PySession {
         price_type: &str,
         price: Option<f64>,
         trigger_price: Option<f64>,
+        trail_by_ticks: Option<i32>,
     ) -> PyResult<()> {
         let _guard = self.begin_order_op()?;
         let handle = self.acquire_order_handle()?;
@@ -768,6 +776,7 @@ impl PySession {
                 price_type,
                 price,
                 trigger_price,
+                trail_by_ticks,
             ))
             .map_err(to_py_err)
     }
@@ -793,10 +802,21 @@ impl PySession {
     }
 }
 
-/// Register the PyO3 module `rithmic_connect._lib`.
+/// List system names advertised by a gateway (no login).
+#[pyfunction]
+#[pyo3(signature = (url=None))]
+fn list_systems(url: Option<&str>) -> PyResult<Vec<String>> {
+    let url = url.unwrap_or(DEFAULT_LUCID_URL);
+    runtime()
+        .block_on(crate::systems::list_systems(url))
+        .map_err(to_py_err)
+}
+
+/// Register the PyO3 module `rithmic_nt_connect._lib`.
 #[pymodule]
 fn _lib(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySession>()?;
+    m.add_function(wrap_pyfunction!(list_systems, m)?)?;
     m.add("ChannelLaggedError", m.py().get_type::<ChannelLaggedError>())?;
     m.add("ChannelClosedError", m.py().get_type::<ChannelClosedError>())?;
     m.add("NotConnectedError", m.py().get_type::<NotConnectedError>())?;

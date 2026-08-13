@@ -9,9 +9,9 @@ from nautilus_trader.model.objects import AccountBalance
 from nautilus_trader.model.objects import Currency
 from nautilus_trader.model.objects import Money
 
-from rithmic_connect._convert import account_pnl_to_fields
-from rithmic_connect.constants import VENUE
-from rithmic_connect.execution import RithmicExecutionClient
+from rithmic_nt_connect._convert import account_pnl_to_fields
+from rithmic_nt_connect.constants import VENUE
+from rithmic_nt_connect.execution import RithmicExecutionClient
 
 
 def test_account_pnl_fields_build_balance():
@@ -42,21 +42,21 @@ def test_readonly_mode_tracks_rejects():
 
 
 def test_execution_client_alias_preserved():
-    from rithmic_connect.execution import RithmicReadOnlyExecutionClient
+    from rithmic_nt_connect.execution import RithmicReadOnlyExecutionClient
 
     assert RithmicReadOnlyExecutionClient is RithmicExecutionClient
 
 
 def test_order_plant_and_errors_import_smoke():
-    from rithmic_connect._order_plant import OrderPlantPolicy
-    from rithmic_connect.errors import VenueQueryUnavailable
+    from rithmic_nt_connect._order_plant import OrderPlantPolicy
+    from rithmic_nt_connect.errors import VenueQueryUnavailable
 
     assert OrderPlantPolicy().use_cache_order_reports()
     assert issubclass(VenueQueryUnavailable, RuntimeError)
 
 
 def test_instrument_pnl_to_position_fields():
-    from rithmic_connect._convert import instrument_pnl_to_fields
+    from rithmic_nt_connect._convert import instrument_pnl_to_fields
 
     fields = instrument_pnl_to_fields(
         {
@@ -76,7 +76,7 @@ def test_instrument_pnl_to_position_fields():
 
 
 def test_instrument_pnl_flat_when_zero_net():
-    from rithmic_connect._convert import instrument_pnl_to_fields
+    from rithmic_nt_connect._convert import instrument_pnl_to_fields
 
     fields = instrument_pnl_to_fields(
         {

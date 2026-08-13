@@ -1,4 +1,4 @@
-//! Error types for the rithmic-connect facade.
+//! Error types for the rithmic-nt-connect facade.
 
 use thiserror::Error;
 

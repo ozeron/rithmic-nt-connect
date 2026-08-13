@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from rithmic_connect.config import SessionConfig
+from rithmic_nt_connect.config import SessionConfig
 
 
 class TickerSession(Protocol):
@@ -51,6 +51,8 @@ class OrderSession(Protocol):
         price: float | None = None,
         trigger_price: float | None = None,
         duration: str = "DAY",
+        trail_by_ticks: int | None = None,
+        trail_by_price_id: int | None = None,
     ) -> None: ...
     def cancel_order(self, basket_id: str) -> None: ...
     def modify_order(
@@ -62,6 +64,7 @@ class OrderSession(Protocol):
         price_type: str,
         price: float | None = None,
         trigger_price: float | None = None,
+        trail_by_ticks: int | None = None,
     ) -> None: ...
     def cancel_all_orders(self) -> None: ...
     def poll_order_event(self) -> dict[str, Any] | None: ...
@@ -73,7 +76,7 @@ class WireSession(TickerSession, PnlSession, OrderSession, Protocol):
 
 def create_rust_session(session: SessionConfig) -> WireSession:
     """Create the PyO3 session when the extension is built."""
-    from rithmic_connect._lib import Session  # type: ignore
+    from rithmic_nt_connect._lib import Session  # type: ignore
 
     return Session(
         user=session.user,

@@ -1,4 +1,4 @@
-"""Configuration dataclasses for rithmic-connect.
+"""Configuration dataclasses for rithmic-nt-connect.
 
 Supports MY046-style env names and rithmic-rs ``RITHMIC_LIVE_*`` / ``RITHMIC_DEMO_*``
 prefixes. LucidTrading acceptance maps to Live env + system ``LucidTrading`` + the
@@ -11,7 +11,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Mapping, MutableMapping
 
-from rithmic_connect.constants import (
+from rithmic_nt_connect.constants import (
     DEFAULT_APP_NAME,
     DEFAULT_APP_VERSION,
     DEFAULT_GATEWAY_URL,

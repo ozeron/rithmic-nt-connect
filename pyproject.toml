@@ -1,14 +1,18 @@
 [project]
-name = "rithmic-connect"
+name = "rithmic-nt-connect"
 version = "0.1.0"
 description = "Unofficial Rithmic R|Protocol adapter compatible with NautilusTrader (Rust core, Python surface)"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
-authors = [{ name = "rithmic-connect contributors" }]
+authors = [{ name = "rithmic-nt-connect contributors" }]
 dependencies = [
   "nautilus_trader==1.231.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/ozeron/rithmic-nt-connect"
+Repository = "https://github.com/ozeron/rithmic-nt-connect"
 
 [project.optional-dependencies]
 dev = [
@@ -23,8 +27,8 @@ requires = ["maturin>=1.7,<2.0"]
 build-backend = "maturin"
 
 [tool.maturin]
-manifest-path = "crates/rithmic-connect/Cargo.toml"
-module-name = "rithmic_connect._lib"
+manifest-path = "crates/rithmic-nt-connect/Cargo.toml"
+module-name = "rithmic_nt_connect._lib"
 python-source = "python"
 features = ["python", "extension-module"]
 

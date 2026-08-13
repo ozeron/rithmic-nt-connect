@@ -41,30 +41,32 @@ from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 from nautilus_trader.model.orders import Order
 
-from rithmic_connect._convert import account_pnl_to_fields
-from rithmic_connect._convert import format_price_str
-from rithmic_connect._convert import instrument_pnl_to_fields
-from rithmic_connect._convert import rithmic_route_from_info
-from rithmic_connect._order_plant import OrderPlantPolicy
-from rithmic_connect._order_plant import OrderPlantState
-from rithmic_connect._orders import OrderMapError
-from rithmic_connect._orders import nautilus_order_type_to_rithmic
-from rithmic_connect._orders import nautilus_side_to_rithmic
-from rithmic_connect._orders import nautilus_tif_to_rithmic
-from rithmic_connect._orders import notification_action
-from rithmic_connect._orders import order_notification_to_fields
-from rithmic_connect.config import RithmicExecClientConfig
-from rithmic_connect.constants import ADAPTER_NAME
-from rithmic_connect.constants import VENUE
-from rithmic_connect.errors import ChannelError
-from rithmic_connect.errors import VenueQueryUnavailable
-from rithmic_connect.providers import RithmicInstrumentProvider
-from rithmic_connect.session import WireSession
+from rithmic_nt_connect._convert import account_pnl_to_fields
+from rithmic_nt_connect._convert import format_price_str
+from rithmic_nt_connect._convert import instrument_pnl_to_fields
+from rithmic_nt_connect._convert import rithmic_route_from_info
+from rithmic_nt_connect._order_plant import OrderPlantPolicy
+from rithmic_nt_connect._order_plant import OrderPlantState
+from rithmic_nt_connect._orders import OrderMapError
+from rithmic_nt_connect._orders import DEFAULT_TRAIL_BY_PRICE_ID
+from rithmic_nt_connect._orders import nautilus_order_type_to_rithmic
+from rithmic_nt_connect._orders import nautilus_side_to_rithmic
+from rithmic_nt_connect._orders import nautilus_tif_to_rithmic
+from rithmic_nt_connect._orders import notification_action
+from rithmic_nt_connect._orders import order_notification_to_fields
+from rithmic_nt_connect._orders import trailing_ticks_from_order
+from rithmic_nt_connect.config import RithmicExecClientConfig
+from rithmic_nt_connect.constants import ADAPTER_NAME
+from rithmic_nt_connect.constants import VENUE
+from rithmic_nt_connect.errors import ChannelError
+from rithmic_nt_connect.errors import VenueQueryUnavailable
+from rithmic_nt_connect.providers import RithmicInstrumentProvider
+from rithmic_nt_connect.session import WireSession
 
 try:
-    from rithmic_connect._lib import ChannelClosedError as _LibChannelClosed
-    from rithmic_connect._lib import ChannelLaggedError as _LibChannelLagged
-    from rithmic_connect._lib import NotConnectedError as _LibNotConnected
+    from rithmic_nt_connect._lib import ChannelClosedError as _LibChannelClosed
+    from rithmic_nt_connect._lib import ChannelLaggedError as _LibChannelLagged
+    from rithmic_nt_connect._lib import NotConnectedError as _LibNotConnected
 except ImportError:  # pragma: no cover - extension not built
     _LibChannelClosed = ()
     _LibChannelLagged = ()
@@ -541,6 +543,7 @@ class RithmicExecutionClient(LiveExecutionClient):
             side = nautilus_side_to_rithmic(order.side)
             price_type = nautilus_order_type_to_rithmic(order.order_type)
             duration = nautilus_tif_to_rithmic(order.time_in_force)
+            trail_by_ticks = trailing_ticks_from_order(order)
         except (OrderMapError, ValueError) as exc:
             self.generate_order_rejected(
                 order.strategy_id,
@@ -556,6 +559,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         price = float(order.price) if order.has_price else None
         trigger = float(order.trigger_price) if order.has_trigger_price else None
         qty = int(order.quantity)
+        trail_by_price_id = DEFAULT_TRAIL_BY_PRICE_ID if trail_by_ticks is not None else None
 
         self.generate_order_submitted(
             order.strategy_id,
@@ -575,6 +579,8 @@ class RithmicExecutionClient(LiveExecutionClient):
                 price,
                 trigger,
                 duration,
+                trail_by_ticks,
+                trail_by_price_id,
             )
         except Exception as exc:  # noqa: BLE001
             self._tag_to_client.pop(user_tag, None)
@@ -659,6 +665,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         try:
             symbol, exchange = self._route(command.instrument_id)
             price_type = nautilus_order_type_to_rithmic(order.order_type)
+            trail_by_ticks = trailing_ticks_from_order(order)
         except (OrderMapError, ValueError) as exc:
             self.generate_order_modify_rejected(
                 command.strategy_id,
@@ -686,6 +693,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                 price_type,
                 price,
                 trigger,
+                trail_by_ticks,
             )
         except Exception as exc:  # noqa: BLE001
             self.generate_order_modify_rejected(

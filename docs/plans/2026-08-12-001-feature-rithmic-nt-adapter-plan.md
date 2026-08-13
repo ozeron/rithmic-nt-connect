@@ -9,6 +9,8 @@ execution: code
 
 # Rithmic NT Adapter - Plan
 
+Public identities later renamed to [`rithmic-nt-connect`](https://github.com/ozeron/rithmic-nt-connect) (crate `rithmic-nt-connect`, import `rithmic_nt_connect`). Path lists below describe the original tree.
+
 ## Goal Capsule
 
 - **Objective:** Ship an out-of-tree Rithmic R|Protocol adapter that lets a Python strategy on NautilusTrader 1.231.x consume live/historical market data (and best-effort account state) through a Rust client core.

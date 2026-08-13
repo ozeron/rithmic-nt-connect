@@ -12,8 +12,8 @@ from nautilus_trader.model.identifiers import InstrumentId, Symbol
 from nautilus_trader.model.instruments import FuturesContract
 from nautilus_trader.model.objects import Currency, Price, Quantity
 
-from rithmic_connect.constants import VENUE
-from rithmic_connect.session import WireSession
+from rithmic_nt_connect.constants import VENUE
+from rithmic_nt_connect.session import WireSession
 
 
 class InstrumentBuildError(ValueError):

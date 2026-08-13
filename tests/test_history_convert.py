@@ -5,11 +5,11 @@ from __future__ import annotations
 import pytest
 from nautilus_trader.model.data import BarType
 
-from rithmic_connect._convert import ConvertError
-from rithmic_connect._convert import last_trade_to_fields
-from rithmic_connect._convert import time_bar_to_fields
-from rithmic_connect.data import bar_type_to_rithmic
-from rithmic_connect.data import fields_to_bar
+from rithmic_nt_connect._convert import ConvertError
+from rithmic_nt_connect._convert import last_trade_to_fields
+from rithmic_nt_connect._convert import time_bar_to_fields
+from rithmic_nt_connect.data import bar_type_to_rithmic
+from rithmic_nt_connect.data import fields_to_bar
 
 
 def test_history_tick_requires_trade_price_and_size():

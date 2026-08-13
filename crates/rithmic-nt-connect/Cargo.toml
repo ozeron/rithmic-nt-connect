@@ -1,18 +1,18 @@
 [package]
-name = "rithmic-connect"
+name = "rithmic-nt-connect"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Rust Rithmic R|Protocol session facade for rithmic-connect (Phase 2: MD + PnL + orders)"
+description = "Rust Rithmic R|Protocol session facade for rithmic-nt-connect (Phase 2: MD + PnL + orders)"
 readme = "../../README.md"
-repository = "https://github.com/ozeron/rithmic-connect"
+repository = "https://github.com/ozeron/rithmic-nt-connect"
 
 [lib]
-name = "rithmic_connect"
+name = "rithmic_nt_connect"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-# Empty Cargo default so `cargo test -p rithmic-connect` does not link libpython.
+# Empty Cargo default so `cargo test -p rithmic-nt-connect` does not link libpython.
 # Maturin builds enable `python` via pyproject.toml `[tool.maturin] features`.
 default = []
 python = ["dep:pyo3"]

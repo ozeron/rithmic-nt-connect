@@ -1,6 +1,6 @@
 //! Unit tests for the Phase 2 session facade (no live network).
 
-use rithmic_connect::{Error, RithmicSession, SessionConfig};
+use rithmic_nt_connect::{Error, RithmicSession, SessionConfig};
 
 #[test]
 fn config_rejects_incomplete_lucid_settings() {
@@ -46,6 +46,8 @@ async fn disconnected_order_methods_error_without_network() {
             None,
             None,
             "DAY",
+            None,
+            None,
         )
         .await
         .unwrap_err();
