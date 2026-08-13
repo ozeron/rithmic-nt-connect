@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from rithmic_nt_connect import ConfigError, SessionConfig, VENUE
@@ -122,6 +124,38 @@ def test_data_and_exec_config_from_env() -> None:
     assert "pw" not in repr(exec_cfg)
 
 
+def test_env_truthy() -> None:
+    from rithmic_nt_connect.config import env_truthy
+
+    assert env_truthy("1")
+    assert env_truthy("TRUE")
+    assert not env_truthy(None)
+    assert not env_truthy("0")
+    assert env_truthy(None, default=True)
+
+
+def test_load_dotenv_setdefault(tmp_path, monkeypatch) -> None:
+    from rithmic_nt_connect.config import load_dotenv
+    from rithmic_nt_connect.config import load_dotenv_files
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("RITHMIC_USER=alice\n# comment\nRITHMIC_PASSWORD='s3cret'\n")
+    monkeypatch.delenv("RITHMIC_USER", raising=False)
+    monkeypatch.delenv("RITHMIC_PASSWORD", raising=False)
+    monkeypatch.setenv("RITHMIC_USER", "keep-me")
+    assert load_dotenv(env_file) is True
+    assert os.environ["RITHMIC_USER"] == "keep-me"
+    assert os.environ["RITHMIC_PASSWORD"] == "s3cret"
+    assert load_dotenv(tmp_path / "missing.env") is False
+
+    extra = tmp_path / "extra.env"
+    extra.write_text("RITHMIC_SYMBOL=NQ\n")
+    monkeypatch.delenv("RITHMIC_SYMBOL", raising=False)
+    monkeypatch.setenv("RITHMIC_CONNECT_DOTENV", str(extra))
+    load_dotenv_files(tmp_path / "missing.env")
+    assert os.environ["RITHMIC_SYMBOL"] == "NQ"
+
+
 def test_package_imports_without_network() -> None:
     import rithmic_nt_connect
 
@@ -129,3 +163,12 @@ def test_package_imports_without_network() -> None:
     assert rithmic_nt_connect.__version__
     with pytest.raises(ModuleNotFoundError):
         import rithmic_connect  # noqa: F401
+
+
+def test_live_data_client_config_is_nautilus_config() -> None:
+    from nautilus_trader.config import LiveDataClientConfig
+
+    from rithmic_nt_connect.config import RithmicLiveDataClientConfig
+
+    cfg = RithmicLiveDataClientConfig()
+    assert isinstance(cfg, LiveDataClientConfig)

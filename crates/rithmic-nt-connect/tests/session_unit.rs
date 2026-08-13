@@ -1,6 +1,6 @@
 //! Unit tests for the Phase 2 session facade (no live network).
 
-use rithmic_nt_connect::{Error, RithmicSession, SessionConfig};
+use rithmic_nt_connect::{Error, PlantSet, RithmicSession, SessionConfig};
 
 #[test]
 fn config_rejects_incomplete_lucid_settings() {
@@ -74,4 +74,26 @@ fn debug_redacts_password() {
     let text = format!("{session:?}");
     assert!(text.contains("***"));
     assert!(!text.contains("super-secret"));
+}
+
+#[test]
+fn default_session_is_market_data_plants() {
+    let cfg = SessionConfig::builder()
+        .user("alice")
+        .password("pw")
+        .build()
+        .unwrap();
+    let session = RithmicSession::new(cfg);
+    assert_eq!(session.plants(), PlantSet::MARKET_DATA);
+}
+
+#[test]
+fn execution_plants_request_pnl() {
+    let cfg = SessionConfig::builder()
+        .user("alice")
+        .password("pw")
+        .build()
+        .unwrap();
+    let session = RithmicSession::with_plants(cfg, PlantSet::EXECUTION);
+    assert!(session.plants().pnl);
 }

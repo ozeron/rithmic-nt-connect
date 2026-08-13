@@ -16,6 +16,15 @@ Out-of-tree adapter for NautilusTrader **1.231.x**: live ticks/quotes, history r
 
 Trading is **off by default** (`enable_trading=False` / unset `RITHMIC_ENABLE_TRADING`). Live place is gated; use the dry-run harness first. Scope vs done: [`docs/STATUS.md`](docs/STATUS.md).
 
+Paper-trade a simple NQ strategy with **live Rithmic data** and Nautilus **Sandbox** execution (no Rithmic orders):
+
+```bash
+python examples/live_nq_intraday_sandbox.py --seconds 90
+python examples/backtest_nq_today.py --rth
+python examples/backtest_nq_today.py --rth --until 16:15:00   # same window → same tape
+python examples/backtest_nq_today.py --rth --check            # engine twice on that tape
+```
+
 ```bash
 python scripts/verify_order_dry_run.py --seconds 5
 # Do NOT pass --live-place until conformance / app_name is confirmed.
@@ -55,10 +64,39 @@ session = SessionConfig.from_env()
 # node.add_exec_client_factory(f"{ADAPTER_NAME}-EXEC", RithmicLiveExecClientFactory)
 ```
 
-Minimal ticks example: [`examples/live_nq_ticks.py`](examples/live_nq_ticks.py).
+Wire smoke (no strategy): `python scripts/smoke_lucid_nq.py`.
 
-History via the same session API: `load_ticks(...)` and `load_time_bars(...)`
-(also used by the data client's `_request_trade_ticks` / `_request_bars`).
+Same 4-bar rule (SMA20 on 1-DAY EXTERNAL / VWAP on 1-MINUTE INTERNAL + 1s INTERNAL)
+in [`examples/nq_four_bar.py`](examples/nq_four_bar.py), run live or backtest.
+
+History **requests** (`load_time_bars` / `request_bars`) hydrate EXTERNAL lookback. Live EXTERNAL
+1m / 15m / 1h / 1d bars subscribe on the **history plant** (`subscribe_time_bars`). 1-second
+bars stay INTERNAL from ticks.
+
+History for backtest / research (IB / Databento-style helper; windowing lives in Rust):
+
+```python
+from nautilus_trader.model.data import BarType
+from rithmic_nt_connect import (
+    connect_market_data_session,
+    load_front_month_instrument,
+    load_time_bars,
+    load_trade_ticks,
+)
+
+session = connect_market_data_session()
+instrument = load_front_month_instrument(session, "NQ", "CME")
+ticks = load_trade_ticks(session, instrument, start, end)
+daily = load_time_bars(
+    session, instrument, start, end,
+    BarType.from_str(f"{instrument.id}-1-DAY-LAST-EXTERNAL"),
+)
+```
+
+Same pattern as [async-rithmic historical time bars](https://async-rithmic.readthedocs.io/en/latest/historical_data.html#fetch-historical-time-bars):
+`python examples/load_nq_time_bars.py` (1-DAY / 1-HOUR / 15-MINUTE).
+
+The live data client `_request_trade_ticks` / `_request_bars` uses the same session loaders.
 
 Front-month + live↔history verify (writes JSON for a frontend/API):
 

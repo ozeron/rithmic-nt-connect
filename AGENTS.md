@@ -24,7 +24,7 @@ Do not invent a second status table. Do not copy upstream DataTester / ExecTeste
 
 ## Review against conventions
 
-After a change that emits Nautilus data or execution events, check the rows that apply. If you cannot mark a row, say so and point at the convention section.
+After a change that emits Nautilus data or execution events, check the rows that apply. If you cannot mark a row, say so and point at the convention section. Lasting marks live in [`docs/STATUS.md`](docs/STATUS.md), not here.
 
 ### Config / identity
 
@@ -82,5 +82,6 @@ Live (creds in `.env`, MotiveWave closed):
 
 ```bash
 python scripts/smoke_lucid_nq.py
+python examples/live_nq_intraday_sandbox.py --seconds 90
 python scripts/verify_order_dry_run.py --seconds 5
 ```

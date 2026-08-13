@@ -92,7 +92,7 @@ Semantic rules apply even when in-tree Rust v2 machinery is **N/A** (this repo i
 - Bars: `INTERNAL` (engine aggregates) vs `EXTERNAL` (venue aggregated). Do not advertise internal bars as venue external.
 - Instrument status from a polled snapshot: emit **diffs**, not the full snapshot every time.
 
-**Here:** live `TradeTick` / `QuoteTick` / L2 summary; history ticks and time bars on request. No live `EXTERNAL` bars, no depth-by-order.
+**Here:** live `TradeTick` / `QuoteTick` / L2 summary; history ticks and time bars on request. Live `EXTERNAL` time bars (1m / 15m / 1h / 1d) on the **history plant** subscribe + poll. 1s stays `INTERNAL`. No depth-by-order.
 
 ## Execution
 

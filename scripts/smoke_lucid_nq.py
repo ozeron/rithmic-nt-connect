@@ -18,29 +18,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "python"))
 
 
-def _load_dotenv(path: Path) -> None:
-    if not path.is_file():
-        return
-    for raw in path.read_text().splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, v = line.split("=", 1)
-        os.environ.setdefault(k.strip(), v.strip().strip("'").strip('"'))
-
-
-def _load_dotenv_files() -> None:
-    """Load repo `.env`, then optional paths from `RITHMIC_CONNECT_DOTENV` (os.pathsep)."""
-    _load_dotenv(ROOT / ".env")
-    extra = os.environ.get("RITHMIC_CONNECT_DOTENV", "")
-    for part in extra.split(os.pathsep):
-        part = part.strip()
-        if part:
-            _load_dotenv(Path(part))
-
-
 def main() -> int:
-    _load_dotenv_files()
+    from rithmic_nt_connect import load_dotenv_files
+
+    load_dotenv_files(ROOT / ".env")
 
     try:
         from rithmic_nt_connect.config import SessionConfig
@@ -55,6 +36,8 @@ def main() -> int:
         return 2
 
     try:
+        from rithmic_nt_connect.session import PLANTS_EXECUTION
+        from rithmic_nt_connect.session import PLANTS_MARKET_DATA
         from rithmic_nt_connect.session import create_rust_session
     except Exception as exc:  # noqa: BLE001
         print(f"SMOKE FAIL: extension unavailable: {exc}", file=sys.stderr)
@@ -67,7 +50,8 @@ def main() -> int:
     )
     print("NOTE: close MotiveWave / R|Trader first (one session per login).")
 
-    session = create_rust_session(session_cfg)
+    plants = PLANTS_EXECUTION if session_cfg.has_account() else PLANTS_MARKET_DATA
+    session = create_rust_session(session_cfg, plants=plants)
     try:
         session.connect()
         symbol = session_cfg.symbol or "NQ"

@@ -27,3 +27,12 @@ else:
 
 class VenueQueryUnavailable(RuntimeError):
     """Venue query cannot be answered authoritatively (no snapshot API)."""
+
+
+# Channel failures that require plant resync (PyO3 types when built, else stubs).
+CHANNEL_ERRORS: tuple[type[BaseException], ...] = (
+    ChannelLaggedError,
+    ChannelClosedError,
+    NotConnectedError,
+    ChannelError,
+)
