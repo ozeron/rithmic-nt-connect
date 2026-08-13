@@ -12,6 +12,7 @@ path = "src/bin/rithmic_gateway.rs"
 
 [dependencies]
 rithmic-plants = { path = "../rithmic-plants" }
+rithmic-rs = "3"
 bytes = "1"
 prost = "0.14"
 thiserror = "2"

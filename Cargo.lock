@@ -683,6 +683,7 @@ dependencies = [
  "prost",
  "prost-build",
  "rithmic-plants",
+ "rithmic-rs",
  "tempfile",
  "thiserror",
  "tokio",
