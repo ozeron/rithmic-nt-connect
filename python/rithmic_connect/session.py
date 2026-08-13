@@ -30,6 +30,32 @@ class WireSession(Protocol):
         period: int = 1,
     ) -> list[dict[str, Any]]: ...
     def subscribe_pnl(self) -> None: ...
+    def subscribe_order_updates(self) -> None: ...
+    def place_order(
+        self,
+        symbol: str,
+        exchange: str,
+        side: str,
+        price_type: str,
+        quantity: int,
+        user_tag: str,
+        price: float | None = None,
+        trigger_price: float | None = None,
+        duration: str = "DAY",
+    ) -> None: ...
+    def cancel_order(self, basket_id: str) -> None: ...
+    def modify_order(
+        self,
+        basket_id: str,
+        symbol: str,
+        exchange: str,
+        quantity: int,
+        price_type: str,
+        price: float | None = None,
+        trigger_price: float | None = None,
+    ) -> None: ...
+    def cancel_all_orders(self) -> None: ...
+    def poll_order_event(self) -> dict[str, Any] | None: ...
 
 
 def create_rust_session(session: SessionConfig) -> WireSession:

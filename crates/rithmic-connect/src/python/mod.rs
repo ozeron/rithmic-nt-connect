@@ -1,4 +1,4 @@
-//! Python bindings for the Phase 1 Rithmic session facade.
+//! Python bindings for the Phase 2 Rithmic session facade.
 
 use std::sync::{Mutex, OnceLock};
 
@@ -10,7 +10,7 @@ use tokio::runtime::Runtime;
 use crate::config::SessionConfig;
 use crate::dto::{
     AccountPnlDto, BboDto, FrontMonthDto, HistoryBarDto, HistoryTickDto, InstrumentPnlDto,
-    LastTradeDto, OrderBookDto, ReferenceDataDto, TickerEvent,
+    LastTradeDto, OrderBookDto, OrderNotificationDto, ReferenceDataDto, TickerEvent,
 };
 use crate::error::Error;
 use crate::session::RithmicSession;
@@ -150,6 +150,40 @@ fn order_book_dict(py: Python<'_>, o: OrderBookDto) -> PyResult<Py<PyDict>> {
     Ok(d.unbind())
 }
 
+fn order_notification_dict(py: Python<'_>, n: OrderNotificationDto) -> PyResult<Py<PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("type", "order_notification")?;
+    d.set_item("source", n.source)?;
+    set_opt_i32(&d, "notify_type", n.notify_type)?;
+    set_opt_str(&d, "notify_type_name", n.notify_type_name)?;
+    set_opt_str(&d, "status", n.status)?;
+    set_opt_str(&d, "basket_id", n.basket_id)?;
+    set_opt_str(&d, "exchange_order_id", n.exchange_order_id)?;
+    set_opt_str(&d, "user_tag", n.user_tag)?;
+    set_opt_str(&d, "account_id", n.account_id)?;
+    set_opt_str(&d, "symbol", n.symbol)?;
+    set_opt_str(&d, "exchange", n.exchange)?;
+    set_opt_i32(&d, "quantity", n.quantity)?;
+    set_opt_i32(&d, "total_fill_size", n.total_fill_size)?;
+    set_opt_i32(&d, "total_unfilled_size", n.total_unfilled_size)?;
+    set_opt_i32(&d, "fill_size", n.fill_size)?;
+    set_opt_f64(&d, "price", n.price)?;
+    set_opt_f64(&d, "trigger_price", n.trigger_price)?;
+    set_opt_f64(&d, "avg_fill_price", n.avg_fill_price)?;
+    set_opt_f64(&d, "fill_price", n.fill_price)?;
+    set_opt_i32(&d, "transaction_type", n.transaction_type)?;
+    set_opt_i32(&d, "price_type", n.price_type)?;
+    set_opt_str(&d, "fill_id", n.fill_id)?;
+    set_opt_str(&d, "text", n.text)?;
+    set_opt_str(&d, "report_text", n.report_text)?;
+    set_opt_str(&d, "completion_reason", n.completion_reason)?;
+    set_opt_i32(&d, "ssboe", n.ssboe)?;
+    set_opt_i32(&d, "usecs", n.usecs)?;
+    set_opt_u64(&d, "ts_event_ns", n.ts_event_ns)?;
+    set_opt_bool(&d, "is_snapshot", n.is_snapshot)?;
+    Ok(d.unbind())
+}
+
 fn reference_data_dict(py: Python<'_>, r: ReferenceDataDto) -> PyResult<Py<PyDict>> {
     let d = PyDict::new(py);
     d.set_item("type", "reference_data")?;
@@ -177,6 +211,7 @@ fn event_to_dict(py: Python<'_>, event: TickerEvent) -> PyResult<Py<PyDict>> {
         TickerEvent::OrderBook(o) => order_book_dict(py, o),
         TickerEvent::AccountPnl(a) => account_pnl_dict(py, a),
         TickerEvent::InstrumentPnl(i) => instrument_pnl_dict(py, i),
+        TickerEvent::OrderNotification(n) => order_notification_dict(py, n),
         TickerEvent::Other { type_name, source } => {
             let d = PyDict::new(py);
             d.set_item("type", "other")?;
@@ -525,6 +560,128 @@ impl PySession {
             .lock()
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         runtime().block_on(inner.subscribe_pnl()).map_err(to_py_err)
+    }
+
+    fn subscribe_order_updates(&self) -> PyResult<()> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        runtime()
+            .block_on(inner.subscribe_order_updates())
+            .map_err(to_py_err)
+    }
+
+    #[pyo3(signature = (
+        symbol,
+        exchange,
+        side,
+        price_type,
+        quantity,
+        user_tag,
+        price=None,
+        trigger_price=None,
+        duration="DAY",
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn place_order(
+        &self,
+        symbol: &str,
+        exchange: &str,
+        side: &str,
+        price_type: &str,
+        quantity: i32,
+        user_tag: &str,
+        price: Option<f64>,
+        trigger_price: Option<f64>,
+        duration: &str,
+    ) -> PyResult<()> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        runtime()
+            .block_on(inner.place_order(
+                symbol,
+                exchange,
+                side,
+                price_type,
+                quantity,
+                user_tag,
+                price,
+                trigger_price,
+                duration,
+            ))
+            .map_err(to_py_err)
+    }
+
+    fn cancel_order(&self, basket_id: &str) -> PyResult<()> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        runtime()
+            .block_on(inner.cancel_order(basket_id))
+            .map_err(to_py_err)
+    }
+
+    #[pyo3(signature = (
+        basket_id,
+        symbol,
+        exchange,
+        quantity,
+        price_type,
+        price=None,
+        trigger_price=None,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn modify_order(
+        &self,
+        basket_id: &str,
+        symbol: &str,
+        exchange: &str,
+        quantity: i32,
+        price_type: &str,
+        price: Option<f64>,
+        trigger_price: Option<f64>,
+    ) -> PyResult<()> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        runtime()
+            .block_on(inner.modify_order(
+                basket_id,
+                symbol,
+                exchange,
+                quantity,
+                price_type,
+                price,
+                trigger_price,
+            ))
+            .map_err(to_py_err)
+    }
+
+    fn cancel_all_orders(&self) -> PyResult<()> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        runtime()
+            .block_on(inner.cancel_all_orders())
+            .map_err(to_py_err)
+    }
+
+    /// Non-blocking poll of the order plant; returns a dict or None.
+    fn poll_order_event(&self, py: Python<'_>) -> PyResult<Option<Py<PyDict>>> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        match inner.poll_order_event().map_err(to_py_err)? {
+            Some(event) => Ok(Some(event_to_dict(py, event)?)),
+            None => Ok(None),
+        }
     }
 }
 

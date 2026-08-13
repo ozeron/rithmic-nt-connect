@@ -3,7 +3,7 @@ name = "rithmic-connect"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Rust Rithmic R|Protocol session facade for rithmic-connect (Phase 1: MD + PnL, no orders)"
+description = "Rust Rithmic R|Protocol session facade for rithmic-connect (Phase 2: MD + PnL + orders)"
 readme = "../../README.md"
 repository = "https://github.com/ozeron/rithmic-connect"
 

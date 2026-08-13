@@ -1,8 +1,8 @@
-//! rithmic-connect — Phase 1 Rithmic session facade (MD + history + PnL; no orders).
+//! rithmic-connect — Phase 2 Rithmic session facade (MD + history + PnL + orders).
 //!
 //! This crate wraps [`rithmic-rs`] plants behind a small API consumed by the
-//! Python package via PyO3. Phase 1 intentionally exposes **no** public order
-//! place / cancel / modify methods.
+//! Python package via PyO3. Phase 2 adds order plant place / cancel / modify
+//! and order-notification polling when an account is configured.
 
 #![allow(missing_docs)]
 
@@ -20,7 +20,7 @@ pub use config::{
 };
 pub use dto::{
     AccountPnlDto, BboDto, FrontMonthDto, HistoryBarDto, HistoryTickDto, InstrumentPnlDto,
-    LastTradeDto, OrderBookDto, ReferenceDataDto, TickerEvent,
+    LastTradeDto, OrderBookDto, OrderNotificationDto, ReferenceDataDto, TickerEvent,
 };
 pub use error::{Error, Result};
 pub use session::RithmicSession;

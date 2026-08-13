@@ -270,18 +270,30 @@ class RithmicDataClientConfig:
 
 @dataclass
 class RithmicExecClientConfig:
-    """Config for the Phase 1 read-only execution client (account/PnL only)."""
+    """Config for the Rithmic execution client.
+
+    ``enable_trading=False`` (default) keeps Phase 1 read-only behavior: account/PnL
+    only; order actions are rejected. Set ``enable_trading=True`` for Phase 2 order
+    routing (requires account_id/fcm_id/ib_id and order-plant authorization).
+    """
 
     session: SessionConfig
     venue: str = VENUE
     soft_fail_pnl: bool = True
+    enable_trading: bool = False
 
     def __repr__(self) -> str:
         return (
             f"RithmicExecClientConfig(session={self.session!r}, "
-            f"venue={self.venue!r}, soft_fail_pnl={self.soft_fail_pnl!r})"
+            f"venue={self.venue!r}, soft_fail_pnl={self.soft_fail_pnl!r}, "
+            f"enable_trading={self.enable_trading!r})"
         )
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> RithmicExecClientConfig:
-        return cls(session=SessionConfig.from_env(environ))
+        env = environ if environ is not None else os.environ
+        raw = _env_first(env, "RITHMIC_ENABLE_TRADING", "ENABLE_TRADING")
+        enable = False
+        if raw is not None:
+            enable = raw.strip().lower() in {"1", "true", "yes", "on"}
+        return cls(session=SessionConfig.from_env(environ), enable_trading=enable)
