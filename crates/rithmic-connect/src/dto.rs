@@ -3,9 +3,9 @@
 use rithmic_rs::rti::messages::RithmicMessage;
 use rithmic_rs::{RithmicResponse, rithmic_to_unix_nanos};
 
-/// Dict-friendly ticker / PnL event for Python consumers.
+/// Dict-friendly plant event for Python consumers (ticker, PnL, orders).
 #[derive(Debug, Clone, PartialEq)]
-pub enum TickerEvent {
+pub enum PlantEvent {
     /// Last trade update.
     LastTrade(LastTradeDto),
     /// Best bid / offer update.
@@ -16,6 +16,8 @@ pub enum TickerEvent {
     AccountPnl(AccountPnlDto),
     /// Instrument-level PnL / position update.
     InstrumentPnl(InstrumentPnlDto),
+    /// Order plant notification (Rithmic or exchange).
+    OrderNotification(OrderNotificationDto),
     /// Catch-all with type name for unhandled templates.
     Other {
         /// Discriminator / message variant name.
@@ -23,6 +25,42 @@ pub enum TickerEvent {
         /// Plant source name.
         source: String,
     },
+}
+
+/// Order notification fields from Rithmic or exchange plants.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OrderNotificationDto {
+    /// `"rithmic"` or `"exchange"`.
+    pub source: String,
+    /// Canonical action kind (`accepted`, `filled`, …) classified at the DTO boundary.
+    pub kind: Option<String>,
+    pub notify_type: Option<i32>,
+    pub notify_type_name: Option<String>,
+    pub status: Option<String>,
+    pub basket_id: Option<String>,
+    pub exchange_order_id: Option<String>,
+    pub user_tag: Option<String>,
+    pub account_id: Option<String>,
+    pub symbol: Option<String>,
+    pub exchange: Option<String>,
+    pub quantity: Option<i32>,
+    pub total_fill_size: Option<i32>,
+    pub total_unfilled_size: Option<i32>,
+    pub fill_size: Option<i32>,
+    pub price: Option<f64>,
+    pub trigger_price: Option<f64>,
+    pub avg_fill_price: Option<f64>,
+    pub fill_price: Option<f64>,
+    pub transaction_type: Option<i32>,
+    pub price_type: Option<i32>,
+    pub fill_id: Option<String>,
+    pub text: Option<String>,
+    pub report_text: Option<String>,
+    pub completion_reason: Option<String>,
+    pub ssboe: Option<i32>,
+    pub usecs: Option<i32>,
+    pub ts_event_ns: Option<u64>,
+    pub is_snapshot: Option<bool>,
 }
 
 /// LastTrade fields needed by Python converters.
@@ -181,7 +219,33 @@ fn ts_ns(ssboe: Option<i32>, usecs: Option<i32>) -> Option<u64> {
     Some(rithmic_to_unix_nanos(ssboe, usecs.unwrap_or(0)))
 }
 
-impl From<&RithmicResponse> for TickerEvent {
+fn order_kind(source: &str, notify_type_name: Option<&str>, status: Option<&str>) -> Option<String> {
+    let name = notify_type_name?.to_ascii_uppercase();
+    let kind = match (source, name.as_str()) {
+        ("rithmic", "OPEN") => "accepted",
+        ("rithmic", "MODIFIED") => "updated",
+        ("rithmic", "MODIFICATION_FAILED") => "modify_rejected",
+        ("rithmic", "CANCELLATION_FAILED") => "cancel_rejected",
+        ("rithmic", "COMPLETE") => {
+            let status_u = status.unwrap_or("").to_ascii_uppercase();
+            if status_u == "CANCELLED" || status_u == "CANCELED" {
+                "canceled"
+            } else {
+                return None;
+            }
+        }
+        ("exchange", "FILL") => "filled",
+        ("exchange", "REJECT") => "rejected",
+        ("exchange", "CANCEL") => "canceled",
+        ("exchange", "TRIGGER") => "triggered",
+        ("exchange", "NOT_MODIFIED") => "modify_rejected",
+        ("exchange", "NOT_CANCELLED" | "NOT_CANCELED") => "cancel_rejected",
+        _ => return None,
+    };
+    Some(kind.to_string())
+}
+
+impl From<&RithmicResponse> for PlantEvent {
     fn from(resp: &RithmicResponse) -> Self {
         match &resp.message {
             RithmicMessage::LastTrade(t) => Self::LastTrade(LastTradeDto {
@@ -252,6 +316,92 @@ impl From<&RithmicResponse> for TickerEvent {
                 ssboe: i.ssboe,
                 usecs: i.usecs,
             }),
+            RithmicMessage::RithmicOrderNotification(n) => {
+                let notify_type_name = n.notify_type.and_then(|v| {
+                    rithmic_rs::rti::rithmic_order_notification::NotifyType::try_from(v)
+                        .ok()
+                        .map(|t| t.as_str_name().to_string())
+                });
+                let kind = order_kind(
+                    "rithmic",
+                    notify_type_name.as_deref(),
+                    n.status.as_deref(),
+                );
+                Self::OrderNotification(OrderNotificationDto {
+                    source: "rithmic".into(),
+                    kind,
+                    notify_type: n.notify_type,
+                    notify_type_name,
+                    status: n.status.clone(),
+                    basket_id: n.basket_id.clone(),
+                    exchange_order_id: n.exchange_order_id.clone(),
+                    user_tag: n.user_tag.clone(),
+                    account_id: n.account_id.clone(),
+                    symbol: n.symbol.clone(),
+                    exchange: n.exchange.clone(),
+                    quantity: n.quantity,
+                    total_fill_size: n.total_fill_size,
+                    total_unfilled_size: n.total_unfilled_size,
+                    fill_size: None,
+                    price: n.price,
+                    trigger_price: n.trigger_price,
+                    avg_fill_price: n.avg_fill_price,
+                    fill_price: None,
+                    transaction_type: n.transaction_type,
+                    price_type: n.price_type,
+                    fill_id: None,
+                    text: n.text.clone(),
+                    report_text: n.report_text.clone(),
+                    completion_reason: n.completion_reason.clone(),
+                    ssboe: n.ssboe,
+                    usecs: n.usecs,
+                    ts_event_ns: ts_ns(n.ssboe, n.usecs),
+                    is_snapshot: n.is_snapshot,
+                })
+            }
+            RithmicMessage::ExchangeOrderNotification(n) => {
+                let notify_type_name = n.notify_type.and_then(|v| {
+                    rithmic_rs::rti::exchange_order_notification::NotifyType::try_from(v)
+                        .ok()
+                        .map(|t| t.as_str_name().to_string())
+                });
+                let kind = order_kind(
+                    "exchange",
+                    notify_type_name.as_deref(),
+                    n.status.as_deref(),
+                );
+                Self::OrderNotification(OrderNotificationDto {
+                    source: "exchange".into(),
+                    kind,
+                    notify_type: n.notify_type,
+                    notify_type_name,
+                    status: n.status.clone(),
+                    basket_id: n.basket_id.clone(),
+                    exchange_order_id: n.exchange_order_id.clone(),
+                    user_tag: n.user_tag.clone(),
+                    account_id: n.account_id.clone(),
+                    symbol: n.symbol.clone(),
+                    exchange: n.exchange.clone(),
+                    quantity: n.quantity,
+                    total_fill_size: n.total_fill_size,
+                    total_unfilled_size: n.total_unfilled_size,
+                    fill_size: n.fill_size,
+                    price: n.price,
+                    trigger_price: n.trigger_price,
+                    avg_fill_price: n.avg_fill_price,
+                    fill_price: n.fill_price,
+                    transaction_type: n.transaction_type,
+                    price_type: n.price_type,
+                    fill_id: n.fill_id.clone(),
+                    text: n.text.clone(),
+                    report_text: n.report_text.clone(),
+                    completion_reason: None,
+                    ssboe: n.ssboe,
+                    usecs: n.usecs,
+                    ts_event_ns: ts_ns(n.ssboe, n.usecs),
+                    is_snapshot: n.is_snapshot,
+                })
+            }
             other => Self::Other {
                 type_name: format!("{other:?}")
                     .split('(')

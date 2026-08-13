@@ -8,9 +8,14 @@ Unofficial **Rithmic R|Protocol** adapter compatible with NautilusTrader — Rus
 
 ## Status
 
-**Phase 1** targeting **NautilusTrader 1.231.x**: market data + instruments + read-only account/PnL. **No order routing.**
+**Phase 1** (merged): market data + instruments + read-only account/PnL on NautilusTrader **1.231.x**.
 
-Plan: [`docs/plans/2026-08-12-001-feature-rithmic-nt-adapter-plan.md`](docs/plans/2026-08-12-001-feature-rithmic-nt-adapter-plan.md)
+**Phase 2** (in progress on `feat/phase2-order-routing`): order plant place/cancel/modify + Nautilus execution events. Trading is **off by default** (`enable_trading=False` / unset `RITHMIC_ENABLE_TRADING`). Live place is gated; use the dry-run harness first:
+
+```bash
+python scripts/verify_order_dry_run.py --seconds 5
+# Do NOT pass --live-place until conformance / app_name is confirmed.
+```
 
 ## Quick start
 

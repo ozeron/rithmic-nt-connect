@@ -1,6 +1,6 @@
-//! Unit tests for the Phase 1 session facade (no live network).
+//! Unit tests for the Phase 2 session facade (no live network).
 
-use rithmic_connect::{RithmicSession, SessionConfig};
+use rithmic_connect::{Error, RithmicSession, SessionConfig};
 
 #[test]
 fn config_rejects_incomplete_lucid_settings() {
@@ -12,36 +12,6 @@ fn config_rejects_incomplete_lucid_settings() {
 }
 
 #[test]
-fn session_api_has_no_public_order_methods() {
-    let session_src = include_str!("../src/session.rs");
-    let lib_src = include_str!("../src/lib.rs");
-    for forbidden in [
-        "place_order",
-        "cancel_order",
-        "modify_order",
-        "submit_order",
-        "new_order",
-    ] {
-        assert!(
-            !session_src.contains(&format!("pub async fn {forbidden}")),
-            "session.rs must not expose pub async fn {forbidden}"
-        );
-        assert!(
-            !session_src.contains(&format!("pub fn {forbidden}")),
-            "session.rs must not expose pub fn {forbidden}"
-        );
-    }
-    assert!(
-        !session_src.contains("RithmicOrderPlant"),
-        "session.rs must not reference RithmicOrderPlant"
-    );
-    assert!(
-        !lib_src.contains("RithmicOrderPlant"),
-        "lib.rs must not re-export RithmicOrderPlant"
-    );
-}
-
-#[test]
 fn disconnected_session_methods_error_without_network() {
     let cfg = SessionConfig::builder()
         .user("alice")
@@ -50,7 +20,45 @@ fn disconnected_session_methods_error_without_network() {
         .unwrap();
     let mut session = RithmicSession::new(cfg);
     let err = session.poll_event().unwrap_err();
-    assert!(err.to_string().contains("not connected"));
+    assert!(matches!(err, Error::NotConnected { plant: "ticker" }));
+}
+
+#[tokio::test]
+async fn disconnected_order_methods_error_without_network() {
+    let cfg = SessionConfig::builder()
+        .user("alice")
+        .password("pw")
+        .account_id("acct")
+        .fcm_id("fcm")
+        .ib_id("ib")
+        .build()
+        .unwrap();
+    let mut session = RithmicSession::new(cfg);
+
+    let err = session
+        .place_order(
+            "ESM6",
+            "CME",
+            "BUY",
+            "MARKET",
+            1,
+            "tag-1",
+            None,
+            None,
+            "DAY",
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, Error::NotConnected { plant: "ticker" | "order" }),
+        "unexpected place_order error: {err}"
+    );
+
+    let err = session.poll_order_event().unwrap_err();
+    assert!(
+        matches!(err, Error::NotConnected { plant: "order" }),
+        "unexpected poll_order_event error: {err}"
+    );
 }
 
 #[test]

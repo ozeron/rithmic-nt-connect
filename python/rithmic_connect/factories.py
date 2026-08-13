@@ -1,4 +1,4 @@
-"""TradingNode factories for Rithmic data and read-only execution clients."""
+"""TradingNode factories for Rithmic data and execution clients."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from rithmic_connect.config import RithmicDataClientConfig
 from rithmic_connect.config import RithmicExecClientConfig
 from rithmic_connect.config import SessionConfig
 from rithmic_connect.data import RithmicDataClient
-from rithmic_connect.execution import RithmicReadOnlyExecutionClient
+from rithmic_connect.execution import RithmicExecutionClient
 from rithmic_connect.providers import RithmicInstrumentProvider
 from rithmic_connect.session import WireSession
 from rithmic_connect.session import create_rust_session
@@ -77,14 +77,14 @@ class RithmicLiveExecClientFactory(LiveExecClientFactory):
         msgbus: MessageBus,
         cache: Cache,
         clock: LiveClock,
-    ) -> RithmicReadOnlyExecutionClient:
+    ) -> RithmicExecutionClient:
         session = _shared_session(config.session, _SESSION_CACHE)
         provider = RithmicInstrumentProvider(
             session=session,
             pairs=_pairs_from_session(config.session),
             config=InstrumentProviderConfig(load_all=True),
         )
-        return RithmicReadOnlyExecutionClient(
+        return RithmicExecutionClient(
             loop=loop,
             msgbus=msgbus,
             cache=cache,

@@ -1,13 +1,13 @@
-"""Wire session protocol used by data/exec clients (Rust PyO3 or test doubles)."""
+"""Wire session protocols used by data/exec clients (Rust PyO3 or test doubles)."""
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Protocol
+from typing import Any, Protocol
 
 from rithmic_connect.config import SessionConfig
 
 
-class WireSession(Protocol):
+class TickerSession(Protocol):
     def connect(self) -> None: ...
     def disconnect(self) -> None: ...
     def subscribe(self, symbol: str, exchange: str) -> None: ...
@@ -16,7 +16,6 @@ class WireSession(Protocol):
     def get_front_month(self, symbol: str, exchange: str) -> Any: ...
     def get_reference_data(self, symbol: str, exchange: str) -> Any: ...
     def poll_event(self, timeout_ms: int = 0) -> dict[str, Any] | None: ...
-    def poll_pnl_event(self) -> dict[str, Any] | None: ...
     def load_ticks(
         self, symbol: str, exchange: str, start_ssboe: int, end_ssboe: int
     ) -> list[dict[str, Any]]: ...
@@ -29,7 +28,47 @@ class WireSession(Protocol):
         bar_type: int = 2,
         period: int = 1,
     ) -> list[dict[str, Any]]: ...
+
+
+class PnlSession(Protocol):
     def subscribe_pnl(self) -> None: ...
+    def disconnect_pnl_plant(self) -> None: ...
+    def ensure_pnl_plant(self) -> None: ...
+    def poll_pnl_event(self) -> dict[str, Any] | None: ...
+
+
+class OrderSession(Protocol):
+    def subscribe_order_updates(self) -> None: ...
+    def disconnect_order_plant(self) -> None: ...
+    def place_order(
+        self,
+        symbol: str,
+        exchange: str,
+        side: str,
+        price_type: str,
+        quantity: int,
+        user_tag: str,
+        price: float | None = None,
+        trigger_price: float | None = None,
+        duration: str = "DAY",
+    ) -> None: ...
+    def cancel_order(self, basket_id: str) -> None: ...
+    def modify_order(
+        self,
+        basket_id: str,
+        symbol: str,
+        exchange: str,
+        quantity: int,
+        price_type: str,
+        price: float | None = None,
+        trigger_price: float | None = None,
+    ) -> None: ...
+    def cancel_all_orders(self) -> None: ...
+    def poll_order_event(self) -> dict[str, Any] | None: ...
+
+
+class WireSession(TickerSession, PnlSession, OrderSession, Protocol):
+    """Full multi-plant session facade (composition of ticker / PnL / order)."""
 
 
 def create_rust_session(session: SessionConfig) -> WireSession:
@@ -51,5 +90,10 @@ def create_rust_session(session: SessionConfig) -> WireSession:
     )
 
 
-def session_config_to_kwargs(session: SessionConfig) -> dict[str, Any]:
-    return session.to_dict(redact=False)
+__all__ = [
+    "OrderSession",
+    "PnlSession",
+    "TickerSession",
+    "WireSession",
+    "create_rust_session",
+]

@@ -96,11 +96,10 @@ def main() -> int:
                 print("subscribe_pnl OK")
             except Exception as exc:  # noqa: BLE001
                 print(f"subscribe_pnl soft-fail: {exc}")
-        # AE4: no order methods on session
-        for name in ("submit_order", "place_order", "cancel_order", "modify_order"):
-            if hasattr(session, name):
-                print(f"SMOKE FAIL: unexpected order API {name}", file=sys.stderr)
-                return 1
+        # AE4 Phase 1 smoke: trading not exercised here. Order APIs may exist for
+        # Phase 2 but this smoke never calls them.
+        if hasattr(session, "place_order"):
+            print("order API present (Phase 2); smoke does not place orders")
         print("SMOKE OK")
         return 0 if got > 0 else 1
     except Exception as exc:  # noqa: BLE001

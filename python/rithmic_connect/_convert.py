@@ -7,6 +7,7 @@ from these fields.
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any, Mapping
 
 from rithmic_connect.constants import VENUE
@@ -37,6 +38,27 @@ def instrument_id_from_symbol(symbol: str, exchange: str | None = None) -> str:
     """Build a Nautilus-style instrument id string (symbol.VENUE)."""
     _ = exchange  # exchange retained for callers; venue is constant for Phase 1
     return f"{symbol}.{VENUE}"
+
+
+def format_price_str(value: float | Decimal | str) -> str:
+    """Normalize a numeric price to a Nautilus ``Price.from_str``-ready text."""
+    text = f"{float(value):.8f}".rstrip("0").rstrip(".")
+    if "." not in text:
+        text = f"{text}.0"
+    return text
+
+
+def rithmic_route_from_info(
+    info: Mapping[str, Any],
+    *,
+    instrument_id: str | None = None,
+) -> tuple[str, str]:
+    symbol = info.get("rithmic_symbol")
+    exchange = info.get("rithmic_exchange")
+    if not symbol or not exchange:
+        label = instrument_id if instrument_id is not None else "instrument"
+        raise ValueError(f"instrument {label} missing rithmic_symbol/rithmic_exchange in info")
+    return str(symbol), str(exchange)
 
 
 def last_trade_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:

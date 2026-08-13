@@ -1,6 +1,8 @@
-//! Python bindings for the Phase 1 Rithmic session facade.
+//! Python bindings for the Phase 2 Rithmic session facade.
 
 use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -10,10 +12,16 @@ use tokio::runtime::Runtime;
 use crate::config::SessionConfig;
 use crate::dto::{
     AccountPnlDto, BboDto, FrontMonthDto, HistoryBarDto, HistoryTickDto, InstrumentPnlDto,
-    LastTradeDto, OrderBookDto, ReferenceDataDto, TickerEvent,
+    LastTradeDto, OrderBookDto, OrderNotificationDto, ReferenceDataDto, PlantEvent,
 };
 use crate::error::Error;
-use crate::session::RithmicSession;
+use crate::session::{
+    RithmicSession, cancel_all_orders_on, cancel_order_on, modify_order_on, place_order_on,
+};
+
+pyo3::create_exception!(rithmic_connect, ChannelLaggedError, PyRuntimeError);
+pyo3::create_exception!(rithmic_connect, ChannelClosedError, PyRuntimeError);
+pyo3::create_exception!(rithmic_connect, NotConnectedError, PyRuntimeError);
 
 fn runtime() -> &'static Runtime {
     static RT: OnceLock<Runtime> = OnceLock::new();
@@ -23,6 +31,11 @@ fn runtime() -> &'static Runtime {
 fn to_py_err(err: Error) -> PyErr {
     match err {
         Error::Config(msg) => PyValueError::new_err(msg),
+        Error::ChannelLagged { plant, skipped } => {
+            ChannelLaggedError::new_err(format!("{plant}:{skipped}"))
+        }
+        Error::ChannelClosed { plant } => ChannelClosedError::new_err(plant),
+        Error::NotConnected { plant } => NotConnectedError::new_err(plant),
         other => PyRuntimeError::new_err(other.to_string()),
     }
 }
@@ -150,6 +163,41 @@ fn order_book_dict(py: Python<'_>, o: OrderBookDto) -> PyResult<Py<PyDict>> {
     Ok(d.unbind())
 }
 
+fn order_notification_dict(py: Python<'_>, n: OrderNotificationDto) -> PyResult<Py<PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("type", "order_notification")?;
+    d.set_item("source", n.source)?;
+    set_opt_str(&d, "kind", n.kind)?;
+    set_opt_i32(&d, "notify_type", n.notify_type)?;
+    set_opt_str(&d, "notify_type_name", n.notify_type_name)?;
+    set_opt_str(&d, "status", n.status)?;
+    set_opt_str(&d, "basket_id", n.basket_id)?;
+    set_opt_str(&d, "exchange_order_id", n.exchange_order_id)?;
+    set_opt_str(&d, "user_tag", n.user_tag)?;
+    set_opt_str(&d, "account_id", n.account_id)?;
+    set_opt_str(&d, "symbol", n.symbol)?;
+    set_opt_str(&d, "exchange", n.exchange)?;
+    set_opt_i32(&d, "quantity", n.quantity)?;
+    set_opt_i32(&d, "total_fill_size", n.total_fill_size)?;
+    set_opt_i32(&d, "total_unfilled_size", n.total_unfilled_size)?;
+    set_opt_i32(&d, "fill_size", n.fill_size)?;
+    set_opt_f64(&d, "price", n.price)?;
+    set_opt_f64(&d, "trigger_price", n.trigger_price)?;
+    set_opt_f64(&d, "avg_fill_price", n.avg_fill_price)?;
+    set_opt_f64(&d, "fill_price", n.fill_price)?;
+    set_opt_i32(&d, "transaction_type", n.transaction_type)?;
+    set_opt_i32(&d, "price_type", n.price_type)?;
+    set_opt_str(&d, "fill_id", n.fill_id)?;
+    set_opt_str(&d, "text", n.text)?;
+    set_opt_str(&d, "report_text", n.report_text)?;
+    set_opt_str(&d, "completion_reason", n.completion_reason)?;
+    set_opt_i32(&d, "ssboe", n.ssboe)?;
+    set_opt_i32(&d, "usecs", n.usecs)?;
+    set_opt_u64(&d, "ts_event_ns", n.ts_event_ns)?;
+    set_opt_bool(&d, "is_snapshot", n.is_snapshot)?;
+    Ok(d.unbind())
+}
+
 fn reference_data_dict(py: Python<'_>, r: ReferenceDataDto) -> PyResult<Py<PyDict>> {
     let d = PyDict::new(py);
     d.set_item("type", "reference_data")?;
@@ -170,14 +218,15 @@ fn reference_data_dict(py: Python<'_>, r: ReferenceDataDto) -> PyResult<Py<PyDic
     Ok(d.unbind())
 }
 
-fn event_to_dict(py: Python<'_>, event: TickerEvent) -> PyResult<Py<PyDict>> {
+fn event_to_dict(py: Python<'_>, event: PlantEvent) -> PyResult<Py<PyDict>> {
     match event {
-        TickerEvent::LastTrade(t) => last_trade_dict(py, t),
-        TickerEvent::Bbo(b) => bbo_dict(py, b),
-        TickerEvent::OrderBook(o) => order_book_dict(py, o),
-        TickerEvent::AccountPnl(a) => account_pnl_dict(py, a),
-        TickerEvent::InstrumentPnl(i) => instrument_pnl_dict(py, i),
-        TickerEvent::Other { type_name, source } => {
+        PlantEvent::LastTrade(t) => last_trade_dict(py, t),
+        PlantEvent::Bbo(b) => bbo_dict(py, b),
+        PlantEvent::OrderBook(o) => order_book_dict(py, o),
+        PlantEvent::AccountPnl(a) => account_pnl_dict(py, a),
+        PlantEvent::InstrumentPnl(i) => instrument_pnl_dict(py, i),
+        PlantEvent::OrderNotification(n) => order_notification_dict(py, n),
+        PlantEvent::Other { type_name, source } => {
             let d = PyDict::new(py);
             d.set_item("type", "other")?;
             d.set_item("type_name", type_name)?;
@@ -289,6 +338,67 @@ fn history_bar_dict(py: Python<'_>, b: HistoryBarDto) -> PyResult<Py<PyDict>> {
 #[pyclass(name = "Session")]
 pub struct PySession {
     inner: Mutex<RithmicSession>,
+    /// Held for the full duration of place/cancel/modify so disconnect cannot interleave.
+    session_ops: Mutex<()>,
+    disconnecting: AtomicBool,
+}
+
+struct OrderOpGuard<'a> {
+    _ops: std::sync::MutexGuard<'a, ()>,
+}
+
+impl PySession {
+    fn begin_order_op(&self) -> PyResult<OrderOpGuard<'_>> {
+        if self.disconnecting.load(Ordering::SeqCst) {
+            return Err(PyRuntimeError::new_err(
+                "session disconnect in progress; order operation rejected",
+            ));
+        }
+        let guard = self
+            .session_ops
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok(OrderOpGuard { _ops: guard })
+    }
+
+    fn acquire_session_ops_for_disconnect(&self) -> PyResult<std::sync::MutexGuard<'_, ()>> {
+        let timeout = Duration::from_secs(30);
+        let start = Instant::now();
+        loop {
+            match self.session_ops.try_lock() {
+                Ok(guard) => return Ok(guard),
+                Err(_) if start.elapsed() >= timeout => {
+                    return Err(PyRuntimeError::new_err(
+                        "timed out waiting for in-flight order operations",
+                    ));
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+    }
+
+    fn with_disconnect_gate<F>(&self, f: F) -> PyResult<()>
+    where
+        F: FnOnce() -> PyResult<()>,
+    {
+        self.disconnecting.store(true, Ordering::SeqCst);
+        let result = f();
+        self.disconnecting.store(false, Ordering::SeqCst);
+        result
+    }
+
+    /// Ensure order plant under a short lock, then clone so network I/O can run
+    /// without blocking `poll_order_event`.
+    fn acquire_order_handle(&self) -> PyResult<rithmic_rs::RithmicOrderPlantHandle> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        runtime()
+            .block_on(inner.ensure_order_plant())
+            .map_err(to_py_err)?;
+        inner.clone_order_handle().map_err(to_py_err)
+    }
 }
 
 #[pymethods]
@@ -354,6 +464,8 @@ impl PySession {
         let config = builder.build().map_err(to_py_err)?;
         Ok(Self {
             inner: Mutex::new(RithmicSession::new(config)),
+            session_ops: Mutex::new(()),
+            disconnecting: AtomicBool::new(false),
         })
     }
 
@@ -366,11 +478,47 @@ impl PySession {
     }
 
     fn disconnect(&self) -> PyResult<()> {
+        self.with_disconnect_gate(|| {
+            let _ops = self.acquire_session_ops_for_disconnect()?;
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            runtime().block_on(inner.disconnect()).map_err(to_py_err)
+        })
+    }
+
+    fn disconnect_order_plant(&self) -> PyResult<()> {
+        self.with_disconnect_gate(|| {
+            let _ops = self.acquire_session_ops_for_disconnect()?;
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            runtime()
+                .block_on(inner.disconnect_order_plant())
+                .map_err(to_py_err)
+        })
+    }
+
+    fn disconnect_pnl_plant(&self) -> PyResult<()> {
         let mut inner = self
             .inner
             .lock()
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        runtime().block_on(inner.disconnect()).map_err(to_py_err)
+        runtime()
+            .block_on(inner.disconnect_pnl_plant())
+            .map_err(to_py_err)
+    }
+
+    fn ensure_pnl_plant(&self) -> PyResult<()> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        runtime()
+            .block_on(inner.ensure_pnl_plant())
+            .map_err(to_py_err)
     }
 
     fn subscribe(&self, symbol: &str, exchange: &str) -> PyResult<()> {
@@ -526,12 +674,132 @@ impl PySession {
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         runtime().block_on(inner.subscribe_pnl()).map_err(to_py_err)
     }
+
+    fn subscribe_order_updates(&self) -> PyResult<()> {
+        // Subscribe must use the session's own handle (the one poll_order_event reads).
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        runtime()
+            .block_on(inner.subscribe_order_updates())
+            .map_err(to_py_err)
+    }
+
+    #[pyo3(signature = (
+        symbol,
+        exchange,
+        side,
+        price_type,
+        quantity,
+        user_tag,
+        price=None,
+        trigger_price=None,
+        duration="DAY",
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn place_order(
+        &self,
+        symbol: &str,
+        exchange: &str,
+        side: &str,
+        price_type: &str,
+        quantity: i32,
+        user_tag: &str,
+        price: Option<f64>,
+        trigger_price: Option<f64>,
+        duration: &str,
+    ) -> PyResult<()> {
+        let _guard = self.begin_order_op()?;
+        let handle = self.acquire_order_handle()?;
+        runtime()
+            .block_on(place_order_on(
+                &handle,
+                symbol,
+                exchange,
+                side,
+                price_type,
+                quantity,
+                user_tag,
+                price,
+                trigger_price,
+                duration,
+            ))
+            .map_err(to_py_err)
+    }
+
+    fn cancel_order(&self, basket_id: &str) -> PyResult<()> {
+        let _guard = self.begin_order_op()?;
+        let handle = self.acquire_order_handle()?;
+        runtime()
+            .block_on(cancel_order_on(&handle, basket_id))
+            .map_err(to_py_err)
+    }
+
+    #[pyo3(signature = (
+        basket_id,
+        symbol,
+        exchange,
+        quantity,
+        price_type,
+        price=None,
+        trigger_price=None,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn modify_order(
+        &self,
+        basket_id: &str,
+        symbol: &str,
+        exchange: &str,
+        quantity: i32,
+        price_type: &str,
+        price: Option<f64>,
+        trigger_price: Option<f64>,
+    ) -> PyResult<()> {
+        let _guard = self.begin_order_op()?;
+        let handle = self.acquire_order_handle()?;
+        runtime()
+            .block_on(modify_order_on(
+                &handle,
+                basket_id,
+                symbol,
+                exchange,
+                quantity,
+                price_type,
+                price,
+                trigger_price,
+            ))
+            .map_err(to_py_err)
+    }
+
+    fn cancel_all_orders(&self) -> PyResult<()> {
+        let _guard = self.begin_order_op()?;
+        let handle = self.acquire_order_handle()?;
+        runtime()
+            .block_on(cancel_all_orders_on(&handle))
+            .map_err(to_py_err)
+    }
+
+    /// Non-blocking poll of the order plant; returns a dict or None.
+    fn poll_order_event(&self, py: Python<'_>) -> PyResult<Option<Py<PyDict>>> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        match inner.poll_order_event().map_err(to_py_err)? {
+            Some(event) => Ok(Some(event_to_dict(py, event)?)),
+            None => Ok(None),
+        }
+    }
 }
 
 /// Register the PyO3 module `rithmic_connect._lib`.
 #[pymodule]
 fn _lib(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySession>()?;
+    m.add("ChannelLaggedError", m.py().get_type::<ChannelLaggedError>())?;
+    m.add("ChannelClosedError", m.py().get_type::<ChannelClosedError>())?;
+    m.add("NotConnectedError", m.py().get_type::<NotConnectedError>())?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

@@ -1,9 +1,8 @@
-"""Read-only execution client tests (helpers; Cython base resists partial construction)."""
+"""Execution client tests (helpers; Cython base resists partial construction)."""
 
 from __future__ import annotations
 
 from decimal import Decimal
-from unittest.mock import MagicMock
 
 from nautilus_trader.model.identifiers import AccountId
 from nautilus_trader.model.objects import AccountBalance
@@ -12,6 +11,7 @@ from nautilus_trader.model.objects import Money
 
 from rithmic_connect._convert import account_pnl_to_fields
 from rithmic_connect.constants import VENUE
+from rithmic_connect.execution import RithmicExecutionClient
 
 
 def test_account_pnl_fields_build_balance():
@@ -30,7 +30,7 @@ def test_account_pnl_fields_build_balance():
     assert AccountId(f"{VENUE}-{fields['account_id']}").value.startswith(f"{VENUE}-")
 
 
-def test_phase1_order_actions_are_tracked_as_rejects():
+def test_readonly_mode_tracks_rejects():
     order_calls: list[str] = []
 
     def reject(action: str) -> None:
@@ -41,14 +41,18 @@ def test_phase1_order_actions_are_tracked_as_rejects():
     assert order_calls == ["submit_order", "cancel_order", "modify_order"]
 
 
-def test_wire_session_has_no_order_place_in_protocol_doc():
-    import inspect
-    from rithmic_connect import session as sess_mod
+def test_execution_client_alias_preserved():
+    from rithmic_connect.execution import RithmicReadOnlyExecutionClient
 
-    src = inspect.getsource(sess_mod.WireSession)
-    assert "place_order" not in src
-    assert "submit_order" not in src
-    assert "cancel_order" not in src
+    assert RithmicReadOnlyExecutionClient is RithmicExecutionClient
+
+
+def test_order_plant_and_errors_import_smoke():
+    from rithmic_connect._order_plant import OrderPlantPolicy
+    from rithmic_connect.errors import VenueQueryUnavailable
+
+    assert OrderPlantPolicy().use_cache_order_reports()
+    assert issubclass(VenueQueryUnavailable, RuntimeError)
 
 
 def test_instrument_pnl_to_position_fields():

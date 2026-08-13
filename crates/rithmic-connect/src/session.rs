@@ -1,18 +1,22 @@
-//! Multi-plant Rithmic session facade (Phase 1: MD + history + PnL; no orders).
+//! Multi-plant Rithmic session facade (Phase 2: MD + history + PnL + orders).
 //!
-//! Intentionally omits any public place / cancel / modify order APIs.
+//! When an account is configured, also connects the order plant for place /
+//! cancel / modify and order-notification polling.
 
 use std::future::Future;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use rithmic_rs::{
-    ConnectStrategy, RithmicHistoryPlant, RithmicHistoryPlantHandle, RithmicPnlPlant,
-    RithmicPnlPlantHandle, RithmicTickerPlant, RithmicTickerPlantHandle, TimeBarType,
+    ConnectStrategy, ManualOrAutoEntry, OrderSide, OrderType, RithmicCancelAllOrders,
+    RithmicCancelOrder, RithmicHistoryPlant, RithmicHistoryPlantHandle, RithmicModifyOrder,
+    RithmicOrder, RithmicOrderPlant, RithmicOrderPlantHandle, RithmicPnlPlant,
+    RithmicPnlPlantHandle, RithmicTickerPlant, RithmicTickerPlantHandle, TimeBarType, TimeInForce,
 };
+use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::broadcast::error::TryRecvError;
 
 use crate::config::SessionConfig;
-use crate::dto::{FrontMonthDto, HistoryBarDto, HistoryTickDto, ReferenceDataDto, TickerEvent};
+use crate::dto::{FrontMonthDto, HistoryBarDto, HistoryTickDto, ReferenceDataDto, PlantEvent};
 use crate::error::{Error, Result};
 
 fn noop_waker() -> Waker {
@@ -53,12 +57,18 @@ struct PnlPlant {
     handle: RithmicPnlPlantHandle,
 }
 
+struct OrderPlant {
+    _plant: RithmicOrderPlant,
+    handle: RithmicOrderPlantHandle,
+}
+
 /// Connected multi-plant session used by the Python adapter.
 pub struct RithmicSession {
     config: SessionConfig,
     ticker: Option<TickerPlant>,
     history: Option<HistoryPlant>,
     pnl: Option<PnlPlant>,
+    order: Option<OrderPlant>,
 }
 
 impl std::fmt::Debug for RithmicSession {
@@ -68,6 +78,7 @@ impl std::fmt::Debug for RithmicSession {
             .field("ticker_connected", &self.ticker.is_some())
             .field("history_connected", &self.history.is_some())
             .field("pnl_connected", &self.pnl.is_some())
+            .field("order_connected", &self.order.is_some())
             .finish()
     }
 }
@@ -80,6 +91,7 @@ impl RithmicSession {
             ticker: None,
             history: None,
             pnl: None,
+            order: None,
         }
     }
 
@@ -90,7 +102,8 @@ impl RithmicSession {
 
     /// Connect ticker + history plants (and PnL when account is configured).
     ///
-    /// Uses [`ConnectStrategy::Retry`]. Does **not** expose order-plant trading.
+    /// Uses [`ConnectStrategy::Retry`]. The order plant is **not** connected here —
+    /// call [`Self::ensure_order_plant`] (or any place/cancel/subscribe order API).
     pub async fn connect(&mut self) -> Result<()> {
         if self.ticker.is_some() {
             return Err(Error::Session("already connected".into()));
@@ -128,11 +141,39 @@ impl RithmicSession {
             handle: history_handle,
         });
         self.pnl = pnl;
+        // Order plant connects lazily on first order API use so Phase 1 MD+PnL
+        // sessions stay unchanged when trading is not enabled.
+        self.order = None;
         Ok(())
     }
 
-    /// Gracefully disconnect connected plants.
+    /// Connect + login the order plant (idempotent). Requires account triple.
+    pub async fn ensure_order_plant(&mut self) -> Result<()> {
+        if self.order.is_some() {
+            return Ok(());
+        }
+        if self.ticker.is_none() {
+            return Err(Error::NotConnected { plant: "ticker" });
+        }
+        let account = self.config.account().ok_or_else(|| {
+            Error::Config("order plant requires account_id/fcm_id/ib_id".into())
+        })?;
+        let rc = self.config.to_rithmic_config()?;
+        let order_plant = RithmicOrderPlant::connect(&rc, ConnectStrategy::Retry).await?;
+        let order_handle = order_plant.get_handle(&account);
+        check_response(order_handle.login().await?, "order login")?;
+        self.order = Some(OrderPlant {
+            _plant: order_plant,
+            handle: order_handle,
+        });
+        Ok(())
+    }
+
+    /// Gracefully disconnect connected plants (order first, then PnL, history, ticker).
     pub async fn disconnect(&mut self) -> Result<()> {
+        if let Some(order) = self.order.take() {
+            let _ = order.handle.disconnect().await;
+        }
         if let Some(pnl) = self.pnl.take() {
             let _ = pnl.handle.disconnect().await;
         }
@@ -266,8 +307,128 @@ impl RithmicSession {
         Ok(())
     }
 
+    /// Subscribe to order plant notifications (Rithmic + exchange).
+    pub async fn subscribe_order_updates(&mut self) -> Result<()> {
+        self.ensure_order_plant().await?;
+        let handle = self.order_handle()?;
+        if let Err(e) = check_response(
+            handle.subscribe_order_updates().await?,
+            "subscribe_order_updates",
+        ) {
+            let _ = self.disconnect_order_plant().await;
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Connect + login the PnL plant (idempotent). Requires account triple.
+    pub async fn ensure_pnl_plant(&mut self) -> Result<()> {
+        if self.pnl.is_some() {
+            return Ok(());
+        }
+        if self.ticker.is_none() {
+            return Err(Error::NotConnected { plant: "ticker" });
+        }
+        let account = self.config.account().ok_or_else(|| {
+            Error::Config("pnl plant requires account_id/fcm_id/ib_id".into())
+        })?;
+        let rc = self.config.to_rithmic_config()?;
+        let pnl_plant = RithmicPnlPlant::connect(&rc, ConnectStrategy::Retry).await?;
+        let pnl_handle = pnl_plant.get_handle(&account);
+        check_response(pnl_handle.login().await?, "pnl login")?;
+        self.pnl = Some(PnlPlant {
+            _plant: pnl_plant,
+            handle: pnl_handle,
+        });
+        Ok(())
+    }
+
+    /// Disconnect only the order plant (leaves ticker/history/PnL connected).
+    pub async fn disconnect_order_plant(&mut self) -> Result<()> {
+        if let Some(order) = self.order.take() {
+            let _ = order.handle.disconnect().await;
+        }
+        Ok(())
+    }
+
+    /// Disconnect only the PnL plant (leaves ticker/history/order connected).
+    pub async fn disconnect_pnl_plant(&mut self) -> Result<()> {
+        if let Some(pnl) = self.pnl.take() {
+            let _ = pnl.handle.disconnect().await;
+        }
+        Ok(())
+    }
+
+    /// Place a new order on the order plant.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn place_order(
+        &mut self,
+        symbol: &str,
+        exchange: &str,
+        side: &str,
+        price_type: &str,
+        quantity: i32,
+        user_tag: &str,
+        price: Option<f64>,
+        trigger_price: Option<f64>,
+        duration: &str,
+    ) -> Result<()> {
+        self.ensure_order_plant().await?;
+        place_order_on(
+            self.order_handle()?,
+            symbol,
+            exchange,
+            side,
+            price_type,
+            quantity,
+            user_tag,
+            price,
+            trigger_price,
+            duration,
+        )
+        .await
+    }
+
+    /// Cancel an order by basket id.
+    pub async fn cancel_order(&mut self, basket_id: &str) -> Result<()> {
+        self.ensure_order_plant().await?;
+        cancel_order_on(self.order_handle()?, basket_id).await
+    }
+
+    /// Modify an existing order.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn modify_order(
+        &mut self,
+        basket_id: &str,
+        symbol: &str,
+        exchange: &str,
+        quantity: i32,
+        price_type: &str,
+        price: Option<f64>,
+        trigger_price: Option<f64>,
+    ) -> Result<()> {
+        self.ensure_order_plant().await?;
+        modify_order_on(
+            self.order_handle()?,
+            basket_id,
+            symbol,
+            exchange,
+            quantity,
+            price_type,
+            price,
+            trigger_price,
+        )
+        .await
+    }
+
+    /// Cancel all working orders on the account.
+    pub async fn cancel_all_orders(&mut self) -> Result<()> {
+        self.ensure_order_plant().await?;
+        cancel_all_orders_on(self.order_handle()?).await
+    }
+
     /// Non-blocking poll of the next ticker-plant subscription message.
-    pub fn poll_event(&mut self) -> Result<Option<TickerEvent>> {
+    pub fn poll_event(&mut self) -> Result<Option<PlantEvent>> {
         let handle = self.ticker_handle_mut()?;
         match handle.subscription_receiver.try_recv() {
             Ok(resp) => {
@@ -276,17 +437,15 @@ impl RithmicSession {
                         return Err(Error::Rithmic(err.to_string()));
                     }
                 }
-                Ok(Some(TickerEvent::from(&resp)))
+                Ok(Some(PlantEvent::from(&resp)))
             }
             Err(TryRecvError::Empty) | Err(TryRecvError::Lagged(_)) => Ok(None),
-            Err(TryRecvError::Closed) => Err(Error::Session(
-                "ticker subscription channel closed".into(),
-            )),
+            Err(TryRecvError::Closed) => Err(Error::ChannelClosed { plant: "ticker" }),
         }
     }
 
     /// Non-blocking poll of the next PnL-plant subscription message.
-    pub fn poll_pnl_event(&mut self) -> Result<Option<TickerEvent>> {
+    pub fn poll_pnl_event(&mut self) -> Result<Option<PlantEvent>> {
         let Some(pnl) = self.pnl.as_mut() else {
             return Ok(None);
         };
@@ -297,56 +456,200 @@ impl RithmicSession {
                         return Err(Error::Rithmic(err.to_string()));
                     }
                 }
-                Ok(Some(TickerEvent::from(&resp)))
+                Ok(Some(PlantEvent::from(&resp)))
             }
-            Some(Err(_)) => Err(Error::Session("pnl subscription channel closed".into())),
+            Some(Err(RecvError::Lagged(skipped))) => Err(Error::ChannelLagged {
+                plant: "pnl",
+                skipped,
+            }),
+            Some(Err(RecvError::Closed)) => Err(Error::ChannelClosed { plant: "pnl" }),
+            None => Ok(None),
+        }
+    }
+
+    /// Non-blocking poll of the next order-plant subscription message.
+    pub fn poll_order_event(&mut self) -> Result<Option<PlantEvent>> {
+        let handle = self.order_handle_mut()?;
+        match now_or_never(handle.subscription_receiver.recv()) {
+            Some(Ok(resp)) => {
+                if let Some(err) = &resp.error {
+                    if err.is_connection_issue() {
+                        return Err(Error::Rithmic(err.to_string()));
+                    }
+                }
+                Ok(Some(PlantEvent::from(&resp)))
+            }
+            Some(Err(RecvError::Lagged(skipped))) => Err(Error::ChannelLagged {
+                plant: "order",
+                skipped,
+            }),
+            Some(Err(RecvError::Closed)) => Err(Error::ChannelClosed { plant: "order" }),
             None => Ok(None),
         }
     }
 
     /// Blocking receive of the next ticker message (async).
-    pub async fn recv_event(&mut self) -> Result<TickerEvent> {
+    pub async fn recv_event(&mut self) -> Result<PlantEvent> {
         let handle = self.ticker_handle_mut()?;
         let resp = handle
             .subscription_receiver
             .recv()
             .await
-            .map_err(|_| Error::Session("ticker subscription channel closed".into()))?;
+            .map_err(|_| Error::ChannelClosed { plant: "ticker" })?;
         if let Some(err) = &resp.error {
             if err.is_connection_issue() {
                 return Err(Error::Rithmic(err.to_string()));
             }
         }
-        Ok(TickerEvent::from(&resp))
+        Ok(PlantEvent::from(&resp))
     }
 
     fn ticker_handle(&self) -> Result<&RithmicTickerPlantHandle> {
         self.ticker
             .as_ref()
             .map(|t| &t.handle)
-            .ok_or_else(|| Error::Session("ticker plant not connected".into()))
+            .ok_or(Error::NotConnected { plant: "ticker" })
     }
 
     fn ticker_handle_mut(&mut self) -> Result<&mut RithmicTickerPlantHandle> {
         self.ticker
             .as_mut()
             .map(|t| &mut t.handle)
-            .ok_or_else(|| Error::Session("ticker plant not connected".into()))
+            .ok_or(Error::NotConnected { plant: "ticker" })
     }
 
     fn history_handle(&self) -> Result<&RithmicHistoryPlantHandle> {
         self.history
             .as_ref()
             .map(|h| &h.handle)
-            .ok_or_else(|| Error::Session("history plant not connected".into()))
+            .ok_or(Error::NotConnected { plant: "history" })
     }
 
     fn pnl_handle(&self) -> Result<&RithmicPnlPlantHandle> {
         self.pnl
             .as_ref()
             .map(|p| &p.handle)
-            .ok_or_else(|| Error::Session("pnl plant not connected (account required)".into()))
+            .ok_or(Error::NotConnected { plant: "pnl" })
     }
+
+    fn order_handle(&self) -> Result<&RithmicOrderPlantHandle> {
+        self.order
+            .as_ref()
+            .map(|o| &o.handle)
+            .ok_or(Error::NotConnected { plant: "order" })
+    }
+
+    fn order_handle_mut(&mut self) -> Result<&mut RithmicOrderPlantHandle> {
+        self.order
+            .as_mut()
+            .map(|o| &mut o.handle)
+            .ok_or(Error::NotConnected { plant: "order" })
+    }
+
+    /// Clone a command handle for order I/O outside the session lock.
+    ///
+    /// The clone shares the plant command channel; its subscription receiver is a
+    /// separate resubscribe and is unused for place/cancel/modify.
+    pub fn clone_order_handle(&self) -> Result<RithmicOrderPlantHandle> {
+        Ok(self.order_handle()?.clone())
+    }
+}
+
+/// Place an order on an already-connected order-plant handle (no session lock).
+#[allow(clippy::too_many_arguments)]
+pub async fn place_order_on(
+    handle: &RithmicOrderPlantHandle,
+    symbol: &str,
+    exchange: &str,
+    side: &str,
+    price_type: &str,
+    quantity: i32,
+    user_tag: &str,
+    price: Option<f64>,
+    trigger_price: Option<f64>,
+    duration: &str,
+) -> Result<()> {
+    let side: OrderSide = side
+        .parse()
+        .map_err(|e| Error::Config(format!("invalid order side: {e}")))?;
+    let price_type: OrderType = price_type
+        .parse()
+        .map_err(|e| Error::Config(format!("invalid price type: {e}")))?;
+    let duration: TimeInForce = if duration.is_empty() {
+        TimeInForce::Day
+    } else {
+        duration
+            .parse()
+            .map_err(|e| Error::Config(format!("invalid duration: {e}")))?
+    };
+
+    let mut builder = RithmicOrder::new()
+        .symbol(symbol)
+        .exchange(exchange)
+        .quantity(quantity)
+        .transaction_type(side)
+        .price_type(price_type)
+        .user_tag(user_tag)
+        .duration(duration)
+        .manual_or_auto(ManualOrAutoEntry::Auto);
+    if let Some(p) = price {
+        builder = builder.price(p);
+    }
+    if let Some(t) = trigger_price {
+        builder = builder.trigger_price(t);
+    }
+    let order = builder.build()?;
+    check_responses(handle.place_order(order).await?, "place_order")
+}
+
+/// Cancel an order on an already-connected handle (no session lock).
+pub async fn cancel_order_on(handle: &RithmicOrderPlantHandle, basket_id: &str) -> Result<()> {
+    let cancel = RithmicCancelOrder::new()
+        .id(basket_id)
+        .manual_or_auto(ManualOrAutoEntry::Auto)
+        .build()?;
+    check_responses(handle.cancel_order(cancel).await?, "cancel_order")
+}
+
+/// Modify an order on an already-connected handle (no session lock).
+#[allow(clippy::too_many_arguments)]
+pub async fn modify_order_on(
+    handle: &RithmicOrderPlantHandle,
+    basket_id: &str,
+    symbol: &str,
+    exchange: &str,
+    quantity: i32,
+    price_type: &str,
+    price: Option<f64>,
+    trigger_price: Option<f64>,
+) -> Result<()> {
+    let price_type: OrderType = price_type
+        .parse()
+        .map_err(|e| Error::Config(format!("invalid price type: {e}")))?;
+
+    let mut builder = RithmicModifyOrder::new()
+        .id(basket_id)
+        .symbol(symbol)
+        .exchange(exchange)
+        .quantity(quantity)
+        .price_type(price_type)
+        .manual_or_auto(ManualOrAutoEntry::Auto);
+    if let Some(p) = price {
+        builder = builder.price(p);
+    }
+    if let Some(t) = trigger_price {
+        builder = builder.trigger_price(t);
+    }
+    let order = builder.build()?;
+    check_responses(handle.modify_order(order).await?, "modify_order")
+}
+
+/// Cancel all orders on an already-connected handle (no session lock).
+pub async fn cancel_all_orders_on(handle: &RithmicOrderPlantHandle) -> Result<()> {
+    let cmd = RithmicCancelAllOrders::new()
+        .manual_or_auto(ManualOrAutoEntry::Auto)
+        .build()?;
+    check_response(handle.cancel_all_orders(cmd).await?, "cancel_all_orders")
 }
 
 fn check_response(resp: rithmic_rs::RithmicResponse, ctx: &str) -> Result<()> {
@@ -356,6 +659,13 @@ fn check_response(resp: rithmic_rs::RithmicResponse, ctx: &str) -> Result<()> {
 fn check_response_ref(resp: &rithmic_rs::RithmicResponse, ctx: &str) -> Result<()> {
     if let Some(err) = &resp.error {
         return Err(Error::Rithmic(format!("{ctx}: {err}")));
+    }
+    Ok(())
+}
+
+fn check_responses(resps: Vec<rithmic_rs::RithmicResponse>, ctx: &str) -> Result<()> {
+    for resp in &resps {
+        check_response_ref(resp, ctx)?;
     }
     Ok(())
 }
