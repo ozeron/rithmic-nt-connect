@@ -20,6 +20,9 @@ venv/
 .ruff_cache/
 *.so
 
+# Local verify / smoke outputs
+artifacts/
+
 # IDE / OS
 .idea/
 .vscode/
