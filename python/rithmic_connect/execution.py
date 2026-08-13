@@ -126,16 +126,30 @@ class RithmicReadOnlyExecutionClient(LiveExecutionClient):
                 self._cache_position(event)
 
     def _publish_account(self, event: dict[str, Any]) -> None:
-        fields = account_pnl_to_fields(event)
+        try:
+            fields = account_pnl_to_fields(event)
+        except Exception as exc:  # noqa: BLE001
+            self._log.error(f"invalid account_pnl: {exc}")
+            return
         account_id = AccountId(f"{VENUE}-{fields['account_id']}")
         if self.account_id is None:
             self._set_account_id(account_id)
-        currency = Currency.from_str(str(fields.get("currency", "USD")))
-        free_raw = fields.get("cash_on_hand") or fields.get("account_balance") or "0"
+        currency_raw = fields.get("currency")
+        if currency_raw is None:
+            self._log.error("account_pnl missing currency")
+            return
+        currency = Currency.from_str(str(currency_raw))
+        free_raw = fields.get("cash_on_hand")
+        if free_raw is None:
+            free_raw = fields.get("account_balance")
+        if free_raw is None:
+            self._log.error("account_pnl missing cash_on_hand and account_balance")
+            return
         try:
             free_dec = Decimal(str(free_raw))
-        except Exception:  # noqa: BLE001
-            free_dec = Decimal("0")
+        except Exception as exc:  # noqa: BLE001
+            self._log.error(f"account_pnl balance not numeric ({free_raw!r}): {exc}")
+            return
         free = Money(free_dec, currency)
         locked = Money(Decimal("0"), currency)
         total = free
@@ -152,7 +166,7 @@ class RithmicReadOnlyExecutionClient(LiveExecutionClient):
         try:
             fields = instrument_pnl_to_fields(event)
         except Exception as exc:  # noqa: BLE001
-            self._log.debug(f"skip instrument_pnl: {exc}")
+            self._log.error(f"invalid instrument_pnl: {exc}")
             return
         self._positions[str(fields["instrument_id"])] = fields
         account_raw = fields.get("account_id")

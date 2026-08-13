@@ -19,8 +19,8 @@ pub use config::{
     SessionConfigBuilder,
 };
 pub use dto::{
-    AccountPnlDto, BboDto, FrontMonthDto, HistoryTickDto, InstrumentPnlDto, LastTradeDto,
-    OrderBookDto, ReferenceDataDto, TickerEvent,
+    AccountPnlDto, BboDto, FrontMonthDto, HistoryBarDto, HistoryTickDto, InstrumentPnlDto,
+    LastTradeDto, OrderBookDto, ReferenceDataDto, TickerEvent,
 };
 pub use error::{Error, Result};
 pub use session::RithmicSession;

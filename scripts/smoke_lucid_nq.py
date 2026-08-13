@@ -29,15 +29,18 @@ def _load_dotenv(path: Path) -> None:
         os.environ.setdefault(k.strip(), v.strip().strip("'").strip('"'))
 
 
-def main() -> int:
+def _load_dotenv_files() -> None:
+    """Load repo `.env`, then optional paths from `RITHMIC_CONNECT_DOTENV` (os.pathsep)."""
     _load_dotenv(ROOT / ".env")
-    # Also accept MY046 harness envs if present (local sibling tree)
-    my046_root = Path(
-        "/Users/ozeron/code/algotrading/quant-guild-work/projects/"
-        "MY046_motivewave_simple_ls_demo"
-    )
-    _load_dotenv(my046_root / ".env")
-    _load_dotenv(my046_root / "vendor" / "parbhatc-rithmic" / ".env")
+    extra = os.environ.get("RITHMIC_CONNECT_DOTENV", "")
+    for part in extra.split(os.pathsep):
+        part = part.strip()
+        if part:
+            _load_dotenv(Path(part))
+
+
+def main() -> int:
+    _load_dotenv_files()
 
     try:
         from rithmic_connect.config import SessionConfig

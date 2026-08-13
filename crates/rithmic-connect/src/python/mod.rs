@@ -9,8 +9,8 @@ use tokio::runtime::Runtime;
 
 use crate::config::SessionConfig;
 use crate::dto::{
-    AccountPnlDto, BboDto, FrontMonthDto, HistoryTickDto, InstrumentPnlDto, LastTradeDto,
-    OrderBookDto, ReferenceDataDto, TickerEvent,
+    AccountPnlDto, BboDto, FrontMonthDto, HistoryBarDto, HistoryTickDto, InstrumentPnlDto,
+    LastTradeDto, OrderBookDto, ReferenceDataDto, TickerEvent,
 };
 use crate::error::Error;
 use crate::session::RithmicSession;
@@ -200,6 +200,23 @@ fn front_month_dict(py: Python<'_>, f: FrontMonthDto) -> PyResult<Py<PyDict>> {
 }
 
 fn history_tick_dict(py: Python<'_>, t: HistoryTickDto) -> PyResult<Py<PyDict>> {
+    // Tick-bar replay schema: last price = close_price, size = num_trades.
+    // Both must be present; no open_price / invented-size substitutes.
+    let Some(trade_price) = t.close_price else {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "history_tick missing close_price",
+        ));
+    };
+    let Some(num_trades) = t.num_trades else {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "history_tick missing num_trades",
+        ));
+    };
+    if num_trades == 0 || num_trades > i32::MAX as u64 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "history_tick num_trades out of range: {num_trades}"
+        )));
+    }
     let d = PyDict::new(py);
     d.set_item("type", "history_tick")?;
     set_opt_str(&d, "symbol", t.symbol)?;
@@ -208,15 +225,63 @@ fn history_tick_dict(py: Python<'_>, t: HistoryTickDto) -> PyResult<Py<PyDict>> 
     set_opt_f64(&d, "high_price", t.high_price)?;
     set_opt_f64(&d, "low_price", t.low_price)?;
     set_opt_f64(&d, "close_price", t.close_price)?;
-    set_opt_f64(&d, "trade_price", t.close_price.or(t.open_price))?;
+    d.set_item("trade_price", trade_price)?;
+    d.set_item("trade_size", num_trades as i32)?;
     set_opt_u64(&d, "volume", t.volume)?;
-    set_opt_u64(&d, "num_trades", t.num_trades)?;
-    if let Some(n) = t.num_trades {
-        set_opt_i32(&d, "trade_size", Some(n as i32))?;
-    }
+    d.set_item("num_trades", num_trades)?;
     set_opt_i32(&d, "ssboe", t.ssboe)?;
     set_opt_i32(&d, "usecs", t.usecs)?;
     set_opt_u64(&d, "ts_event_ns", t.ts_event_ns)?;
+    Ok(d.unbind())
+}
+
+fn history_bar_dict(py: Python<'_>, b: HistoryBarDto) -> PyResult<Py<PyDict>> {
+    let Some(symbol) = b.symbol.clone() else {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "history_bar missing symbol",
+        ));
+    };
+    let Some(open_price) = b.open_price else {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "history_bar missing open_price",
+        ));
+    };
+    let Some(high_price) = b.high_price else {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "history_bar missing high_price",
+        ));
+    };
+    let Some(low_price) = b.low_price else {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "history_bar missing low_price",
+        ));
+    };
+    let Some(close_price) = b.close_price else {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "history_bar missing close_price",
+        ));
+    };
+    let Some(volume) = b.volume else {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "history_bar missing volume",
+        ));
+    };
+    let d = PyDict::new(py);
+    d.set_item("type", "history_bar")?;
+    d.set_item("symbol", symbol)?;
+    set_opt_str(&d, "exchange", b.exchange)?;
+    set_opt_i32(&d, "bar_type", b.bar_type)?;
+    set_opt_str(&d, "period", b.period)?;
+    set_opt_i32(&d, "marker", b.marker)?;
+    d.set_item("open_price", open_price)?;
+    d.set_item("high_price", high_price)?;
+    d.set_item("low_price", low_price)?;
+    d.set_item("close_price", close_price)?;
+    d.set_item("volume", volume)?;
+    set_opt_u64(&d, "num_trades", b.num_trades)?;
+    set_opt_u64(&d, "bid_volume", b.bid_volume)?;
+    set_opt_u64(&d, "ask_volume", b.ask_volume)?;
+    set_opt_u64(&d, "ts_event_ns", b.ts_event_ns)?;
     Ok(d.unbind())
 }
 
@@ -408,8 +473,8 @@ impl PySession {
             .map_err(to_py_err)
     }
 
-    /// Load minute time bars for a window; returns opaque message dicts (Phase 1).
-    #[pyo3(signature = (symbol, exchange, start_time_sec, end_time_sec, bar_type=1, period=1))]
+    /// Load minute time bars for a window; returns structured OHLCV dicts.
+    #[pyo3(signature = (symbol, exchange, start_time_sec, end_time_sec, bar_type=2, period=1))]
     fn load_time_bars(
         &self,
         symbol: &str,
@@ -419,16 +484,27 @@ impl PySession {
         bar_type: i32,
         period: i32,
     ) -> PyResult<Py<PyList>> {
-        let _ = bar_type; // Phase 1: always MinuteBar
+        let rithmic_bar_type = match bar_type {
+            1 => rithmic_rs::TimeBarType::SecondBar,
+            2 => rithmic_rs::TimeBarType::MinuteBar,
+            3 => rithmic_rs::TimeBarType::DailyBar,
+            4 => rithmic_rs::TimeBarType::WeeklyBar,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "unsupported bar_type {other}; expected 1=second, 2=minute, 3=daily, 4=weekly"
+                )));
+            }
+        };
+        let period = period.max(1);
         let inner = self
             .inner
             .lock()
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        let messages = runtime()
+        let bars = runtime()
             .block_on(inner.load_time_bars_all(
                 symbol,
                 exchange,
-                rithmic_rs::TimeBarType::MinuteBar,
+                rithmic_bar_type,
                 period,
                 start_time_sec,
                 end_time_sec,
@@ -436,11 +512,8 @@ impl PySession {
             .map_err(to_py_err)?;
         Python::with_gil(|py| {
             let list = PyList::empty(py);
-            for message in messages {
-                let d = PyDict::new(py);
-                d.set_item("type", "time_bar")?;
-                d.set_item("type_name", format!("{message:?}"))?;
-                list.append(d)?;
+            for bar in bars {
+                list.append(history_bar_dict(py, bar)?)?;
             }
             Ok(list.unbind())
         })

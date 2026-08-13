@@ -10,6 +10,10 @@ from rithmic_connect.config import RithmicExecClientConfig
 from rithmic_connect.config import SessionConfig
 from rithmic_connect.constants import ADAPTER_NAME
 from rithmic_connect.constants import VENUE
+from rithmic_connect.front_month import FrontMonthError
+from rithmic_connect.front_month import resolve_front_month
+from rithmic_connect.verify import VerifyReport
+from rithmic_connect.verify import run_front_month_verify
 
 __version__ = "0.1.0"
 
@@ -17,11 +21,15 @@ __all__ = [
     "ADAPTER_NAME",
     "VENUE",
     "ConfigError",
+    "FrontMonthError",
     "SessionConfig",
     "RithmicDataClientConfig",
     "RithmicExecClientConfig",
     "RithmicLiveDataClientFactory",
     "RithmicLiveExecClientFactory",
+    "VerifyReport",
+    "resolve_front_month",
+    "run_front_month_verify",
     "__version__",
 ]
 
