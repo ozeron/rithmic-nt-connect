@@ -27,3 +27,6 @@ pub use error::{Error, Result};
 pub use plants::PlantSet;
 pub use session::RithmicSession;
 pub use systems::{list_systems, normalize_gateway_url};
+
+/// Re-export venue env enum so gateway/bin callers need not depend on `rithmic-rs` directly.
+pub use rithmic_rs::RithmicEnv;

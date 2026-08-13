@@ -7,6 +7,11 @@
 
 pub mod codec;
 pub mod framing;
+pub mod listen;
+pub mod reconnect;
+pub mod server;
+pub mod singleton;
+pub mod subscriptions;
 
 /// Generated protobuf types from `proto/rithmic_gateway/v1/session.proto`.
 pub mod pb {

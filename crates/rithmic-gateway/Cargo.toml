@@ -6,15 +6,22 @@ license.workspace = true
 description = "Transport-agnostic length-delimited protobuf framing and broker for shared Rithmic sessions"
 build = "build.rs"
 
+[[bin]]
+name = "rithmic-gateway"
+path = "src/bin/rithmic_gateway.rs"
+
 [dependencies]
 rithmic-plants = { path = "../rithmic-plants" }
 bytes = "1"
 prost = "0.14"
 thiserror = "2"
-tokio = { version = "1", features = ["net", "io-util", "macros", "sync", "rt-multi-thread"] }
+tokio = { version = "1", features = ["net", "io-util", "macros", "sync", "rt-multi-thread", "fs", "signal", "time"] }
+fs2 = "0.4.3"
 
 [build-dependencies]
 prost-build = "0.14"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["net", "io-util", "macros", "sync", "rt-multi-thread"] }
+bytes = "1"
+tokio = { version = "1", features = ["net", "io-util", "macros", "sync", "rt-multi-thread", "time"] }
+tempfile = "3"
