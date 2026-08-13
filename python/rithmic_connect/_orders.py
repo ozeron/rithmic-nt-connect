@@ -31,7 +31,6 @@ _TIF_TO_RITHMIC: dict[str, str] = {
     "FOK": "FOK",
 }
 
-# Rithmic notify_type for exchange fills
 _EXCHANGE_FILL = 5
 _EXCHANGE_REJECT = 6
 _EXCHANGE_CANCEL = 3
@@ -39,7 +38,6 @@ _EXCHANGE_TRIGGER = 4
 _EXCHANGE_NOT_MODIFIED = 7
 _EXCHANGE_NOT_CANCELLED = 8
 
-# Rithmic plant notify types of interest
 _RITHMIC_OPEN = 13
 _RITHMIC_MODIFIED = 14
 _RITHMIC_COMPLETE = 15
@@ -78,7 +76,6 @@ def nautilus_tif_to_rithmic(tif: Any) -> str:
 def order_notification_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
     """Normalize a wire order_notification dict for the exec client."""
     if d.get("type") not in (None, "order_notification"):
-        # allow raw dicts missing type when source is set
         if d.get("source") not in ("rithmic", "exchange"):
             raise ConvertError(f"unexpected order notification type: {d.get('type')!r}")
     source = d.get("source")
@@ -123,107 +120,71 @@ def order_notification_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def is_exchange_fill(fields: Mapping[str, Any]) -> bool:
-    if fields.get("source") != "exchange":
+def _notification_matches(
+    fields: Mapping[str, Any],
+    source: str,
+    notify_type: int,
+    *names: str,
+) -> bool:
+    if fields.get("source") != source:
         return False
     name = fields.get("notify_type_name")
-    if name == "FILL":
+    if name is not None and name in names:
         return True
-    return fields.get("notify_type") == _EXCHANGE_FILL
+    return fields.get("notify_type") == notify_type
+
+
+def is_exchange_fill(fields: Mapping[str, Any]) -> bool:
+    return _notification_matches(fields, "exchange", _EXCHANGE_FILL, "FILL")
 
 
 def is_exchange_reject(fields: Mapping[str, Any]) -> bool:
-    if fields.get("source") != "exchange":
-        return False
-    name = fields.get("notify_type_name")
-    if name == "REJECT":
-        return True
-    return fields.get("notify_type") == _EXCHANGE_REJECT
+    return _notification_matches(fields, "exchange", _EXCHANGE_REJECT, "REJECT")
 
 
 def is_exchange_cancel(fields: Mapping[str, Any]) -> bool:
-    if fields.get("source") != "exchange":
-        return False
-    name = fields.get("notify_type_name")
-    if name == "CANCEL":
-        return True
-    return fields.get("notify_type") == _EXCHANGE_CANCEL
+    return _notification_matches(fields, "exchange", _EXCHANGE_CANCEL, "CANCEL")
 
 
 def is_exchange_trigger(fields: Mapping[str, Any]) -> bool:
-    if fields.get("source") != "exchange":
-        return False
-    name = fields.get("notify_type_name")
-    if name == "TRIGGER":
-        return True
-    return fields.get("notify_type") == _EXCHANGE_TRIGGER
+    return _notification_matches(fields, "exchange", _EXCHANGE_TRIGGER, "TRIGGER")
 
 
 def is_exchange_not_modified(fields: Mapping[str, Any]) -> bool:
-    if fields.get("source") != "exchange":
-        return False
-    name = fields.get("notify_type_name")
-    if name == "NOT_MODIFIED":
-        return True
-    return fields.get("notify_type") == _EXCHANGE_NOT_MODIFIED
+    return _notification_matches(fields, "exchange", _EXCHANGE_NOT_MODIFIED, "NOT_MODIFIED")
 
 
 def is_exchange_not_cancelled(fields: Mapping[str, Any]) -> bool:
-    if fields.get("source") != "exchange":
-        return False
-    name = fields.get("notify_type_name")
-    if name in {"NOT_CANCELLED", "NOT_CANCELED"}:
-        return True
-    return fields.get("notify_type") == _EXCHANGE_NOT_CANCELLED
+    return _notification_matches(
+        fields, "exchange", _EXCHANGE_NOT_CANCELLED, "NOT_CANCELLED", "NOT_CANCELED"
+    )
 
 
 def is_rithmic_open(fields: Mapping[str, Any]) -> bool:
-    if fields.get("source") != "rithmic":
-        return False
-    name = fields.get("notify_type_name")
-    if name == "OPEN":
-        return True
-    return fields.get("notify_type") == _RITHMIC_OPEN
+    return _notification_matches(fields, "rithmic", _RITHMIC_OPEN, "OPEN")
 
 
 def is_rithmic_complete(fields: Mapping[str, Any]) -> bool:
-    if fields.get("source") != "rithmic":
-        return False
-    name = fields.get("notify_type_name")
-    if name == "COMPLETE":
-        return True
-    return fields.get("notify_type") == _RITHMIC_COMPLETE
+    return _notification_matches(fields, "rithmic", _RITHMIC_COMPLETE, "COMPLETE")
 
 
 def is_rithmic_modified(fields: Mapping[str, Any]) -> bool:
-    if fields.get("source") != "rithmic":
-        return False
-    name = fields.get("notify_type_name")
-    if name == "MODIFIED":
-        return True
-    return fields.get("notify_type") == _RITHMIC_MODIFIED
+    return _notification_matches(fields, "rithmic", _RITHMIC_MODIFIED, "MODIFIED")
 
 
 def is_rithmic_modify_failed(fields: Mapping[str, Any]) -> bool:
-    if fields.get("source") != "rithmic":
-        return False
-    name = fields.get("notify_type_name")
-    if name == "MODIFICATION_FAILED":
-        return True
-    return fields.get("notify_type") == _RITHMIC_MODIFICATION_FAILED
+    return _notification_matches(
+        fields, "rithmic", _RITHMIC_MODIFICATION_FAILED, "MODIFICATION_FAILED"
+    )
 
 
 def is_rithmic_cancel_failed(fields: Mapping[str, Any]) -> bool:
-    if fields.get("source") != "rithmic":
-        return False
-    name = fields.get("notify_type_name")
-    if name == "CANCELLATION_FAILED":
-        return True
-    return fields.get("notify_type") == _RITHMIC_CANCELLATION_FAILED
+    return _notification_matches(
+        fields, "rithmic", _RITHMIC_CANCELLATION_FAILED, "CANCELLATION_FAILED"
+    )
 
 
 def trade_id_from_fill_fields(fields: Mapping[str, Any], ts_event: int) -> str:
-    """Build a unique TradeId for partial fills when fill_id is absent."""
     fill_id = fields.get("fill_id")
     if fill_id:
         return str(fill_id)

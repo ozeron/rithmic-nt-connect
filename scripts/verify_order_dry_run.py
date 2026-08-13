@@ -30,9 +30,11 @@ sys.path.insert(0, str(ROOT / "python"))
 
 
 def _load_dotenv(path: Path) -> None:
-    if not path.is_file():
+    try:
+        lines = path.read_text().splitlines()
+    except FileNotFoundError:
         return
-    for raw in path.read_text().splitlines():
+    for raw in lines:
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue

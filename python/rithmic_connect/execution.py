@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from decimal import Decimal
-from typing import Any
+from typing import Any, Callable
 
 from nautilus_trader.cache.cache import Cache
 from nautilus_trader.common.component import LiveClock
@@ -24,25 +24,23 @@ from nautilus_trader.execution.reports import OrderStatusReport
 from nautilus_trader.execution.reports import PositionStatusReport
 from nautilus_trader.live.execution_client import LiveExecutionClient
 from nautilus_trader.model.enums import AccountType
-from nautilus_trader.model.enums import LiquiditySide
 from nautilus_trader.model.enums import OmsType
 from nautilus_trader.model.enums import PositionSide
 from nautilus_trader.model.identifiers import AccountId
 from nautilus_trader.model.identifiers import ClientId
 from nautilus_trader.model.identifiers import ClientOrderId
 from nautilus_trader.model.identifiers import InstrumentId
-from nautilus_trader.model.identifiers import TradeId
 from nautilus_trader.model.identifiers import Venue
 from nautilus_trader.model.identifiers import VenueOrderId
 from nautilus_trader.model.objects import AccountBalance
 from nautilus_trader.model.objects import Currency
 from nautilus_trader.model.objects import Money
-from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 from nautilus_trader.model.orders import Order
 
 from rithmic_connect._convert import account_pnl_to_fields
 from rithmic_connect._convert import instrument_pnl_to_fields
+from rithmic_connect._convert import rithmic_route_from_info
 from rithmic_connect._exec_notifications import route_order_notification
 from rithmic_connect._orders import OrderMapError
 from rithmic_connect._orders import nautilus_order_type_to_rithmic
@@ -63,20 +61,8 @@ _POSITION_SIDE = {
 }
 
 
-def _price(value: float | Decimal | str) -> Price:
-    text = f"{float(value):.8f}".rstrip("0").rstrip(".")
-    if "." not in text:
-        text = f"{text}.0"
-    return Price.from_str(text)
-
-
 class RithmicExecutionClient(LiveExecutionClient):
-    """Rithmic execution client.
-
-    When ``config.enable_trading`` is false (default), order actions are rejected
-    and only account/PnL publishing runs (Phase 1). When true, the order plant is
-    used for submit/cancel/modify and notifications drive Nautilus order events.
-    """
+    """Rithmic execution client (PnL always; order plant when ``enable_trading``)."""
 
     def __init__(
         self,
@@ -107,12 +93,9 @@ class RithmicExecutionClient(LiveExecutionClient):
         self._poll_task: asyncio.Task | None = None
         self._order_poll_task: asyncio.Task | None = None
         self._positions: dict[str, dict[str, Any]] = {}
-        # client_order_id.value -> basket_id / venue id
         self._client_to_venue: dict[str, str] = {}
         self._venue_to_client: dict[str, ClientOrderId] = {}
         self._tag_to_client: dict[str, ClientOrderId] = {}
-        # Set after order-channel lag/close until resync succeeds; blocks submits and
-        # makes reconciliation use cache-backed status instead of empty venue snapshots.
         self._order_reconcile_unsafe = False
 
     @property
@@ -138,12 +121,10 @@ class RithmicExecutionClient(LiveExecutionClient):
             try:
                 await asyncio.to_thread(self._session.subscribe_order_updates)
             except Exception:
-                disconnect_order = getattr(self._session, "disconnect_order_plant", None)
-                if callable(disconnect_order):
-                    try:
-                        await asyncio.to_thread(disconnect_order)
-                    except Exception as teardown_exc:  # noqa: BLE001
-                        self._log.warning(f"order plant teardown after subscribe fail: {teardown_exc}")
+                try:
+                    await asyncio.to_thread(self._session.disconnect_order_plant)
+                except Exception as teardown_exc:  # noqa: BLE001
+                    self._log.warning(f"order plant teardown after subscribe fail: {teardown_exc}")
                 raise
             self._order_poll_task = self.create_task(
                 self._order_poll_loop(),
@@ -151,36 +132,34 @@ class RithmicExecutionClient(LiveExecutionClient):
             )
 
     async def _resync_order_subscription(self) -> None:
-        """Reconnect order plant subscription after lagged/closed channel."""
         self._order_reconcile_unsafe = True
-        disconnect_order = getattr(self._session, "disconnect_order_plant", None)
-        if callable(disconnect_order):
-            await asyncio.to_thread(disconnect_order)
+        await asyncio.to_thread(self._session.disconnect_order_plant)
         await asyncio.to_thread(self._session.subscribe_order_updates)
 
     async def _resync_pnl_subscription(self) -> None:
-        """Reconnect PnL plant subscription after lagged/closed channel."""
-        disconnect_pnl = getattr(self._session, "disconnect_pnl_plant", None)
-        if callable(disconnect_pnl):
-            await asyncio.to_thread(disconnect_pnl)
-        ensure_pnl = getattr(self._session, "ensure_pnl_plant", None)
-        if callable(ensure_pnl):
-            await asyncio.to_thread(ensure_pnl)
+        await asyncio.to_thread(self._session.disconnect_pnl_plant)
+        await asyncio.to_thread(self._session.ensure_pnl_plant)
         await asyncio.to_thread(self._session.subscribe_pnl)
 
-    async def _poll_session_event(self, poll_fn: Any) -> dict[str, Any] | None:
-        """Poll with transient-error tolerance; re-raise channel/lagged failures."""
+    async def _poll_session_event(
+        self,
+        poll_fn: Callable[[], dict[str, Any] | None],
+    ) -> dict[str, Any] | None:
+        """Return next event, or None on transient errors; re-raise channel/lag failures."""
         try:
             return await asyncio.to_thread(poll_fn)
         except Exception as exc:  # noqa: BLE001
             msg = str(exc).lower()
-            if (
-                "lagged" in msg
-                or "closed" in msg
-                or "resync" in msg
-                or "not connected" in msg
-                or "order plant" in msg
-                or "pnl plant" in msg
+            if any(
+                token in msg
+                for token in (
+                    "lagged",
+                    "closed",
+                    "resync",
+                    "not connected",
+                    "order plant",
+                    "pnl plant",
+                )
             ):
                 raise
             self._log.warning(f"poll transient error: {exc}")
@@ -205,28 +184,19 @@ class RithmicExecutionClient(LiveExecutionClient):
     async def _poll_loop(self) -> None:
         backoff = 0.05
         while True:
-            poll_pnl = getattr(self._session, "poll_pnl_event", None)
-            if callable(poll_pnl):
+            try:
+                event = await self._poll_session_event(self._session.poll_pnl_event)
+            except Exception as exc:  # noqa: BLE001
+                self._log.error(f"PnL poll channel error: {exc}")
                 try:
-                    event = await self._poll_session_event(poll_pnl)
-                except Exception as exc:  # noqa: BLE001
-                    self._log.error(f"PnL poll channel error: {exc}")
-                    try:
-                        await self._resync_pnl_subscription()
-                        self._log.warning("PnL subscription resynced after channel error")
-                        backoff = 0.05
-                    except Exception as resync_exc:  # noqa: BLE001
-                        self._log.error(f"PnL subscription resync failed: {resync_exc}")
-                        backoff = min(backoff * 2, 2.0)
-                    await asyncio.sleep(backoff)
-                    continue
-            else:
-                try:
-                    event = await asyncio.to_thread(self._session.poll_event)
-                except Exception as exc:  # noqa: BLE001
-                    self._log.warning(f"ticker poll error: {exc}")
-                    await asyncio.sleep(0.1)
-                    continue
+                    await self._resync_pnl_subscription()
+                    self._log.warning("PnL subscription resynced after channel error")
+                    backoff = 0.05
+                except Exception as resync_exc:  # noqa: BLE001
+                    self._log.error(f"PnL subscription resync failed: {resync_exc}")
+                    backoff = min(backoff * 2, 2.0)
+                await asyncio.sleep(backoff)
+                continue
             if event is None:
                 await asyncio.sleep(0.05)
                 continue
@@ -239,12 +209,8 @@ class RithmicExecutionClient(LiveExecutionClient):
     async def _order_poll_loop(self) -> None:
         backoff = 0.05
         while True:
-            poll = getattr(self._session, "poll_order_event", None)
-            if not callable(poll):
-                await asyncio.sleep(0.05)
-                continue
             try:
-                event = await self._poll_session_event(poll)
+                event = await self._poll_session_event(self._session.poll_order_event)
             except Exception as exc:  # noqa: BLE001
                 self._log.error(f"order poll channel error: {exc}")
                 self._order_reconcile_unsafe = True
@@ -348,13 +314,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         if instrument is None:
             raise ValueError(f"instrument not in cache: {instrument_id}")
         info = getattr(instrument, "info", None) or {}
-        symbol = info.get("rithmic_symbol")
-        exchange = info.get("rithmic_exchange")
-        if not symbol or not exchange:
-            raise ValueError(
-                f"instrument {instrument_id} missing rithmic_symbol/rithmic_exchange in info"
-            )
-        return str(symbol), str(exchange)
+        return rithmic_route_from_info(info, instrument_id=str(instrument_id))
 
     def _log_trading_disabled(self, action: str) -> None:
         self._log.error(f"Rithmic exec client trading disabled: {action}")
@@ -412,13 +372,14 @@ class RithmicExecutionClient(LiveExecutionClient):
         self,
         command: GenerateOrderStatusReports,
     ) -> list[OrderStatusReport]:
-        """Best-effort venue snapshots from cache while order channel is degraded."""
         ts_init = self._clock.timestamp_ns()
         reports: list[OrderStatusReport] = []
-        orders = self._cache.orders_open() if command.open_only else self._cache.orders()
+        orders = (
+            self._cache.orders_open(venue=self.venue, instrument_id=command.instrument_id)
+            if command.open_only
+            else self._cache.orders(venue=self.venue, instrument_id=command.instrument_id)
+        )
         for order in orders:
-            if command.instrument_id is not None and order.instrument_id != command.instrument_id:
-                continue
             venue_id = self._client_to_venue.get(order.client_order_id.value)
             if venue_id is None and order.venue_order_id is not None:
                 venue_id = order.venue_order_id.value

@@ -16,6 +16,7 @@ from nautilus_trader.model.objects import Money
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 
+from rithmic_connect._convert import format_price_str
 from rithmic_connect._orders import is_exchange_cancel
 from rithmic_connect._orders import is_exchange_fill
 from rithmic_connect._orders import is_exchange_not_cancelled
@@ -31,10 +32,7 @@ from rithmic_connect._orders import trade_id_from_fill_fields
 
 
 def _price(value: float | Decimal | str) -> Price:
-    text = f"{float(value):.8f}".rstrip("0").rstrip(".")
-    if "." not in text:
-        text = f"{text}.0"
-    return Price.from_str(text)
+    return Price.from_str(format_price_str(value))
 
 
 class OrderEventEmitter(Protocol):

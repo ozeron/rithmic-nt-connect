@@ -376,6 +376,19 @@ impl PySession {
         self.disconnecting.store(false, Ordering::SeqCst);
         result
     }
+
+    /// Ensure order plant under a short lock, then clone so network I/O can run
+    /// without blocking `poll_order_event`.
+    fn acquire_order_handle(&self) -> PyResult<rithmic_rs::RithmicOrderPlantHandle> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        runtime()
+            .block_on(inner.ensure_order_plant())
+            .map_err(to_py_err)?;
+        inner.clone_order_handle().map_err(to_py_err)
+    }
 }
 
 #[pymethods]
@@ -688,18 +701,7 @@ impl PySession {
         duration: &str,
     ) -> PyResult<()> {
         let _guard = self.begin_order_op()?;
-        // Ensure + clone under a short lock, then release before network I/O so
-        // poll_order_event can run concurrently.
-        let handle = {
-            let mut inner = self
-                .inner
-                .lock()
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-            runtime()
-                .block_on(inner.ensure_order_plant())
-                .map_err(to_py_err)?;
-            inner.clone_order_handle().map_err(to_py_err)?
-        };
+        let handle = self.acquire_order_handle()?;
         runtime()
             .block_on(place_order_on(
                 &handle,
@@ -718,16 +720,7 @@ impl PySession {
 
     fn cancel_order(&self, basket_id: &str) -> PyResult<()> {
         let _guard = self.begin_order_op()?;
-        let handle = {
-            let mut inner = self
-                .inner
-                .lock()
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-            runtime()
-                .block_on(inner.ensure_order_plant())
-                .map_err(to_py_err)?;
-            inner.clone_order_handle().map_err(to_py_err)?
-        };
+        let handle = self.acquire_order_handle()?;
         runtime()
             .block_on(cancel_order_on(&handle, basket_id))
             .map_err(to_py_err)
@@ -754,16 +747,7 @@ impl PySession {
         trigger_price: Option<f64>,
     ) -> PyResult<()> {
         let _guard = self.begin_order_op()?;
-        let handle = {
-            let mut inner = self
-                .inner
-                .lock()
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-            runtime()
-                .block_on(inner.ensure_order_plant())
-                .map_err(to_py_err)?;
-            inner.clone_order_handle().map_err(to_py_err)?
-        };
+        let handle = self.acquire_order_handle()?;
         runtime()
             .block_on(modify_order_on(
                 &handle,
@@ -780,16 +764,7 @@ impl PySession {
 
     fn cancel_all_orders(&self) -> PyResult<()> {
         let _guard = self.begin_order_op()?;
-        let handle = {
-            let mut inner = self
-                .inner
-                .lock()
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-            runtime()
-                .block_on(inner.ensure_order_plant())
-                .map_err(to_py_err)?;
-            inner.clone_order_handle().map_err(to_py_err)?
-        };
+        let handle = self.acquire_order_handle()?;
         runtime()
             .block_on(cancel_all_orders_on(&handle))
             .map_err(to_py_err)

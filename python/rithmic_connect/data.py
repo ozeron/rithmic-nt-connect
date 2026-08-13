@@ -37,6 +37,7 @@ from nautilus_trader.model.objects import Quantity
 
 from rithmic_connect._convert import ConvertError
 from rithmic_connect._convert import bbo_to_fields
+from rithmic_connect._convert import format_price_str
 from rithmic_connect._convert import last_trade_to_fields
 from rithmic_connect._convert import order_book_to_fields
 from rithmic_connect._convert import time_bar_to_fields
@@ -65,10 +66,7 @@ def _aggressor(value: Any) -> AggressorSide:
 
 
 def _price(value: float) -> Price:
-    text = f"{float(value):.8f}".rstrip("0").rstrip(".")
-    if "." not in text:
-        text = f"{text}.0"
-    return Price.from_str(text)
+    return Price.from_str(format_price_str(value))
 
 
 def fields_to_trade_tick(fields: dict[str, Any], ts_init: int) -> TradeTick:
