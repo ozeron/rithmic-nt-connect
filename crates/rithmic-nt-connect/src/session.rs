@@ -145,7 +145,7 @@ impl RithmicSession {
                 Err(err) => return Err(err),
             }
         }
-        if self.plants.pnl && self.pnl.is_none() {
+        if self.plants.pnl && self.pnl.is_none() && self.config.account().is_some() {
             self.ensure_pnl_plant().await?;
         }
         Ok(())
