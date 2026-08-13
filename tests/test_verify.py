@@ -65,8 +65,10 @@ class FakeSession:
             },
             {
                 "type": "history_tick",
-                "close_price": 21000.5,
-                "num_trades": 2,
+                "symbol": symbol,
+                "exchange": exchange,
+                "trade_price": 21000.5,
+                "trade_size": 2,
                 "ts_event_ns": 1_700_000_011_000_000_000,
             },
         ]
@@ -104,6 +106,24 @@ def test_compare_ticks_overlap():
     assert cmp["matched"] == 2
     assert cmp["overlap_ratio"] == 1.0
     assert cmp["max_price_diff"] == 0.0
+
+
+def test_compare_ticks_window_uses_min_max_not_list_ends():
+    # Deliberately unsorted live list: ends are not the time window.
+    live = [
+        RecordedTick(1_700_000_020_000_000_000, 21001.0, 1.0, "live"),
+        RecordedTick(1_700_000_010_000_000_000, 21000.25, 1.0, "live"),
+    ]
+    hist = [
+        RecordedTick(1_700_000_010_000_000_000, 21000.25, 1.0, "history"),
+        RecordedTick(1_700_000_015_000_000_000, 21000.5, 1.0, "history"),
+        RecordedTick(1_700_000_020_000_000_000, 21001.0, 1.0, "history"),
+    ]
+    cmp = compare_ticks(live, hist)
+    assert cmp["live_window_ns"]["start"] == 1_700_000_010_000_000_000
+    assert cmp["live_window_ns"]["end"] == 1_700_000_020_000_000_000
+    assert cmp["history_in_window"] == 3
+    assert cmp["matched"] == 2
 
 
 def test_compare_detects_usec_truncation_as_fuzzy():

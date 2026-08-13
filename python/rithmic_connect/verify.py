@@ -57,40 +57,26 @@ def _tick_key(ts_event_ns: int, price: float) -> tuple[int, float]:
 
 def _event_to_recorded(event: Mapping[str, Any], *, source: str) -> RecordedTick | None:
     etype = event.get("type")
-    if etype == "last_trade":
-        price = event.get("trade_price")
-        ts = event.get("ts_event_ns")
-        if ts is None and event.get("ssboe") is not None:
-            ts = int(event["ssboe"]) * 1_000_000_000 + int(event.get("usecs") or 0) * 1_000
-        if price is None or ts is None:
-            return None
-        return RecordedTick(
-            ts_event_ns=int(ts),
-            price=float(price),
-            size=float(event["trade_size"]) if event.get("trade_size") is not None else None,
-            source=source,
+    if etype not in ("last_trade", "history_tick"):
+        return None
+    price = event.get("trade_price")
+    size = event.get("trade_size")
+    ts = event.get("ts_event_ns")
+    if ts is None and event.get("ssboe") is not None:
+        usecs = event.get("usecs")
+        if usecs is None:
+            usecs = 0
+        ts = int(event["ssboe"]) * 1_000_000_000 + int(usecs) * 1_000
+    if price is None or size is None or ts is None:
+        raise ValueError(
+            f"{source} {etype} missing trade_price/trade_size/timestamp: {dict(event)!r}"
         )
-    if etype in ("history_tick", None) and (
-        event.get("trade_price") is not None or event.get("close_price") is not None
-    ):
-        price = event.get("trade_price")
-        if price is None:
-            price = event.get("close_price") or event.get("open_price")
-        ts = event.get("ts_event_ns")
-        if ts is None and event.get("ssboe") is not None:
-            ts = int(event["ssboe"]) * 1_000_000_000 + int(event.get("usecs") or 0) * 1_000
-        if price is None or ts is None:
-            return None
-        size = event.get("trade_size")
-        if size is None:
-            size = event.get("num_trades") or event.get("volume")
-        return RecordedTick(
-            ts_event_ns=int(ts),
-            price=float(price),
-            size=float(size) if size is not None else None,
-            source=source,
-        )
-    return None
+    return RecordedTick(
+        ts_event_ns=int(ts),
+        price=float(price),
+        size=float(size),
+        source=source,
+    )
 
 
 def record_live_trades(
@@ -102,9 +88,11 @@ def record_live_trades(
     max_events: int = 500,
 ) -> list[RecordedTick]:
     """Subscribe and record last-trade events for a short window."""
+    if duration_sec <= 0:
+        raise ValueError(f"duration_sec must be > 0, got {duration_sec}")
     session.subscribe(symbol, exchange)
     out: list[RecordedTick] = []
-    deadline = time.time() + max(duration_sec, 0.5)
+    deadline = time.time() + duration_sec
     while time.time() < deadline and len(out) < max_events:
         event = session.poll_event()
         if event is None:
@@ -113,10 +101,8 @@ def record_live_trades(
         tick = _event_to_recorded(event, source="live")
         if tick is not None:
             out.append(tick)
-    try:
-        session.unsubscribe(symbol, exchange)
-    except Exception:  # noqa: BLE001 — best-effort
-        pass
+    session.unsubscribe(symbol, exchange)
+    out.sort(key=lambda t: t.ts_event_ns)
     return out
 
 
@@ -132,8 +118,9 @@ def load_history_trades(
     out: list[RecordedTick] = []
     for item in raw:
         tick = _event_to_recorded(item, source="history")
-        if tick is not None:
-            out.append(tick)
+        if tick is None:
+            raise ValueError(f"unexpected history payload type: {item!r}")
+        out.append(tick)
     out.sort(key=lambda t: t.ts_event_ns)
     return out
 
@@ -162,8 +149,8 @@ def compare_ticks(
             "notes": [],
         }
 
-    live_start = live[0].ts_event_ns
-    live_end = live[-1].ts_event_ns
+    live_start = min(t.ts_event_ns for t in live)
+    live_end = max(t.ts_event_ns for t in live)
     hist_in_window = [h for h in history if live_start <= h.ts_event_ns <= live_end]
 
     live_map: dict[tuple[int, float], RecordedTick] = {}

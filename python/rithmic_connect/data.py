@@ -37,7 +37,6 @@ from nautilus_trader.model.objects import Quantity
 
 from rithmic_connect._convert import ConvertError
 from rithmic_connect._convert import bbo_to_fields
-from rithmic_connect._convert import history_tick_to_trade_fields
 from rithmic_connect._convert import last_trade_to_fields
 from rithmic_connect._convert import order_book_to_fields
 from rithmic_connect._convert import time_bar_to_fields
@@ -60,7 +59,9 @@ def _aggressor(value: Any) -> AggressorSide:
         return AggressorSide.BUYER
     if value in (2, "2", "SELL", "SELLER", "ask"):
         return AggressorSide.SELLER
-    return AggressorSide.NO_AGGRESSOR
+    if value is None:
+        return AggressorSide.NO_AGGRESSOR
+    raise ValueError(f"unknown aggressor value: {value!r}")
 
 
 def _price(value: float) -> Price:
@@ -71,25 +72,31 @@ def _price(value: float) -> Price:
 
 
 def fields_to_trade_tick(fields: dict[str, Any], ts_init: int) -> TradeTick:
-    size = max(int(fields["size"]), 1)
+    size = int(fields["size"])
+    if size < 1:
+        raise ConvertError(f"trade size must be >= 1, got {size}")
     return TradeTick(
         InstrumentId.from_str(fields["instrument_id"]),
         _price(fields["price"]),
         Quantity.from_int(size),
         _aggressor(fields.get("aggressor")),
-        TradeId(str(fields.get("ts_event", ts_init))),
+        TradeId(str(fields["ts_event"])),
         int(fields["ts_event"]),
         ts_init,
     )
 
 
 def fields_to_quote_tick(fields: dict[str, Any], ts_init: int) -> QuoteTick:
+    bid_size = int(fields["bid_size"])
+    ask_size = int(fields["ask_size"])
+    if bid_size < 1 or ask_size < 1:
+        raise ConvertError(f"quote sizes must be >= 1, got bid={bid_size} ask={ask_size}")
     return QuoteTick(
         InstrumentId.from_str(fields["instrument_id"]),
         _price(fields["bid_price"]),
         _price(fields["ask_price"]),
-        Quantity.from_int(max(int(fields["bid_size"]), 1)),
-        Quantity.from_int(max(int(fields["ask_size"]), 1)),
+        Quantity.from_int(bid_size),
+        Quantity.from_int(ask_size),
         int(fields["ts_event"]),
         ts_init,
     )
@@ -103,14 +110,16 @@ def fields_to_order_book_deltas(fields: dict[str, Any], ts_init: int) -> OrderBo
     ]
     for level in fields["levels"]:
         side = OrderSide.BUY if level["side"] == "BUY" else OrderSide.SELL
-        size = max(int(level["size"]), 0)
-        if size <= 0:
+        size = int(level["size"])
+        if size < 0:
+            raise ConvertError(f"order book level size must be >= 0, got {size}")
+        if size == 0:
             continue
         order = BookOrder(
             side,
             _price(level["price"]),
             Quantity.from_int(size),
-            int(level.get("order_id", 0)),
+            int(level["order_id"]),
         )
         deltas.append(
             OrderBookDelta(
@@ -127,14 +136,16 @@ def fields_to_order_book_deltas(fields: dict[str, Any], ts_init: int) -> OrderBo
 
 
 def fields_to_bar(fields: dict[str, Any], bar_type: BarType, ts_init: int) -> Bar:
-    volume = max(int(fields.get("volume") or 0), 0)
+    volume = int(fields["volume"])
+    if volume < 0:
+        raise ConvertError(f"bar volume must be >= 0, got {volume}")
     return Bar(
         bar_type,
         _price(fields["open"]),
         _price(fields["high"]),
         _price(fields["low"]),
         _price(fields["close"]),
-        Quantity.from_int(volume) if volume > 0 else Quantity.from_int(0),
+        Quantity.from_int(volume),
         int(fields["ts_event"]),
         ts_init,
     )
@@ -144,16 +155,18 @@ def bar_type_to_rithmic(bar_type: BarType) -> tuple[int, int]:
     """Map a Nautilus BarType to (rithmic_bar_type, period)."""
     aggregation = bar_type.spec.aggregation
     step = int(bar_type.spec.step)
+    if step < 1:
+        raise ValueError(f"bar step must be >= 1, got {step}")
     if aggregation == BarAggregation.SECOND:
-        return _RITHMIC_SECOND, max(step, 1)
+        return _RITHMIC_SECOND, step
     if aggregation == BarAggregation.MINUTE:
-        return _RITHMIC_MINUTE, max(step, 1)
+        return _RITHMIC_MINUTE, step
     if aggregation == BarAggregation.HOUR:
-        return _RITHMIC_MINUTE, max(step * 60, 1)
+        return _RITHMIC_MINUTE, step * 60
     if aggregation == BarAggregation.DAY:
-        return _RITHMIC_DAILY, max(step, 1)
+        return _RITHMIC_DAILY, step
     if aggregation == BarAggregation.WEEK:
-        return _RITHMIC_WEEKLY, max(step, 1)
+        return _RITHMIC_WEEKLY, step
     raise ValueError(
         f"unsupported bar aggregation {aggregation!r} for Rithmic history "
         "(supported: SECOND, MINUTE, HOUR→minute, DAY, WEEK)"
@@ -196,8 +209,13 @@ class RithmicDataClient(LiveMarketDataClient):
         for instrument in self._instrument_provider.list_all():
             self._handle_data(instrument)
             info = instrument.info or {}
-            exchange = str(info.get("rithmic_exchange", "CME"))
-            symbol = str(info.get("rithmic_symbol", instrument.raw_symbol.value))
+            try:
+                exchange = str(info["rithmic_exchange"])
+                symbol = str(info["rithmic_symbol"])
+            except KeyError as exc:
+                raise ValueError(
+                    f"instrument {instrument.id} missing rithmic route fields in info"
+                ) from exc
             self._instrument_routes[str(instrument.id)] = (symbol, exchange)
         self._poll_task = self.create_task(self._poll_loop(), log_msg="rithmic_poll")
 
@@ -237,9 +255,11 @@ class RithmicDataClient(LiveMarketDataClient):
 
     def _route(self, instrument_id: InstrumentId) -> tuple[str, str]:
         key = str(instrument_id)
-        if key in self._instrument_routes:
-            return self._instrument_routes[key]
-        return instrument_id.symbol.value, "CME"
+        if key not in self._instrument_routes:
+            raise ValueError(
+                f"no Rithmic route for {instrument_id}; load instruments before subscribe/request"
+            )
+        return self._instrument_routes[key]
 
     async def _subscribe_trade_ticks(self, command: SubscribeTradeTicks) -> None:
         symbol, exchange = self._route(command.instrument_id)
@@ -271,26 +291,68 @@ class RithmicDataClient(LiveMarketDataClient):
 
     async def _request_trade_ticks(self, request: RequestTradeTicks) -> None:
         symbol, exchange = self._route(request.instrument_id)
-        start = int(request.start.timestamp()) if request.start else 0
-        end = int(request.end.timestamp()) if request.end else start
-        ticks_raw = await asyncio.to_thread(
-            self._session.load_ticks,
-            symbol,
-            exchange,
-            start,
-            end,
-        )
+        if request.start is None or request.end is None:
+            self._log.error("RequestTradeTicks requires start and end")
+            self._handle_trade_ticks(
+                request.instrument_id,
+                [],
+                request.id,
+                request.start,
+                request.end,
+                request.params,
+            )
+            return
+        start = int(request.start.timestamp())
+        end = int(request.end.timestamp())
+        try:
+            ticks_raw = await asyncio.to_thread(
+                self._session.load_ticks,
+                symbol,
+                exchange,
+                start,
+                end,
+            )
+        except Exception as exc:  # noqa: BLE001 — always complete RequestTradeTicks
+            self._log.error(f"Error requesting trade ticks for {request.instrument_id}: {exc}")
+            self._handle_trade_ticks(
+                request.instrument_id,
+                [],
+                request.id,
+                request.start,
+                request.end,
+                request.params,
+            )
+            return
+
         ts_init = self._clock.timestamp_ns()
         ticks: list[TradeTick] = []
-        for raw in ticks_raw:
-            payload = dict(raw)
-            payload.setdefault("symbol", symbol)
-            payload.setdefault("exchange", exchange)
-            try:
-                fields = history_tick_to_trade_fields(payload)
+        try:
+            for raw in ticks_raw:
+                payload = dict(raw)
+                if "symbol" not in payload or payload["symbol"] is None:
+                    payload["symbol"] = symbol
+                if "exchange" not in payload or payload["exchange"] is None:
+                    payload["exchange"] = exchange
+                fields = last_trade_to_fields(payload)
                 ticks.append(fields_to_trade_tick(fields, ts_init))
-            except ConvertError:
-                continue
+        except (ConvertError, ValueError) as exc:
+            self._log.error(
+                f"Invalid history tick for {request.instrument_id}: {exc}"
+            )
+            self._handle_trade_ticks(
+                request.instrument_id,
+                [],
+                request.id,
+                request.start,
+                request.end,
+                request.params,
+            )
+            return
+
+        # Order: Rithmic FORWARDS replay + session sorts by ts_event_ns.
+        # Nautilus _handle_trade_ticks does not re-sort; last-N needs time order.
+        if request.limit:
+            ticks = ticks[-request.limit :]
         self._handle_trade_ticks(
             request.instrument_id,
             ticks,
@@ -316,29 +378,67 @@ class RithmicDataClient(LiveMarketDataClient):
                 request.params,
             )
             return
-        start = int(request.start.timestamp()) if request.start else 0
-        end = int(request.end.timestamp()) if request.end else start
-        bars_raw = await asyncio.to_thread(
-            self._session.load_time_bars,
-            symbol,
-            exchange,
-            start,
-            end,
-            rithmic_type,
-            period,
-        )
+        if request.start is None or request.end is None:
+            self._log.error("RequestBars requires start and end")
+            self._handle_bars(
+                bar_type,
+                [],
+                request.id,
+                request.start,
+                request.end,
+                request.params,
+            )
+            return
+        start = int(request.start.timestamp())
+        end = int(request.end.timestamp())
+        try:
+            bars_raw = await asyncio.to_thread(
+                self._session.load_time_bars,
+                symbol,
+                exchange,
+                start,
+                end,
+                rithmic_type,
+                period,
+            )
+        except Exception as exc:  # noqa: BLE001 — always complete RequestBars
+            self._log.error(f"Error requesting bars for {bar_type}: {exc}")
+            self._handle_bars(
+                bar_type,
+                [],
+                request.id,
+                request.start,
+                request.end,
+                request.params,
+            )
+            return
+
         ts_init = self._clock.timestamp_ns()
         bars: list[Bar] = []
-        for raw in bars_raw:
-            payload = dict(raw)
-            payload.setdefault("symbol", symbol)
-            payload.setdefault("exchange", exchange)
-            try:
+        try:
+            for raw in bars_raw:
+                payload = dict(raw)
+                if "symbol" not in payload or payload["symbol"] is None:
+                    payload["symbol"] = symbol
+                if "exchange" not in payload or payload["exchange"] is None:
+                    payload["exchange"] = exchange
                 fields = time_bar_to_fields(payload)
                 bars.append(fields_to_bar(fields, bar_type, ts_init))
-            except ConvertError:
-                continue
-        bars.sort(key=lambda b: b.ts_event)
+        except (ConvertError, ValueError) as exc:
+            self._log.error(f"Invalid history bar for {bar_type}: {exc}")
+            self._handle_bars(
+                bar_type,
+                [],
+                request.id,
+                request.start,
+                request.end,
+                request.params,
+            )
+            return
+
+        # Order: FORWARDS + session sort by ts_event_ns (NT does not re-sort).
+        if request.limit:
+            bars = bars[-request.limit :]
         self._handle_bars(
             bar_type,
             bars,

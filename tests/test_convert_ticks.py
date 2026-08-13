@@ -49,6 +49,7 @@ ACCOUNT_PNL_FIXTURE = {
     "open_position_pnl": "50.00",
     "closed_position_pnl": "75.50",
     "available_buying_power": "50000.00",
+    "currency": "USD",
     "is_snapshot": True,
 }
 
@@ -114,7 +115,14 @@ def test_partial_bbo_raises() -> None:
 
 def test_account_pnl_requires_account_id() -> None:
     with pytest.raises(ConvertError):
-        account_pnl_to_fields({"account_balance": "1"})
+        account_pnl_to_fields({"account_balance": "1", "currency": "USD"})
+
+
+def test_account_pnl_requires_balance_and_currency() -> None:
+    with pytest.raises(ConvertError):
+        account_pnl_to_fields({"account_id": "A1"})
+    with pytest.raises(ConvertError):
+        account_pnl_to_fields({"account_id": "A1", "cash_on_hand": "1"})
 
 
 def test_order_book_fixture_to_fields() -> None:

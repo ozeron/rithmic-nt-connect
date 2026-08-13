@@ -321,35 +321,35 @@ impl HistoryTickDto {
     pub(crate) fn from_response(resp: &RithmicResponse) -> Option<Self> {
         match &resp.message {
             RithmicMessage::ResponseTickBarReplay(m) => {
-                let ssboe = m.data_bar_ssboe.first().copied();
-                let usecs = m.data_bar_usecs.first().copied();
+                // Incomplete tick bars are dropped (no invented OHLC / size).
+                // Prefer close time (index 1): rithmic-rs docs note the first
+                // record's open can be the request window start, not trade time.
+                let close_price = m.close_price?;
+                let num_trades = m.num_trades.filter(|n| *n > 0)?;
+                let ssboe = match m.data_bar_ssboe.as_slice() {
+                    [_, close, ..] => *close,
+                    [only] => *only,
+                    [] => return None,
+                };
+                let usecs = match m.data_bar_usecs.as_slice() {
+                    [_, close, ..] => Some(*close),
+                    [only] => Some(*only),
+                    [] => None,
+                };
                 Some(Self {
                     symbol: m.symbol.clone(),
                     exchange: m.exchange.clone(),
                     open_price: m.open_price,
                     high_price: m.high_price,
                     low_price: m.low_price,
-                    close_price: m.close_price,
+                    close_price: Some(close_price),
                     volume: m.volume,
-                    num_trades: m.num_trades,
-                    ssboe,
+                    num_trades: Some(num_trades),
+                    ssboe: Some(ssboe),
                     usecs,
-                    ts_event_ns: ts_ns(ssboe, usecs),
+                    ts_event_ns: ts_ns(Some(ssboe), usecs),
                 })
             }
-            RithmicMessage::LastTrade(t) => Some(Self {
-                symbol: t.symbol.clone(),
-                exchange: t.exchange.clone(),
-                open_price: t.trade_price,
-                high_price: t.trade_price,
-                low_price: t.trade_price,
-                close_price: t.trade_price,
-                volume: t.volume,
-                num_trades: Some(1),
-                ssboe: t.ssboe,
-                usecs: t.usecs,
-                ts_event_ns: ts_ns(t.ssboe, t.usecs),
-            }),
             _ => None,
         }
     }
@@ -359,47 +359,54 @@ impl HistoryBarDto {
     pub(crate) fn from_response(resp: &RithmicResponse) -> Option<Self> {
         match &resp.message {
             RithmicMessage::ResponseTimeBarReplay(m) => {
-                // End-of-replay markers carry no OHLC.
-                if m.open_price.is_none()
-                    && m.high_price.is_none()
-                    && m.low_price.is_none()
-                    && m.close_price.is_none()
-                {
-                    return None;
-                }
+                // End-of-replay / incomplete markers are dropped (no invented OHLCV).
+                let open_price = m.open_price?;
+                let high_price = m.high_price?;
+                let low_price = m.low_price?;
+                let close_price = m.close_price?;
+                let volume = m.volume?;
+                let marker = m.marker?;
                 Some(Self {
                     symbol: m.symbol.clone(),
                     exchange: m.exchange.clone(),
                     bar_type: m.r#type,
                     period: m.period.clone(),
-                    marker: m.marker,
-                    open_price: m.open_price,
-                    high_price: m.high_price,
-                    low_price: m.low_price,
-                    close_price: m.close_price,
-                    volume: m.volume,
+                    marker: Some(marker),
+                    open_price: Some(open_price),
+                    high_price: Some(high_price),
+                    low_price: Some(low_price),
+                    close_price: Some(close_price),
+                    volume: Some(volume),
                     num_trades: m.num_trades,
                     bid_volume: m.bid_volume,
                     ask_volume: m.ask_volume,
-                    ts_event_ns: m.marker.map(|sec| rithmic_to_unix_nanos(sec, 0)),
+                    ts_event_ns: Some(rithmic_to_unix_nanos(marker, 0)),
                 })
             }
-            RithmicMessage::TimeBar(m) => Some(Self {
-                symbol: m.symbol.clone(),
-                exchange: m.exchange.clone(),
-                bar_type: m.r#type,
-                period: m.period.clone(),
-                marker: m.marker,
-                open_price: m.open_price,
-                high_price: m.high_price,
-                low_price: m.low_price,
-                close_price: m.close_price,
-                volume: m.volume,
-                num_trades: m.num_trades,
-                bid_volume: m.bid_volume,
-                ask_volume: m.ask_volume,
-                ts_event_ns: m.marker.map(|sec| rithmic_to_unix_nanos(sec, 0)),
-            }),
+            RithmicMessage::TimeBar(m) => {
+                let open_price = m.open_price?;
+                let high_price = m.high_price?;
+                let low_price = m.low_price?;
+                let close_price = m.close_price?;
+                let volume = m.volume?;
+                let marker = m.marker?;
+                Some(Self {
+                    symbol: m.symbol.clone(),
+                    exchange: m.exchange.clone(),
+                    bar_type: m.r#type,
+                    period: m.period.clone(),
+                    marker: Some(marker),
+                    open_price: Some(open_price),
+                    high_price: Some(high_price),
+                    low_price: Some(low_price),
+                    close_price: Some(close_price),
+                    volume: Some(volume),
+                    num_trades: m.num_trades,
+                    bid_volume: m.bid_volume,
+                    ask_volume: m.ask_volume,
+                    ts_event_ns: Some(rithmic_to_unix_nanos(marker, 0)),
+                })
+            }
             _ => None,
         }
     }

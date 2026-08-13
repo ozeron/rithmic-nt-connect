@@ -33,10 +33,14 @@ def resolve_front_month(
     raw = session.get_front_month(root, exchange)
     if not isinstance(raw, Mapping):
         raise FrontMonthError(f"unexpected front-month payload type: {type(raw)!r}")
-    trading_symbol = raw.get("trading_symbol") or raw.get("symbol")
+    trading_symbol = raw.get("trading_symbol")
     if not trading_symbol:
         raise FrontMonthError(f"front-month response missing trading_symbol for {root}/{exchange}")
-    trading_exchange = raw.get("trading_exchange") or raw.get("exchange") or exchange
+    trading_exchange = raw.get("trading_exchange")
+    if not trading_exchange:
+        raise FrontMonthError(
+            f"front-month response missing trading_exchange for {root}/{exchange}"
+        )
     return {
         "root": root,
         "exchange": exchange,

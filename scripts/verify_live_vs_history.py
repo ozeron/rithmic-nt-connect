@@ -32,6 +32,16 @@ def _load_dotenv(path: Path) -> None:
         os.environ.setdefault(k.strip(), v.strip().strip("'").strip('"'))
 
 
+def _load_dotenv_files() -> None:
+    """Load repo `.env`, then optional paths from `RITHMIC_CONNECT_DOTENV` (os.pathsep)."""
+    _load_dotenv(ROOT / ".env")
+    extra = os.environ.get("RITHMIC_CONNECT_DOTENV", "")
+    for part in extra.split(os.pathsep):
+        part = part.strip()
+        if part:
+            _load_dotenv(Path(part))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", default=None, help="Product root (default: env symbol or NQ)")
@@ -55,13 +65,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    _load_dotenv(ROOT / ".env")
-    my046_root = Path(
-        "/Users/ozeron/code/algotrading/quant-guild-work/projects/"
-        "MY046_motivewave_simple_ls_demo"
-    )
-    _load_dotenv(my046_root / ".env")
-    _load_dotenv(my046_root / "vendor" / "parbhatc-rithmic" / ".env")
+    _load_dotenv_files()
 
     try:
         from rithmic_connect.config import SessionConfig

@@ -85,6 +85,10 @@ def bbo_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
 def account_pnl_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
     """Map an AccountPnL venue dict to AccountState-oriented fields."""
     _require(d, "account_id")
+    if d.get("cash_on_hand") is None and d.get("account_balance") is None:
+        raise ConvertError("missing cash_on_hand or account_balance")
+    if d.get("currency") is None:
+        raise ConvertError("missing currency")
     return {
         "type": "account_pnl",
         "account_id": str(d["account_id"]),
@@ -98,7 +102,7 @@ def account_pnl_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
         "closed_position_pnl": d.get("closed_position_pnl"),
         "available_buying_power": d.get("available_buying_power"),
         "used_buying_power": d.get("used_buying_power"),
-        "currency": d.get("currency", "USD"),
+        "currency": d.get("currency"),
         "is_snapshot": d.get("is_snapshot"),
         "venue": VENUE,
     }
@@ -116,18 +120,28 @@ def order_book_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
     if ts is None:
         raise ConvertError("missing timestamp fields: ts_event_ns or ssboe")
 
-    bid_price = list(d.get("bid_price") or [])
-    bid_size = list(d.get("bid_size") or [])
-    ask_price = list(d.get("ask_price") or [])
-    ask_size = list(d.get("ask_size") or [])
+    if "bid_price" not in d or "ask_price" not in d:
+        raise ConvertError("missing required fields: bid_price, ask_price")
+    bid_price = list(d["bid_price"] if d["bid_price"] is not None else [])
+    bid_size = list(d["bid_size"] if d.get("bid_size") is not None else [])
+    ask_price = list(d["ask_price"] if d["ask_price"] is not None else [])
+    ask_size = list(d["ask_size"] if d.get("ask_size") is not None else [])
+    if len(bid_price) != len(bid_size):
+        raise ConvertError(
+            f"bid_price/bid_size length mismatch: {len(bid_price)} vs {len(bid_size)}"
+        )
+    if len(ask_price) != len(ask_size):
+        raise ConvertError(
+            f"ask_price/ask_size length mismatch: {len(ask_price)} vs {len(ask_size)}"
+        )
     if not bid_price and not ask_price:
         raise ConvertError("order book has no bid/ask levels")
 
     levels: list[dict[str, Any]] = []
     for i, price in enumerate(bid_price):
-        size = bid_size[i] if i < len(bid_size) else 0
+        size = bid_size[i]
         if price is None or size is None:
-            continue
+            raise ConvertError(f"bid level {i} has null price/size")
         levels.append(
             {
                 "side": "BUY",
@@ -137,9 +151,9 @@ def order_book_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
             }
         )
     for i, price in enumerate(ask_price):
-        size = ask_size[i] if i < len(ask_size) else 0
+        size = ask_size[i]
         if price is None or size is None:
-            continue
+            raise ConvertError(f"ask level {i} has null price/size")
         levels.append(
             {
                 "side": "SELL",
@@ -148,8 +162,6 @@ def order_book_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
                 "order_id": 1_000_000 + i + 1,
             }
         )
-    if not levels:
-        raise ConvertError("order book levels empty after filtering")
 
     return {
         "type": "order_book",
@@ -165,14 +177,10 @@ def order_book_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
 
 def instrument_pnl_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
     """Map an InstrumentPnL venue dict to position-oriented fields."""
-    _require(d, "symbol")
+    _require(d, "symbol", "net_quantity")
     symbol = str(d["symbol"])
     exchange = d.get("exchange")
-    net = d.get("net_quantity")
-    if net is None:
-        open_qty = d.get("open_position_quantity")
-        net = open_qty if open_qty is not None else 0
-    net_i = int(net)
+    net_i = int(d["net_quantity"])
     if net_i > 0:
         side = "LONG"
         qty = net_i
@@ -198,36 +206,29 @@ def instrument_pnl_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def history_tick_to_trade_fields(d: Mapping[str, Any]) -> dict[str, Any]:
-    """Normalize a history_tick dict into last_trade_to_fields inputs."""
-    payload = dict(d)
-    if payload.get("trade_price") is None:
-        payload["trade_price"] = payload.get("close_price") or payload.get("open_price")
-    if payload.get("trade_size") is None:
-        payload["trade_size"] = payload.get("num_trades") or payload.get("volume") or 1
-    return last_trade_to_fields(payload)
-
-
 def time_bar_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
     """Map a history_bar venue dict to Bar-oriented fields."""
-    _require(d, "open_price", "high_price", "low_price", "close_price")
-    symbol = d.get("symbol")
+    _require(d, "symbol", "open_price", "high_price", "low_price", "close_price", "volume")
+    symbol = str(d["symbol"])
     exchange = d.get("exchange")
     ts = _ts_ns(d)
     if ts is None and d.get("marker") is not None:
         ts = int(d["marker"]) * 1_000_000_000
     if ts is None:
         raise ConvertError("missing timestamp fields: ts_event_ns, ssboe, or marker")
+    volume = float(d["volume"])
+    if volume < 0:
+        raise ConvertError(f"bar volume must be >= 0, got {volume}")
     return {
         "type": "bar",
-        "instrument_id": instrument_id_from_symbol(str(symbol), exchange) if symbol else None,
+        "instrument_id": instrument_id_from_symbol(symbol, exchange),
         "symbol": symbol,
         "exchange": exchange,
         "open": float(d["open_price"]),
         "high": float(d["high_price"]),
         "low": float(d["low_price"]),
         "close": float(d["close_price"]),
-        "volume": float(d.get("volume") or 0),
+        "volume": volume,
         "num_trades": d.get("num_trades"),
         "bar_type": d.get("bar_type"),
         "period": d.get("period"),

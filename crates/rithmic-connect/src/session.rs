@@ -217,11 +217,13 @@ impl RithmicSession {
                 end_time_sec,
             )
             .await?;
-        Ok(responses
+        let mut ticks: Vec<HistoryTickDto> = responses
             .iter()
             .filter_map(HistoryTickDto::from_response)
-            .filter(|t| t.close_price.is_some() || t.open_price.is_some())
-            .collect())
+            .collect();
+        // rithmic-rs does not document chronological order; sort by trade time.
+        ticks.sort_by_key(|t| t.ts_event_ns.unwrap_or(0));
+        Ok(ticks)
     }
 
     /// Load all time bars in the window via history `*_all`.
@@ -245,10 +247,12 @@ impl RithmicSession {
                 end_time_sec,
             )
             .await?;
-        Ok(responses
+        let mut bars: Vec<HistoryBarDto> = responses
             .iter()
             .filter_map(HistoryBarDto::from_response)
-            .collect())
+            .collect();
+        bars.sort_by_key(|b| b.ts_event_ns.unwrap_or(0));
+        Ok(bars)
     }
 
     /// Subscribe to PnL updates and request a snapshot when account is configured.
