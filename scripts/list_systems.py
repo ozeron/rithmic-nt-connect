@@ -17,19 +17,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "python"))
 
 
-def _load_dotenv(path: Path) -> None:
-    if not path.is_file():
-        return
-    for raw in path.read_text().splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, v = line.split("=", 1)
-        os.environ.setdefault(k.strip(), v.strip().strip("'").strip('"'))
-
-
 def main() -> int:
-    _load_dotenv(ROOT / ".env")
+    from rithmic_nt_connect import load_dotenv
+
+    load_dotenv(ROOT / ".env")
     parser = argparse.ArgumentParser(description="List Rithmic systems on a gateway")
     parser.add_argument(
         "--url",

@@ -58,19 +58,10 @@ from rithmic_nt_connect._orders import trailing_ticks_from_order
 from rithmic_nt_connect.config import RithmicExecClientConfig
 from rithmic_nt_connect.constants import ADAPTER_NAME
 from rithmic_nt_connect.constants import VENUE
-from rithmic_nt_connect.errors import ChannelError
+from rithmic_nt_connect.errors import CHANNEL_ERRORS
 from rithmic_nt_connect.errors import VenueQueryUnavailable
 from rithmic_nt_connect.providers import RithmicInstrumentProvider
 from rithmic_nt_connect.session import WireSession
-
-try:
-    from rithmic_nt_connect._lib import ChannelClosedError as _LibChannelClosed
-    from rithmic_nt_connect._lib import ChannelLaggedError as _LibChannelLagged
-    from rithmic_nt_connect._lib import NotConnectedError as _LibNotConnected
-except ImportError:  # pragma: no cover - extension not built
-    _LibChannelClosed = ()
-    _LibChannelLagged = ()
-    _LibNotConnected = ()
 
 
 _POSITION_SIDE = {
@@ -79,11 +70,11 @@ _POSITION_SIDE = {
     "FLAT": PositionSide.FLAT,
 }
 
-_CHANNEL_ERRORS = (_LibChannelLagged, _LibChannelClosed, _LibNotConnected, ChannelError)
 
-
-def _price(value: float | Decimal | str) -> Price:
-    return Price.from_str(format_price_str(value))
+def _price(value: float | Decimal | str, precision: int | None = None) -> Price:
+    if precision is None:
+        return Price.from_str(format_price_str(value))
+    return Price.from_str(f"{float(value):.{int(precision)}f}")
 
 
 class RithmicExecutionClient(LiveExecutionClient):
@@ -190,7 +181,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         """Return next event, or None on transient errors; re-raise channel failures."""
         try:
             return await asyncio.to_thread(poll_fn)
-        except _CHANNEL_ERRORS:
+        except CHANNEL_ERRORS:
             raise
         except Exception as exc:  # noqa: BLE001
             self._log.warning(f"poll transient error: {exc}")
@@ -335,6 +326,16 @@ class RithmicExecutionClient(LiveExecutionClient):
             avg_px_open=avg_dec,
         )
 
+    def _price_for_instrument(
+        self,
+        instrument_id: InstrumentId,
+        value: float | Decimal | str,
+    ) -> Price:
+        instrument = self._cache.instrument(instrument_id)
+        if instrument is not None:
+            return instrument.make_price(value)
+        return _price(value)
+
     def _route(self, instrument_id: InstrumentId) -> tuple[str, str]:
         instrument = self._cache.instrument(instrument_id)
         if instrument is None:
@@ -420,13 +421,14 @@ class RithmicExecutionClient(LiveExecutionClient):
                 if action.quantity is not None
                 else order.quantity
             )
+            prec = int(order.price.precision) if order.has_price else None
             price = (
-                _price(action.price)
+                _price(action.price, prec)
                 if action.price is not None
                 else (order.price if order.has_price else None)
             )
             trigger = (
-                _price(action.trigger)
+                _price(action.trigger, prec)
                 if action.trigger is not None
                 else (order.trigger_price if order.has_trigger_price else None)
             )
@@ -463,7 +465,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                 order.side,
                 order.order_type,
                 Quantity.from_int(int(action.fill_qty)),
-                _price(action.fill_px),
+                self._price_for_instrument(instrument_id, action.fill_px),
                 Currency.from_str("USD"),
                 commission,
                 LiquiditySide.NO_LIQUIDITY_SIDE,

@@ -22,9 +22,9 @@ Acceptance: **NQ / CME via LucidTrading**. One Rithmic login (close MotiveWave /
 | Environments | `SessionConfig.env` Live / Demo / Test | **Done**. LucidTrading + `wss://rprotocol.rithmic.com:443`. |
 | Account modes | Margin + `OmsType.NETTING`; trading gated | **Partial**. `enable_trading=False` default. Trading / PnL still require FCM / IB / account triple. |
 | Live trades / quotes | `TradeTick`, `QuoteTick` | **Done** |
-| Order-book summary | `OrderBookDeltas` (L2) | **Partial** — `Clear` + `Add`, flags `0`; book unsubscribe is a no-op. **Close-out.** |
-| History ticks / time bars | Request path, `*_all` | **Done** |
-| Live venue `EXTERNAL` bars | Not advertised | **N/A** — `INTERNAL` aggregate from ticks/quotes |
+| Order-book summary | `OrderBookDeltas` (L2) | **Partial** — snapshot flags `F_SNAPSHOT` / `F_LAST`. No dedicated book-unsubscribe wire (intent dropped only). |
+| History ticks / time bars | Request path, `*_all` | **Done** — Rust slices (15m ticks / 4h bars), transient + empty retry, sort/dedup. Daily/weekly replay uses calendar `YYYYMMDD` indexes (Lucid 2026-08-13). Python `load_front_month_instrument` / `load_trade_ticks` / `load_time_bars`. |
+| Live venue `EXTERNAL` bars | 1m / 15m / 1h / 1d | **Partial** — history `request_bars` + history-plant `subscribe_time_bar_updates`. Not Lucid-proven. 1s stays INTERNAL. |
 | Depth-by-order / L3 MBO | Not advertised | **N/A** until a separate slice |
 | Mark / index / funding / greeks | Not advertised | **N/A** |
 | Catalog / Parquet | Other repo | **N/A** |
@@ -34,7 +34,7 @@ Acceptance: **NQ / CME via LucidTrading**. One Rithmic login (close MotiveWave /
 | Submit / cancel / modify + fills | Gated order plant | **Partial** — on `main`; post-send errors reported as reject; untracked notifications dropped. **Close-out.** |
 | Order status reports | Cache-backed only | **Done** (honest: not a venue snapshot) |
 | Fill reports | Query unavailable | **Done** (`VenueQueryUnavailable`) |
-| Reconnect + MD resubscribe | Planned | **Not done** — exec plant resyncs; ticker does not. **Close-out.** |
+| Reconnect + MD resubscribe | Planned | **Partial** — ticker poll resyncs last-trade/BBO + book + EXTERNAL bar intent. Not live-proven. |
 | Python v2 / LiveNode | Not this support line | **N/A** |
 
 **Protocol boundaries:** ticker, history, PnL, order plants. Public MD vs private exec.
@@ -47,6 +47,7 @@ Acceptance: **NQ / CME via LucidTrading**. One Rithmic login (close MotiveWave /
 | `scripts/smoke_lucid_nq.py` | Live MD (exit `2` if no creds) |
 | `scripts/verify_live_vs_history.py` | Live ↔ history compare |
 | `scripts/verify_order_dry_run.py` | Order plant connect / subscribe; **no** `--live-place` until `app_name` |
+| `examples/live_nq_intraday_sandbox.py` | Live Rithmic MD + Nautilus sandbox exec (no Rithmic place) |
 
 ---
 
@@ -72,9 +73,9 @@ Acceptance: **NQ / CME via LucidTrading**. One Rithmic login (close MotiveWave /
 
 ### Phase 3: Market data
 
-- [x] Live last-trade + BBO; history request; book summary subscribe
-- [~] Book `F_LAST` / `F_SNAPSHOT`; book unsubscribe; ticker reconnect
-- [~] **Exit:** not claimed until close-outs 1 and 4
+- [x] Live last-trade + BBO; history request (sliced `*_all`); book summary subscribe
+- [~] Book snapshot flags set; no book-unsubscribe wire; ticker resync unit-tested, not live-proven
+- [~] **Exit:** not claimed until close-out 4 is live-proven
 
 ### Phase 4: Execution
 
@@ -85,7 +86,8 @@ Acceptance: **NQ / CME via LucidTrading**. One Rithmic login (close MotiveWave /
 
 ### Phase 5: Optional
 
-- N/A until advertised: brackets / OCO, depth-by-order, live EXTERNAL bars, catalog
+- N/A until advertised: brackets / OCO, depth-by-order, 1-SECOND-EXTERNAL, weekly/tick bars, catalog
+- [~] Live EXTERNAL time bars (1m/15m/1h/1d): subscribe + poll wired; Lucid proof still open
 - `cancel_all_orders` exists on the wire; not a safe default
 
 ### Phase 6: Factories
@@ -122,10 +124,10 @@ Cross-cutting items from [`references/nautilus-adapter-conventions.md`](referenc
 | Distinct `InstrumentId`s | [x] | |
 | One convert boundary; reject closed-set unknowns | [x] | `_convert.py` / `_orders.py` |
 | `ts_event` venue / `ts_init` clock | [x] | |
-| Book `F_LAST` / `F_SNAPSHOT` | [ ] | Close-out 1 |
-| Subscribe intent vs confirm | [~] | Ticks/quotes tracked; book unsub no-op |
-| Request always completes | [x] | History path |
-| Reconnect restores intent | [ ] | Close-out 4 (MD) |
+| Book `F_LAST` / `F_SNAPSHOT` | [x] | Snapshot envelope; last delta includes `F_LAST` |
+| Subscribe intent vs confirm | [~] | Ticks/quotes tracked; book unsub drops intent only |
+| Request always completes | [x] | History path; Rust empty window → `[]` |
+| Reconnect restores intent | [~] | Ticker resync unit-tested; not live-proven |
 | Partial connect teardown | [x] | Order-plant subscribe fail |
 | Three outcome classes | [ ] | Close-out 2 |
 | Tracked vs external reports | [ ] | Close-out 2 |
@@ -141,11 +143,26 @@ Cross-cutting items from [`references/nautilus-adapter-conventions.md`](referenc
 
 Do not mark Phase 3, 4, or 7 `[x]` until the matching items are proven.
 
-1. **Book summary** — `F_SNAPSHOT | F_LAST`; last incremental `F_LAST`; book unsubscribe or documented shared ticker unsub.
+1. **Book unsubscribe wire** — intent is dropped; no plant unsub (do not ticker-unsubscribe). Incremental book updates N/A (summary snapshots only).
 2. **Execution honesty** — three evidence classes; untracked → reports; fill query stays unavailable; dedup by venue id.
 3. **Account auto-discovery** — [`plans/2026-08-13-001-account-auto-discovery-plan.md`](plans/2026-08-13-001-account-auto-discovery-plan.md).
-4. **Ticker reconnect + resubscribe intent** (exec plant already resyncs).
+4. **Live-prove ticker resync** on LucidTrading (code + unit test landed).
 5. **Record LucidTrading order dry-run** (`python scripts/verify_order_dry_run.py --seconds 5`, no `--live-place`). Live place stays gated on authorized `app_name`.
+
+## Paper path (intraday)
+
+Live Rithmic MD + Nautilus sandbox exec. Plan: [`plans/2026-08-13-002-intraday-sandbox-paper-plan.md`](plans/2026-08-13-002-intraday-sandbox-paper-plan.md).
+
+- [x] Ticker poll resyncs and replays last-trade/BBO + book intent (`resync_ticker_session`)
+- [x] Book snapshot `F_SNAPSHOT`; last delta `F_SNAPSHOT | F_LAST` (empty book = `Clear` with both)
+- [x] `RithmicLiveDataClientConfig` for `TradingNode` (factory loads `SessionConfig.from_env()`, `plants=market_data` so account env does not attach PnL)
+- [x] Historical helper + Rust history windowing (examples no longer chunk/convert)
+- [x] Shared `examples/nq_four_bar.py` (SMA20 on 1-DAY EXTERNAL / VWAP on 1-MINUTE INTERNAL + 1s 4-bar). Live: `live_nq_intraday_sandbox.py` (sandbox exec). Backtest: `backtest_nq_today.py`. Refuses `RITHMIC_ENABLE_TRADING` on paper.
+- [x] README + ops point at the paper example
+- [x] Unit tests: flags + resync double (`pytest`)
+- [x] Live Lucid run of the sandbox example (2026-08-13: NQU6 trades + two INTERNAL 1-minute bars; clean stop)
+
+Do not register Rithmic exec on the same node as sandbox.
 
 ---
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Mapping, MutableMapping
 
 from rithmic_nt_connect.constants import (
@@ -36,6 +37,47 @@ def _env_first(mapping: Mapping[str, str], *keys: str) -> str | None:
         if raw is not None and str(raw).strip():
             return str(raw).strip()
     return None
+
+
+_ENV_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def env_truthy(value: str | None, *, default: bool = False) -> bool:
+    """Parse a common env flag (``1`` / ``true`` / ``yes`` / ``on``)."""
+    if value is None:
+        return default
+    return value.strip().lower() in _ENV_TRUTHY
+
+
+def load_dotenv(path: str | Path) -> bool:
+    """Load ``KEY=VALUE`` lines into ``os.environ`` via ``setdefault``.
+
+    Missing files are ignored. Returns whether ``path`` existed as a file.
+    """
+    file_path = Path(path)
+    if not file_path.is_file():
+        return False
+    for raw in file_path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip("'").strip('"'))
+    return True
+
+
+def load_dotenv_files(
+    *paths: str | Path,
+    extra_env_var: str = "RITHMIC_CONNECT_DOTENV",
+) -> None:
+    """Load each path, then optional extra paths from ``extra_env_var`` (``os.pathsep``)."""
+    for path in paths:
+        load_dotenv(path)
+    extra = os.environ.get(extra_env_var, "")
+    for part in extra.split(os.pathsep):
+        part = part.strip()
+        if part:
+            load_dotenv(Path(part))
 
 
 def _redact_secrets(data: MutableMapping[str, Any]) -> dict[str, Any]:
@@ -268,6 +310,16 @@ class RithmicDataClientConfig:
         return cls(session=session, instrument_ids=instrument_ids)
 
 
+try:
+    from nautilus_trader.config import LiveDataClientConfig
+except ImportError:  # pragma: no cover - nautilus not installed
+    RithmicLiveDataClientConfig = None  # type: ignore[misc, assignment]
+else:
+
+    class RithmicLiveDataClientConfig(LiveDataClientConfig, frozen=True, kw_only=True):
+        """TradingNode-facing data config. Factory loads ``SessionConfig.from_env()``."""
+
+
 @dataclass
 class RithmicExecClientConfig:
     """Config for the Rithmic execution client.
@@ -293,7 +345,5 @@ class RithmicExecClientConfig:
     def from_env(cls, environ: Mapping[str, str] | None = None) -> RithmicExecClientConfig:
         env = environ if environ is not None else os.environ
         raw = _env_first(env, "RITHMIC_ENABLE_TRADING", "ENABLE_TRADING")
-        enable = False
-        if raw is not None:
-            enable = raw.strip().lower() in {"1", "true", "yes", "on"}
+        enable = env_truthy(raw)
         return cls(session=SessionConfig.from_env(environ), enable_trading=enable)

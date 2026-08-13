@@ -28,6 +28,9 @@ class TickerSession(Protocol):
         bar_type: int = 2,
         period: int = 1,
     ) -> list[dict[str, Any]]: ...
+    def subscribe_time_bars(self, symbol: str, exchange: str, bar_type: int, period: int) -> None: ...
+    def unsubscribe_time_bars(self, symbol: str, exchange: str, bar_type: int, period: int) -> None: ...
+    def poll_history_event(self) -> dict[str, Any] | None: ...
 
 
 class PnlSession(Protocol):
@@ -74,8 +77,20 @@ class WireSession(TickerSession, PnlSession, OrderSession, Protocol):
     """Full multi-plant session facade (composition of ticker / PnL / order)."""
 
 
-def create_rust_session(session: SessionConfig) -> WireSession:
-    """Create the PyO3 session when the extension is built."""
+PLANTS_MARKET_DATA = "market_data"
+PLANTS_EXECUTION = "execution"
+
+
+def create_rust_session(
+    session: SessionConfig,
+    *,
+    plants: str = PLANTS_MARKET_DATA,
+) -> WireSession:
+    """Create the PyO3 session when the extension is built.
+
+    ``plants`` is ``market_data`` (ticker + history) or ``execution``
+    (also PnL when the account triple is set). Order plant stays lazy.
+    """
     from rithmic_nt_connect._lib import Session  # type: ignore
 
     return Session(
@@ -90,13 +105,29 @@ def create_rust_session(session: SessionConfig) -> WireSession:
         fcm_id=session.fcm_id,
         ib_id=session.ib_id,
         beta_url=session.beta_url,
+        plants=plants,
     )
+
+
+def connect_market_data_session(
+    config: SessionConfig | None = None,
+) -> WireSession:
+    """Create and connect a ticker+history session (no PnL / order plant)."""
+    session = create_rust_session(
+        config if config is not None else SessionConfig.from_env(),
+        plants=PLANTS_MARKET_DATA,
+    )
+    session.connect()
+    return session
 
 
 __all__ = [
     "OrderSession",
+    "PLANTS_EXECUTION",
+    "PLANTS_MARKET_DATA",
     "PnlSession",
     "TickerSession",
     "WireSession",
+    "connect_market_data_session",
     "create_rust_session",
 ]

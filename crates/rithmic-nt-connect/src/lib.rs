@@ -9,6 +9,8 @@
 pub mod config;
 pub mod dto;
 pub mod error;
+pub mod history;
+pub mod plants;
 pub mod session;
 pub mod systems;
 
@@ -21,8 +23,10 @@ pub use config::{
 };
 pub use dto::{
     AccountPnlDto, BboDto, FrontMonthDto, HistoryBarDto, HistoryTickDto, InstrumentPnlDto,
-    LastTradeDto, OrderBookDto, OrderNotificationDto, ReferenceDataDto, PlantEvent,
+    LastTradeDto, OrderBookDto, OrderNotificationDto, PlantEvent, ReferenceDataDto,
+    TimeBarProbeRow,
 };
 pub use error::{Error, Result};
+pub use plants::PlantSet;
 pub use session::RithmicSession;
 pub use systems::{list_systems, normalize_gateway_url};

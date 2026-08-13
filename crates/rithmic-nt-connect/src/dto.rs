@@ -18,6 +18,8 @@ pub enum PlantEvent {
     InstrumentPnl(InstrumentPnlDto),
     /// Order plant notification (Rithmic or exchange).
     OrderNotification(OrderNotificationDto),
+    /// Live or replay time bar (history plant).
+    TimeBar(HistoryBarDto),
     /// Catch-all with type name for unhandled templates.
     Other {
         /// Discriminator / message variant name.
@@ -190,6 +192,127 @@ pub struct HistoryTickDto {
     pub ssboe: Option<i32>,
     pub usecs: Option<i32>,
     pub ts_event_ns: Option<u64>,
+}
+
+/// One raw history-plant time-bar replay message (including rows we drop).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimeBarProbeRow {
+    pub variant: String,
+    pub source: String,
+    pub error: Option<String>,
+    pub rp_code: Vec<String>,
+    pub parsed: bool,
+    pub skip_reason: Option<String>,
+    pub symbol: Option<String>,
+    pub exchange: Option<String>,
+    pub bar_type: Option<i32>,
+    pub period: Option<String>,
+    pub marker: Option<i32>,
+    pub open_price: Option<f64>,
+    pub high_price: Option<f64>,
+    pub low_price: Option<f64>,
+    pub close_price: Option<f64>,
+    pub settlement_price: Option<f64>,
+    pub has_settlement_price: Option<bool>,
+    pub volume: Option<u64>,
+    pub num_trades: Option<u64>,
+}
+
+impl TimeBarProbeRow {
+    pub(crate) fn from_response(resp: &RithmicResponse) -> Self {
+        let rp_code = resp
+            .rp_code()
+            .map(|codes| codes.to_vec())
+            .unwrap_or_default();
+        let error = resp.error.as_ref().map(ToString::to_string);
+        match &resp.message {
+            RithmicMessage::ResponseTimeBarReplay(m) => {
+                let skip_reason = if m.close_price.is_none() && m.settlement_price.is_none() {
+                    Some("no close or settlement".into())
+                } else if m.marker.is_none() {
+                    Some("no marker".into())
+                } else {
+                    None
+                };
+                Self {
+                    variant: "ResponseTimeBarReplay".into(),
+                    source: resp.source.clone(),
+                    error,
+                    rp_code,
+                    parsed: skip_reason.is_none(),
+                    skip_reason,
+                    symbol: m.symbol.clone(),
+                    exchange: m.exchange.clone(),
+                    bar_type: m.r#type,
+                    period: m.period.clone(),
+                    marker: m.marker,
+                    open_price: m.open_price,
+                    high_price: m.high_price,
+                    low_price: m.low_price,
+                    close_price: m.close_price,
+                    settlement_price: m.settlement_price,
+                    has_settlement_price: m.has_settlement_price,
+                    volume: m.volume,
+                    num_trades: m.num_trades,
+                }
+            }
+            RithmicMessage::TimeBar(m) => {
+                let skip_reason = if m.close_price.is_none() {
+                    Some("no close".into())
+                } else if m.marker.is_none() {
+                    Some("no marker".into())
+                } else {
+                    None
+                };
+                Self {
+                    variant: "TimeBar".into(),
+                    source: resp.source.clone(),
+                    error,
+                    rp_code,
+                    parsed: skip_reason.is_none(),
+                    skip_reason,
+                    symbol: m.symbol.clone(),
+                    exchange: m.exchange.clone(),
+                    bar_type: m.r#type,
+                    period: m.period.clone(),
+                    marker: m.marker,
+                    open_price: m.open_price,
+                    high_price: m.high_price,
+                    low_price: m.low_price,
+                    close_price: m.close_price,
+                    settlement_price: None,
+                    has_settlement_price: None,
+                    volume: m.volume,
+                    num_trades: m.num_trades,
+                }
+            }
+            other => Self {
+                variant: format!("{other:?}")
+                    .split('(')
+                    .next()
+                    .unwrap_or("Unknown")
+                    .to_string(),
+                source: resp.source.clone(),
+                error,
+                rp_code,
+                parsed: false,
+                skip_reason: Some("unhandled variant".into()),
+                symbol: None,
+                exchange: None,
+                bar_type: None,
+                period: None,
+                marker: None,
+                open_price: None,
+                high_price: None,
+                low_price: None,
+                close_price: None,
+                settlement_price: None,
+                has_settlement_price: None,
+                volume: None,
+                num_trades: None,
+            },
+        }
+    }
 }
 
 /// Historical / replay time bar (OHLCV).
@@ -402,6 +525,13 @@ impl From<&RithmicResponse> for PlantEvent {
                     is_snapshot: n.is_snapshot,
                 })
             }
+            RithmicMessage::TimeBar(_) => match HistoryBarDto::from_response(resp) {
+                Some(bar) => Self::TimeBar(bar),
+                None => Self::Other {
+                    type_name: "TimeBar".into(),
+                    source: resp.source.clone(),
+                },
+            },
             other => Self::Other {
                 type_name: format!("{other:?}")
                     .split('(')
@@ -506,58 +636,210 @@ impl HistoryTickDto {
 }
 
 impl HistoryBarDto {
+    /// Build a bar only when OHLC are present. Missing open/high/low are dropped
+    /// (never filled from close). Missing volume is allowed only for settlement
+    /// replay rows (`allow_missing_volume`); otherwise the row is dropped.
+    fn from_ohlcv(
+        symbol: Option<String>,
+        exchange: Option<String>,
+        bar_type: Option<i32>,
+        period: Option<String>,
+        marker: i32,
+        close_price: f64,
+        open_price: Option<f64>,
+        high_price: Option<f64>,
+        low_price: Option<f64>,
+        volume: Option<u64>,
+        num_trades: Option<u64>,
+        bid_volume: Option<u64>,
+        ask_volume: Option<u64>,
+        allow_missing_volume: bool,
+    ) -> Option<Self> {
+        let open_price = open_price?;
+        let high_price = high_price?;
+        let low_price = low_price?;
+        let volume = match volume {
+            Some(v) => v,
+            None if allow_missing_volume => 0,
+            None => return None,
+        };
+        let ssboe = crate::history::marker_to_ssboe(marker)?;
+        Some(Self {
+            symbol,
+            exchange,
+            bar_type,
+            period,
+            marker: Some(marker),
+            open_price: Some(open_price),
+            high_price: Some(high_price),
+            low_price: Some(low_price),
+            close_price: Some(close_price),
+            volume: Some(volume),
+            num_trades,
+            bid_volume,
+            ask_volume,
+            ts_event_ns: Some(rithmic_to_unix_nanos(ssboe, 0)),
+        })
+    }
+
     pub(crate) fn from_response(resp: &RithmicResponse) -> Option<Self> {
         match &resp.message {
             RithmicMessage::ResponseTimeBarReplay(m) => {
-                // End-of-replay / incomplete markers are dropped (no invented OHLCV).
-                let open_price = m.open_price?;
-                let high_price = m.high_price?;
-                let low_price = m.low_price?;
-                let close_price = m.close_price?;
-                let volume = m.volume?;
+                // End-of-replay markers have no price. Settlement may stand in
+                // for close; volume may be omitted only on that settlement path.
+                let used_settlement = m.close_price.is_none() && m.settlement_price.is_some();
+                let close_price = m.close_price.or(m.settlement_price)?;
                 let marker = m.marker?;
-                Some(Self {
-                    symbol: m.symbol.clone(),
-                    exchange: m.exchange.clone(),
-                    bar_type: m.r#type,
-                    period: m.period.clone(),
-                    marker: Some(marker),
-                    open_price: Some(open_price),
-                    high_price: Some(high_price),
-                    low_price: Some(low_price),
-                    close_price: Some(close_price),
-                    volume: Some(volume),
-                    num_trades: m.num_trades,
-                    bid_volume: m.bid_volume,
-                    ask_volume: m.ask_volume,
-                    ts_event_ns: Some(rithmic_to_unix_nanos(marker, 0)),
-                })
+                Self::from_ohlcv(
+                    m.symbol.clone(),
+                    m.exchange.clone(),
+                    m.r#type,
+                    m.period.clone(),
+                    marker,
+                    close_price,
+                    m.open_price,
+                    m.high_price,
+                    m.low_price,
+                    m.volume,
+                    m.num_trades,
+                    m.bid_volume,
+                    m.ask_volume,
+                    used_settlement,
+                )
             }
             RithmicMessage::TimeBar(m) => {
-                let open_price = m.open_price?;
-                let high_price = m.high_price?;
-                let low_price = m.low_price?;
                 let close_price = m.close_price?;
-                let volume = m.volume?;
                 let marker = m.marker?;
-                Some(Self {
-                    symbol: m.symbol.clone(),
-                    exchange: m.exchange.clone(),
-                    bar_type: m.r#type,
-                    period: m.period.clone(),
-                    marker: Some(marker),
-                    open_price: Some(open_price),
-                    high_price: Some(high_price),
-                    low_price: Some(low_price),
-                    close_price: Some(close_price),
-                    volume: Some(volume),
-                    num_trades: m.num_trades,
-                    bid_volume: m.bid_volume,
-                    ask_volume: m.ask_volume,
-                    ts_event_ns: Some(rithmic_to_unix_nanos(marker, 0)),
-                })
+                Self::from_ohlcv(
+                    m.symbol.clone(),
+                    m.exchange.clone(),
+                    m.r#type,
+                    m.period.clone(),
+                    marker,
+                    close_price,
+                    m.open_price,
+                    m.high_price,
+                    m.low_price,
+                    m.volume,
+                    m.num_trades,
+                    m.bid_volume,
+                    m.ask_volume,
+                    false,
+                )
             }
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod history_bar_tests {
+    use super::HistoryBarDto;
+
+    #[test]
+    fn close_only_does_not_invent_ohl() {
+        assert!(HistoryBarDto::from_ohlcv(
+            Some("NQU6".into()),
+            Some("CME".into()),
+            Some(3),
+            Some("1".into()),
+            1_700_000_000,
+            100.0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn partial_ohl_is_dropped() {
+        assert!(HistoryBarDto::from_ohlcv(
+            Some("NQU6".into()),
+            Some("CME".into()),
+            Some(2),
+            Some("1".into()),
+            1_700_000_000,
+            100.0,
+            Some(99.0),
+            Some(101.0),
+            None,
+            Some(10),
+            None,
+            None,
+            None,
+            false,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn missing_volume_dropped_unless_settlement_path() {
+        assert!(HistoryBarDto::from_ohlcv(
+            Some("NQU6".into()),
+            Some("CME".into()),
+            Some(2),
+            Some("1".into()),
+            1_700_000_000,
+            100.0,
+            Some(99.0),
+            Some(101.0),
+            Some(98.5),
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .is_none());
+        let bar = HistoryBarDto::from_ohlcv(
+            Some("NQU6".into()),
+            Some("CME".into()),
+            Some(3),
+            Some("1".into()),
+            1_700_000_000,
+            100.0,
+            Some(99.0),
+            Some(101.0),
+            Some(98.5),
+            None,
+            None,
+            None,
+            None,
+            true,
+        )
+        .expect("settlement volume default");
+        assert_eq!(bar.volume, Some(0));
+    }
+
+    #[test]
+    fn full_ohlc_parses() {
+        let bar = HistoryBarDto::from_ohlcv(
+            Some("NQU6".into()),
+            Some("CME".into()),
+            Some(2),
+            Some("1".into()),
+            1_700_000_000,
+            100.0,
+            Some(99.0),
+            Some(101.0),
+            Some(98.5),
+            Some(12),
+            None,
+            None,
+            None,
+            false,
+        )
+        .expect("bar");
+        assert_eq!(bar.open_price, Some(99.0));
+        assert_eq!(bar.high_price, Some(101.0));
+        assert_eq!(bar.low_price, Some(98.5));
+        assert_eq!(bar.close_price, Some(100.0));
+        assert_eq!(bar.volume, Some(12));
     }
 }

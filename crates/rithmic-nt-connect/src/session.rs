@@ -1,23 +1,32 @@
 //! Multi-plant Rithmic session facade (Phase 2: MD + history + PnL + orders).
 //!
-//! When an account is configured, also connects the order plant for place /
-//! cancel / modify and order-notification polling.
+//! [`PlantSet`] chooses ticker/history/PnL on [`RithmicSession::connect`].
+//! The order plant stays lazy via [`RithmicSession::ensure_order_plant`].
 
 use std::future::Future;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use rithmic_rs::{
-    ConnectStrategy, ManualOrAutoEntry, OrderSide, OrderType, RithmicCancelAllOrders,
-    RithmicCancelOrder, RithmicHistoryPlant, RithmicHistoryPlantHandle, RithmicModifyOrder,
-    RithmicOrder, RithmicOrderPlant, RithmicOrderPlantHandle, RithmicPnlPlant,
-    RithmicPnlPlantHandle, RithmicTickerPlant, RithmicTickerPlantHandle, TimeBarType, TimeInForce,
+    ConnectStrategy, ManualOrAutoEntry, OrderSide, OrderType, RithmicAccount,
+    RithmicCancelAllOrders, RithmicCancelOrder, RithmicConfig, RithmicHistoryPlant,
+    RithmicHistoryPlantHandle, RithmicModifyOrder, RithmicOrder, RithmicOrderPlant,
+    RithmicOrderPlantHandle, RithmicPnlPlant, RithmicPnlPlantHandle, RithmicTickerPlant,
+    RithmicTickerPlantHandle, TimeBarType, TimeInForce,
 };
+use rithmic_rs::rti::request_time_bar_update;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::broadcast::error::TryRecvError;
 
 use crate::config::SessionConfig;
-use crate::dto::{FrontMonthDto, HistoryBarDto, HistoryTickDto, ReferenceDataDto, PlantEvent};
+use crate::dto::{
+    FrontMonthDto, HistoryBarDto, HistoryTickDto, PlantEvent, ReferenceDataDto, TimeBarProbeRow,
+};
 use crate::error::{Error, Result};
+use crate::history::{
+    DEFAULT_TICK_SLICE_SECS, bar_replay_index, bar_slice_secs, dedup_bars, dedup_ticks,
+    load_sliced, parse_time_bar_type,
+};
+use crate::plants::PlantSet;
 
 fn noop_waker() -> Waker {
     fn clone(_: *const ()) -> RawWaker {
@@ -65,6 +74,7 @@ struct OrderPlant {
 /// Connected multi-plant session used by the Python adapter.
 pub struct RithmicSession {
     config: SessionConfig,
+    plants: PlantSet,
     ticker: Option<TickerPlant>,
     history: Option<HistoryPlant>,
     pnl: Option<PnlPlant>,
@@ -75,6 +85,7 @@ impl std::fmt::Debug for RithmicSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RithmicSession")
             .field("config", &self.config)
+            .field("plants", &self.plants)
             .field("ticker_connected", &self.ticker.is_some())
             .field("history_connected", &self.history.is_some())
             .field("pnl_connected", &self.pnl.is_some())
@@ -84,10 +95,16 @@ impl std::fmt::Debug for RithmicSession {
 }
 
 impl RithmicSession {
-    /// Create a disconnected session from config.
+    /// Create a disconnected **market-data** session (ticker + history).
     pub fn new(config: SessionConfig) -> Self {
+        Self::with_plants(config, PlantSet::MARKET_DATA)
+    }
+
+    /// Create a disconnected session that will attach `plants` on connect.
+    pub fn with_plants(config: SessionConfig, plants: PlantSet) -> Self {
         Self {
             config,
+            plants,
             ticker: None,
             history: None,
             pnl: None,
@@ -95,56 +112,101 @@ impl RithmicSession {
         }
     }
 
+    /// Plants requested at construction.
+    pub fn plants(&self) -> PlantSet {
+        self.plants
+    }
+
+    /// Union extra plants into the set. If already connected, attach any
+    /// newly requested plants that are not online yet.
+    pub async fn request_plants(&mut self, extra: PlantSet) -> Result<()> {
+        self.plants.ticker |= extra.ticker;
+        self.plants.history |= extra.history;
+        self.plants.pnl |= extra.pnl;
+
+        let connected =
+            self.ticker.is_some() || self.history.is_some() || self.pnl.is_some();
+        if !connected {
+            return Ok(());
+        }
+
+        let rc = self.config.to_rithmic_config()?;
+        // Attach without connect_or_rollback: a failed add must not tear down
+        // plants that were already live (and their subscription intent).
+        if self.plants.ticker && self.ticker.is_none() {
+            match connect_ticker(&rc).await {
+                Ok(plant) => self.ticker = Some(plant),
+                Err(err) => return Err(err),
+            }
+        }
+        if self.plants.history && self.history.is_none() {
+            match connect_history(&rc).await {
+                Ok(plant) => self.history = Some(plant),
+                Err(err) => return Err(err),
+            }
+        }
+        if self.plants.pnl && self.pnl.is_none() && self.config.account().is_some() {
+            self.ensure_pnl_plant().await?;
+        }
+        Ok(())
+    }
+
     /// Session configuration.
     pub fn config(&self) -> &SessionConfig {
         &self.config
     }
 
-    /// Connect ticker + history plants (and PnL when account is configured).
+    /// Connect plants selected by [`PlantSet`].
     ///
     /// Uses [`ConnectStrategy::Retry`]. The order plant is **not** connected here —
     /// call [`Self::ensure_order_plant`] (or any place/cancel/subscribe order API).
+    /// Partial failure disconnects whatever already logged in.
     pub async fn connect(&mut self) -> Result<()> {
-        if self.ticker.is_some() {
+        if self.ticker.is_some() || self.history.is_some() || self.pnl.is_some() {
             return Err(Error::Session("already connected".into()));
         }
 
         let rc = self.config.to_rithmic_config()?;
 
-        let ticker_plant =
-            RithmicTickerPlant::connect(&rc, ConnectStrategy::Retry).await?;
-        let ticker_handle = ticker_plant.get_handle();
-        check_response(ticker_handle.login().await?, "ticker login")?;
-
-        let history_plant =
-            RithmicHistoryPlant::connect(&rc, ConnectStrategy::Retry).await?;
-        let history_handle = history_plant.get_handle();
-        check_response(history_handle.login().await?, "history login")?;
-
-        let mut pnl = None;
-        if let Some(account) = self.config.account() {
-            let pnl_plant = RithmicPnlPlant::connect(&rc, ConnectStrategy::Retry).await?;
-            let pnl_handle = pnl_plant.get_handle(&account);
-            check_response(pnl_handle.login().await?, "pnl login")?;
-            pnl = Some(PnlPlant {
-                _plant: pnl_plant,
-                handle: pnl_handle,
-            });
+        if self.plants.ticker {
+            self.connect_or_rollback(connect_ticker(&rc), |s, p| s.ticker = Some(p))
+                .await?;
         }
 
-        self.ticker = Some(TickerPlant {
-            _plant: ticker_plant,
-            handle: ticker_handle,
-        });
-        self.history = Some(HistoryPlant {
-            _plant: history_plant,
-            handle: history_handle,
-        });
-        self.pnl = pnl;
-        // Order plant connects lazily on first order API use so Phase 1 MD+PnL
-        // sessions stay unchanged when trading is not enabled.
+        if self.plants.history {
+            self.connect_or_rollback(connect_history(&rc), |s, p| s.history = Some(p))
+                .await?;
+        }
+
+        if self.plants.pnl {
+            if let Some(account) = self.config.account() {
+                self.connect_or_rollback(connect_pnl(&rc, &account), |s, p| s.pnl = Some(p))
+                    .await?;
+            }
+        }
+
         self.order = None;
         Ok(())
+    }
+
+    async fn connect_or_rollback<T, F>(
+        &mut self,
+        fut: F,
+        assign: impl FnOnce(&mut Self, T),
+    ) -> Result<()>
+    where
+        F: Future<Output = Result<T>>,
+    {
+        match fut.await {
+            Ok(plant) => {
+                assign(self, plant);
+                Ok(())
+            }
+            Err(err) => {
+                let _ = self.disconnect().await;
+                Err(err)
+            }
+        }
     }
 
     /// Connect + login the order plant (idempotent). Requires account triple.
@@ -241,7 +303,7 @@ impl RithmicSession {
         })
     }
 
-    /// Load all ticks in `[start_time_sec, end_time_sec]` via history `*_all`.
+    /// Load ticks in `[start_time_sec, end_time_sec]` (sliced, retried, deduped).
     pub async fn load_ticks_all(
         &self,
         symbol: &str,
@@ -250,24 +312,25 @@ impl RithmicSession {
         end_time_sec: i32,
     ) -> Result<Vec<HistoryTickDto>> {
         let handle = self.history_handle()?;
-        let responses = handle
-            .load_ticks_all(
-                symbol.to_string(),
-                exchange.to_string(),
-                start_time_sec,
-                end_time_sec,
-            )
-            .await?;
-        let mut ticks: Vec<HistoryTickDto> = responses
-            .iter()
-            .filter_map(HistoryTickDto::from_response)
-            .collect();
-        // rithmic-rs does not document chronological order; sort by trade time.
-        ticks.sort_by_key(|t| t.ts_event_ns.unwrap_or(0));
-        Ok(ticks)
+        load_sliced(
+            start_time_sec,
+            end_time_sec,
+            DEFAULT_TICK_SLICE_SECS,
+            |slice_start, slice_end| {
+                let handle = handle;
+                let symbol = symbol;
+                let exchange = exchange;
+                async move {
+                    load_tick_slice(handle, symbol, exchange, slice_start, slice_end).await
+                }
+            },
+            |t| t.ts_event_ns.unwrap_or(0),
+            dedup_ticks,
+        )
+        .await
     }
 
-    /// Load all time bars in the window via history `*_all`.
+    /// Load time bars in the window (sliced, retried, deduped).
     pub async fn load_time_bars_all(
         &self,
         symbol: &str,
@@ -277,6 +340,44 @@ impl RithmicSession {
         start_time_sec: i32,
         end_time_sec: i32,
     ) -> Result<Vec<HistoryBarDto>> {
+        let handle = self.history_handle()?;
+        load_sliced(
+            start_time_sec,
+            end_time_sec,
+            bar_slice_secs(bar_type, bar_type_period),
+            |slice_start, slice_end| {
+                let handle = handle;
+                let symbol = symbol;
+                let exchange = exchange;
+                async move {
+                    load_bar_slice(
+                        handle,
+                        symbol,
+                        exchange,
+                        bar_type,
+                        bar_type_period,
+                        slice_start,
+                        slice_end,
+                    )
+                    .await
+                }
+            },
+            |b| b.ts_event_ns.unwrap_or(0),
+            dedup_bars,
+        )
+        .await
+    }
+
+    /// One history-plant time-bar replay with every raw row (including dropped).
+    pub async fn probe_time_bars(
+        &self,
+        symbol: &str,
+        exchange: &str,
+        bar_type: TimeBarType,
+        bar_type_period: i32,
+        start_time_sec: i32,
+        end_time_sec: i32,
+    ) -> Result<Vec<TimeBarProbeRow>> {
         let handle = self.history_handle()?;
         let responses = handle
             .load_time_bars_all(
@@ -288,12 +389,73 @@ impl RithmicSession {
                 end_time_sec,
             )
             .await?;
-        let mut bars: Vec<HistoryBarDto> = responses
-            .iter()
-            .filter_map(HistoryBarDto::from_response)
-            .collect();
-        bars.sort_by_key(|b| b.ts_event_ns.unwrap_or(0));
-        Ok(bars)
+        Ok(responses.iter().map(TimeBarProbeRow::from_response).collect())
+    }
+
+    /// Live time-bar feed on the history plant (ack only; bars via `poll_history_event`).
+    pub async fn subscribe_time_bars(
+        &self,
+        symbol: &str,
+        exchange: &str,
+        bar_type: i32,
+        period: i32,
+    ) -> Result<()> {
+        self.time_bar_updates(
+            symbol,
+            exchange,
+            bar_type,
+            period,
+            request_time_bar_update::Request::Subscribe,
+            "subscribe_time_bars",
+        )
+        .await
+    }
+
+    /// Stop a live time-bar feed.
+    pub async fn unsubscribe_time_bars(
+        &self,
+        symbol: &str,
+        exchange: &str,
+        bar_type: i32,
+        period: i32,
+    ) -> Result<()> {
+        self.time_bar_updates(
+            symbol,
+            exchange,
+            bar_type,
+            period,
+            request_time_bar_update::Request::Unsubscribe,
+            "unsubscribe_time_bars",
+        )
+        .await
+    }
+
+    async fn time_bar_updates(
+        &self,
+        symbol: &str,
+        exchange: &str,
+        bar_type: i32,
+        period: i32,
+        request: request_time_bar_update::Request,
+        ctx: &str,
+    ) -> Result<()> {
+        let handle = self.history_handle()?;
+        let bt = update_bar_type(bar_type)?;
+        check_response(
+            handle
+                .subscribe_time_bar_updates(symbol, exchange, bt, period, request)
+                .await?,
+            ctx,
+        )
+    }
+
+    /// Non-blocking poll of the history-plant subscription channel (live TimeBar).
+    pub fn poll_history_event(&mut self) -> Result<Option<PlantEvent>> {
+        let handle = self.history_handle_mut()?;
+        map_broadcast_poll(
+            "history",
+            now_or_never(handle.subscription_receiver.recv()),
+        )
     }
 
     /// Subscribe to PnL updates and request a snapshot when account is configured.
@@ -455,43 +617,19 @@ impl RithmicSession {
         let Some(pnl) = self.pnl.as_mut() else {
             return Ok(None);
         };
-        match now_or_never(pnl.handle.subscription_receiver.recv()) {
-            Some(Ok(resp)) => {
-                if let Some(err) = &resp.error {
-                    if err.is_connection_issue() {
-                        return Err(Error::Rithmic(err.to_string()));
-                    }
-                }
-                Ok(Some(PlantEvent::from(&resp)))
-            }
-            Some(Err(RecvError::Lagged(skipped))) => Err(Error::ChannelLagged {
-                plant: "pnl",
-                skipped,
-            }),
-            Some(Err(RecvError::Closed)) => Err(Error::ChannelClosed { plant: "pnl" }),
-            None => Ok(None),
-        }
+        map_broadcast_poll(
+            "pnl",
+            now_or_never(pnl.handle.subscription_receiver.recv()),
+        )
     }
 
     /// Non-blocking poll of the next order-plant subscription message.
     pub fn poll_order_event(&mut self) -> Result<Option<PlantEvent>> {
         let handle = self.order_handle_mut()?;
-        match now_or_never(handle.subscription_receiver.recv()) {
-            Some(Ok(resp)) => {
-                if let Some(err) = &resp.error {
-                    if err.is_connection_issue() {
-                        return Err(Error::Rithmic(err.to_string()));
-                    }
-                }
-                Ok(Some(PlantEvent::from(&resp)))
-            }
-            Some(Err(RecvError::Lagged(skipped))) => Err(Error::ChannelLagged {
-                plant: "order",
-                skipped,
-            }),
-            Some(Err(RecvError::Closed)) => Err(Error::ChannelClosed { plant: "order" }),
-            None => Ok(None),
-        }
+        map_broadcast_poll(
+            "order",
+            now_or_never(handle.subscription_receiver.recv()),
+        )
     }
 
     /// Blocking receive of the next ticker message (async).
@@ -528,6 +666,13 @@ impl RithmicSession {
         self.history
             .as_ref()
             .map(|h| &h.handle)
+            .ok_or(Error::NotConnected { plant: "history" })
+    }
+
+    fn history_handle_mut(&mut self) -> Result<&mut RithmicHistoryPlantHandle> {
+        self.history
+            .as_mut()
+            .map(|h| &mut h.handle)
             .ok_or(Error::NotConnected { plant: "history" })
     }
 
@@ -611,7 +756,7 @@ pub async fn place_order_on(
         builder = builder.trailing_stop_by(ticks, price_id);
     }
     let order = builder.build()?;
-    check_responses(handle.place_order(order).await?, "place_order")
+    check_responses(&handle.place_order(order).await?, "place_order")
 }
 
 /// Cancel an order on an already-connected handle (no session lock).
@@ -620,7 +765,7 @@ pub async fn cancel_order_on(handle: &RithmicOrderPlantHandle, basket_id: &str) 
         .id(basket_id)
         .manual_or_auto(ManualOrAutoEntry::Auto)
         .build()?;
-    check_responses(handle.cancel_order(cancel).await?, "cancel_order")
+    check_responses(&handle.cancel_order(cancel).await?, "cancel_order")
 }
 
 /// Modify an order on an already-connected handle (no session lock).
@@ -657,7 +802,7 @@ pub async fn modify_order_on(
         builder = builder.trail_by_ticks(ticks);
     }
     let order = builder.build()?;
-    check_responses(handle.modify_order(order).await?, "modify_order")
+    check_responses(&handle.modify_order(order).await?, "modify_order")
 }
 
 /// Cancel all orders on an already-connected handle (no session lock).
@@ -666,6 +811,139 @@ pub async fn cancel_all_orders_on(handle: &RithmicOrderPlantHandle) -> Result<()
         .manual_or_auto(ManualOrAutoEntry::Auto)
         .build()?;
     check_response(handle.cancel_all_orders(cmd).await?, "cancel_all_orders")
+}
+
+async fn connect_ticker(rc: &RithmicConfig) -> Result<TickerPlant> {
+    let plant = RithmicTickerPlant::connect(rc, ConnectStrategy::Retry).await?;
+    let handle = plant.get_handle();
+    check_response(handle.login().await?, "ticker login")?;
+    Ok(TickerPlant {
+        _plant: plant,
+        handle,
+    })
+}
+
+async fn connect_history(rc: &RithmicConfig) -> Result<HistoryPlant> {
+    let plant = RithmicHistoryPlant::connect(rc, ConnectStrategy::Retry).await?;
+    let handle = plant.get_handle();
+    check_response(handle.login().await?, "history login")?;
+    Ok(HistoryPlant {
+        _plant: plant,
+        handle,
+    })
+}
+
+async fn connect_pnl(rc: &RithmicConfig, account: &RithmicAccount) -> Result<PnlPlant> {
+    let plant = RithmicPnlPlant::connect(rc, ConnectStrategy::Retry).await?;
+    let handle = plant.get_handle(account);
+    check_response(handle.login().await?, "pnl login")?;
+    Ok(PnlPlant {
+        _plant: plant,
+        handle,
+    })
+}
+
+async fn load_tick_slice(
+    handle: &RithmicHistoryPlantHandle,
+    symbol: &str,
+    exchange: &str,
+    start_time_sec: i32,
+    end_time_sec: i32,
+) -> Result<Vec<HistoryTickDto>> {
+    let responses = handle
+        .load_ticks_all(
+            symbol.to_string(),
+            exchange.to_string(),
+            start_time_sec,
+            end_time_sec,
+        )
+        .await?;
+    // Multi-response replay: keep valid rows; if nothing parsed and the plant
+    // reported an error on any frame, surface that instead of Ok([]).
+    collect_history_rows(responses, "load_ticks", HistoryTickDto::from_response)
+}
+
+async fn load_bar_slice(
+    handle: &RithmicHistoryPlantHandle,
+    symbol: &str,
+    exchange: &str,
+    bar_type: TimeBarType,
+    bar_type_period: i32,
+    start_time_sec: i32,
+    end_time_sec: i32,
+) -> Result<Vec<HistoryBarDto>> {
+    let start_index = bar_replay_index(bar_type, start_time_sec);
+    let finish_index = bar_replay_index(bar_type, end_time_sec);
+    let responses = handle
+        .load_time_bars_all(
+            symbol.to_string(),
+            exchange.to_string(),
+            bar_type,
+            bar_type_period,
+            start_index,
+            finish_index,
+        )
+        .await?;
+    collect_history_rows(responses, "load_time_bars", HistoryBarDto::from_response)
+}
+
+fn collect_history_rows<T>(
+    responses: Vec<rithmic_rs::RithmicResponse>,
+    ctx: &str,
+    parse: impl Fn(&rithmic_rs::RithmicResponse) -> Option<T>,
+) -> Result<Vec<T>> {
+    let mut rows = Vec::new();
+    let mut first_err: Option<String> = None;
+    for resp in &responses {
+        if let Some(err) = &resp.error {
+            if first_err.is_none() {
+                first_err = Some(err.to_string());
+            }
+            continue;
+        }
+        if let Some(row) = parse(resp) {
+            rows.push(row);
+        }
+    }
+    if rows.is_empty() {
+        if let Some(err) = first_err {
+            return Err(Error::Rithmic(format!("{ctx}: {err}")));
+        }
+    }
+    Ok(rows)
+}
+
+fn update_bar_type(bar_type: i32) -> Result<request_time_bar_update::BarType> {
+    Ok(match parse_time_bar_type(bar_type)? {
+        TimeBarType::SecondBar => request_time_bar_update::BarType::SecondBar,
+        TimeBarType::MinuteBar => request_time_bar_update::BarType::MinuteBar,
+        TimeBarType::DailyBar => request_time_bar_update::BarType::DailyBar,
+        TimeBarType::WeeklyBar => request_time_bar_update::BarType::WeeklyBar,
+        other => {
+            return Err(Error::Protocol(format!(
+                "unsupported time bar type {other:?}"
+            )));
+        }
+    })
+}
+
+fn map_broadcast_poll(
+    plant: &'static str,
+    polled: Option<std::result::Result<rithmic_rs::RithmicResponse, RecvError>>,
+) -> Result<Option<PlantEvent>> {
+    match polled {
+        Some(Ok(resp)) => {
+            if let Some(err) = &resp.error {
+                if err.is_connection_issue() {
+                    return Err(Error::Rithmic(err.to_string()));
+                }
+            }
+            Ok(Some(PlantEvent::from(&resp)))
+        }
+        Some(Err(RecvError::Lagged(skipped))) => Err(Error::ChannelLagged { plant, skipped }),
+        Some(Err(RecvError::Closed)) => Err(Error::ChannelClosed { plant }),
+        None => Ok(None),
+    }
 }
 
 fn check_response(resp: rithmic_rs::RithmicResponse, ctx: &str) -> Result<()> {
@@ -679,8 +957,11 @@ fn check_response_ref(resp: &rithmic_rs::RithmicResponse, ctx: &str) -> Result<(
     Ok(())
 }
 
-fn check_responses(resps: Vec<rithmic_rs::RithmicResponse>, ctx: &str) -> Result<()> {
-    for resp in &resps {
+fn check_responses<'a, I>(resps: I, ctx: &str) -> Result<()>
+where
+    I: IntoIterator<Item = &'a rithmic_rs::RithmicResponse>,
+{
+    for resp in resps {
         check_response_ref(resp, ctx)?;
     }
     Ok(())

@@ -15,6 +15,8 @@ use crate::dto::{
     LastTradeDto, OrderBookDto, OrderNotificationDto, ReferenceDataDto, PlantEvent,
 };
 use crate::error::Error;
+use crate::history::parse_time_bar_type;
+use crate::plants::PlantSet;
 use crate::session::{
     RithmicSession, cancel_all_orders_on, cancel_order_on, modify_order_on, place_order_on,
 };
@@ -226,6 +228,7 @@ fn event_to_dict(py: Python<'_>, event: PlantEvent) -> PyResult<Py<PyDict>> {
         PlantEvent::AccountPnl(a) => account_pnl_dict(py, a),
         PlantEvent::InstrumentPnl(i) => instrument_pnl_dict(py, i),
         PlantEvent::OrderNotification(n) => order_notification_dict(py, n),
+        PlantEvent::TimeBar(b) => time_bar_event_dict(py, b),
         PlantEvent::Other { type_name, source } => {
             let d = PyDict::new(py);
             d.set_item("type", "other")?;
@@ -334,6 +337,12 @@ fn history_bar_dict(py: Python<'_>, b: HistoryBarDto) -> PyResult<Py<PyDict>> {
     Ok(d.unbind())
 }
 
+fn time_bar_event_dict(py: Python<'_>, b: HistoryBarDto) -> PyResult<Py<PyDict>> {
+    let d = history_bar_dict(py, b)?;
+    d.bind(py).set_item("type", "time_bar")?;
+    Ok(d)
+}
+
 /// Python-facing Rithmic multi-plant session.
 #[pyclass(name = "Session")]
 pub struct PySession {
@@ -416,6 +425,7 @@ impl PySession {
         fcm_id=None,
         ib_id=None,
         beta_url=None,
+        plants="market_data",
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -430,6 +440,7 @@ impl PySession {
         fcm_id: Option<String>,
         ib_id: Option<String>,
         beta_url: Option<String>,
+        plants: &str,
     ) -> PyResult<Self> {
         let renv = match env {
             "Live" | "live" => rithmic_rs::RithmicEnv::Live,
@@ -462,11 +473,23 @@ impl PySession {
             builder = builder.ib_id(v);
         }
         let config = builder.build().map_err(to_py_err)?;
+        let plants = PlantSet::parse(plants).map_err(to_py_err)?;
         Ok(Self {
-            inner: Mutex::new(RithmicSession::new(config)),
+            inner: Mutex::new(RithmicSession::with_plants(config, plants)),
             session_ops: Mutex::new(()),
             disconnecting: AtomicBool::new(false),
         })
+    }
+
+    fn request_plants(&self, plants: &str) -> PyResult<()> {
+        let extra = PlantSet::parse(plants).map_err(to_py_err)?;
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        runtime()
+            .block_on(inner.request_plants(extra))
+            .map_err(to_py_err)
     }
 
     fn connect(&self) -> PyResult<()> {
@@ -611,6 +634,49 @@ impl PySession {
         })
     }
 
+    fn subscribe_time_bars(
+        &self,
+        symbol: &str,
+        exchange: &str,
+        bar_type: i32,
+        period: i32,
+    ) -> PyResult<()> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        runtime()
+            .block_on(inner.subscribe_time_bars(symbol, exchange, bar_type, period))
+            .map_err(to_py_err)
+    }
+
+    fn unsubscribe_time_bars(
+        &self,
+        symbol: &str,
+        exchange: &str,
+        bar_type: i32,
+        period: i32,
+    ) -> PyResult<()> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        runtime()
+            .block_on(inner.unsubscribe_time_bars(symbol, exchange, bar_type, period))
+            .map_err(to_py_err)
+    }
+
+    fn poll_history_event(&self, py: Python<'_>) -> PyResult<Option<Py<PyDict>>> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        match inner.poll_history_event().map_err(to_py_err)? {
+            Some(event) => Ok(Some(event_to_dict(py, event)?)),
+            None => Ok(None),
+        }
+    }
+
     fn subscribe_order_book_summary(&self, symbol: &str, exchange: &str) -> PyResult<()> {
         let inner = self
             .inner
@@ -632,17 +698,7 @@ impl PySession {
         bar_type: i32,
         period: i32,
     ) -> PyResult<Py<PyList>> {
-        let rithmic_bar_type = match bar_type {
-            1 => rithmic_rs::TimeBarType::SecondBar,
-            2 => rithmic_rs::TimeBarType::MinuteBar,
-            3 => rithmic_rs::TimeBarType::DailyBar,
-            4 => rithmic_rs::TimeBarType::WeeklyBar,
-            other => {
-                return Err(PyValueError::new_err(format!(
-                    "unsupported bar_type {other}; expected 1=second, 2=minute, 3=daily, 4=weekly"
-                )));
-            }
-        };
+        let rithmic_bar_type = parse_time_bar_type(bar_type).map_err(to_py_err)?;
         let period = period.max(1);
         let inner = self
             .inner

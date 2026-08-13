@@ -36,28 +36,6 @@ sys.path.insert(0, str(ROOT / "python"))
 SMOKE_TAG_PREFIX = "rithmic-nt-connect-dryrun"
 
 
-def _load_dotenv(path: Path) -> None:
-    try:
-        lines = path.read_text().splitlines()
-    except FileNotFoundError:
-        return
-    for raw in lines:
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip("'").strip('"'))
-
-
-def _load_dotenv_files() -> None:
-    _load_dotenv(ROOT / ".env")
-    extra = os.environ.get("RITHMIC_CONNECT_DOTENV", "")
-    for part in extra.split(os.pathsep):
-        part = part.strip()
-        if part:
-            _load_dotenv(Path(part))
-
-
 def _slim_event(ev: dict) -> dict:
     return {
         "type": ev.get("type"),
@@ -103,23 +81,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--side", default="BUY", choices=["BUY", "SELL"])
     args = parser.parse_args(argv)
 
-    _load_dotenv_files()
-
+    from rithmic_nt_connect import env_truthy
+    from rithmic_nt_connect import load_dotenv_files
     from rithmic_nt_connect.config import SessionConfig
     from rithmic_nt_connect.front_month import resolve_front_month
     from rithmic_nt_connect.session import create_rust_session
+
+    load_dotenv_files(ROOT / ".env")
 
     session_cfg = SessionConfig.from_env()
     if not session_cfg.has_account():
         print("FAIL: account_id/fcm_id/ib_id required for order plant", file=sys.stderr)
         return 2
 
-    env_trading = os.environ.get("RITHMIC_ENABLE_TRADING", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    env_trading = env_truthy(os.environ.get("RITHMIC_ENABLE_TRADING"))
     allow_live = bool(args.live_place) and env_trading and not args.no_live_place
     if args.live_place and not allow_live:
         print(

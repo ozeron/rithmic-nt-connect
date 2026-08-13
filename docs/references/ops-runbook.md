@@ -11,6 +11,10 @@ session / exec client when `enable_trading=True` (or `RITHMIC_ENABLE_TRADING=1`)
 Prefer `python scripts/verify_order_dry_run.py` before any live place. Never use
 `--live-place` until conformance / `app_name` authorization is confirmed.
 
+Paper-trade strategies with live Rithmic MD and Nautilus sandbox execution
+(no Rithmic place): `python examples/live_nq_intraday_sandbox.py --seconds 90`.
+Do not register both sandbox and Rithmic exec for venue `RITHMIC`.
+
 Current advertised scope vs done: [`../STATUS.md`](../STATUS.md).
 Phases / conventions: [`nautilus-adapter-phases.md`](nautilus-adapter-phases.md), [`nautilus-adapter-conventions.md`](nautilus-adapter-conventions.md).
 

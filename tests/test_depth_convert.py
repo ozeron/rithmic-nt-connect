@@ -32,11 +32,14 @@ def test_order_book_summary_to_delta_fields() -> None:
 
 
 def test_order_book_fields_to_nautilus_deltas() -> None:
+    from nautilus_trader.model.enums import RecordFlag
+
     fields = order_book_to_fields(ORDER_BOOK_SUMMARY)
     deltas = fields_to_order_book_deltas(fields, ts_init=1)
     # CLEAR + 5 ADD
     assert len(deltas.deltas) == 6
     assert str(deltas.instrument_id) == f"NQU6.{VENUE}"
+    assert int(deltas.deltas[-1].flags) == int(RecordFlag.F_SNAPSHOT | RecordFlag.F_LAST)
 
 
 def test_depth_entitlement_style_empty_book_is_explicit() -> None:

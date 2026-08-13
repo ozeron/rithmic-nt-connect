@@ -10,9 +10,11 @@ from nautilus_trader.common.component import LiveClock
 from nautilus_trader.common.component import MessageBus
 from nautilus_trader.data.messages import RequestBars
 from nautilus_trader.data.messages import RequestTradeTicks
+from nautilus_trader.data.messages import SubscribeBars
 from nautilus_trader.data.messages import SubscribeOrderBook
 from nautilus_trader.data.messages import SubscribeQuoteTicks
 from nautilus_trader.data.messages import SubscribeTradeTicks
+from nautilus_trader.data.messages import UnsubscribeBars
 from nautilus_trader.data.messages import UnsubscribeOrderBook
 from nautilus_trader.data.messages import UnsubscribeQuoteTicks
 from nautilus_trader.data.messages import UnsubscribeTradeTicks
@@ -28,6 +30,7 @@ from nautilus_trader.model.enums import AggressorSide
 from nautilus_trader.model.enums import BarAggregation
 from nautilus_trader.model.enums import BookAction
 from nautilus_trader.model.enums import OrderSide
+from nautilus_trader.model.enums import RecordFlag
 from nautilus_trader.model.identifiers import ClientId
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.identifiers import TradeId
@@ -44,8 +47,26 @@ from rithmic_nt_connect._convert import time_bar_to_fields
 from rithmic_nt_connect.config import RithmicDataClientConfig
 from rithmic_nt_connect.constants import ADAPTER_NAME
 from rithmic_nt_connect.constants import VENUE
+from rithmic_nt_connect.errors import CHANNEL_ERRORS
 from rithmic_nt_connect.providers import RithmicInstrumentProvider
 from rithmic_nt_connect.session import WireSession
+
+
+def _reconnectable_poll_error(exc: BaseException) -> bool:
+    if isinstance(exc, CHANNEL_ERRORS):
+        return True
+    text = str(exc).lower()
+    return (
+        "forced logout" in text
+        or "connection closed" in text
+        or "not connected" in text
+        or "channel closed" in text
+        or "channel lagged" in text
+    )
+
+_F_SNAPSHOT = int(RecordFlag.F_SNAPSHOT)
+_F_LAST = int(RecordFlag.F_LAST)
+_F_SNAPSHOT_LAST = _F_SNAPSHOT | _F_LAST
 
 
 # Rithmic TimeBarType wire values.
@@ -65,17 +86,86 @@ def _aggressor(value: Any) -> AggressorSide:
     raise ValueError(f"unknown aggressor value: {value!r}")
 
 
-def _price(value: float) -> Price:
-    return Price.from_str(format_price_str(value))
+def _price(value: float, precision: int | None = None) -> Price:
+    if precision is None:
+        return Price.from_str(format_price_str(value))
+    if precision < 0:
+        raise ConvertError(f"price_precision must be >= 0, got {precision}")
+    return Price.from_str(f"{float(value):.{int(precision)}f}")
 
 
-def fields_to_trade_tick(fields: dict[str, Any], ts_init: int) -> TradeTick:
+def payloads_to_trade_ticks(
+    raw_ticks: list[dict[str, Any]],
+    *,
+    symbol: str,
+    exchange: str,
+    price_precision: int,
+    ts_init: int | None = None,
+) -> list[TradeTick]:
+    """Convert venue history/live dicts to ``TradeTick`` (one convert boundary)."""
+    ticks: list[TradeTick] = []
+    for raw in raw_ticks:
+        payload = dict(raw)
+        if payload.get("symbol") is None:
+            payload["symbol"] = symbol
+        if payload.get("exchange") is None:
+            payload["exchange"] = exchange
+        fields = last_trade_to_fields(payload)
+        event_ts = int(fields["ts_event"])
+        ticks.append(
+            fields_to_trade_tick(
+                fields,
+                ts_init=event_ts if ts_init is None else ts_init,
+                price_precision=price_precision,
+            )
+        )
+    ticks.sort(key=lambda tick: tick.ts_event)
+    return ticks
+
+
+def payloads_to_bars(
+    raw_bars: list[dict[str, Any]],
+    *,
+    symbol: str,
+    exchange: str,
+    bar_type: BarType,
+    price_precision: int,
+    ts_init: int | None = None,
+) -> list[Bar]:
+    """Convert venue history/live dicts to ``Bar`` (one convert boundary)."""
+    bars: list[Bar] = []
+    for raw in raw_bars:
+        payload = dict(raw)
+        if payload.get("symbol") is None:
+            payload["symbol"] = symbol
+        if payload.get("exchange") is None:
+            payload["exchange"] = exchange
+        fields = time_bar_to_fields(payload)
+        event_ts = int(fields["ts_event"])
+        bars.append(
+            fields_to_bar(
+                fields,
+                bar_type,
+                event_ts if ts_init is None else ts_init,
+                price_precision=price_precision,
+            )
+        )
+    bars.sort(key=lambda bar: bar.ts_event)
+    return bars
+
+
+def fields_to_trade_tick(
+    fields: dict[str, Any],
+    ts_init: int,
+    *,
+    price_precision: int | None = None,
+) -> TradeTick:
     size = int(fields["size"])
     if size < 1:
         raise ConvertError(f"trade size must be >= 1, got {size}")
     return TradeTick(
         InstrumentId.from_str(fields["instrument_id"]),
-        _price(fields["price"]),
+        _price(fields["price"], price_precision),
         Quantity.from_int(size),
         _aggressor(fields.get("aggressor")),
         TradeId(str(fields["ts_event"])),
@@ -84,15 +174,20 @@ def fields_to_trade_tick(fields: dict[str, Any], ts_init: int) -> TradeTick:
     )
 
 
-def fields_to_quote_tick(fields: dict[str, Any], ts_init: int) -> QuoteTick:
+def fields_to_quote_tick(
+    fields: dict[str, Any],
+    ts_init: int,
+    *,
+    price_precision: int | None = None,
+) -> QuoteTick:
     bid_size = int(fields["bid_size"])
     ask_size = int(fields["ask_size"])
     if bid_size < 1 or ask_size < 1:
         raise ConvertError(f"quote sizes must be >= 1, got bid={bid_size} ask={ask_size}")
     return QuoteTick(
         InstrumentId.from_str(fields["instrument_id"]),
-        _price(fields["bid_price"]),
-        _price(fields["ask_price"]),
+        _price(fields["bid_price"], price_precision),
+        _price(fields["ask_price"], price_precision),
         Quantity.from_int(bid_size),
         Quantity.from_int(ask_size),
         int(fields["ts_event"]),
@@ -100,12 +195,38 @@ def fields_to_quote_tick(fields: dict[str, Any], ts_init: int) -> QuoteTick:
     )
 
 
-def fields_to_order_book_deltas(fields: dict[str, Any], ts_init: int) -> OrderBookDeltas:
+def _book_delta(
+    instrument_id: InstrumentId,
+    action: BookAction,
+    order: BookOrder | None,
+    flags: int,
+    ts_event: int,
+    ts_init: int,
+) -> OrderBookDelta:
+    return OrderBookDelta(
+        instrument_id,
+        action,
+        order,
+        flags,
+        0,
+        ts_event,
+        ts_init,
+    )
+
+
+def fields_to_order_book_deltas(
+    fields: dict[str, Any],
+    ts_init: int,
+    *,
+    price_precision: int | None = None,
+) -> OrderBookDeltas:
+    """Map a Rithmic order-book **summary** to one snapshot envelope.
+
+    Last delta is always ``F_SNAPSHOT | F_LAST`` (including empty books).
+    """
     instrument_id = InstrumentId.from_str(fields["instrument_id"])
     ts_event = int(fields["ts_event"])
-    deltas: list[OrderBookDelta] = [
-        OrderBookDelta.clear(instrument_id, 0, ts_event, ts_init),
-    ]
+    adds: list[BookOrder] = []
     for level in fields["levels"]:
         side = OrderSide.BUY if level["side"] == "BUY" else OrderSide.SELL
         size = int(level["size"])
@@ -113,19 +234,47 @@ def fields_to_order_book_deltas(fields: dict[str, Any], ts_init: int) -> OrderBo
             raise ConvertError(f"order book level size must be >= 0, got {size}")
         if size == 0:
             continue
-        order = BookOrder(
-            side,
-            _price(level["price"]),
-            Quantity.from_int(size),
-            int(level["order_id"]),
+        adds.append(
+            BookOrder(
+                side,
+                _price(level["price"], price_precision),
+                Quantity.from_int(size),
+                int(level["order_id"]),
+            )
         )
+    if not adds:
+        return OrderBookDeltas(
+            instrument_id=instrument_id,
+            deltas=[
+                _book_delta(
+                    instrument_id,
+                    BookAction.CLEAR,
+                    None,
+                    _F_SNAPSHOT_LAST,
+                    ts_event,
+                    ts_init,
+                )
+            ],
+        )
+    deltas: list[OrderBookDelta] = [
+        _book_delta(
+            instrument_id,
+            BookAction.CLEAR,
+            None,
+            _F_SNAPSHOT,
+            ts_event,
+            ts_init,
+        )
+    ]
+    last_i = len(adds) - 1
+    for i, order in enumerate(adds):
+        flags = _F_SNAPSHOT_LAST if i == last_i else _F_SNAPSHOT
         deltas.append(
-            OrderBookDelta(
+            _book_delta(
                 instrument_id,
                 BookAction.ADD,
                 order,
-                0,
-                0,
+                flags,
                 ts_event,
                 ts_init,
             )
@@ -133,20 +282,56 @@ def fields_to_order_book_deltas(fields: dict[str, Any], ts_init: int) -> OrderBo
     return OrderBookDeltas(instrument_id=instrument_id, deltas=deltas)
 
 
-def fields_to_bar(fields: dict[str, Any], bar_type: BarType, ts_init: int) -> Bar:
+async def resync_ticker_session(
+    session: WireSession,
+    subscriptions: set[tuple[str, str]],
+    book_subscriptions: set[tuple[str, str]],
+    bar_subscriptions: set[tuple[str, str, int, int]] | None = None,
+) -> None:
+    """Disconnect, reconnect, and replay ticker + book + EXTERNAL bar intent."""
+    await asyncio.to_thread(session.disconnect)
+    await asyncio.to_thread(session.connect)
+    for symbol, exchange in subscriptions:
+        await asyncio.to_thread(session.subscribe, symbol, exchange)
+    for symbol, exchange in book_subscriptions:
+        await asyncio.to_thread(session.subscribe_order_book_summary, symbol, exchange)
+    for symbol, exchange, rtype, period in bar_subscriptions or ():
+        await asyncio.to_thread(session.subscribe_time_bars, symbol, exchange, rtype, period)
+
+
+def fields_to_bar(
+    fields: dict[str, Any],
+    bar_type: BarType,
+    ts_init: int,
+    *,
+    price_precision: int | None = None,
+) -> Bar:
     volume = int(fields["volume"])
     if volume < 0:
         raise ConvertError(f"bar volume must be >= 0, got {volume}")
     return Bar(
         bar_type,
-        _price(fields["open"]),
-        _price(fields["high"]),
-        _price(fields["low"]),
-        _price(fields["close"]),
+        _price(fields["open"], price_precision),
+        _price(fields["high"], price_precision),
+        _price(fields["low"], price_precision),
+        _price(fields["close"], price_precision),
         Quantity.from_int(volume),
         int(fields["ts_event"]),
         ts_init,
     )
+
+
+def external_bar_advertised(bar_type: BarType) -> bool:
+    """Live EXTERNAL subscribe is only advertised for these specs."""
+    agg = bar_type.spec.aggregation
+    step = int(bar_type.spec.step)
+    if agg == BarAggregation.MINUTE and step in {1, 15, 60}:
+        return True
+    if agg == BarAggregation.HOUR and step == 1:
+        return True
+    if agg == BarAggregation.DAY and step == 1:
+        return True
+    return False
 
 
 def bar_type_to_rithmic(bar_type: BarType) -> tuple[int, int]:
@@ -198,8 +383,15 @@ class RithmicDataClient(LiveMarketDataClient):
         self._config_local = config
         self._session = session
         self._poll_task: asyncio.Task | None = None
+        self._poll_closing = False
         self._subscriptions: set[tuple[str, str]] = set()
+        self._book_subscriptions: set[tuple[str, str]] = set()
+        # Wire key → one or more Nautilus BarTypes (60-MINUTE and 1-HOUR share a key).
+        self._bar_types: dict[tuple[str, str, int, int], set[BarType]] = {}
         self._instrument_routes: dict[str, tuple[str, str]] = {}
+        self._history_poll_task: asyncio.Task | None = None
+        self._resync_lock = asyncio.Lock()
+        self._resync_generation = 0
 
     async def _connect(self) -> None:
         await asyncio.to_thread(self._session.connect)
@@ -215,25 +407,111 @@ class RithmicDataClient(LiveMarketDataClient):
                     f"instrument {instrument.id} missing rithmic route fields in info"
                 ) from exc
             self._instrument_routes[str(instrument.id)] = (symbol, exchange)
-        self._poll_task = self.create_task(self._poll_loop(), log_msg="rithmic_poll")
+        # Own the task: LiveMarketDataClient.create_task WARNs on our cancel.
+        self._poll_closing = False
+        self._poll_task = self._loop.create_task(self._poll_loop(), name="rithmic_poll")
+        self._poll_task.add_done_callback(
+            lambda task: self._on_poll_done(task, name="rithmic_poll")
+        )
+
+    def _ensure_history_poll_task(self) -> None:
+        if self._history_poll_task is not None:
+            return
+        self._history_poll_task = self._loop.create_task(
+            self._history_poll_loop(), name="rithmic_history_poll"
+        )
+        self._history_poll_task.add_done_callback(
+            lambda task: self._on_poll_done(task, name="rithmic_history_poll")
+        )
+
+    def _on_poll_done(self, task: asyncio.Task, *, name: str) -> None:
+        if self._poll_closing or task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            self._log.error(f"{name} died: {exc}")
 
     async def _disconnect(self) -> None:
-        if self._poll_task is not None:
-            self._poll_task.cancel()
-            try:
-                await self._poll_task
-            except asyncio.CancelledError:
-                pass
-            self._poll_task = None
+        self._poll_closing = True
+        for attr in ("_poll_task", "_history_poll_task"):
+            task = getattr(self, attr)
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                setattr(self, attr, None)
         await asyncio.to_thread(self._session.disconnect)
 
-    async def _poll_loop(self) -> None:
+    async def _resync_ticker_subscription(self) -> None:
+        start_gen = self._resync_generation
+        async with self._resync_lock:
+            if self._resync_generation != start_gen:
+                return
+            await resync_ticker_session(
+                self._session,
+                set(self._subscriptions),
+                set(self._book_subscriptions),
+                set(self._bar_types),
+            )
+            self._resync_generation += 1
+
+    async def _poll_channel_loop(
+        self,
+        *,
+        label: str,
+        poll,
+        idle_sleep: float,
+        should_poll=None,
+    ) -> None:
+        backoff = 0.05
         while True:
-            event = await asyncio.to_thread(self._session.poll_event)
+            if should_poll is not None and not should_poll():
+                await asyncio.sleep(idle_sleep)
+                continue
+            try:
+                event = await asyncio.to_thread(poll)
+            except Exception as exc:  # noqa: BLE001
+                if not _reconnectable_poll_error(exc):
+                    self._log.exception(f"{label} poll transient error", exc)
+                    await asyncio.sleep(0.1)
+                    continue
+                self._log.warning(f"{label} poll reconnect: {exc}")
+                try:
+                    await self._resync_ticker_subscription()
+                    self._log.warning(f"{label} subscription resynced after channel error")
+                    backoff = 0.05
+                except Exception as resync_exc:  # noqa: BLE001
+                    self._log.warning(f"{label} subscription resync failed: {resync_exc}")
+                    backoff = min(backoff * 2, 2.0)
+                await asyncio.sleep(backoff)
+                continue
             if event is None:
-                await asyncio.sleep(0.01)
+                await asyncio.sleep(idle_sleep)
                 continue
             self._dispatch_event(event)
+
+    async def _poll_loop(self) -> None:
+        await self._poll_channel_loop(
+            label="ticker",
+            poll=self._session.poll_event,
+            idle_sleep=0.01,
+        )
+
+    async def _history_poll_loop(self) -> None:
+        await self._poll_channel_loop(
+            label="history",
+            poll=self._session.poll_history_event,
+            idle_sleep=0.05,
+            should_poll=lambda: bool(self._bar_types),
+        )
+
+    def _price_precision(self, instrument_id: InstrumentId) -> int:
+        instrument = self._cache.instrument(instrument_id)
+        if instrument is None:
+            raise ConvertError(f"instrument not in cache: {instrument_id}")
+        return int(instrument.price_precision)
 
     def _dispatch_event(self, event: dict[str, Any]) -> None:
         etype = event.get("type")
@@ -241,15 +519,37 @@ class RithmicDataClient(LiveMarketDataClient):
         try:
             if etype == "last_trade":
                 fields = last_trade_to_fields(event)
-                self._handle_data(fields_to_trade_tick(fields, ts_init))
+                prec = self._price_precision(InstrumentId.from_str(fields["instrument_id"]))
+                self._handle_data(
+                    fields_to_trade_tick(fields, ts_init, price_precision=prec)
+                )
             elif etype == "bbo":
                 fields = bbo_to_fields(event)
-                self._handle_data(fields_to_quote_tick(fields, ts_init))
+                prec = self._price_precision(InstrumentId.from_str(fields["instrument_id"]))
+                self._handle_data(
+                    fields_to_quote_tick(fields, ts_init, price_precision=prec)
+                )
             elif etype == "order_book":
                 fields = order_book_to_fields(event)
-                self._handle_data(fields_to_order_book_deltas(fields, ts_init))
+                prec = self._price_precision(InstrumentId.from_str(fields["instrument_id"]))
+                self._handle_data(
+                    fields_to_order_book_deltas(fields, ts_init, price_precision=prec)
+                )
+            elif etype == "time_bar":
+                bar_types = self._bar_types_for_event(event)
+                if not bar_types:
+                    self._log.debug(f"skip time_bar with no matching subscribe: {event.get('symbol')}")
+                    return
+                fields = time_bar_to_fields(event)
+                for bar_type in bar_types:
+                    prec = self._price_precision(bar_type.instrument_id)
+                    self._handle_data(
+                        fields_to_bar(fields, bar_type, ts_init, price_precision=prec)
+                    )
         except ConvertError as exc:
             self._log.debug(f"skip event {etype}: {exc}")
+        except Exception as exc:  # noqa: BLE001 — never kill the poll loop
+            self._log.exception(f"failed to dispatch {etype}", exc)
 
     def _route(self, instrument_id: InstrumentId) -> tuple[str, str]:
         key = str(instrument_id)
@@ -258,6 +558,17 @@ class RithmicDataClient(LiveMarketDataClient):
                 f"no Rithmic route for {instrument_id}; load instruments before subscribe/request"
             )
         return self._instrument_routes[key]
+
+    def _bar_types_for_event(self, event: dict[str, Any]) -> set[BarType]:
+        symbol = str(event.get("symbol") or "")
+        exchange = str(event.get("exchange") or "")
+        rtype = int(event.get("bar_type") or 0)
+        period_raw = event.get("period")
+        try:
+            period = int(period_raw) if period_raw not in (None, "") else 1
+        except (TypeError, ValueError):
+            period = 1
+        return set(self._bar_types.get((symbol, exchange, rtype, period), ()))
 
     async def _subscribe_trade_ticks(self, command: SubscribeTradeTicks) -> None:
         symbol, exchange = self._route(command.instrument_id)
@@ -282,10 +593,49 @@ class RithmicDataClient(LiveMarketDataClient):
     async def _subscribe_order_book_deltas(self, command: SubscribeOrderBook) -> None:
         symbol, exchange = self._route(command.instrument_id)
         await asyncio.to_thread(self._session.subscribe_order_book_summary, symbol, exchange)
+        self._book_subscriptions.add((symbol, exchange))
 
     async def _unsubscribe_order_book_deltas(self, command: UnsubscribeOrderBook) -> None:
-        _ = command
-        return
+        # No dedicated book-unsubscribe on the session; ticker unsubscribe would
+        # also drop LastTrade+BBO. Drop intent so resync does not replay book.
+        symbol, exchange = self._route(command.instrument_id)
+        self._book_subscriptions.discard((symbol, exchange))
+
+    async def _subscribe_bars(self, command: SubscribeBars) -> None:
+        bar_type = command.bar_type
+        if not bar_type.is_externally_aggregated():
+            return
+        if not external_bar_advertised(bar_type):
+            raise ValueError(
+                f"live EXTERNAL bars not advertised for {bar_type}; "
+                "use request_bars for lookback or INTERNAL 1s from ticks"
+            )
+        symbol, exchange = self._route(bar_type.instrument_id)
+        rtype, period = bar_type_to_rithmic(bar_type)
+        await asyncio.to_thread(
+            self._session.subscribe_time_bars, symbol, exchange, rtype, period
+        )
+        key = (symbol, exchange, rtype, period)
+        self._bar_types.setdefault(key, set()).add(bar_type)
+        self._ensure_history_poll_task()
+
+    async def _unsubscribe_bars(self, command: UnsubscribeBars) -> None:
+        bar_type = command.bar_type
+        if not bar_type.is_externally_aggregated():
+            return
+        if not external_bar_advertised(bar_type):
+            return
+        symbol, exchange = self._route(bar_type.instrument_id)
+        rtype, period = bar_type_to_rithmic(bar_type)
+        key = (symbol, exchange, rtype, period)
+        mapped = self._bar_types.get(key)
+        if mapped is not None:
+            mapped.discard(bar_type)
+            if not mapped:
+                del self._bar_types[key]
+                await asyncio.to_thread(
+                    self._session.unsubscribe_time_bars, symbol, exchange, rtype, period
+                )
 
     async def _request_trade_ticks(self, request: RequestTradeTicks) -> None:
         symbol, exchange = self._route(request.instrument_id)
@@ -323,16 +673,15 @@ class RithmicDataClient(LiveMarketDataClient):
             return
 
         ts_init = self._clock.timestamp_ns()
-        ticks: list[TradeTick] = []
         try:
-            for raw in ticks_raw:
-                payload = dict(raw)
-                if "symbol" not in payload or payload["symbol"] is None:
-                    payload["symbol"] = symbol
-                if "exchange" not in payload or payload["exchange"] is None:
-                    payload["exchange"] = exchange
-                fields = last_trade_to_fields(payload)
-                ticks.append(fields_to_trade_tick(fields, ts_init))
+            prec = self._price_precision(request.instrument_id)
+            ticks = payloads_to_trade_ticks(
+                list(ticks_raw),
+                symbol=symbol,
+                exchange=exchange,
+                price_precision=prec,
+                ts_init=ts_init,
+            )
         except (ConvertError, ValueError) as exc:
             self._log.error(
                 f"Invalid history tick for {request.instrument_id}: {exc}"
@@ -389,6 +738,10 @@ class RithmicDataClient(LiveMarketDataClient):
             return
         start = int(request.start.timestamp())
         end = int(request.end.timestamp())
+        self._log.info(
+            f"history {bar_type} → rithmic type={rithmic_type} period={period} "
+            f"(not 1s/1m unless that is the requested type)"
+        )
         try:
             bars_raw = await asyncio.to_thread(
                 self._session.load_time_bars,
@@ -412,16 +765,16 @@ class RithmicDataClient(LiveMarketDataClient):
             return
 
         ts_init = self._clock.timestamp_ns()
-        bars: list[Bar] = []
         try:
-            for raw in bars_raw:
-                payload = dict(raw)
-                if "symbol" not in payload or payload["symbol"] is None:
-                    payload["symbol"] = symbol
-                if "exchange" not in payload or payload["exchange"] is None:
-                    payload["exchange"] = exchange
-                fields = time_bar_to_fields(payload)
-                bars.append(fields_to_bar(fields, bar_type, ts_init))
+            prec = self._price_precision(bar_type.instrument_id)
+            bars = payloads_to_bars(
+                list(bars_raw),
+                symbol=symbol,
+                exchange=exchange,
+                bar_type=bar_type,
+                price_precision=prec,
+                ts_init=ts_init,
+            )
         except (ConvertError, ValueError) as exc:
             self._log.error(f"Invalid history bar for {bar_type}: {exc}")
             self._handle_bars(
@@ -437,6 +790,7 @@ class RithmicDataClient(LiveMarketDataClient):
         # Order: FORWARDS + session sort by ts_event_ns (NT does not re-sort).
         if request.limit:
             bars = bars[-request.limit :]
+        self._log.info(f"loaded {len(bars)} {bar_type} history bars (raw={len(bars_raw)})")
         self._handle_bars(
             bar_type,
             bars,

@@ -31,6 +31,7 @@ def test_future_from_reference_uses_tick_size_and_underlying():
     assert float(instrument.price_increment) == 0.25
     assert float(instrument.multiplier) == 20.0
     assert instrument.info["rithmic_symbol"] == "NQU6"
+    assert instrument.activation_ns == 0
 
 
 def test_future_from_reference_requires_fields():

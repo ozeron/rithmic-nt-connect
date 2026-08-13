@@ -13,7 +13,6 @@ Example:
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
@@ -21,28 +20,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "python"))
 
 
-def _load_dotenv(path: Path) -> None:
-    if not path.is_file():
-        return
-    for raw in path.read_text().splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, v = line.split("=", 1)
-        os.environ.setdefault(k.strip(), v.strip().strip("'").strip('"'))
-
-
-def _load_dotenv_files() -> None:
-    """Load repo `.env`, then optional paths from `RITHMIC_CONNECT_DOTENV` (os.pathsep)."""
-    _load_dotenv(ROOT / ".env")
-    extra = os.environ.get("RITHMIC_CONNECT_DOTENV", "")
-    for part in extra.split(os.pathsep):
-        part = part.strip()
-        if part:
-            _load_dotenv(Path(part))
-
-
 def main(argv: list[str] | None = None) -> int:
+    from rithmic_nt_connect import load_dotenv_files
+    from rithmic_nt_connect.config import SessionConfig
+    from rithmic_nt_connect.session import connect_market_data_session
+    from rithmic_nt_connect.verify import run_front_month_verify
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", default=None, help="Product root (default: env symbol or NQ)")
     parser.add_argument("--exchange", default=None, help="Exchange (default: env or CME)")
@@ -65,15 +48,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    _load_dotenv_files()
-
-    try:
-        from rithmic_nt_connect.config import SessionConfig
-        from rithmic_nt_connect.session import create_rust_session
-        from rithmic_nt_connect.verify import run_front_month_verify
-    except Exception as exc:  # noqa: BLE001
-        print(f"import failed: {exc}", file=sys.stderr)
-        return 1
+    load_dotenv_files(ROOT / ".env")
 
     try:
         cfg = SessionConfig.from_env()
@@ -85,8 +60,7 @@ def main(argv: list[str] | None = None) -> int:
     exchange = args.exchange or cfg.exchange or "CME"
     print(f"NOTE: close MotiveWave first. Resolving front for {root}/{exchange}…")
 
-    session = create_rust_session(cfg)
-    session.connect()
+    session = connect_market_data_session(cfg)
     try:
         report = run_front_month_verify(
             session,

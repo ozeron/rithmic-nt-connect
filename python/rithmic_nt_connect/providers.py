@@ -53,7 +53,11 @@ def _multiplier(point_value: float) -> Quantity:
     return Quantity.from_str(text)
 
 
-def future_from_reference(ref: dict[str, Any]) -> FuturesContract:
+def future_from_reference(
+    ref: dict[str, Any],
+    *,
+    activation_ns: int | None = None,
+) -> FuturesContract:
     """Build a FuturesContract from a reference-data venue dict (no invented fields)."""
     symbol = ref.get("trading_symbol") or ref.get("symbol")
     exchange = ref.get("trading_exchange") or ref.get("exchange")
@@ -85,6 +89,9 @@ def future_from_reference(ref: dict[str, Any]) -> FuturesContract:
         raise InstrumentBuildError("reference data missing underlying/product_code")
 
     now = int(datetime.now(timezone.utc).timestamp() * 1_000_000_000)
+    # 0 = tradable for any backtest window. "now" rejects historical orders
+    # ("Contract not yet active").
+    act_ns = 0 if activation_ns is None else int(activation_ns)
     instrument_id = InstrumentId(Symbol(symbol_s), nautilus_venue())
     return FuturesContract(
         instrument_id=instrument_id,
@@ -96,7 +103,7 @@ def future_from_reference(ref: dict[str, Any]) -> FuturesContract:
         multiplier=_multiplier(float(point_value)),
         lot_size=Quantity.from_str("1"),
         underlying=str(underlying),
-        activation_ns=now,
+        activation_ns=act_ns,
         expiration_ns=_parse_expiration_ns(str(expiration_raw)),
         ts_event=now,
         ts_init=now,

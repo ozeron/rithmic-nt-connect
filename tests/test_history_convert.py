@@ -9,6 +9,7 @@ from rithmic_nt_connect._convert import ConvertError
 from rithmic_nt_connect._convert import last_trade_to_fields
 from rithmic_nt_connect._convert import time_bar_to_fields
 from rithmic_nt_connect.data import bar_type_to_rithmic
+from rithmic_nt_connect.data import external_bar_advertised
 from rithmic_nt_connect.data import fields_to_bar
 
 
@@ -78,6 +79,39 @@ def test_time_bar_requires_volume():
                 "marker": 1_700_000_000,
             }
         )
+
+
+def test_live_time_bar_dict_converts():
+    raw = {
+        "type": "time_bar",
+        "symbol": "NQU6",
+        "exchange": "CME",
+        "open_price": 100.0,
+        "high_price": 101.0,
+        "low_price": 99.5,
+        "close_price": 100.5,
+        "volume": 42,
+        "marker": 1_700_000_000,
+        "bar_type": 2,
+        "period": "15",
+    }
+    fields = time_bar_to_fields(raw)
+    bar = fields_to_bar(
+        fields,
+        BarType.from_str("NQU6.RITHMIC-15-MINUTE-LAST-EXTERNAL"),
+        ts_init=1,
+    )
+    assert float(bar.close) == 100.5
+
+
+def test_external_bar_advertised_slice():
+    assert external_bar_advertised(BarType.from_str("NQU6.RITHMIC-1-MINUTE-LAST-EXTERNAL"))
+    assert external_bar_advertised(BarType.from_str("NQU6.RITHMIC-15-MINUTE-LAST-EXTERNAL"))
+    assert external_bar_advertised(BarType.from_str("NQU6.RITHMIC-1-DAY-LAST-EXTERNAL"))
+    assert external_bar_advertised(BarType.from_str("NQU6.RITHMIC-1-HOUR-LAST-EXTERNAL"))
+    assert not external_bar_advertised(BarType.from_str("NQU6.RITHMIC-1-SECOND-LAST-EXTERNAL"))
+    assert not external_bar_advertised(BarType.from_str("NQU6.RITHMIC-1-SECOND-LAST-INTERNAL"))
+    assert not external_bar_advertised(BarType.from_str("NQU6.RITHMIC-5-MINUTE-LAST-EXTERNAL"))
 
 
 def test_bar_type_to_rithmic_mapping():
