@@ -311,10 +311,51 @@ impl RithmicSession {
     pub async fn subscribe_order_updates(&mut self) -> Result<()> {
         self.ensure_order_plant().await?;
         let handle = self.order_handle()?;
-        check_response(
+        if let Err(e) = check_response(
             handle.subscribe_order_updates().await?,
             "subscribe_order_updates",
-        )?;
+        ) {
+            let _ = self.disconnect_order_plant().await;
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Connect + login the PnL plant (idempotent). Requires account triple.
+    pub async fn ensure_pnl_plant(&mut self) -> Result<()> {
+        if self.pnl.is_some() {
+            return Ok(());
+        }
+        if self.ticker.is_none() {
+            return Err(Error::Session("session not connected".into()));
+        }
+        let account = self.config.account().ok_or_else(|| {
+            Error::Config("pnl plant requires account_id/fcm_id/ib_id".into())
+        })?;
+        let rc = self.config.to_rithmic_config()?;
+        let pnl_plant = RithmicPnlPlant::connect(&rc, ConnectStrategy::Retry).await?;
+        let pnl_handle = pnl_plant.get_handle(&account);
+        check_response(pnl_handle.login().await?, "pnl login")?;
+        self.pnl = Some(PnlPlant {
+            _plant: pnl_plant,
+            handle: pnl_handle,
+        });
+        Ok(())
+    }
+
+    /// Disconnect only the order plant (leaves ticker/history/PnL connected).
+    pub async fn disconnect_order_plant(&mut self) -> Result<()> {
+        if let Some(order) = self.order.take() {
+            let _ = order.handle.disconnect().await;
+        }
+        Ok(())
+    }
+
+    /// Disconnect only the PnL plant (leaves ticker/history/order connected).
+    pub async fn disconnect_pnl_plant(&mut self) -> Result<()> {
+        if let Some(pnl) = self.pnl.take() {
+            let _ = pnl.handle.disconnect().await;
+        }
         Ok(())
     }
 
@@ -419,8 +460,9 @@ impl RithmicSession {
                 }
                 Ok(Some(TickerEvent::from(&resp)))
             }
-            // Lagged means we fell behind; skip and try again next poll.
-            Some(Err(RecvError::Lagged(_))) => Ok(None),
+            Some(Err(RecvError::Lagged(skipped))) => Err(Error::Session(format!(
+                "pnl subscription lagged; skipped {skipped} messages — resync required"
+            ))),
             Some(Err(RecvError::Closed)) => {
                 Err(Error::Session("pnl subscription channel closed".into()))
             }
@@ -440,8 +482,9 @@ impl RithmicSession {
                 }
                 Ok(Some(TickerEvent::from(&resp)))
             }
-            // Lagged means we fell behind; skip and try again next poll.
-            Some(Err(RecvError::Lagged(_))) => Ok(None),
+            Some(Err(RecvError::Lagged(skipped))) => Err(Error::Session(format!(
+                "order subscription lagged; skipped {skipped} messages — resync required"
+            ))),
             Some(Err(RecvError::Closed)) => Err(Error::Session(
                 "order subscription channel closed".into(),
             )),

@@ -43,14 +43,8 @@ from nautilus_trader.model.orders import Order
 
 from rithmic_connect._convert import account_pnl_to_fields
 from rithmic_connect._convert import instrument_pnl_to_fields
+from rithmic_connect._exec_notifications import route_order_notification
 from rithmic_connect._orders import OrderMapError
-from rithmic_connect._orders import is_exchange_cancel
-from rithmic_connect._orders import is_exchange_fill
-from rithmic_connect._orders import is_exchange_reject
-from rithmic_connect._orders import is_rithmic_cancel_failed
-from rithmic_connect._orders import is_rithmic_complete
-from rithmic_connect._orders import is_rithmic_modify_failed
-from rithmic_connect._orders import is_rithmic_open
 from rithmic_connect._orders import nautilus_order_type_to_rithmic
 from rithmic_connect._orders import nautilus_side_to_rithmic
 from rithmic_connect._orders import nautilus_tif_to_rithmic
@@ -112,12 +106,14 @@ class RithmicExecutionClient(LiveExecutionClient):
         self._session = session
         self._poll_task: asyncio.Task | None = None
         self._order_poll_task: asyncio.Task | None = None
-        self._order_calls: list[str] = []
         self._positions: dict[str, dict[str, Any]] = {}
         # client_order_id.value -> basket_id / venue id
         self._client_to_venue: dict[str, str] = {}
         self._venue_to_client: dict[str, ClientOrderId] = {}
         self._tag_to_client: dict[str, ClientOrderId] = {}
+        # Set after order-channel lag/close until resync succeeds; blocks submits and
+        # makes reconciliation use cache-backed status instead of empty venue snapshots.
+        self._order_reconcile_unsafe = False
 
     @property
     def enable_trading(self) -> bool:
@@ -139,11 +135,57 @@ class RithmicExecutionClient(LiveExecutionClient):
         if self.enable_trading:
             if not self._config_local.session.has_account():
                 raise ValueError("enable_trading requires account_id/fcm_id/ib_id")
-            await asyncio.to_thread(self._session.subscribe_order_updates)
+            try:
+                await asyncio.to_thread(self._session.subscribe_order_updates)
+            except Exception:
+                disconnect_order = getattr(self._session, "disconnect_order_plant", None)
+                if callable(disconnect_order):
+                    try:
+                        await asyncio.to_thread(disconnect_order)
+                    except Exception as teardown_exc:  # noqa: BLE001
+                        self._log.warning(f"order plant teardown after subscribe fail: {teardown_exc}")
+                raise
             self._order_poll_task = self.create_task(
                 self._order_poll_loop(),
                 log_msg="rithmic_order_poll",
             )
+
+    async def _resync_order_subscription(self) -> None:
+        """Reconnect order plant subscription after lagged/closed channel."""
+        self._order_reconcile_unsafe = True
+        disconnect_order = getattr(self._session, "disconnect_order_plant", None)
+        if callable(disconnect_order):
+            await asyncio.to_thread(disconnect_order)
+        await asyncio.to_thread(self._session.subscribe_order_updates)
+
+    async def _resync_pnl_subscription(self) -> None:
+        """Reconnect PnL plant subscription after lagged/closed channel."""
+        disconnect_pnl = getattr(self._session, "disconnect_pnl_plant", None)
+        if callable(disconnect_pnl):
+            await asyncio.to_thread(disconnect_pnl)
+        ensure_pnl = getattr(self._session, "ensure_pnl_plant", None)
+        if callable(ensure_pnl):
+            await asyncio.to_thread(ensure_pnl)
+        await asyncio.to_thread(self._session.subscribe_pnl)
+
+    async def _poll_session_event(self, poll_fn: Any) -> dict[str, Any] | None:
+        """Poll with transient-error tolerance; re-raise channel/lagged failures."""
+        try:
+            return await asyncio.to_thread(poll_fn)
+        except Exception as exc:  # noqa: BLE001
+            msg = str(exc).lower()
+            if (
+                "lagged" in msg
+                or "closed" in msg
+                or "resync" in msg
+                or "not connected" in msg
+                or "order plant" in msg
+                or "pnl plant" in msg
+            ):
+                raise
+            self._log.warning(f"poll transient error: {exc}")
+            await asyncio.sleep(0.1)
+            return None
 
     async def _disconnect(self) -> None:
         for task_attr in ("_order_poll_task", "_poll_task"):
@@ -161,12 +203,30 @@ class RithmicExecutionClient(LiveExecutionClient):
             self._log.warning(f"disconnect warning: {exc}")
 
     async def _poll_loop(self) -> None:
+        backoff = 0.05
         while True:
             poll_pnl = getattr(self._session, "poll_pnl_event", None)
             if callable(poll_pnl):
-                event = await asyncio.to_thread(poll_pnl)
+                try:
+                    event = await self._poll_session_event(poll_pnl)
+                except Exception as exc:  # noqa: BLE001
+                    self._log.error(f"PnL poll channel error: {exc}")
+                    try:
+                        await self._resync_pnl_subscription()
+                        self._log.warning("PnL subscription resynced after channel error")
+                        backoff = 0.05
+                    except Exception as resync_exc:  # noqa: BLE001
+                        self._log.error(f"PnL subscription resync failed: {resync_exc}")
+                        backoff = min(backoff * 2, 2.0)
+                    await asyncio.sleep(backoff)
+                    continue
             else:
-                event = await asyncio.to_thread(self._session.poll_event)
+                try:
+                    event = await asyncio.to_thread(self._session.poll_event)
+                except Exception as exc:  # noqa: BLE001
+                    self._log.warning(f"ticker poll error: {exc}")
+                    await asyncio.sleep(0.1)
+                    continue
             if event is None:
                 await asyncio.sleep(0.05)
                 continue
@@ -177,12 +237,27 @@ class RithmicExecutionClient(LiveExecutionClient):
                 self._cache_position(event)
 
     async def _order_poll_loop(self) -> None:
+        backoff = 0.05
         while True:
             poll = getattr(self._session, "poll_order_event", None)
             if not callable(poll):
                 await asyncio.sleep(0.05)
                 continue
-            event = await asyncio.to_thread(poll)
+            try:
+                event = await self._poll_session_event(poll)
+            except Exception as exc:  # noqa: BLE001
+                self._log.error(f"order poll channel error: {exc}")
+                self._order_reconcile_unsafe = True
+                try:
+                    await self._resync_order_subscription()
+                    self._order_reconcile_unsafe = False
+                    self._log.warning("order subscription resynced after channel error")
+                    backoff = 0.05
+                except Exception as resync_exc:  # noqa: BLE001
+                    self._log.error(f"order subscription resync failed: {resync_exc}")
+                    backoff = min(backoff * 2, 2.0)
+                await asyncio.sleep(backoff)
+                continue
             if event is None:
                 await asyncio.sleep(0.05)
                 continue
@@ -281,10 +356,8 @@ class RithmicExecutionClient(LiveExecutionClient):
             )
         return str(symbol), str(exchange)
 
-    def _reject_order(self, action: str) -> None:
-        self._order_calls.append(action)
-        mode = "trading disabled" if not self.enable_trading else "rejected"
-        self._log.error(f"Rithmic exec client {mode}: {action}")
+    def _log_trading_disabled(self, action: str) -> None:
+        self._log.error(f"Rithmic exec client trading disabled: {action}")
 
     def _resolve_client_order_id(self, fields: dict[str, Any]) -> ClientOrderId | None:
         tag = fields.get("user_tag")
@@ -300,116 +373,93 @@ class RithmicExecutionClient(LiveExecutionClient):
         self._venue_to_client[venue_id] = client_order_id
 
     def _handle_order_notification(self, fields: dict[str, Any]) -> None:
-        client_order_id = self._resolve_client_order_id(fields)
-        if client_order_id is None:
-            self._log.debug(f"order notification for unknown order: {fields}")
-            return
-        order = self._cache.order(client_order_id)
-        if order is None:
-            self._log.warning(f"cached order missing for {client_order_id}")
-            return
-        ts_event = fields.get("ts_event")
-        if ts_event is None:
-            ts_event = self._clock.timestamp_ns()
-        else:
-            ts_event = int(ts_event)
-        strategy_id = order.strategy_id
-        instrument_id = order.instrument_id
+        route_order_notification(
+            fields,
+            resolve_client_order_id=self._resolve_client_order_id,
+            get_order=self._cache.order,
+            bind_venue_id=self._bind_venue_id,
+            venue_id_for=self._venue_id_for_notification,
+            clock_ts=self._clock.timestamp_ns,
+            emit=self,
+            log_debug=self._log.debug,
+            log_warning=self._log.warning,
+            log_error=self._log.error,
+        )
+
+    def _venue_id_for_notification(
+        self,
+        client_order_id: ClientOrderId,
+        fields: dict[str, Any],
+    ) -> str:
         basket = fields.get("basket_id")
         if basket:
-            self._bind_venue_id(client_order_id, str(basket))
-        venue_order_id = VenueOrderId(str(basket or self._client_to_venue.get(client_order_id.value) or client_order_id.value))
+            return str(basket)
+        return str(self._client_to_venue.get(client_order_id.value) or client_order_id.value)
 
-        if is_rithmic_open(fields):
-            self.generate_order_accepted(
-                strategy_id,
-                instrument_id,
-                client_order_id,
-                venue_order_id,
-                ts_event,
-            )
-            return
+    def _reject_if_order_channel_unsafe(self, order: Order, action: str) -> bool:
+        if not self._order_reconcile_unsafe:
+            return False
+        self.generate_order_rejected(
+            order.strategy_id,
+            order.instrument_id,
+            order.client_order_id,
+            f"order channel resync in progress; {action} blocked",
+            self._clock.timestamp_ns(),
+        )
+        return True
 
-        if is_exchange_reject(fields):
-            reason = fields.get("text") or fields.get("report_text") or fields.get("status") or "REJECT"
-            self.generate_order_rejected(
-                strategy_id,
-                instrument_id,
-                client_order_id,
-                str(reason),
-                ts_event,
+    def _cache_backed_order_status_reports(
+        self,
+        command: GenerateOrderStatusReports,
+    ) -> list[OrderStatusReport]:
+        """Best-effort venue snapshots from cache while order channel is degraded."""
+        ts_init = self._clock.timestamp_ns()
+        reports: list[OrderStatusReport] = []
+        orders = self._cache.orders_open() if command.open_only else self._cache.orders()
+        for order in orders:
+            if command.instrument_id is not None and order.instrument_id != command.instrument_id:
+                continue
+            venue_id = self._client_to_venue.get(order.client_order_id.value)
+            if venue_id is None and order.venue_order_id is not None:
+                venue_id = order.venue_order_id.value
+            if venue_id is None:
+                continue
+            reports.append(
+                OrderStatusReport(
+                    account_id=self.account_id,
+                    instrument_id=order.instrument_id,
+                    venue_order_id=VenueOrderId(venue_id),
+                    order_side=order.side,
+                    order_type=order.order_type,
+                    time_in_force=order.time_in_force,
+                    order_status=order.status,
+                    quantity=order.quantity,
+                    filled_qty=order.filled_qty,
+                    report_id=UUID4(),
+                    ts_accepted=order.ts_accepted,
+                    ts_last=order.ts_last,
+                    ts_init=ts_init,
+                    client_order_id=order.client_order_id,
+                    price=order.price if order.has_price else None,
+                    trigger_price=order.trigger_price if order.has_trigger_price else None,
+                )
             )
-            return
-
-        if is_rithmic_modify_failed(fields):
-            reason = fields.get("text") or fields.get("status") or "MODIFICATION_FAILED"
-            self.generate_order_modify_rejected(
-                strategy_id,
-                instrument_id,
-                client_order_id,
-                venue_order_id,
-                str(reason),
-                ts_event,
-            )
-            return
-
-        if is_rithmic_cancel_failed(fields):
-            reason = fields.get("text") or fields.get("status") or "CANCELLATION_FAILED"
-            self.generate_order_cancel_rejected(
-                strategy_id,
-                instrument_id,
-                client_order_id,
-                venue_order_id,
-                str(reason),
-                ts_event,
-            )
-            return
-
-        if is_exchange_cancel(fields) or (
-            is_rithmic_complete(fields)
-            and str(fields.get("status") or "").upper() in {"CANCELLED", "CANCELED"}
-        ):
-            self.generate_order_canceled(
-                strategy_id,
-                instrument_id,
-                client_order_id,
-                venue_order_id,
-                ts_event,
-            )
-            return
-
-        if is_exchange_fill(fields):
-            fill_px = fields.get("fill_price")
-            fill_sz = fields.get("fill_size")
-            if fill_px is None or fill_sz is None:
-                self._log.error(f"fill notification missing fill_price/fill_size: {fields}")
-                return
-            fill_id = fields.get("fill_id") or fields.get("exchange_order_id") or f"{basket}-{ts_event}"
-            commission = Money(Decimal("0"), Currency.from_str("USD"))
-            self.generate_order_filled(
-                strategy_id,
-                instrument_id,
-                client_order_id,
-                venue_order_id,
-                None,
-                TradeId(str(fill_id)),
-                order.side,
-                order.order_type,
-                Quantity.from_int(int(fill_sz)),
-                _price(fill_px),
-                Currency.from_str("USD"),
-                commission,
-                LiquiditySide.NO_LIQUIDITY_SIDE,
-                ts_event,
-                info={"rithmic": dict(fields)},
-            )
-            return
+        return reports
 
     async def _submit_order(self, command: SubmitOrder) -> None:
-        if not self.enable_trading:
-            self._reject_order("submit_order")
-            return
         order: Order = command.order
+        if not self.enable_trading:
+            self._log_trading_disabled("submit_order")
+            self.generate_order_rejected(
+                order.strategy_id,
+                order.instrument_id,
+                order.client_order_id,
+                "Rithmic trading disabled (enable_trading=False)",
+                self._clock.timestamp_ns(),
+            )
+            return
+        if self._reject_if_order_channel_unsafe(order, "submit"):
+            return
         try:
             symbol, exchange = self._route(order.instrument_id)
             side = nautilus_side_to_rithmic(order.side)
@@ -451,6 +501,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                 duration,
             )
         except Exception as exc:  # noqa: BLE001
+            self._tag_to_client.pop(user_tag, None)
             self.generate_order_rejected(
                 order.strategy_id,
                 order.instrument_id,
@@ -461,7 +512,15 @@ class RithmicExecutionClient(LiveExecutionClient):
 
     async def _submit_order_list(self, command: SubmitOrderList) -> None:
         if not self.enable_trading:
-            self._reject_order("submit_order_list")
+            self._log_trading_disabled("submit_order_list")
+            for order in command.order_list.orders:
+                self.generate_order_rejected(
+                    order.strategy_id,
+                    order.instrument_id,
+                    order.client_order_id,
+                    "Rithmic trading disabled (enable_trading=False)",
+                    self._clock.timestamp_ns(),
+                )
             return
         for order in command.order_list.orders:
             await self._submit_order(
@@ -477,11 +536,36 @@ class RithmicExecutionClient(LiveExecutionClient):
 
     async def _modify_order(self, command: ModifyOrder) -> None:
         if not self.enable_trading:
-            self._reject_order("modify_order")
+            self._log_trading_disabled("modify_order")
+            self.generate_order_modify_rejected(
+                command.strategy_id,
+                command.instrument_id,
+                command.client_order_id,
+                VenueOrderId("UNKNOWN"),
+                "Rithmic trading disabled (enable_trading=False)",
+                self._clock.timestamp_ns(),
+            )
+            return
+        if self._order_reconcile_unsafe:
+            self.generate_order_modify_rejected(
+                command.strategy_id,
+                command.instrument_id,
+                command.client_order_id,
+                VenueOrderId("UNKNOWN"),
+                "order channel resync in progress; modify blocked",
+                self._clock.timestamp_ns(),
+            )
             return
         order = self._cache.order(command.client_order_id)
         if order is None:
-            self._log.error(f"modify_order: order not in cache {command.client_order_id}")
+            self.generate_order_modify_rejected(
+                command.strategy_id,
+                command.instrument_id,
+                command.client_order_id,
+                VenueOrderId("UNKNOWN"),
+                "order not in cache",
+                self._clock.timestamp_ns(),
+            )
             return
         venue_id = self._client_to_venue.get(command.client_order_id.value)
         if not venue_id and order.venue_order_id is not None:
@@ -539,7 +623,15 @@ class RithmicExecutionClient(LiveExecutionClient):
 
     async def _cancel_order(self, command: CancelOrder) -> None:
         if not self.enable_trading:
-            self._reject_order("cancel_order")
+            self._log_trading_disabled("cancel_order")
+            self.generate_order_cancel_rejected(
+                command.strategy_id,
+                command.instrument_id,
+                command.client_order_id,
+                command.venue_order_id or VenueOrderId("UNKNOWN"),
+                "Rithmic trading disabled (enable_trading=False)",
+                self._clock.timestamp_ns(),
+            )
             return
         venue_id = None
         if command.venue_order_id is not None:
@@ -571,7 +663,7 @@ class RithmicExecutionClient(LiveExecutionClient):
     async def _cancel_all_orders(self, command: CancelAllOrders) -> None:
         _ = command
         if not self.enable_trading:
-            self._reject_order("cancel_all_orders")
+            self._log_trading_disabled("cancel_all_orders")
             return
         try:
             await asyncio.to_thread(self._session.cancel_all_orders)
@@ -589,13 +681,18 @@ class RithmicExecutionClient(LiveExecutionClient):
         self,
         command: GenerateOrderStatusReports,
     ) -> list[OrderStatusReport]:
-        _ = command
+        if self._order_reconcile_unsafe:
+            return self._cache_backed_order_status_reports(command)
         return []
 
     async def generate_fill_reports(
         self,
         command: GenerateFillReports,
     ) -> list[FillReport]:
+        if self._order_reconcile_unsafe:
+            raise RuntimeError(
+                "order channel degraded; fill report query unavailable until resync completes"
+            )
         _ = command
         return []
 

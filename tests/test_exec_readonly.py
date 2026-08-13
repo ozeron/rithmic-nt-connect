@@ -47,6 +47,12 @@ def test_execution_client_alias_preserved():
     assert RithmicReadOnlyExecutionClient is RithmicExecutionClient
 
 
+def test_exec_notifications_import_smoke():
+    from rithmic_connect._exec_notifications import route_order_notification
+
+    assert callable(route_order_notification)
+
+
 def test_instrument_pnl_to_position_fields():
     from rithmic_connect._convert import instrument_pnl_to_fields
 

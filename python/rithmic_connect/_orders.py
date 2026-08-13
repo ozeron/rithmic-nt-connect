@@ -35,9 +35,13 @@ _TIF_TO_RITHMIC: dict[str, str] = {
 _EXCHANGE_FILL = 5
 _EXCHANGE_REJECT = 6
 _EXCHANGE_CANCEL = 3
+_EXCHANGE_TRIGGER = 4
+_EXCHANGE_NOT_MODIFIED = 7
+_EXCHANGE_NOT_CANCELLED = 8
 
 # Rithmic plant notify types of interest
 _RITHMIC_OPEN = 13
+_RITHMIC_MODIFIED = 14
 _RITHMIC_COMPLETE = 15
 _RITHMIC_MODIFICATION_FAILED = 16
 _RITHMIC_CANCELLATION_FAILED = 17
@@ -146,6 +150,33 @@ def is_exchange_cancel(fields: Mapping[str, Any]) -> bool:
     return fields.get("notify_type") == _EXCHANGE_CANCEL
 
 
+def is_exchange_trigger(fields: Mapping[str, Any]) -> bool:
+    if fields.get("source") != "exchange":
+        return False
+    name = fields.get("notify_type_name")
+    if name == "TRIGGER":
+        return True
+    return fields.get("notify_type") == _EXCHANGE_TRIGGER
+
+
+def is_exchange_not_modified(fields: Mapping[str, Any]) -> bool:
+    if fields.get("source") != "exchange":
+        return False
+    name = fields.get("notify_type_name")
+    if name == "NOT_MODIFIED":
+        return True
+    return fields.get("notify_type") == _EXCHANGE_NOT_MODIFIED
+
+
+def is_exchange_not_cancelled(fields: Mapping[str, Any]) -> bool:
+    if fields.get("source") != "exchange":
+        return False
+    name = fields.get("notify_type_name")
+    if name in {"NOT_CANCELLED", "NOT_CANCELED"}:
+        return True
+    return fields.get("notify_type") == _EXCHANGE_NOT_CANCELLED
+
+
 def is_rithmic_open(fields: Mapping[str, Any]) -> bool:
     if fields.get("source") != "rithmic":
         return False
@@ -164,6 +195,15 @@ def is_rithmic_complete(fields: Mapping[str, Any]) -> bool:
     return fields.get("notify_type") == _RITHMIC_COMPLETE
 
 
+def is_rithmic_modified(fields: Mapping[str, Any]) -> bool:
+    if fields.get("source") != "rithmic":
+        return False
+    name = fields.get("notify_type_name")
+    if name == "MODIFIED":
+        return True
+    return fields.get("notify_type") == _RITHMIC_MODIFIED
+
+
 def is_rithmic_modify_failed(fields: Mapping[str, Any]) -> bool:
     if fields.get("source") != "rithmic":
         return False
@@ -180,3 +220,15 @@ def is_rithmic_cancel_failed(fields: Mapping[str, Any]) -> bool:
     if name == "CANCELLATION_FAILED":
         return True
     return fields.get("notify_type") == _RITHMIC_CANCELLATION_FAILED
+
+
+def trade_id_from_fill_fields(fields: Mapping[str, Any], ts_event: int) -> str:
+    """Build a unique TradeId for partial fills when fill_id is absent."""
+    fill_id = fields.get("fill_id")
+    if fill_id:
+        return str(fill_id)
+    basket = fields.get("basket_id") or ""
+    exch = fields.get("exchange_order_id") or ""
+    fill_sz = fields.get("fill_size")
+    fill_px = fields.get("fill_price")
+    return f"{basket}:{exch}:{ts_event}:{fill_sz}:{fill_px}"

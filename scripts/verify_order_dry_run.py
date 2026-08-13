@@ -153,7 +153,18 @@ def main(argv: list[str] | None = None) -> int:
             print(f"order_event: {slim}")
 
         report["event_count"] = len(report["events"])
-        print(f"DRY-RUN OK event_count={report['event_count']} placed={report['placed']}")
+        if report["placed"]:
+            if report["event_count"] == 0:
+                print(
+                    "FAIL: place_order sent but no order events received",
+                    file=sys.stderr,
+                )
+                return 1
+            print(
+                f"LIVE PLACE OK event_count={report['event_count']} placed={report['placed']}"
+            )
+        else:
+            print(f"DRY-RUN OK event_count={report['event_count']} placed={report['placed']}")
         if args.out is not None:
             args.out.parent.mkdir(parents=True, exist_ok=True)
             args.out.write_text(json.dumps(report, indent=2) + "\n")

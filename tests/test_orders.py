@@ -8,6 +8,10 @@ from nautilus_trader.model.enums import TimeInForce
 
 from rithmic_connect._orders import OrderMapError
 from rithmic_connect._orders import is_exchange_fill
+from rithmic_connect._orders import is_exchange_not_cancelled
+from rithmic_connect._orders import is_exchange_not_modified
+from rithmic_connect._orders import is_exchange_trigger
+from rithmic_connect._orders import is_rithmic_modified
 from rithmic_connect._orders import is_rithmic_open
 from rithmic_connect._orders import nautilus_order_type_to_rithmic
 from rithmic_connect._orders import nautilus_side_to_rithmic
@@ -69,6 +73,17 @@ def test_rithmic_open_detection():
         }
     )
     assert is_rithmic_open(fields)
+
+
+def test_exchange_trigger_modified_not_modified_predicates():
+    assert is_exchange_trigger({"source": "exchange", "notify_type": 4, "notify_type_name": "TRIGGER"})
+    assert is_rithmic_modified({"source": "rithmic", "notify_type": 14, "notify_type_name": "MODIFIED"})
+    assert is_exchange_not_modified(
+        {"source": "exchange", "notify_type": 7, "notify_type_name": "NOT_MODIFIED"}
+    )
+    assert is_exchange_not_cancelled(
+        {"source": "exchange", "notify_type": 8, "notify_type_name": "NOT_CANCELLED"}
+    )
 
 
 def test_exec_config_enable_trading_default_false():

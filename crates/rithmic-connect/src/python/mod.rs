@@ -1,6 +1,8 @@
 //! Python bindings for the Phase 2 Rithmic session facade.
 
 use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -326,6 +328,54 @@ fn history_bar_dict(py: Python<'_>, b: HistoryBarDto) -> PyResult<Py<PyDict>> {
 #[pyclass(name = "Session")]
 pub struct PySession {
     inner: Mutex<RithmicSession>,
+    /// Held for the full duration of place/cancel/modify so disconnect cannot interleave.
+    session_ops: Mutex<()>,
+    disconnecting: AtomicBool,
+}
+
+struct OrderOpGuard<'a> {
+    _ops: std::sync::MutexGuard<'a, ()>,
+}
+
+impl PySession {
+    fn begin_order_op(&self) -> PyResult<OrderOpGuard<'_>> {
+        if self.disconnecting.load(Ordering::SeqCst) {
+            return Err(PyRuntimeError::new_err(
+                "session disconnect in progress; order operation rejected",
+            ));
+        }
+        let guard = self
+            .session_ops
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok(OrderOpGuard { _ops: guard })
+    }
+
+    fn acquire_session_ops_for_disconnect(&self) -> PyResult<std::sync::MutexGuard<'_, ()>> {
+        let timeout = Duration::from_secs(30);
+        let start = Instant::now();
+        loop {
+            match self.session_ops.try_lock() {
+                Ok(guard) => return Ok(guard),
+                Err(_) if start.elapsed() >= timeout => {
+                    return Err(PyRuntimeError::new_err(
+                        "timed out waiting for in-flight order operations",
+                    ));
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+    }
+
+    fn with_disconnect_gate<F>(&self, f: F) -> PyResult<()>
+    where
+        F: FnOnce() -> PyResult<()>,
+    {
+        self.disconnecting.store(true, Ordering::SeqCst);
+        let result = f();
+        self.disconnecting.store(false, Ordering::SeqCst);
+        result
+    }
 }
 
 #[pymethods]
@@ -391,6 +441,8 @@ impl PySession {
         let config = builder.build().map_err(to_py_err)?;
         Ok(Self {
             inner: Mutex::new(RithmicSession::new(config)),
+            session_ops: Mutex::new(()),
+            disconnecting: AtomicBool::new(false),
         })
     }
 
@@ -403,11 +455,47 @@ impl PySession {
     }
 
     fn disconnect(&self) -> PyResult<()> {
+        self.with_disconnect_gate(|| {
+            let _ops = self.acquire_session_ops_for_disconnect()?;
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            runtime().block_on(inner.disconnect()).map_err(to_py_err)
+        })
+    }
+
+    fn disconnect_order_plant(&self) -> PyResult<()> {
+        self.with_disconnect_gate(|| {
+            let _ops = self.acquire_session_ops_for_disconnect()?;
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            runtime()
+                .block_on(inner.disconnect_order_plant())
+                .map_err(to_py_err)
+        })
+    }
+
+    fn disconnect_pnl_plant(&self) -> PyResult<()> {
         let mut inner = self
             .inner
             .lock()
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        runtime().block_on(inner.disconnect()).map_err(to_py_err)
+        runtime()
+            .block_on(inner.disconnect_pnl_plant())
+            .map_err(to_py_err)
+    }
+
+    fn ensure_pnl_plant(&self) -> PyResult<()> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        runtime()
+            .block_on(inner.ensure_pnl_plant())
+            .map_err(to_py_err)
     }
 
     fn subscribe(&self, symbol: &str, exchange: &str) -> PyResult<()> {
@@ -599,6 +687,7 @@ impl PySession {
         trigger_price: Option<f64>,
         duration: &str,
     ) -> PyResult<()> {
+        let _guard = self.begin_order_op()?;
         // Ensure + clone under a short lock, then release before network I/O so
         // poll_order_event can run concurrently.
         let handle = {
@@ -628,6 +717,7 @@ impl PySession {
     }
 
     fn cancel_order(&self, basket_id: &str) -> PyResult<()> {
+        let _guard = self.begin_order_op()?;
         let handle = {
             let mut inner = self
                 .inner
@@ -663,6 +753,7 @@ impl PySession {
         price: Option<f64>,
         trigger_price: Option<f64>,
     ) -> PyResult<()> {
+        let _guard = self.begin_order_op()?;
         let handle = {
             let mut inner = self
                 .inner
@@ -688,6 +779,7 @@ impl PySession {
     }
 
     fn cancel_all_orders(&self) -> PyResult<()> {
+        let _guard = self.begin_order_op()?;
         let handle = {
             let mut inner = self
                 .inner
