@@ -597,11 +597,10 @@ class RithmicDataClient(LiveMarketDataClient):
         if not bar_type.is_externally_aggregated():
             return
         if not external_bar_advertised(bar_type):
-            self._log.error(
+            raise ValueError(
                 f"live EXTERNAL bars not advertised for {bar_type}; "
                 "use request_bars for lookback or INTERNAL 1s from ticks"
             )
-            return
         symbol, exchange = self._route(bar_type.instrument_id)
         rtype, period = bar_type_to_rithmic(bar_type)
         await asyncio.to_thread(

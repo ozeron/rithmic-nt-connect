@@ -636,6 +636,8 @@ impl HistoryTickDto {
 }
 
 impl HistoryBarDto {
+    /// Build a bar only when OHLC are present. Missing open/high/low are dropped
+    /// (never filled from close). Missing volume becomes 0 for settlement rows.
     fn from_ohlcv(
         symbol: Option<String>,
         exchange: Option<String>,
@@ -650,16 +652,19 @@ impl HistoryBarDto {
         num_trades: Option<u64>,
         bid_volume: Option<u64>,
         ask_volume: Option<u64>,
-    ) -> Self {
-        Self {
+    ) -> Option<Self> {
+        let open_price = open_price?;
+        let high_price = high_price?;
+        let low_price = low_price?;
+        Some(Self {
             symbol,
             exchange,
             bar_type,
             period,
             marker: Some(marker),
-            open_price: Some(open_price.unwrap_or(close_price)),
-            high_price: Some(high_price.unwrap_or(close_price)),
-            low_price: Some(low_price.unwrap_or(close_price)),
+            open_price: Some(open_price),
+            high_price: Some(high_price),
+            low_price: Some(low_price),
             close_price: Some(close_price),
             volume: Some(volume.unwrap_or(0)),
             num_trades,
@@ -669,17 +674,17 @@ impl HistoryBarDto {
                 crate::history::marker_to_ssboe(marker),
                 0,
             )),
-        }
+        })
     }
 
     pub(crate) fn from_response(resp: &RithmicResponse) -> Option<Self> {
         match &resp.message {
             RithmicMessage::ResponseTimeBarReplay(m) => {
-                // End-of-replay markers have no price. Daily rows often have
-                // settlement and no volume — do not drop those.
+                // End-of-replay markers have no price. Daily rows may use
+                // settlement as close and omit volume — never invent OHLC.
                 let close_price = m.close_price.or(m.settlement_price)?;
                 let marker = m.marker?;
-                Some(Self::from_ohlcv(
+                Self::from_ohlcv(
                     m.symbol.clone(),
                     m.exchange.clone(),
                     m.r#type,
@@ -693,12 +698,12 @@ impl HistoryBarDto {
                     m.num_trades,
                     m.bid_volume,
                     m.ask_volume,
-                ))
+                )
             }
             RithmicMessage::TimeBar(m) => {
                 let close_price = m.close_price?;
                 let marker = m.marker?;
-                Some(Self::from_ohlcv(
+                Self::from_ohlcv(
                     m.symbol.clone(),
                     m.exchange.clone(),
                     m.r#type,
@@ -712,9 +717,79 @@ impl HistoryBarDto {
                     m.num_trades,
                     m.bid_volume,
                     m.ask_volume,
-                ))
+                )
             }
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod history_bar_tests {
+    use super::HistoryBarDto;
+
+    #[test]
+    fn close_only_does_not_invent_ohl() {
+        assert!(HistoryBarDto::from_ohlcv(
+            Some("NQU6".into()),
+            Some("CME".into()),
+            Some(3),
+            Some("1".into()),
+            1_700_000_000,
+            100.0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn partial_ohl_is_dropped() {
+        assert!(HistoryBarDto::from_ohlcv(
+            Some("NQU6".into()),
+            Some("CME".into()),
+            Some(2),
+            Some("1".into()),
+            1_700_000_000,
+            100.0,
+            Some(99.0),
+            Some(101.0),
+            None,
+            Some(10),
+            None,
+            None,
+            None,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn full_ohlc_parses_and_missing_volume_is_zero() {
+        let bar = HistoryBarDto::from_ohlcv(
+            Some("NQU6".into()),
+            Some("CME".into()),
+            Some(2),
+            Some("1".into()),
+            1_700_000_000,
+            100.0,
+            Some(99.0),
+            Some(101.0),
+            Some(98.5),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("bar");
+        assert_eq!(bar.open_price, Some(99.0));
+        assert_eq!(bar.high_price, Some(101.0));
+        assert_eq!(bar.low_price, Some(98.5));
+        assert_eq!(bar.close_price, Some(100.0));
+        assert_eq!(bar.volume, Some(0));
     }
 }

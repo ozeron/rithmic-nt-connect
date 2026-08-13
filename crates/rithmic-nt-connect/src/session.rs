@@ -835,9 +835,11 @@ async fn load_tick_slice(
             end_time_sec,
         )
         .await?;
-    check_responses(responses.iter(), "load_ticks")?;
+    // Multi-response replay: skip error / marker frames; keep valid rows.
+    // Do not abort the whole slice on a single frame error.
     Ok(responses
         .iter()
+        .filter(|resp| resp.error.is_none())
         .filter_map(HistoryTickDto::from_response)
         .collect())
 }
@@ -863,9 +865,9 @@ async fn load_bar_slice(
             finish_index,
         )
         .await?;
-    check_responses(responses.iter(), "load_time_bars")?;
     Ok(responses
         .iter()
+        .filter(|resp| resp.error.is_none())
         .filter_map(HistoryBarDto::from_response)
         .collect())
 }
