@@ -19,6 +19,7 @@ Related:
 | [`docs/STATUS.md`](docs/STATUS.md) | Planned vs done; update marks when you close a gap |
 | [`docs/references/nautilus-adapter-tiers.md`](docs/references/nautilus-adapter-tiers.md) | 1.231.x `TradingNode` seam; naming |
 | [`docs/references/ops-runbook.md`](docs/references/ops-runbook.md) | How to run smokes |
+| [`docs/references/gateway-remote.md`](docs/references/gateway-remote.md) | Gateway unix / tunnel / TLS roadmap |
 
 Do not invent a second status table. Do not copy upstream DataTester / ExecTester case lists into the repo.
 
@@ -74,7 +75,7 @@ After a change that emits Nautilus data or execution events, check the rows that
 ## Verify
 
 ```bash
-cargo test -p rithmic-nt-connect
+cargo test -p rithmic-plants -p rithmic-gateway -p rithmic-nt-connect
 pytest -q
 ```
 

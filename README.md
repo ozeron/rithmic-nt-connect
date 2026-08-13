@@ -16,6 +16,8 @@ Out-of-tree adapter for NautilusTrader **1.231.x**: live ticks/quotes, history r
 
 Trading is **off by default** (`enable_trading=False` / unset `RITHMIC_ENABLE_TRADING`). Live place is gated; use the dry-run harness first. Scope vs done: [`docs/STATUS.md`](docs/STATUS.md).
 
+**Session modes:** **direct** (default) opens Rithmic in-process under a credential flock; **gateway** attaches to `rithmic-gateway` over `unix://…` so multiple processes share one login (`python/rithmic_gateway`, no Nautilus required for lake/scripts). Remote TLS is not shipped — see [`docs/references/gateway-remote.md`](docs/references/gateway-remote.md).
+
 Paper-trade a simple NQ strategy with **live Rithmic data** and Nautilus **Sandbox** execution (no Rithmic orders):
 
 ```bash
@@ -37,7 +39,7 @@ python scripts/verify_order_dry_run.py --seconds 5
 maturin develop
 
 # Unit tests (no live credentials)
-cargo test -p rithmic-nt-connect
+cargo test -p rithmic-plants -p rithmic-gateway -p rithmic-nt-connect
 pytest -q
 
 # Live LucidTrading smoke (close MotiveWave first)

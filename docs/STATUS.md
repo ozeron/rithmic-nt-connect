@@ -35,6 +35,7 @@ Acceptance: **NQ / CME via LucidTrading**. One Rithmic login (close MotiveWave /
 | Order status reports | Cache-backed only | **Done** (honest: not a venue snapshot) |
 | Fill reports | Query unavailable | **Done** (`VenueQueryUnavailable`) |
 | Reconnect + MD resubscribe | Planned | **Partial** — ticker poll resyncs last-trade/BBO + book + EXTERNAL bar intent. Not live-proven. |
+| Session gateway (shared login) | Direct default + unix gateway | **Partial** — `rithmic-plants` / `rithmic-gateway` / `python/rithmic_gateway`; flock; dual-mode adapter. Unit/mock green. Not Lucid multi-process proven → stay Partial. Native TLS remote **N/A** (see [`gateway-remote.md`](references/gateway-remote.md)). |
 | Python v2 / LiveNode | Not this support line | **N/A** |
 
 **Protocol boundaries:** ticker, history, PnL, order plants. Public MD vs private exec.
@@ -43,7 +44,7 @@ Acceptance: **NQ / CME via LucidTrading**. One Rithmic login (close MotiveWave /
 
 | Harness | Role |
 | --- | --- |
-| `cargo test -p rithmic-nt-connect` + `pytest -q` | Unit / conversion |
+| `cargo test -p rithmic-plants -p rithmic-gateway -p rithmic-nt-connect` + `pytest -q` | Unit / conversion / gateway framing |
 | `scripts/smoke_lucid_nq.py` | Live MD (exit `2` if no creds) |
 | `scripts/verify_live_vs_history.py` | Live ↔ history compare |
 | `scripts/verify_order_dry_run.py` | Order plant connect / subscribe; **no** `--live-place` until `app_name` |
