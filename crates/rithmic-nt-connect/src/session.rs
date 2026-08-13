@@ -131,13 +131,19 @@ impl RithmicSession {
         }
 
         let rc = self.config.to_rithmic_config()?;
+        // Attach without connect_or_rollback: a failed add must not tear down
+        // plants that were already live (and their subscription intent).
         if self.plants.ticker && self.ticker.is_none() {
-            self.connect_or_rollback(connect_ticker(&rc), |s, p| s.ticker = Some(p))
-                .await?;
+            match connect_ticker(&rc).await {
+                Ok(plant) => self.ticker = Some(plant),
+                Err(err) => return Err(err),
+            }
         }
         if self.plants.history && self.history.is_none() {
-            self.connect_or_rollback(connect_history(&rc), |s, p| s.history = Some(p))
-                .await?;
+            match connect_history(&rc).await {
+                Ok(plant) => self.history = Some(plant),
+                Err(err) => return Err(err),
+            }
         }
         if self.plants.pnl && self.pnl.is_none() {
             self.ensure_pnl_plant().await?;

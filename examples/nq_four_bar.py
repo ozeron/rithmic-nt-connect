@@ -92,10 +92,12 @@ class NqFourBarStrategy(Strategy):
 
     def _rth_open_utc(self, now):
         chi = now.astimezone(_CHI)
-        rth = chi.replace(hour=8, minute=30, second=0, microsecond=0).astimezone(timezone.utc)
-        if now >= rth:
-            return rth
-        return rth - timedelta(days=1)
+        rth = chi.replace(hour=8, minute=30, second=0, microsecond=0)
+        if now.astimezone(_CHI) < rth:
+            rth -= timedelta(days=1)
+        while rth.weekday() >= 5:  # Sat/Sun → previous weekday RTH open
+            rth -= timedelta(days=1)
+        return rth.astimezone(timezone.utc)
 
     def _ensure_indicator(self, bar_type: BarType, indicator) -> None:
         if indicator in list(self.registered_indicators):
