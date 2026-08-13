@@ -48,14 +48,25 @@ impl ReconnectController {
         }
     }
 
-    pub async fn on_subscribe(&self, key: SubKey) {
+    /// Record subscribe intent and bump hub refcount. Returns `true` when
+    /// this was the first interest in `key` (0→1) — caller must issue the
+    /// venue subscribe. Returns `false` when a peer is already subscribed.
+    pub async fn on_subscribe(&self, key: SubKey) -> bool {
         self.intent.lock().await.note_sub(key.clone());
-        let _ = self.hub.add_interest(key).await;
+        self.hub.add_interest(key).await
     }
 
-    pub async fn on_unsubscribe(&self, key: &SubKey) {
-        self.intent.lock().await.note_unsub(key);
-        let _ = self.hub.remove_interest(key).await;
+    /// Drop subscribe intent and decrement hub refcount. Returns `true` when
+    /// this was the last interest in `key` (→0) — caller must issue the
+    /// venue unsubscribe. Intent is only cleared from the restore set when
+    /// the last peer detaches, so a reconnect never resurrects an interest
+    /// no client asked for anymore.
+    pub async fn on_unsubscribe(&self, key: &SubKey) -> bool {
+        let last = self.hub.remove_interest(key).await;
+        if last {
+            self.intent.lock().await.note_unsub(key);
+        }
+        last
     }
 
     /// After plants are back, re-add hub interest for every remembered key.

@@ -6,6 +6,7 @@
 #![allow(missing_docs)]
 
 pub mod codec;
+pub mod convert;
 pub mod framing;
 pub mod listen;
 pub mod reconnect;
