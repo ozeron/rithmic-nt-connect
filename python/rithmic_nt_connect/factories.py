@@ -24,7 +24,7 @@ from rithmic_nt_connect.providers import RithmicInstrumentProvider
 from rithmic_nt_connect.session import PLANTS_EXECUTION
 from rithmic_nt_connect.session import PLANTS_MARKET_DATA
 from rithmic_nt_connect.session import WireSession
-from rithmic_nt_connect.session import create_rust_session
+from rithmic_nt_connect.session import create_session
 
 
 def _session_config_from_data(config: object) -> SessionConfig:
@@ -47,11 +47,12 @@ def _shared_session(
     plants: str,
 ) -> WireSession:
     key = (
-        f"{config_session.user}:{config_session.system_name}:{config_session.url}:"
-        f"{config_session.account_id}:{config_session.fcm_id}:{config_session.ib_id}"
+        f"{config_session.session_mode}:{config_session.user}:{config_session.system_name}:"
+        f"{config_session.url}:{config_session.account_id}:{config_session.fcm_id}:"
+        f"{config_session.ib_id}:{config_session.gateway_listen}"
     )
     if key not in cache:
-        cache[key] = create_rust_session(config_session, plants=plants)
+        cache[key] = create_session(config_session, plants=plants)
         return cache[key]
     existing = cache[key]
     if plants == PLANTS_EXECUTION:

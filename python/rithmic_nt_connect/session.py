@@ -109,11 +109,44 @@ def create_rust_session(
     )
 
 
+class _FlockedDirectSession:
+    """Keep credential flock alive for the lifetime of a direct WireSession."""
+
+    def __init__(self, inner: WireSession, lock: Any) -> None:
+        self._inner = inner
+        self._lock = lock
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+def create_session(
+    session: SessionConfig,
+    *,
+    plants: str = PLANTS_MARKET_DATA,
+) -> WireSession:
+    """Create a WireSession in ``direct`` (default) or ``gateway`` mode.
+
+    Direct mode takes the shared credential flock before constructing PyO3 plants.
+    Gateway mode never opens Rithmic plants in-process.
+    """
+    if session.session_mode == "gateway":
+        from rithmic_nt_connect.gateway_wire import create_gateway_wire_session
+
+        return create_gateway_wire_session(session)
+
+    from rithmic_gateway.flock import SessionLock
+
+    lock = SessionLock.try_acquire(session.user, session.system_name, session.url)
+    inner = create_rust_session(session, plants=plants)
+    return _FlockedDirectSession(inner, lock)  # type: ignore[return-value]
+
+
 def connect_market_data_session(
     config: SessionConfig | None = None,
 ) -> WireSession:
     """Create and connect a ticker+history session (no PnL / order plant)."""
-    session = create_rust_session(
+    session = create_session(
         config if config is not None else SessionConfig.from_env(),
         plants=PLANTS_MARKET_DATA,
     )
@@ -130,4 +163,5 @@ __all__ = [
     "WireSession",
     "connect_market_data_session",
     "create_rust_session",
+    "create_session",
 ]
