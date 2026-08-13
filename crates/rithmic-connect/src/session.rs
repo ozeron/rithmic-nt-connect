@@ -12,6 +12,7 @@ use rithmic_rs::{
     RithmicOrder, RithmicOrderPlant, RithmicOrderPlantHandle, RithmicPnlPlant,
     RithmicPnlPlantHandle, RithmicTickerPlant, RithmicTickerPlantHandle, TimeBarType, TimeInForce,
 };
+use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::broadcast::error::TryRecvError;
 
 use crate::config::SessionConfig;
@@ -332,49 +333,25 @@ impl RithmicSession {
         duration: &str,
     ) -> Result<()> {
         self.ensure_order_plant().await?;
-        let side: OrderSide = side
-            .parse()
-            .map_err(|e| Error::Config(format!("invalid order side: {e}")))?;
-        let price_type: OrderType = price_type
-            .parse()
-            .map_err(|e| Error::Config(format!("invalid price type: {e}")))?;
-        let duration: TimeInForce = if duration.is_empty() {
-            TimeInForce::Day
-        } else {
-            duration
-                .parse()
-                .map_err(|e| Error::Config(format!("invalid duration: {e}")))?
-        };
-
-        let mut builder = RithmicOrder::new()
-            .symbol(symbol)
-            .exchange(exchange)
-            .quantity(quantity)
-            .transaction_type(side)
-            .price_type(price_type)
-            .user_tag(user_tag)
-            .duration(duration)
-            .manual_or_auto(ManualOrAutoEntry::Auto);
-        if let Some(p) = price {
-            builder = builder.price(p);
-        }
-        if let Some(t) = trigger_price {
-            builder = builder.trigger_price(t);
-        }
-        let order = builder.build()?;
-        let handle = self.order_handle()?;
-        check_responses(handle.place_order(order).await?, "place_order")
+        place_order_on(
+            self.order_handle()?,
+            symbol,
+            exchange,
+            side,
+            price_type,
+            quantity,
+            user_tag,
+            price,
+            trigger_price,
+            duration,
+        )
+        .await
     }
 
     /// Cancel an order by basket id.
     pub async fn cancel_order(&mut self, basket_id: &str) -> Result<()> {
         self.ensure_order_plant().await?;
-        let cancel = RithmicCancelOrder::new()
-            .id(basket_id)
-            .manual_or_auto(ManualOrAutoEntry::Auto)
-            .build()?;
-        let handle = self.order_handle()?;
-        check_responses(handle.cancel_order(cancel).await?, "cancel_order")
+        cancel_order_on(self.order_handle()?, basket_id).await
     }
 
     /// Modify an existing order.
@@ -390,36 +367,23 @@ impl RithmicSession {
         trigger_price: Option<f64>,
     ) -> Result<()> {
         self.ensure_order_plant().await?;
-        let price_type: OrderType = price_type
-            .parse()
-            .map_err(|e| Error::Config(format!("invalid price type: {e}")))?;
-
-        let mut builder = RithmicModifyOrder::new()
-            .id(basket_id)
-            .symbol(symbol)
-            .exchange(exchange)
-            .quantity(quantity)
-            .price_type(price_type)
-            .manual_or_auto(ManualOrAutoEntry::Auto);
-        if let Some(p) = price {
-            builder = builder.price(p);
-        }
-        if let Some(t) = trigger_price {
-            builder = builder.trigger_price(t);
-        }
-        let order = builder.build()?;
-        let handle = self.order_handle()?;
-        check_responses(handle.modify_order(order).await?, "modify_order")
+        modify_order_on(
+            self.order_handle()?,
+            basket_id,
+            symbol,
+            exchange,
+            quantity,
+            price_type,
+            price,
+            trigger_price,
+        )
+        .await
     }
 
     /// Cancel all working orders on the account.
     pub async fn cancel_all_orders(&mut self) -> Result<()> {
         self.ensure_order_plant().await?;
-        let cmd = RithmicCancelAllOrders::new()
-            .manual_or_auto(ManualOrAutoEntry::Auto)
-            .build()?;
-        let handle = self.order_handle()?;
-        check_response(handle.cancel_all_orders(cmd).await?, "cancel_all_orders")
+        cancel_all_orders_on(self.order_handle()?).await
     }
 
     /// Non-blocking poll of the next ticker-plant subscription message.
@@ -455,7 +419,11 @@ impl RithmicSession {
                 }
                 Ok(Some(TickerEvent::from(&resp)))
             }
-            Some(Err(_)) => Err(Error::Session("pnl subscription channel closed".into())),
+            // Lagged means we fell behind; skip and try again next poll.
+            Some(Err(RecvError::Lagged(_))) => Ok(None),
+            Some(Err(RecvError::Closed)) => {
+                Err(Error::Session("pnl subscription channel closed".into()))
+            }
             None => Ok(None),
         }
     }
@@ -472,7 +440,9 @@ impl RithmicSession {
                 }
                 Ok(Some(TickerEvent::from(&resp)))
             }
-            Some(Err(_)) => Err(Error::Session(
+            // Lagged means we fell behind; skip and try again next poll.
+            Some(Err(RecvError::Lagged(_))) => Ok(None),
+            Some(Err(RecvError::Closed)) => Err(Error::Session(
                 "order subscription channel closed".into(),
             )),
             None => Ok(None),
@@ -536,6 +506,111 @@ impl RithmicSession {
             .map(|o| &mut o.handle)
             .ok_or_else(|| Error::Session("order plant not connected (account required)".into()))
     }
+
+    /// Clone a command handle for order I/O outside the session lock.
+    ///
+    /// The clone shares the plant command channel; its subscription receiver is a
+    /// separate resubscribe and is unused for place/cancel/modify.
+    pub fn clone_order_handle(&self) -> Result<RithmicOrderPlantHandle> {
+        Ok(self.order_handle()?.clone())
+    }
+}
+
+/// Place an order on an already-connected order-plant handle (no session lock).
+#[allow(clippy::too_many_arguments)]
+pub async fn place_order_on(
+    handle: &RithmicOrderPlantHandle,
+    symbol: &str,
+    exchange: &str,
+    side: &str,
+    price_type: &str,
+    quantity: i32,
+    user_tag: &str,
+    price: Option<f64>,
+    trigger_price: Option<f64>,
+    duration: &str,
+) -> Result<()> {
+    let side: OrderSide = side
+        .parse()
+        .map_err(|e| Error::Config(format!("invalid order side: {e}")))?;
+    let price_type: OrderType = price_type
+        .parse()
+        .map_err(|e| Error::Config(format!("invalid price type: {e}")))?;
+    let duration: TimeInForce = if duration.is_empty() {
+        TimeInForce::Day
+    } else {
+        duration
+            .parse()
+            .map_err(|e| Error::Config(format!("invalid duration: {e}")))?
+    };
+
+    let mut builder = RithmicOrder::new()
+        .symbol(symbol)
+        .exchange(exchange)
+        .quantity(quantity)
+        .transaction_type(side)
+        .price_type(price_type)
+        .user_tag(user_tag)
+        .duration(duration)
+        .manual_or_auto(ManualOrAutoEntry::Auto);
+    if let Some(p) = price {
+        builder = builder.price(p);
+    }
+    if let Some(t) = trigger_price {
+        builder = builder.trigger_price(t);
+    }
+    let order = builder.build()?;
+    check_responses(handle.place_order(order).await?, "place_order")
+}
+
+/// Cancel an order on an already-connected handle (no session lock).
+pub async fn cancel_order_on(handle: &RithmicOrderPlantHandle, basket_id: &str) -> Result<()> {
+    let cancel = RithmicCancelOrder::new()
+        .id(basket_id)
+        .manual_or_auto(ManualOrAutoEntry::Auto)
+        .build()?;
+    check_responses(handle.cancel_order(cancel).await?, "cancel_order")
+}
+
+/// Modify an order on an already-connected handle (no session lock).
+#[allow(clippy::too_many_arguments)]
+pub async fn modify_order_on(
+    handle: &RithmicOrderPlantHandle,
+    basket_id: &str,
+    symbol: &str,
+    exchange: &str,
+    quantity: i32,
+    price_type: &str,
+    price: Option<f64>,
+    trigger_price: Option<f64>,
+) -> Result<()> {
+    let price_type: OrderType = price_type
+        .parse()
+        .map_err(|e| Error::Config(format!("invalid price type: {e}")))?;
+
+    let mut builder = RithmicModifyOrder::new()
+        .id(basket_id)
+        .symbol(symbol)
+        .exchange(exchange)
+        .quantity(quantity)
+        .price_type(price_type)
+        .manual_or_auto(ManualOrAutoEntry::Auto);
+    if let Some(p) = price {
+        builder = builder.price(p);
+    }
+    if let Some(t) = trigger_price {
+        builder = builder.trigger_price(t);
+    }
+    let order = builder.build()?;
+    check_responses(handle.modify_order(order).await?, "modify_order")
+}
+
+/// Cancel all orders on an already-connected handle (no session lock).
+pub async fn cancel_all_orders_on(handle: &RithmicOrderPlantHandle) -> Result<()> {
+    let cmd = RithmicCancelAllOrders::new()
+        .manual_or_auto(ManualOrAutoEntry::Auto)
+        .build()?;
+    check_response(handle.cancel_all_orders(cmd).await?, "cancel_all_orders")
 }
 
 fn check_response(resp: rithmic_rs::RithmicResponse, ctx: &str) -> Result<()> {

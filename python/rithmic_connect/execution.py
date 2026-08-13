@@ -124,26 +124,26 @@ class RithmicExecutionClient(LiveExecutionClient):
         return bool(self._config_local.enable_trading)
 
     async def _connect(self) -> None:
-        try:
-            await asyncio.to_thread(self._session.connect)
-            if self._config_local.session.has_account():
+        await asyncio.to_thread(self._session.connect)
+
+        if self._config_local.session.has_account():
+            try:
                 await asyncio.to_thread(self._session.subscribe_pnl)
                 self._poll_task = self.create_task(self._poll_loop(), log_msg="rithmic_pnl_poll")
-            if self.enable_trading:
-                if not self._config_local.session.has_account():
-                    raise ValueError("enable_trading requires account_id/fcm_id/ib_id")
-                await asyncio.to_thread(self._session.subscribe_order_updates)
-                self._order_poll_task = self.create_task(
-                    self._order_poll_loop(),
-                    log_msg="rithmic_order_poll",
-                )
-        except Exception as exc:  # noqa: BLE001
-            if self.enable_trading:
-                raise
-            if self._config_local.soft_fail_pnl:
-                self._log.warning(f"PnL/account path soft-failed: {exc}")
-            else:
-                raise
+            except Exception as exc:  # noqa: BLE001
+                if self._config_local.soft_fail_pnl:
+                    self._log.warning(f"PnL/account path soft-failed: {exc}")
+                else:
+                    raise
+
+        if self.enable_trading:
+            if not self._config_local.session.has_account():
+                raise ValueError("enable_trading requires account_id/fcm_id/ib_id")
+            await asyncio.to_thread(self._session.subscribe_order_updates)
+            self._order_poll_task = self.create_task(
+                self._order_poll_loop(),
+                log_msg="rithmic_order_poll",
+            )
 
     async def _disconnect(self) -> None:
         for task_attr in ("_order_poll_task", "_poll_task"):

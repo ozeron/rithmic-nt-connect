@@ -13,7 +13,9 @@ use crate::dto::{
     LastTradeDto, OrderBookDto, OrderNotificationDto, ReferenceDataDto, TickerEvent,
 };
 use crate::error::Error;
-use crate::session::RithmicSession;
+use crate::session::{
+    RithmicSession, cancel_all_orders_on, cancel_order_on, modify_order_on, place_order_on,
+};
 
 fn runtime() -> &'static Runtime {
     static RT: OnceLock<Runtime> = OnceLock::new();
@@ -563,6 +565,7 @@ impl PySession {
     }
 
     fn subscribe_order_updates(&self) -> PyResult<()> {
+        // Subscribe must use the session's own handle (the one poll_order_event reads).
         let mut inner = self
             .inner
             .lock()
@@ -596,12 +599,21 @@ impl PySession {
         trigger_price: Option<f64>,
         duration: &str,
     ) -> PyResult<()> {
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        // Ensure + clone under a short lock, then release before network I/O so
+        // poll_order_event can run concurrently.
+        let handle = {
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            runtime()
+                .block_on(inner.ensure_order_plant())
+                .map_err(to_py_err)?;
+            inner.clone_order_handle().map_err(to_py_err)?
+        };
         runtime()
-            .block_on(inner.place_order(
+            .block_on(place_order_on(
+                &handle,
                 symbol,
                 exchange,
                 side,
@@ -616,12 +628,18 @@ impl PySession {
     }
 
     fn cancel_order(&self, basket_id: &str) -> PyResult<()> {
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let handle = {
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            runtime()
+                .block_on(inner.ensure_order_plant())
+                .map_err(to_py_err)?;
+            inner.clone_order_handle().map_err(to_py_err)?
+        };
         runtime()
-            .block_on(inner.cancel_order(basket_id))
+            .block_on(cancel_order_on(&handle, basket_id))
             .map_err(to_py_err)
     }
 
@@ -645,12 +663,19 @@ impl PySession {
         price: Option<f64>,
         trigger_price: Option<f64>,
     ) -> PyResult<()> {
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let handle = {
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            runtime()
+                .block_on(inner.ensure_order_plant())
+                .map_err(to_py_err)?;
+            inner.clone_order_handle().map_err(to_py_err)?
+        };
         runtime()
-            .block_on(inner.modify_order(
+            .block_on(modify_order_on(
+                &handle,
                 basket_id,
                 symbol,
                 exchange,
@@ -663,12 +688,18 @@ impl PySession {
     }
 
     fn cancel_all_orders(&self) -> PyResult<()> {
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let handle = {
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            runtime()
+                .block_on(inner.ensure_order_plant())
+                .map_err(to_py_err)?;
+            inner.clone_order_handle().map_err(to_py_err)?
+        };
         runtime()
-            .block_on(inner.cancel_all_orders())
+            .block_on(cancel_all_orders_on(&handle))
             .map_err(to_py_err)
     }
 
