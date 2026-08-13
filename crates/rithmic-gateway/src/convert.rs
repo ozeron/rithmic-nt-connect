@@ -219,11 +219,10 @@ pub fn other_key() -> SubKey {
 }
 
 /// Convert a plant event to its wire form, plus the routing key that
-/// determines which fan-out subscribers receive it.
-///
-/// Returns `None` only for events with no symbol to route on (dropped rather
-/// than broadcast to everyone, to avoid leaking unrelated venue data).
-pub fn plant_event_to_routed(event: PlantEvent) -> Option<(SubKey, pb::Event)> {
+/// determines which fan-out subscribers receive it. Symbol/exchange events
+/// route by `(symbol, exchange)`; account-level events use the internal
+/// `pnl` / `order` / `other` sentinel keys (see [`pnl_key`]).
+pub fn plant_event_to_routed(event: PlantEvent) -> (SubKey, pb::Event) {
     use pb::event::Body;
     match event {
         PlantEvent::LastTrade(t) => {
@@ -231,72 +230,72 @@ pub fn plant_event_to_routed(event: PlantEvent) -> Option<(SubKey, pb::Event)> {
                 symbol: t.symbol.clone().unwrap_or_default(),
                 exchange: t.exchange.clone().unwrap_or_default(),
             };
-            Some((
+            (
                 key,
                 pb::Event {
                     body: Some(Body::LastTrade(last_trade_to_pb(t))),
                 },
-            ))
+            )
         }
         PlantEvent::Bbo(b) => {
             let key = SubKey {
                 symbol: b.symbol.clone().unwrap_or_default(),
                 exchange: b.exchange.clone().unwrap_or_default(),
             };
-            Some((
+            (
                 key,
                 pb::Event {
                     body: Some(Body::Bbo(bbo_to_pb(b))),
                 },
-            ))
+            )
         }
         PlantEvent::OrderBook(o) => {
             let key = SubKey {
                 symbol: o.symbol.clone().unwrap_or_default(),
                 exchange: o.exchange.clone().unwrap_or_default(),
             };
-            Some((
+            (
                 key,
                 pb::Event {
                     body: Some(Body::OrderBook(order_book_to_pb(o))),
                 },
-            ))
+            )
         }
         PlantEvent::TimeBar(b) => {
             let key = SubKey {
                 symbol: b.symbol.clone().unwrap_or_default(),
                 exchange: b.exchange.clone().unwrap_or_default(),
             };
-            Some((
+            (
                 key,
                 pb::Event {
                     body: Some(Body::TimeBar(history_bar_to_pb(b))),
                 },
-            ))
+            )
         }
-        PlantEvent::AccountPnl(a) => Some((
+        PlantEvent::AccountPnl(a) => (
             pnl_key(),
             pb::Event {
                 body: Some(Body::AccountPnl(account_pnl_to_pb(a))),
             },
-        )),
-        PlantEvent::InstrumentPnl(i) => Some((
+        ),
+        PlantEvent::InstrumentPnl(i) => (
             pnl_key(),
             pb::Event {
                 body: Some(Body::InstrumentPnl(instrument_pnl_to_pb(i))),
             },
-        )),
-        PlantEvent::OrderNotification(n) => Some((
+        ),
+        PlantEvent::OrderNotification(n) => (
             order_key(),
             pb::Event {
                 body: Some(Body::OrderNotification(order_notification_to_pb(n))),
             },
-        )),
-        PlantEvent::Other { type_name, source } => Some((
+        ),
+        PlantEvent::Other { type_name, source } => (
             other_key(),
             pb::Event {
                 body: Some(Body::Other(pb::OtherEvent { type_name, source })),
             },
-        )),
+        ),
     }
 }

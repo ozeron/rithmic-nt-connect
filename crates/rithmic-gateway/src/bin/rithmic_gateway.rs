@@ -3,7 +3,10 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
+use tokio::sync::Mutex as TokioMutex;
+
 use rithmic_gateway::listen::{bind_unix, default_unix_path, ListenEndpoint};
+use rithmic_gateway::reconnect::ReconnectController;
 use rithmic_gateway::server::{Fingerprint, GatewayState};
 use rithmic_gateway::singleton::SessionLock;
 use rithmic_gateway::subscriptions::{FanoutHub, ParentGates};
@@ -47,7 +50,7 @@ async fn run() -> Result<(), String> {
         std::env::var("RITHMIC_SYSTEM_NAME").unwrap_or_else(|_| "LucidTrading".into());
     let url = std::env::var("RITHMIC_URL")
         .unwrap_or_else(|_| "wss://rprotocol.rithmic.com:443".into());
-    let env_name = std::env::var("RITHMIC_ENV").unwrap_or_else(|_| "live".into());
+    let env_name = std::env::var("RITHMIC_ENV").unwrap_or_else(|_| "Live".into());
     let env = RithmicEnv::from_str(&env_name.to_ascii_lowercase())
         .map_err(|e| format!("RITHMIC_ENV: {e}"))?;
 
@@ -83,10 +86,11 @@ async fn run() -> Result<(), String> {
         .map_err(|e| format!("bind {}: {e}", path.display()))?;
     eprintln!("rithmic-gateway listening on unix://{}", path.display());
 
+    let hub = Arc::new(FanoutHub::new(1024));
     let gates = ParentGates::from_env();
     let state = Arc::new(GatewayState {
         gates,
-        hub: Arc::new(FanoutHub::new(1024)),
+        hub: hub.clone(),
         fingerprint: Fingerprint {
             user,
             system_name,
@@ -97,9 +101,10 @@ async fn run() -> Result<(), String> {
             ib_id: std::env::var("RITHMIC_IB_ID").unwrap_or_default(),
         },
         ready: true,
+        session: Some(Arc::new(TokioMutex::new(session))),
+        reconnect: Arc::new(ReconnectController::new(hub)),
     });
 
-    let _session = session;
     rithmic_gateway::server::serve(listener, state)
         .await
         .map_err(|e| e.to_string())
