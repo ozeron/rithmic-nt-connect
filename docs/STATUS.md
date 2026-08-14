@@ -29,7 +29,7 @@ Acceptance: **NQ / CME via LucidTrading**. One Rithmic login (close MotiveWave /
 | Mark / index / funding / greeks | Not advertised | **N/A** |
 | Catalog / Parquet | Other repo | **N/A** |
 | Order types | Market, limit, stop / stop-limit, trailing-stop (tick offset) | **Partial** — mapped and gated; live place blocked on authorized `app_name` |
-| Brackets / OCO | Not advertised | **N/A** |
+| Brackets / OCO | Plant bracket API | **Partial** — `place_bracket_order` / adjust / `subscribe_bracket_updates` on **direct** (plants + PyO3) **and gateway** (proto 33–36 + dispatch + client + `gateway_wire`). Lucid accept/survival **not proven**. Capability: `RITHMIC_BRACKETS=1` (direct|gateway). Spike: `scripts/spike_bracket_order.py` |
 | Account / positions | Best-effort PnL | **Partial** — auto-discovers FCM/IB/account when unset (multi-account needs `RITHMIC_ACCOUNT_ID` selector); soft-fail PnL otherwise |
 | Submit / cancel / modify + fills | Gated order plant | **Partial** — submit pre-send deny; post-send unknown; untracked → reports; fill dedup. Live place still gated on `app_name`. |
 | Order status reports | Cache-backed only | **Done** (honest: not a venue snapshot) |
@@ -89,7 +89,7 @@ Acceptance: **NQ / CME via LucidTrading**. One Rithmic login (close MotiveWave /
 
 ### Phase 5: Optional
 
-- N/A until advertised: brackets / OCO, depth-by-order, 1-SECOND-EXTERNAL, weekly/tick bars, catalog
+- N/A until advertised: depth-by-order, 1-SECOND-EXTERNAL, weekly/tick bars, catalog
 - [~] Live EXTERNAL time bars (1m/15m/1h/1d): subscribe + poll wired; Lucid proof still open
 - `cancel_all_orders` exists on the wire; not a safe default
 

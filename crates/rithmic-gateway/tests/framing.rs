@@ -89,3 +89,23 @@ fn proto_schema_has_auth_token_not_password_field() {
         );
     }
 }
+
+#[test]
+fn proto_schema_has_bracket_rpcs_parity_with_plants() {
+    let proto = include_str!("../../../proto/rithmic_gateway/v1/session.proto");
+    for needle in [
+        "SubscribeBracketUpdatesRequest",
+        "PlaceBracketOrderRequest",
+        "AdjustBracketStopRequest",
+        "AdjustBracketTargetRequest",
+        "place_bracket_order",
+        "subscribe_bracket_updates",
+        "adjust_bracket_stop",
+        "adjust_bracket_target",
+    ] {
+        assert!(
+            proto.contains(needle),
+            "gateway proto must keep direct/gateway parity for {needle}"
+        );
+    }
+}

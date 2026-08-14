@@ -305,6 +305,11 @@ class GatewayClient:
     def subscribe_order_updates(self) -> None:
         self._rpc(pb.Frame(subscribe_order_updates=pb.SubscribeOrderUpdatesRequest()))
 
+    def subscribe_bracket_updates(self) -> None:
+        self._rpc(
+            pb.Frame(subscribe_bracket_updates=pb.SubscribeBracketUpdatesRequest())
+        )
+
     def disconnect_order_plant(self) -> None:
         self._rpc(pb.Frame(disconnect_order=pb.DisconnectOrderRequest()))
 
@@ -340,6 +345,55 @@ class GatewayClient:
         if trail_by_price_id is not None:
             req.trail_by_price_id = trail_by_price_id
         self._rpc(pb.Frame(place_order=req))
+
+    def place_bracket_order(
+        self,
+        symbol: str,
+        exchange: str,
+        side: str,
+        price_type: str,
+        quantity: int,
+        localid: str = "",
+        price: float | None = None,
+        trigger_price: float | None = None,
+        duration: str = "DAY",
+        stop_ticks: int | None = None,
+        target_ticks: int | None = None,
+    ) -> None:
+        req = pb.PlaceBracketOrderRequest(
+            symbol=symbol,
+            exchange=exchange,
+            side=side,
+            price_type=price_type,
+            quantity=quantity,
+            localid=localid,
+            duration=duration,
+        )
+        if price is not None:
+            req.price = price
+        if trigger_price is not None:
+            req.trigger_price = trigger_price
+        if stop_ticks is not None:
+            req.stop_ticks = stop_ticks
+        if target_ticks is not None:
+            req.target_ticks = target_ticks
+        self._rpc(pb.Frame(place_bracket_order=req))
+
+    def adjust_bracket_stop(
+        self, basket_id: str, ticks: int, level: int | None = None
+    ) -> None:
+        req = pb.AdjustBracketStopRequest(basket_id=basket_id, ticks=ticks)
+        if level is not None:
+            req.level = level
+        self._rpc(pb.Frame(adjust_bracket_stop=req))
+
+    def adjust_bracket_target(
+        self, basket_id: str, ticks: int, level: int | None = None
+    ) -> None:
+        req = pb.AdjustBracketTargetRequest(basket_id=basket_id, ticks=ticks)
+        if level is not None:
+            req.level = level
+        self._rpc(pb.Frame(adjust_bracket_target=req))
 
     def cancel_order(self, basket_id: str) -> None:
         self._rpc(pb.Frame(cancel_order=pb.CancelOrderRequest(basket_id=basket_id)))

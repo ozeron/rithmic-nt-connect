@@ -503,6 +503,95 @@ pub(super) async fn dispatch(state: &GatewayState, client: &mut ClientCtx, reque
             }
             ack_frame(request_id)
         }
+        Body::SubscribeBracketUpdates(_) => {
+            if !state.gates.trading_enabled {
+                return error_frame(
+                    request_id,
+                    "trading_disabled",
+                    "subscribe_bracket_updates denied: parent trading disabled",
+                );
+            }
+            let Some(session) = &state.session else {
+                return ack_frame(request_id);
+            };
+            let mut guard = session.lock().await;
+            match guard.subscribe_bracket_updates().await {
+                Ok(()) => ack_frame(request_id),
+                Err(e) => err_to_frame(request_id, "subscribe_bracket_updates_failed", e),
+            }
+        }
+        Body::PlaceBracketOrder(req) => {
+            if !state.gates.allow_place() {
+                return error_frame(
+                    request_id,
+                    "trading_disabled",
+                    "place_bracket_order denied: parent trading disabled",
+                );
+            }
+            let Some(session) = &state.session else {
+                return ack_frame(request_id);
+            };
+            let mut guard = session.lock().await;
+            match guard
+                .place_bracket_order(
+                    &req.symbol,
+                    &req.exchange,
+                    &req.side,
+                    &req.price_type,
+                    req.quantity,
+                    &req.localid,
+                    req.price,
+                    req.trigger_price,
+                    &req.duration,
+                    req.stop_ticks,
+                    req.target_ticks,
+                )
+                .await
+            {
+                Ok(()) => ack_frame(request_id),
+                Err(e) => plant_err_frame(request_id, "place_bracket_failed", e),
+            }
+        }
+        Body::AdjustBracketStop(req) => {
+            if !state.gates.allow_place() {
+                return error_frame(
+                    request_id,
+                    "trading_disabled",
+                    "adjust_bracket_stop denied: parent trading disabled",
+                );
+            }
+            let Some(session) = &state.session else {
+                return ack_frame(request_id);
+            };
+            let mut guard = session.lock().await;
+            match guard
+                .adjust_bracket_stop(&req.basket_id, req.ticks, req.level)
+                .await
+            {
+                Ok(()) => ack_frame(request_id),
+                Err(e) => plant_err_frame(request_id, "adjust_bracket_stop_failed", e),
+            }
+        }
+        Body::AdjustBracketTarget(req) => {
+            if !state.gates.allow_place() {
+                return error_frame(
+                    request_id,
+                    "trading_disabled",
+                    "adjust_bracket_target denied: parent trading disabled",
+                );
+            }
+            let Some(session) = &state.session else {
+                return ack_frame(request_id);
+            };
+            let mut guard = session.lock().await;
+            match guard
+                .adjust_bracket_target(&req.basket_id, req.ticks, req.level)
+                .await
+            {
+                Ok(()) => ack_frame(request_id),
+                Err(e) => plant_err_frame(request_id, "adjust_bracket_target_failed", e),
+            }
+        }
         Body::EnsurePnl(_) => {
             if let Some(session) = &state.session {
                 let mut guard = session.lock().await;

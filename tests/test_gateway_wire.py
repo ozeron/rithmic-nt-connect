@@ -78,3 +78,10 @@ def test_create_session_gateway_returns_adapter_without_pyo3() -> None:
     )
     session = create_session(cfg)
     assert isinstance(session, GatewayWireSession)
+    for name in (
+        "place_bracket_order",
+        "subscribe_bracket_updates",
+        "adjust_bracket_stop",
+        "adjust_bracket_target",
+    ):
+        assert hasattr(session, name), f"gateway wire missing {name} (direct/gateway parity)"

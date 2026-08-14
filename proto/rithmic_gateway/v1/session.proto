@@ -162,6 +162,34 @@ message SubscribePnlRequest {}
 
 message SubscribeOrderUpdatesRequest {}
 
+message SubscribeBracketUpdatesRequest {}
+
+message PlaceBracketOrderRequest {
+  string symbol = 1;
+  string exchange = 2;
+  string side = 3;
+  string price_type = 4;
+  int32 quantity = 5;
+  string localid = 6;
+  optional double price = 7;
+  optional double trigger_price = 8;
+  string duration = 9;
+  optional int32 stop_ticks = 10;
+  optional int32 target_ticks = 11;
+}
+
+message AdjustBracketStopRequest {
+  string basket_id = 1;
+  int32 ticks = 2;
+  optional int32 level = 3;
+}
+
+message AdjustBracketTargetRequest {
+  string basket_id = 1;
+  int32 ticks = 2;
+  optional int32 level = 3;
+}
+
 message GetFrontMonthRequest {
   string symbol = 1;
   string exchange = 2;
@@ -441,6 +469,10 @@ message Frame {
     GetReferenceDataRequest get_reference_data = 30;
     UnsubscribeBookRequest unsubscribe_book = 31;
     ProbeTimeBarsRequest probe_time_bars = 32;
+    SubscribeBracketUpdatesRequest subscribe_bracket_updates = 33;
+    PlaceBracketOrderRequest place_bracket_order = 34;
+    AdjustBracketStopRequest adjust_bracket_stop = 35;
+    AdjustBracketTargetRequest adjust_bracket_target = 36;
 
     Ack ack = 50;
     ErrorResponse error = 51;

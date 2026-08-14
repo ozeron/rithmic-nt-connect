@@ -11,6 +11,17 @@ Semantic rules for this adapter:
 
 Read that file (or the sections you are touching) before implementing or reviewing data, execution, config, or plant code. In-tree Rust v2 machinery is N/A here; the **semantic** conventions still apply.
 
+### Direct ↔ gateway plant-surface parity (hard)
+
+`rithmic-plants` / PyO3 **direct** and **gateway** (`proto` → dispatch → `GatewayClient` → `gateway_wire`) must stay capability-compatible for every plant order/exec surface.
+
+When you add or change a plant RPC (place / cancel / modify / brackets / ensure / subscribe / …):
+
+1. Wire it on **both** paths in the same change (plants + PyO3 **and** `session.proto` + gateway dispatch + Python client + `gateway_wire`).
+2. Do not ship “direct-only” for a new live capability unless STATUS explicitly marks gateway as deferred **and** book/runners refuse that mode.
+3. Keep request field names and semantics aligned (e.g. bracket `localid` / `stop_ticks` / `target_ticks`).
+4. Add or extend a test that would fail if one path drifts (proto framing, client method, or wire façade).
+
 Related:
 
 | Doc | Use |
