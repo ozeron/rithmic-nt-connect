@@ -29,7 +29,7 @@ Acceptance: **NQ / CME via LucidTrading**. One Rithmic login (close MotiveWave /
 | Mark / index / funding / greeks | Not advertised | **N/A** |
 | Catalog / Parquet | Other repo | **N/A** |
 | Order types | Market, limit, stop / stop-limit, trailing-stop (tick offset) | **Partial** — mapped and gated; live place blocked on authorized `app_name` |
-| Brackets / OCO | Plant bracket API | **Partial** — `place_bracket_order` / adjust / `subscribe_bracket_updates` in `rithmic-plants` + PyO3 (2026-08-14). Lucid/Demo accept, basket-id semantics, disconnect survival **not proven**. OCO fallback not wired. Capability: `RITHMIC_BRACKETS=1` + `connect_mode=direct`. Spike: `scripts/spike_bracket_order.py` |
+| Brackets / OCO | Not advertised | **N/A** |
 | Account / positions | Best-effort PnL | **Partial** — auto-discovers FCM/IB/account when unset (multi-account needs `RITHMIC_ACCOUNT_ID` selector); soft-fail PnL otherwise |
 | Submit / cancel / modify + fills | Gated order plant | **Partial** — submit pre-send deny; post-send unknown; untracked → reports; fill dedup. Live place still gated on `app_name`. |
 | Order status reports | Cache-backed only | **Done** (honest: not a venue snapshot) |

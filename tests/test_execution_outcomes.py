@@ -17,7 +17,7 @@ def test_fill_dedup_key_includes_account_and_instrument():
     assert fill_dedup_key(fields, ts_event=1) == "A1|NQU6.RITHMIC|F1"
 
 
-def test_fill_dedup_key_falls_back_without_fill_id():
+def test_fill_dedup_key_none_without_fill_id():
     fields = {
         "basket_id": "B1",
         "exchange_order_id": "E1",
@@ -26,9 +26,8 @@ def test_fill_dedup_key_falls_back_without_fill_id():
         "account_id": "A",
         "instrument_id": "I",
     }
-    trade = trade_id_from_fill_fields(fields, 99)
-    key = fill_dedup_key(fields, ts_event=99)
-    assert key == f"A|I|{trade}"
+    assert fill_dedup_key(fields, ts_event=99) is None
+    assert trade_id_from_fill_fields(fields, 99) == "B1:E1:99:1:21000.0"
 
 
 def test_slim_order_fields_omits_noise():

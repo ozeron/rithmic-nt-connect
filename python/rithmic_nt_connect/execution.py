@@ -492,7 +492,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                 self._log.error(f"fill action missing fields: {slim_order_fields(fields)}")
                 return
             dedup = fill_dedup_key(fields, ts_event=ts_event)
-            if self._fill_key_seen(dedup):
+            if dedup is not None and self._fill_key_seen(dedup):
                 return
             try:
                 fill_qty = Quantity.from_int(int(action.fill_qty))
@@ -520,7 +520,8 @@ class RithmicExecutionClient(LiveExecutionClient):
                 ts_event,
                 info={"rithmic": dict(fields)},
             )
-            self._mark_fill_key(dedup)
+            if dedup is not None:
+                self._mark_fill_key(dedup)
 
     def _handle_untracked_notification(self, fields: dict[str, Any]) -> None:
         """External fills only when wire has basket, instrument, side, px, qty."""
@@ -560,7 +561,7 @@ class RithmicExecutionClient(LiveExecutionClient):
             )
             return
         dedup = fill_dedup_key(fields, ts_event=ts_event)
-        if self._fill_key_seen(dedup):
+        if dedup is not None and self._fill_key_seen(dedup):
             return
         try:
             last_qty = Quantity.from_int(int(fill_sz))
@@ -585,7 +586,8 @@ class RithmicExecutionClient(LiveExecutionClient):
             ts_init=self._clock.timestamp_ns(),
         )
         self._send_fill_report(report)
-        self._mark_fill_key(dedup)
+        if dedup is not None:
+            self._mark_fill_key(dedup)
 
     def _order_status_report_for(
         self,
