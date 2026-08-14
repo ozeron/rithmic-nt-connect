@@ -22,6 +22,17 @@ When you add or change a plant RPC (place / cancel / modify / brackets / ensure 
 3. Keep request field names and semantics aligned (e.g. bracket `localid` / `stop_ticks` / `target_ticks`).
 4. Add or extend a test that would fail if one path drifts (proto framing, client method, or wire façade).
 
+#### Learning: gateway RPC kinds (do not confuse)
+
+Gateway plant RPCs are **not** all the same shape. Shipping a new stream as a bare `session.subscribe_*` + Ack is how bracket updates lost fan-out delivery and reconnect restore.
+
+| Kind | Examples | Must include |
+| --- | --- | --- |
+| **One-shot command** | `place_*`, `adjust_*`, `cancel_*`, `modify_*` | Trading gate → plant call → map error. No fanout / `note_*` / restore. |
+| **Subscription intent** | ticker, book, time bars, PnL, **order updates**, **bracket updates** | Gate → attach hub fanout → `note_*` refcount → plant only on 0→1 → rollback on fail → **`restore_intents` re-issues after plant reconnect**. |
+
+Bracket notifications ride the **order-plant** stream. Use `subscribe_order_plant_stream` in `dispatch.rs` (order and/or brackets flags) — never a one-shot plant call. Extend `RestorePlan` + `restore_intents` and add a gate/reconnect test that asserts the new intent bit (see `gates` / `reconnect` tests). Proto string greps alone are not enough.
+
 Related:
 
 | Doc | Use |

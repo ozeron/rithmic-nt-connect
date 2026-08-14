@@ -29,7 +29,8 @@ async fn restore_after_drop_replays_keys() {
     .await;
     ctl.note_pnl().await;
     ctl.note_order().await;
-    assert_eq!(ctl.remembered_count().await, 6);
+    ctl.note_brackets().await;
+    assert_eq!(ctl.remembered_count().await, 7);
 
     let plan = ctl.restore_plan().await;
     let mut ticker = plan.ticker;
@@ -41,12 +42,12 @@ async fn restore_after_drop_replays_keys() {
     assert_eq!(plan.time_bars.len(), 1);
     assert!(plan.pnl);
     assert!(plan.order);
+    assert!(plan.brackets);
 }
 
 #[tokio::test]
 async fn restore_plan_covers_every_intent_channel() {
-    // Documents the contract restore_intents walks: ticker, book, time_bars, pnl, order.
-    // Full reconnect_loop + mock RithmicSession remains a follow-up integration.
+    // restore_intents walks: ticker, book, time_bars, pnl, order, brackets.
     let hub = Arc::new(FanoutHub::new(8));
     let ctl = ReconnectController::new(hub);
     let key = SubKey {
@@ -64,12 +65,13 @@ async fn restore_plan_covers_every_intent_channel() {
     .await;
     ctl.note_pnl().await;
     ctl.note_order().await;
+    ctl.note_brackets().await;
     let plan = ctl.restore_plan().await;
     assert_eq!(plan.ticker.len(), 1);
     assert_eq!(plan.book.len(), 1);
     assert_eq!(plan.time_bars.len(), 1);
     assert_eq!(plan.time_bars[0].period, 15);
-    assert!(plan.pnl && plan.order);
+    assert!(plan.pnl && plan.order && plan.brackets);
     // Clearing last peer intent empties the plan (refcount → 0).
     assert!(ctl.forget_ticker(&key).await);
     assert!(ctl.forget_book(&key).await);
@@ -84,9 +86,28 @@ async fn restore_plan_covers_every_intent_channel() {
     );
     assert!(ctl.forget_pnl().await);
     assert!(ctl.forget_order().await);
+    assert!(ctl.forget_brackets().await);
     let empty = ctl.restore_plan().await;
     assert!(empty.ticker.is_empty());
     assert!(empty.book.is_empty());
     assert!(empty.time_bars.is_empty());
-    assert!(!empty.pnl && !empty.order);
+    assert!(!empty.pnl && !empty.order && !empty.brackets);
+}
+
+#[tokio::test]
+async fn last_brackets_peer_can_leave_while_order_remains() {
+    // DisconnectOrder reseats order-only when forget_brackets is last but
+    // forget_order is not — intent store must allow that split.
+    let hub = Arc::new(FanoutHub::new(8));
+    let ctl = ReconnectController::new(hub);
+    ctl.note_order().await;
+    ctl.note_order().await;
+    ctl.note_brackets().await;
+    assert!(ctl.forget_brackets().await, "last brackets peer");
+    assert!(
+        !ctl.forget_order().await,
+        "order peer remains after brackets cleared"
+    );
+    let plan = ctl.restore_plan().await;
+    assert!(plan.order && !plan.brackets);
 }

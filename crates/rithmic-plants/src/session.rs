@@ -893,8 +893,7 @@ pub async fn cancel_order_on(handle: &RithmicOrderPlantHandle, basket_id: &str) 
 
 /// Place a plant bracket on an already-connected handle (no session lock).
 ///
-/// Exit geometry is **ticks from fill**. Pass `stop_ticks` and/or `target_ticks`.
-/// v1 book path uses DAY + Static shapes derived by `rithmic-rs` `build()`.
+/// Exit geometry is ticks from fill (`stop_ticks` and/or `target_ticks`).
 #[allow(clippy::too_many_arguments)]
 pub async fn place_bracket_order_on(
     handle: &RithmicOrderPlantHandle,
@@ -944,7 +943,6 @@ pub async fn place_bracket_order_on(
     if let Some(t) = trigger_price {
         builder = builder.trigger_price(t);
     }
-    // quantity must be set before .stop/.target sugar (sizes leg to current qty).
     if let Some(ticks) = target_ticks {
         builder = builder.target(ticks);
     }

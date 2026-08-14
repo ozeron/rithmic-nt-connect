@@ -1,47 +1,166 @@
-//! Integration tests: parent trading / cancel_all gates.
+//! Parent trading / cancel_all gates + no-session honesty.
 
 use rithmic_gateway::pb::frame::Body;
-use rithmic_gateway::pb::{CancelAllOrdersRequest, PlaceBracketOrderRequest, PlaceOrderRequest};
-use rithmic_gateway::server::gate_rpc_for_test;
+use rithmic_gateway::pb::{
+    CancelAllOrdersRequest, PlaceBracketOrderRequest, PlaceOrderRequest,
+    SubscribeBracketUpdatesRequest, SubscribeOrderUpdatesRequest,
+};
+use rithmic_gateway::server::{gate_rpc_for_test, rpc_sequence_with_gates};
 use rithmic_gateway::subscriptions::ParentGates;
+
+fn trading_on() -> ParentGates {
+    ParentGates {
+        trading_enabled: true,
+        cancel_all_enabled: false,
+    }
+}
+
+fn assert_error_code(body: Body, code: &str) {
+    match body {
+        Body::Error(e) => assert_eq!(e.code, code),
+        other => panic!("expected Error({code}), got {other:?}"),
+    }
+}
 
 #[test]
 fn place_denied_when_trading_disabled() {
-    let gates = ParentGates { trading_enabled: false, cancel_all_enabled: false };
-    let body = gate_rpc_for_test(&gates, Body::PlaceOrder(PlaceOrderRequest { symbol: "NQ".into(), exchange: "CME".into(), side: "BUY".into(), price_type: "MARKET".into(), quantity: 1, ..Default::default() }));
-    match body { Body::Error(e) => assert_eq!(e.code, "trading_disabled"), other => panic!("{other:?}") }
+    assert_error_code(
+        gate_rpc_for_test(
+            &ParentGates {
+                trading_enabled: false,
+                cancel_all_enabled: false,
+            },
+            Body::PlaceOrder(PlaceOrderRequest {
+                symbol: "NQ".into(),
+                exchange: "CME".into(),
+                side: "BUY".into(),
+                price_type: "MARKET".into(),
+                quantity: 1,
+                ..Default::default()
+            }),
+        ),
+        "trading_disabled",
+    );
 }
 
 #[test]
 fn place_bracket_denied_when_trading_disabled() {
-    let gates = ParentGates { trading_enabled: false, cancel_all_enabled: false };
-    let body = gate_rpc_for_test(&gates, Body::PlaceBracketOrder(PlaceBracketOrderRequest { symbol: "NQ".into(), exchange: "CME".into(), side: "BUY".into(), price_type: "MARKET".into(), quantity: 1, localid: "t1".into(), stop_ticks: Some(40), ..Default::default() }));
-    match body { Body::Error(e) => assert_eq!(e.code, "trading_disabled"), other => panic!("{other:?}") }
+    assert_error_code(
+        gate_rpc_for_test(
+            &ParentGates {
+                trading_enabled: false,
+                cancel_all_enabled: false,
+            },
+            Body::PlaceBracketOrder(PlaceBracketOrderRequest {
+                symbol: "NQ".into(),
+                exchange: "CME".into(),
+                side: "BUY".into(),
+                price_type: "MARKET".into(),
+                quantity: 1,
+                localid: "t1".into(),
+                stop_ticks: Some(40),
+                ..Default::default()
+            }),
+        ),
+        "trading_disabled",
+    );
 }
 
 #[test]
 fn cancel_all_denied_by_default() {
-    let body = gate_rpc_for_test(&ParentGates::default(), Body::CancelAllOrders(CancelAllOrdersRequest {}));
-    match body { Body::Error(e) => assert_eq!(e.code, "cancel_all_denied"), other => panic!("{other:?}") }
+    assert_error_code(
+        gate_rpc_for_test(&ParentGates::default(), Body::CancelAllOrders(CancelAllOrdersRequest {})),
+        "cancel_all_denied",
+    );
 }
 
 #[test]
-fn place_ack_when_trading_enabled_no_session_is_gate_only() {
-    let gates = ParentGates { trading_enabled: true, cancel_all_enabled: false };
-    let body = gate_rpc_for_test(&gates, Body::PlaceOrder(PlaceOrderRequest { symbol: "NQ".into(), exchange: "CME".into(), side: "BUY".into(), price_type: "MARKET".into(), quantity: 1, ..Default::default() }));
-    assert!(matches!(body, Body::Ack(_)));
+fn place_errors_when_no_session() {
+    assert_error_code(
+        gate_rpc_for_test(
+            &trading_on(),
+            Body::PlaceOrder(PlaceOrderRequest {
+                symbol: "NQ".into(),
+                exchange: "CME".into(),
+                side: "BUY".into(),
+                price_type: "MARKET".into(),
+                quantity: 1,
+                ..Default::default()
+            }),
+        ),
+        "no_session",
+    );
 }
 
 #[test]
-fn place_bracket_ack_when_trading_enabled_no_session_is_gate_only() {
-    let gates = ParentGates { trading_enabled: true, cancel_all_enabled: false };
-    let body = gate_rpc_for_test(&gates, Body::PlaceBracketOrder(PlaceBracketOrderRequest { symbol: "NQ".into(), exchange: "CME".into(), side: "BUY".into(), price_type: "MARKET".into(), quantity: 1, localid: "t1".into(), stop_ticks: Some(40), ..Default::default() }));
-    assert!(matches!(body, Body::Ack(_)));
+fn place_bracket_errors_when_no_session() {
+    assert_error_code(
+        gate_rpc_for_test(
+            &trading_on(),
+            Body::PlaceBracketOrder(PlaceBracketOrderRequest {
+                symbol: "NQ".into(),
+                exchange: "CME".into(),
+                side: "BUY".into(),
+                price_type: "MARKET".into(),
+                quantity: 1,
+                localid: "t1".into(),
+                stop_ticks: Some(40),
+                ..Default::default()
+            }),
+        ),
+        "no_session",
+    );
 }
 
 #[test]
-fn cancel_all_ack_when_enabled_no_session() {
-    let gates = ParentGates { trading_enabled: false, cancel_all_enabled: true };
-    let body = gate_rpc_for_test(&gates, Body::CancelAllOrders(CancelAllOrdersRequest {}));
-    assert!(matches!(body, Body::Ack(_)));
+fn cancel_all_errors_when_enabled_but_no_session() {
+    assert_error_code(
+        gate_rpc_for_test(
+            &ParentGates {
+                trading_enabled: false,
+                cancel_all_enabled: true,
+            },
+            Body::CancelAllOrders(CancelAllOrdersRequest {}),
+        ),
+        "no_session",
+    );
+}
+
+#[test]
+fn subscribe_bracket_denied_when_trading_disabled() {
+    assert_error_code(
+        gate_rpc_for_test(
+            &ParentGates {
+                trading_enabled: false,
+                cancel_all_enabled: false,
+            },
+            Body::SubscribeBracketUpdates(SubscribeBracketUpdatesRequest {}),
+        ),
+        "trading_disabled",
+    );
+}
+
+#[test]
+fn subscribe_order_errors_when_no_session() {
+    let (bodies, plan) = rpc_sequence_with_gates(
+        trading_on(),
+        vec![Body::SubscribeOrderUpdates(SubscribeOrderUpdatesRequest {})],
+    );
+    assert_error_code(bodies.into_iter().next().expect("body"), "no_session");
+    assert!(!plan.order && !plan.brackets, "failed subscribe must not leave intent");
+}
+
+#[test]
+fn subscribe_bracket_errors_when_no_session() {
+    let (bodies, plan) = rpc_sequence_with_gates(
+        trading_on(),
+        vec![Body::SubscribeBracketUpdates(SubscribeBracketUpdatesRequest {})],
+    );
+    assert_error_code(bodies.into_iter().next().expect("body"), "no_session");
+    assert!(
+        !plan.order && !plan.brackets,
+        "failed bracket subscribe must not leave intent, got order={} brackets={}",
+        plan.order,
+        plan.brackets
+    );
 }

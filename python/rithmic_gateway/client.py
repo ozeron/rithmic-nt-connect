@@ -353,7 +353,7 @@ class GatewayClient:
         side: str,
         price_type: str,
         quantity: int,
-        localid: str = "",
+        localid: str,
         price: float | None = None,
         trigger_price: float | None = None,
         duration: str = "DAY",

@@ -24,7 +24,7 @@ use crate::reconnect::{ReconnectController, TimeBarIntent};
 use crate::subscriptions::{ClientId, FanoutHub, ParentGates, SharedFanout, SubKey};
 
 mod dispatch;
-pub use dispatch::{gate_rpc_for_test, rpc_sequence_for_test};
+pub use dispatch::{gate_rpc_for_test, rpc_sequence_with_gates};
 
 /// Shared gateway runtime state, held for the process lifetime.
 pub struct GatewayState {
@@ -37,8 +37,8 @@ pub struct GatewayState {
     /// `RITHMIC_GATEWAY_AUTH_TOKEN`). Empty means only same-UID empty-token
     /// peers are accepted.
     pub expected_auth_token: String,
-    /// `None` lets the accept loop and gate tests run without a live
-    /// Rithmic connection; RPCs that need a plant just Ack as a no-op.
+    /// `None` only in gate / RPC-sequence unit tests without plants.
+    /// Plant RPCs return `Error(no_session)` — never Ack / empty success.
     pub session: Option<Arc<TokioMutex<RithmicSession>>>,
     pub reconnect: Arc<ReconnectController>,
     /// Serialize first venue-subscribe per topic so a failing peer cannot
@@ -241,6 +241,7 @@ pub(super) struct ClientCtx {
     time_bars: HashSet<TimeBarIntent>,
     pnl: bool,
     order: bool,
+    brackets: bool,
     forwarders: HashMap<SubKey, JoinHandle<()>>,
     out_tx: mpsc::Sender<OutMsg>,
 }
@@ -255,6 +256,7 @@ impl ClientCtx {
             time_bars: HashSet::new(),
             pnl: false,
             order: false,
+            brackets: false,
             forwarders: HashMap::new(),
             out_tx,
         }
@@ -346,7 +348,23 @@ impl ClientCtx {
                 }
             }
         }
-        if self.order {
+        if self.brackets {
+            let last_brackets = dispatch::clear_client_brackets(state, self).await;
+            let last_order = if self.order {
+                self.order = false;
+                state.reconnect.forget_order().await
+            } else {
+                false
+            };
+            if last_order {
+                if let Some(session) = &state.session {
+                    let mut guard = session.lock().await;
+                    let _ = guard.disconnect_order_plant().await;
+                }
+            } else if last_brackets && state.reconnect.restore_plan().await.order {
+                dispatch::reseat_order_plant_without_brackets(state).await;
+            }
+        } else if self.order {
             self.order = false;
             if state.reconnect.forget_order().await {
                 if let Some(session) = &state.session {

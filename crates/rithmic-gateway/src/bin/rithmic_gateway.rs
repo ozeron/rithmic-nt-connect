@@ -267,28 +267,21 @@ async fn reconnect_loop(
                 continue;
             }
         }
-        // Keep Ready=false while restoring so peers do not Ack against a
-        // half-rebuilt venue session. Bounded attempts, then resume the event
-        // pump even if some intents remain incomplete (best-effort restore).
-        for attempt in 1..=6u32 {
+        // Connect succeeded: retry restore only. Incomplete restore is not a
+        // reason to tear TLS/auth down again (that was the reconnect storm).
+        // Ready only when every remembered intent is restored.
+        loop {
             let mut guard = session.lock().await;
             let (restored, attempted) = restore_intents(&mut guard, reconnect).await;
             drop(guard);
-            eprintln!(
-                "rithmic-gateway: restore attempt {attempt}: {restored}/{attempted} subscriptions"
-            );
+            eprintln!("rithmic-gateway: restore {restored}/{attempted} subscriptions");
             if restored == attempted {
                 state.ready.store(true, Ordering::SeqCst);
                 return;
             }
+            eprintln!("rithmic-gateway: restore incomplete; retry restore in 5s");
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
-        eprintln!(
-            "rithmic-gateway: restore still incomplete after 6 attempts; \
-             marking Ready and resuming plant poll (best-effort)"
-        );
-        state.ready.store(true, Ordering::SeqCst);
-        return;
     }
 }
 
@@ -354,11 +347,30 @@ async fn restore_intents(
             restored += 1;
         }
     }
+    let mut order_ok = !plan.order;
     if plan.order {
         attempted += 1;
         match guard.subscribe_order_updates().await {
-            Ok(()) => restored += 1,
+            Ok(()) => {
+                restored += 1;
+                order_ok = true;
+            }
             Err(e) => eprintln!("rithmic-gateway: resubscribe order updates failed: {e}"),
+        }
+    }
+    if plan.brackets {
+        attempted += 1;
+        // Order updates failure disconnects the plant — do not ensure+subscribe
+        // brackets alone (would look like a partial restore success).
+        if plan.order && !order_ok {
+            eprintln!(
+                "rithmic-gateway: skip bracket restore; order updates not restored"
+            );
+        } else {
+            match guard.subscribe_bracket_updates().await {
+                Ok(()) => restored += 1,
+                Err(e) => eprintln!("rithmic-gateway: resubscribe bracket updates failed: {e}"),
+            }
         }
     }
     (restored, attempted)
