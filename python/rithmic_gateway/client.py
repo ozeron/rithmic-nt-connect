@@ -262,12 +262,14 @@ class GatewayClient:
         period: int = 1,
         *,
         rpc_timeout_sec: float | None = None,
-        max_workers: int = 4,
+        max_workers: int = 1,
     ) -> list[dict[str, Any]]:
         """Load a wide window via client-side calendar chunks + merge.
 
-        Slice lengths match Rust ``bar_slice_secs``. When ``max_workers`` > 1,
-        each chunk uses its own dial to the same parent (parallel unix RPCs).
+        Slice lengths match Rust ``bar_slice_secs``. Default ``max_workers=1``
+        (sequential): the parent holds a session mutex for each history RPC, so
+        extra dials do not overlap plant work. ``max_workers`` > 1 remains for
+        experiments once the plant allows concurrent history.
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -350,7 +352,7 @@ class GatewayClient:
         period: int = 1,
         *,
         rpc_timeout_sec: float | None = None,
-        max_workers: int = 4,
+        max_workers: int = 1,
     ) -> list[dict[str, Any]]:
         """Async wrapper around :meth:`load_time_bars_range` (thread offload)."""
         import asyncio
