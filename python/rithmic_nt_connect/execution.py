@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 from decimal import Decimal
 from typing import Any, Callable
 
@@ -49,11 +50,15 @@ from rithmic_nt_connect._order_plant import OrderPlantPolicy
 from rithmic_nt_connect._order_plant import OrderPlantState
 from rithmic_nt_connect._orders import OrderMapError
 from rithmic_nt_connect._orders import DEFAULT_TRAIL_BY_PRICE_ID
+from rithmic_nt_connect._orders import fill_dedup_key
 from rithmic_nt_connect._orders import nautilus_order_type_to_rithmic
 from rithmic_nt_connect._orders import nautilus_side_to_rithmic
 from rithmic_nt_connect._orders import nautilus_tif_to_rithmic
 from rithmic_nt_connect._orders import notification_action
 from rithmic_nt_connect._orders import order_notification_to_fields
+from rithmic_nt_connect._orders import order_side_from_notification
+from rithmic_nt_connect._orders import slim_order_fields
+from rithmic_nt_connect._orders import trade_id_from_fill_fields
 from rithmic_nt_connect._orders import trailing_ticks_from_order
 from rithmic_nt_connect.config import RithmicExecClientConfig
 from rithmic_nt_connect.constants import ADAPTER_NAME
@@ -62,18 +67,6 @@ from rithmic_nt_connect.errors import CHANNEL_ERRORS
 from rithmic_nt_connect.errors import VenueQueryUnavailable
 from rithmic_nt_connect.providers import RithmicInstrumentProvider
 from rithmic_nt_connect.session import WireSession
-from rithmic_gateway import GatewayError
-
-# After OrderSubmitted, these gateway codes mean "unknown / in flight" — never
-# OrderRejected (adapter conventions: transport/timeout stay unknown).
-_UNKNOWN_GATEWAY_CODES = frozenset(
-    {"timeout", "eof", "desync", "not_connected", "venue_unknown"}
-)
-
-
-def _is_unknown_gateway(exc: BaseException) -> bool:
-    return isinstance(exc, GatewayError) and exc.code in _UNKNOWN_GATEWAY_CODES
-
 
 _POSITION_SIDE = {
     "LONG": PositionSide.LONG,
@@ -123,7 +116,23 @@ class RithmicExecutionClient(LiveExecutionClient):
         self._client_to_venue: dict[str, str] = {}
         self._venue_to_client: dict[str, ClientOrderId] = {}
         self._tag_to_client: dict[str, ClientOrderId] = {}
+        # Venue-stable fill ids; retained across reconnect so snapshot replays stay idempotent.
+        self._seen_fill_keys: OrderedDict[str, None] = OrderedDict()
         self._order_plant = OrderPlantPolicy(OrderPlantState.DISCONNECTED)
+
+    _MAX_SEEN_FILL_KEYS = 10_000
+
+    def _fill_key_seen(self, key: str) -> bool:
+        if key in self._seen_fill_keys:
+            self._seen_fill_keys.move_to_end(key)
+            return True
+        return False
+
+    def _mark_fill_key(self, key: str) -> None:
+        self._seen_fill_keys[key] = None
+        self._seen_fill_keys.move_to_end(key)
+        while len(self._seen_fill_keys) > self._MAX_SEEN_FILL_KEYS:
+            self._seen_fill_keys.popitem(last=False)
 
     @property
     def enable_trading(self) -> bool:
@@ -132,27 +141,25 @@ class RithmicExecutionClient(LiveExecutionClient):
     async def _connect(self) -> None:
         await asyncio.to_thread(self._session.connect)
 
-        if self._config_local.session.has_account():
-            try:
-                await asyncio.to_thread(self._session.subscribe_pnl)
-                self._poll_task = self.create_task(
-                    self._plant_poll_loop(
-                        name="pnl",
-                        poll_fn=self._session.poll_pnl_event,
-                        on_event=self._dispatch_pnl_event,
-                        on_resync=self._resync_pnl_subscription,
-                    ),
-                    log_msg="rithmic_pnl_poll",
-                )
-            except Exception as exc:  # noqa: BLE001
-                if self._config_local.soft_fail_pnl:
-                    self._log.warning(f"PnL/account path soft-failed: {exc}")
-                else:
-                    raise
+        try:
+            await asyncio.to_thread(self._session.subscribe_pnl)
+            self._apply_resolved_account_id()
+            self._poll_task = self.create_task(
+                self._plant_poll_loop(
+                    name="pnl",
+                    poll_fn=self._session.poll_pnl_event,
+                    on_event=self._dispatch_pnl_event,
+                    on_resync=self._resync_pnl_subscription,
+                ),
+                log_msg="rithmic_pnl_poll",
+            )
+        except Exception as exc:  # noqa: BLE001
+            if self._config_local.soft_fail_pnl:
+                self._log.warning(f"PnL/account path soft-failed: {exc}")
+            else:
+                raise
 
         if self.enable_trading:
-            if not self._config_local.session.has_account():
-                raise ValueError("enable_trading requires account_id/fcm_id/ib_id")
             self._order_plant.state = OrderPlantState.CONNECTING
             try:
                 await asyncio.to_thread(self._session.subscribe_order_updates)
@@ -164,6 +171,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                     self._log.warning(f"order plant teardown after subscribe fail: {teardown_exc}")
                 raise
             self._order_plant.state = OrderPlantState.LIVE
+            self._apply_resolved_account_id()
             self._order_poll_task = self.create_task(
                 self._plant_poll_loop(
                     name="order",
@@ -174,6 +182,19 @@ class RithmicExecutionClient(LiveExecutionClient):
                 log_msg="rithmic_order_poll",
             )
 
+    def _apply_resolved_account_id(self) -> None:
+        if self.account_id is not None:
+            return
+        getter = getattr(self._session, "resolved_account", None)
+        if not callable(getter):
+            return
+        resolved = getter()
+        if not isinstance(resolved, dict):
+            return
+        account_raw = resolved.get("account_id")
+        if account_raw:
+            self._set_account_id(AccountId(f"{VENUE}-{account_raw}"))
+
     async def _resync_order_subscription(self) -> None:
         self._order_plant.state = OrderPlantState.RESYNCING
         await asyncio.to_thread(self._session.disconnect_order_plant)
@@ -182,7 +203,6 @@ class RithmicExecutionClient(LiveExecutionClient):
 
     async def _resync_pnl_subscription(self) -> None:
         await asyncio.to_thread(self._session.disconnect_pnl_plant)
-        await asyncio.to_thread(self._session.ensure_pnl_plant)
         await asyncio.to_thread(self._session.subscribe_pnl)
 
     async def _poll_session_event(
@@ -229,7 +249,10 @@ class RithmicExecutionClient(LiveExecutionClient):
             if event is None:
                 await asyncio.sleep(0.05)
                 continue
-            on_event(event)
+            try:
+                on_event(event)
+            except Exception as exc:  # noqa: BLE001
+                self._log.error(f"{name} event handler error (suppressed): {exc}")
 
     def _dispatch_pnl_event(self, event: dict[str, Any]) -> None:
         etype = event.get("type")
@@ -380,14 +403,35 @@ class RithmicExecutionClient(LiveExecutionClient):
             return str(basket)
         return str(self._client_to_venue.get(client_order_id.value) or client_order_id.value)
 
+    def _cache_client_for_notification(self, fields: dict[str, Any]) -> ClientOrderId | None:
+        """Recover ownership from Nautilus cache when tag/basket maps missed."""
+        basket = fields.get("basket_id")
+        if not basket:
+            return None
+        basket_s = str(basket)
+        for order in self._cache.orders(venue=self.venue):
+            vid = order.venue_order_id
+            if vid is not None and vid.value == basket_s:
+                return order.client_order_id
+        return None
+
     def _handle_order_notification(self, fields: dict[str, Any]) -> None:
         client_order_id = self._resolve_client_order_id(fields)
         if client_order_id is None:
-            self._log.debug(f"order notification for unknown order: {fields}")
+            client_order_id = self._cache_client_for_notification(fields)
+            if client_order_id is not None:
+                basket = fields.get("basket_id")
+                if basket:
+                    self._bind_venue_id(client_order_id, str(basket))
+        if client_order_id is None:
+            self._handle_untracked_notification(fields)
             return
         order = self._cache.order(client_order_id)
         if order is None:
-            self._log.warning(f"cached order missing for {client_order_id}")
+            self._log.warning(
+                f"cached order missing for tracked {client_order_id}; "
+                f"notification suppressed: {slim_order_fields(fields)}"
+            )
             return
         ts_event = fields.get("ts_event")
         ts_event = int(ts_event) if ts_event is not None else self._clock.timestamp_ns()
@@ -463,7 +507,18 @@ class RithmicExecutionClient(LiveExecutionClient):
             )
         elif action.kind == "filled":
             if action.fill_px is None or action.fill_qty is None or action.trade_id is None:
-                self._log.error(f"fill action missing fields: {fields}")
+                self._log.error(f"fill action missing fields: {slim_order_fields(fields)}")
+                return
+            dedup = fill_dedup_key(fields, ts_event=ts_event)
+            if dedup is not None and self._fill_key_seen(dedup):
+                return
+            try:
+                fill_qty = Quantity.from_int(int(action.fill_qty))
+                fill_px = self._price_for_instrument(instrument_id, action.fill_px)
+            except (TypeError, ValueError, OverflowError) as exc:
+                self._log.error(
+                    f"fill suppressed (bad px/qty): {exc}; {slim_order_fields(fields)}"
+                )
                 return
             commission = Money(Decimal("0"), Currency.from_str("USD"))
             self.generate_order_filled(
@@ -475,14 +530,82 @@ class RithmicExecutionClient(LiveExecutionClient):
                 TradeId(str(action.trade_id)),
                 order.side,
                 order.order_type,
-                Quantity.from_int(int(action.fill_qty)),
-                self._price_for_instrument(instrument_id, action.fill_px),
+                fill_qty,
+                fill_px,
                 Currency.from_str("USD"),
                 commission,
                 LiquiditySide.NO_LIQUIDITY_SIDE,
                 ts_event,
                 info={"rithmic": dict(fields)},
             )
+            if dedup is not None:
+                self._mark_fill_key(dedup)
+
+    def _handle_untracked_notification(self, fields: dict[str, Any]) -> None:
+        """External fills only when wire has basket, instrument, side, px, qty."""
+        ts_event = fields.get("ts_event")
+        ts_event = int(ts_event) if ts_event is not None else self._clock.timestamp_ns()
+        kind = fields.get("kind")
+        basket = fields.get("basket_id")
+        symbol = fields.get("symbol")
+        instrument_raw = fields.get("instrument_id")
+        if kind != "filled" or not basket or not (instrument_raw or symbol):
+            self._log.error(
+                f"untracked order notification suppressed: {slim_order_fields(fields)}"
+            )
+            return
+        try:
+            instrument_id = InstrumentId.from_str(str(instrument_raw or f"{symbol}.{VENUE}"))
+        except Exception:  # noqa: BLE001
+            self._log.error(
+                f"untracked order notification suppressed (bad instrument): {slim_order_fields(fields)}"
+            )
+            return
+        account_raw = fields.get("account_id")
+        if self.account_id is None and account_raw:
+            self._set_account_id(AccountId(f"{VENUE}-{account_raw}"))
+        if self.account_id is None:
+            self._log.error(
+                f"untracked order notification suppressed (no account): {slim_order_fields(fields)}"
+            )
+            return
+
+        fill_px = fields.get("fill_price")
+        fill_sz = fields.get("fill_size")
+        side = order_side_from_notification(fields)
+        if fill_px is None or fill_sz is None or side is None:
+            self._log.error(
+                f"untracked fill suppressed (missing px/qty/side): {slim_order_fields(fields)}"
+            )
+            return
+        dedup = fill_dedup_key(fields, ts_event=ts_event)
+        if dedup is not None and self._fill_key_seen(dedup):
+            return
+        try:
+            last_qty = Quantity.from_int(int(fill_sz))
+            last_px = self._price_for_instrument(instrument_id, fill_px)
+        except (TypeError, ValueError, OverflowError) as exc:
+            self._log.error(
+                f"untracked fill suppressed (bad px/qty): {exc}; {slim_order_fields(fields)}"
+            )
+            return
+        report = FillReport(
+            account_id=self.account_id,
+            instrument_id=instrument_id,
+            venue_order_id=VenueOrderId(str(basket)),
+            trade_id=TradeId(trade_id_from_fill_fields(fields, ts_event)),
+            order_side=side,
+            last_qty=last_qty,
+            last_px=last_px,
+            commission=Money(Decimal("0"), Currency.from_str("USD")),
+            liquidity_side=LiquiditySide.NO_LIQUIDITY_SIDE,
+            report_id=UUID4(),
+            ts_event=ts_event,
+            ts_init=self._clock.timestamp_ns(),
+        )
+        self._send_fill_report(report)
+        if dedup is not None:
+            self._mark_fill_key(dedup)
 
     def _order_status_report_for(
         self,
@@ -534,7 +657,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         order: Order = command.order
         if not self.enable_trading:
             self._log_trading_disabled("submit_order")
-            self.generate_order_rejected(
+            self.generate_order_denied(
                 order.strategy_id,
                 order.instrument_id,
                 order.client_order_id,
@@ -543,7 +666,7 @@ class RithmicExecutionClient(LiveExecutionClient):
             )
             return
         if not self._order_plant.allow_submit():
-            self.generate_order_rejected(
+            self.generate_order_denied(
                 order.strategy_id,
                 order.instrument_id,
                 order.client_order_id,
@@ -558,7 +681,7 @@ class RithmicExecutionClient(LiveExecutionClient):
             duration = nautilus_tif_to_rithmic(order.time_in_force)
             trail_by_ticks = trailing_ticks_from_order(order)
         except (OrderMapError, ValueError) as exc:
-            self.generate_order_rejected(
+            self.generate_order_denied(
                 order.strategy_id,
                 order.instrument_id,
                 order.client_order_id,
@@ -567,11 +690,10 @@ class RithmicExecutionClient(LiveExecutionClient):
             )
             return
 
-        # Gateway parent trading gate: deny locally before OrderSubmitted
-        # (AGENTS.md: pre-send local failure is deny, not a venue reject).
+        # Gateway parent trading gate: deny locally before OrderSubmitted.
         if getattr(self._session, "trading_enabled", True) is False:
             self._log_trading_disabled("submit_order (parent gateway)")
-            self.generate_order_rejected(
+            self.generate_order_denied(
                 order.strategy_id,
                 order.instrument_id,
                 order.client_order_id,
@@ -609,25 +731,18 @@ class RithmicExecutionClient(LiveExecutionClient):
                 trail_by_price_id,
             )
         except Exception as exc:  # noqa: BLE001
-            if _is_unknown_gateway(exc):
-                self._log.warning(
-                    f"place_order transport unknown (order left in flight): {exc}"
-                )
-                return
-            self._tag_to_client.pop(user_tag, None)
-            self.generate_order_rejected(
-                order.strategy_id,
-                order.instrument_id,
-                order.client_order_id,
-                str(exc),
-                self._clock.timestamp_ns(),
+            self._log.warning(
+                f"place_order transport unknown (order left in flight): {exc}"
             )
 
     async def _submit_order_list(self, command: SubmitOrderList) -> None:
+        # NOTE: this loops independent legs — NOT a Rithmic plant bracket.
+        # Plant brackets use place_bracket_order (stop_ticks/target_ticks) via
+        # rithmic-plants; see docs/STATUS.md Brackets / OCO Partial.
         if not self.enable_trading:
             self._log_trading_disabled("submit_order_list")
             for order in command.order_list.orders:
-                self.generate_order_rejected(
+                self.generate_order_denied(
                     order.strategy_id,
                     order.instrument_id,
                     order.client_order_id,
@@ -727,18 +842,8 @@ class RithmicExecutionClient(LiveExecutionClient):
                 trail_by_ticks,
             )
         except Exception as exc:  # noqa: BLE001
-            if _is_unknown_gateway(exc):
-                self._log.warning(
-                    f"modify_order transport unknown (order left in flight): {exc}"
-                )
-                return
-            self.generate_order_modify_rejected(
-                command.strategy_id,
-                command.instrument_id,
-                command.client_order_id,
-                VenueOrderId(venue_id),
-                str(exc),
-                self._clock.timestamp_ns(),
+            self._log.warning(
+                f"modify_order transport unknown (order left in flight): {exc}"
             )
 
     async def _cancel_order(self, command: CancelOrder) -> None:
@@ -781,18 +886,8 @@ class RithmicExecutionClient(LiveExecutionClient):
         try:
             await asyncio.to_thread(self._session.cancel_order, venue_id)
         except Exception as exc:  # noqa: BLE001
-            if _is_unknown_gateway(exc):
-                self._log.warning(
-                    f"cancel_order transport unknown (order left in flight): {exc}"
-                )
-                return
-            self.generate_order_cancel_rejected(
-                command.strategy_id,
-                command.instrument_id,
-                command.client_order_id,
-                VenueOrderId(venue_id),
-                str(exc),
-                self._clock.timestamp_ns(),
+            self._log.warning(
+                f"cancel_order transport unknown (order left in flight): {exc}"
             )
 
     async def _cancel_all_orders(self, command: CancelAllOrders) -> None:

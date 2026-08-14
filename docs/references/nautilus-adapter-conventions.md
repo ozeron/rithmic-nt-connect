@@ -141,7 +141,7 @@ Retryability ≠ ambiguity. An error can be both, either, or neither. Do not ret
 
 If the venue has no snapshot API: do **not** return `[]` as “venue empty”. Cache-backed orders or `VenueQueryUnavailable` is honest when documented.
 
-**Here:** `OmsType.NETTING`, margin, trading gated. Fill query is unavailable. Account triple still required until auto-discovery.
+**Here:** `OmsType.NETTING`, margin, trading gated. Fill query is unavailable. Account FCM/IB/id auto-discovered when unset (optional env override / multi-account selector).
 
 ## HTTP / stream (when the venue has them)
 

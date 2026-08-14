@@ -227,6 +227,54 @@ def trade_id_from_fill_fields(fields: Mapping[str, Any], ts_event: int) -> str:
     return f"{basket}:{exch}:{ts_event}:{fill_sz}:{fill_px}"
 
 
+def fill_dedup_key(fields: Mapping[str, Any], *, ts_event: int) -> str | None:
+    """Stable fill identity when venue ``fill_id`` is present; else ``None`` (do not suppress)."""
+    fill_id = fields.get("fill_id")
+    if not fill_id:
+        return None
+    acct = fields.get("account_id") or ""
+    inst = fields.get("instrument_id") or ""
+    return f"{acct}|{inst}|{fill_id}"
+
+
+def order_side_from_notification(fields: Mapping[str, Any]) -> Any | None:
+    """Map wire ``transaction_type`` (1=Buy, 2=Sell) to Nautilus ``OrderSide``."""
+    from nautilus_trader.model.enums import OrderSide
+
+    raw = fields.get("transaction_type")
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if value == 1:
+        return OrderSide.BUY
+    if value == 2:
+        return OrderSide.SELL
+    return None
+
+
+def slim_order_fields(fields: Mapping[str, Any]) -> dict[str, Any]:
+    """Log-safe subset of an order notification (no credentials)."""
+    keys = (
+        "kind",
+        "source",
+        "notify_type_name",
+        "status",
+        "basket_id",
+        "user_tag",
+        "symbol",
+        "exchange",
+        "fill_id",
+        "transaction_type",
+        "text",
+        "report_text",
+    )
+    return {k: fields.get(k) for k in keys if fields.get(k) is not None}
+
+
+
 def notification_action(fields: Mapping[str, Any], order: Any) -> OrderAction | None:
     """Classify a normalized notification into one emit action (or None to ignore)."""
     kind = fields.get("kind")

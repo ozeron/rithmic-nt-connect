@@ -85,14 +85,11 @@ def main(argv: list[str] | None = None) -> int:
     from rithmic_nt_connect import load_dotenv_files
     from rithmic_nt_connect.config import SessionConfig
     from rithmic_nt_connect.front_month import resolve_front_month
-    from rithmic_nt_connect.session import create_rust_session
+    from rithmic_nt_connect.session import create_session
 
     load_dotenv_files(ROOT / ".env")
 
     session_cfg = SessionConfig.from_env()
-    if not session_cfg.has_account():
-        print("FAIL: account_id/fcm_id/ib_id required for order plant", file=sys.stderr)
-        return 2
 
     env_trading = env_truthy(os.environ.get("RITHMIC_ENABLE_TRADING"))
     allow_live = bool(args.live_place) and env_trading and not args.no_live_place
@@ -110,12 +107,13 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 3
 
-    session = create_rust_session(session_cfg)
+    session = create_session(session_cfg)
     smoke_tag = f"{SMOKE_TAG_PREFIX}-{uuid.uuid4().hex[:8]}"
     report: dict = {
         "mode": "live_place" if allow_live else "dry_run",
         "system_name": session_cfg.system_name,
         "app_name": session_cfg.app_name,
+        "connect_mode": session_cfg.connect_mode.value,
         "events": [],
         "placed": False,
         "smoke_tag": smoke_tag if allow_live else None,
@@ -129,9 +127,18 @@ def main(argv: list[str] | None = None) -> int:
             "trading_exchange": front["trading_exchange"],
         }
         session.subscribe_order_updates()
+        getter = getattr(session, "resolved_account", None)
+        if callable(getter):
+            resolved = getter()
+            if isinstance(resolved, dict):
+                report["resolved_account"] = {
+                    "account_id": resolved.get("account_id"),
+                    "fcm_id": resolved.get("fcm_id"),
+                    "ib_id": resolved.get("ib_id"),
+                }
         print(
             f"order plant subscribed; front={front['trading_symbol']}.{front['trading_exchange']}; "
-            f"mode={report['mode']}"
+            f"mode={report['mode']}; account={report.get('resolved_account')}"
         )
 
         if allow_live:

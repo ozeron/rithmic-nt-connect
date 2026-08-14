@@ -17,6 +17,7 @@ use rithmic_rs::rti::request_time_bar_update;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::broadcast::error::TryRecvError;
 
+use crate::account::{pick_account, rows_from_account_list};
 use crate::config::SessionConfig;
 use crate::dto::{
     FrontMonthDto, HistoryBarDto, HistoryTickDto, PlantEvent, ReferenceDataDto, TimeBarProbeRow,
@@ -79,6 +80,8 @@ pub struct RithmicSession {
     history: Option<HistoryPlant>,
     pnl: Option<PnlPlant>,
     order: Option<OrderPlant>,
+    /// Cached account after explicit override or wire discovery.
+    resolved_account: Option<RithmicAccount>,
 }
 
 impl std::fmt::Debug for RithmicSession {
@@ -102,6 +105,7 @@ impl RithmicSession {
 
     /// Create a disconnected session that will attach `plants` on connect.
     pub fn with_plants(config: SessionConfig, plants: PlantSet) -> Self {
+        let resolved_account = config.account();
         Self {
             config,
             plants,
@@ -109,7 +113,13 @@ impl RithmicSession {
             history: None,
             pnl: None,
             order: None,
+            resolved_account,
         }
+    }
+
+    /// Resolved FCM/IB/account after override or discovery (if any).
+    pub fn resolved_account(&self) -> Option<&RithmicAccount> {
+        self.resolved_account.as_ref()
     }
 
     /// Plants requested at construction.
@@ -209,7 +219,9 @@ impl RithmicSession {
         }
     }
 
-    /// Connect + login the order plant (idempotent). Requires account triple.
+    /// Connect + login the order plant (idempotent).
+    ///
+    /// Uses config triple when set; otherwise [`Self::resolve_account`].
     pub async fn ensure_order_plant(&mut self) -> Result<()> {
         if self.order.is_some() {
             return Ok(());
@@ -217,9 +229,7 @@ impl RithmicSession {
         if self.ticker.is_none() {
             return Err(Error::NotConnected { plant: "ticker" });
         }
-        let account = self.config.account().ok_or_else(|| {
-            Error::Config("order plant requires account_id/fcm_id/ib_id".into())
-        })?;
+        let account = self.resolve_account().await?;
         let rc = self.config.to_rithmic_config()?;
         let order_plant = RithmicOrderPlant::connect(&rc, ConnectStrategy::Retry).await?;
         let order_handle = order_plant.get_handle(&account);
@@ -227,6 +237,58 @@ impl RithmicSession {
         self.order = Some(OrderPlant {
             _plant: order_plant,
             handle: order_handle,
+        });
+        Ok(())
+    }
+
+    /// Resolve and cache trading account (config override or wire account list).
+    pub async fn resolve_account(&mut self) -> Result<RithmicAccount> {
+        if let Some(acct) = self.config.account() {
+            self.resolved_account = Some(acct.clone());
+            return Ok(acct);
+        }
+        if let Some(cached) = self.resolved_account.clone() {
+            return Ok(cached);
+        }
+
+        let rc = self.config.to_rithmic_config()?;
+        let order_plant = RithmicOrderPlant::connect(&rc, ConnectStrategy::Retry).await?;
+        let bootstrap_handle = order_plant.get_handle(&RithmicAccount::new("", "", ""));
+
+        let outcome = async {
+            check_response(bootstrap_handle.login().await?, "order login (discover)")?;
+            let list = bootstrap_handle.get_account_list().await?;
+            pick_account(
+                &rows_from_account_list(&list),
+                self.config.account_id_selector(),
+            )
+        }
+        .await;
+
+        let _ = bootstrap_handle.disconnect().await;
+        drop(order_plant);
+
+        let account = outcome?;
+        self.resolved_account = Some(account.clone());
+        Ok(account)
+    }
+
+    /// Connect + login the PnL plant (idempotent). Discovers account when needed.
+    pub async fn ensure_pnl_plant(&mut self) -> Result<()> {
+        if self.pnl.is_some() {
+            return Ok(());
+        }
+        if self.ticker.is_none() {
+            return Err(Error::NotConnected { plant: "ticker" });
+        }
+        let account = self.resolve_account().await?;
+        let rc = self.config.to_rithmic_config()?;
+        let pnl_plant = RithmicPnlPlant::connect(&rc, ConnectStrategy::Retry).await?;
+        let pnl_handle = pnl_plant.get_handle(&account);
+        check_response(pnl_handle.login().await?, "pnl login")?;
+        self.pnl = Some(PnlPlant {
+            _plant: pnl_plant,
+            handle: pnl_handle,
         });
         Ok(())
     }
@@ -496,28 +558,6 @@ impl RithmicSession {
             let _ = self.disconnect_order_plant().await;
             return Err(e);
         }
-        Ok(())
-    }
-
-    /// Connect + login the PnL plant (idempotent). Requires account triple.
-    pub async fn ensure_pnl_plant(&mut self) -> Result<()> {
-        if self.pnl.is_some() {
-            return Ok(());
-        }
-        if self.ticker.is_none() {
-            return Err(Error::NotConnected { plant: "ticker" });
-        }
-        let account = self.config.account().ok_or_else(|| {
-            Error::Config("pnl plant requires account_id/fcm_id/ib_id".into())
-        })?;
-        let rc = self.config.to_rithmic_config()?;
-        let pnl_plant = RithmicPnlPlant::connect(&rc, ConnectStrategy::Retry).await?;
-        let pnl_handle = pnl_plant.get_handle(&account);
-        check_response(pnl_handle.login().await?, "pnl login")?;
-        self.pnl = Some(PnlPlant {
-            _plant: pnl_plant,
-            handle: pnl_handle,
-        });
         Ok(())
     }
 

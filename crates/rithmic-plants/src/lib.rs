@@ -6,6 +6,7 @@
 
 #![allow(missing_docs)]
 
+pub mod account;
 pub mod config;
 pub mod dto;
 pub mod error;
@@ -14,6 +15,7 @@ pub mod plants;
 pub mod session;
 pub mod systems;
 
+pub use account::{AccountRow, pick_account, rows_from_account_list};
 pub use config::{
     DEFAULT_APP_NAME, DEFAULT_APP_VERSION, DEFAULT_LUCID_URL, DEFAULT_SYSTEM_NAME, SessionConfig,
     SessionConfigBuilder,
