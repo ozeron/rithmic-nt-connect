@@ -14,12 +14,11 @@ import argparse
 import os
 import sys
 import time
+import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "python"))
-
-SMOKE_LOCALID = "spike-bracket-1"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -60,6 +59,7 @@ def main(argv: list[str] | None = None) -> int:
     cfg = SessionConfig.from_env()
     session = create_session(cfg)
     session.connect()
+    smoke_localid = f"spike-bracket-{uuid.uuid4().hex[:8]}"
     saw_ack = False
     saw_reject = False
     basket_id = None
@@ -73,14 +73,14 @@ def main(argv: list[str] | None = None) -> int:
             side=args.side,
             price_type="Market",
             quantity=int(args.qty),
-            localid=SMOKE_LOCALID,
+            localid=smoke_localid,
             duration="DAY",
             stop_ticks=int(args.stop_ticks),
             target_ticks=None if args.target_ticks is None else int(args.target_ticks),
         )
         print(
             f"PLACE sent front={front['trading_symbol']}.{front['trading_exchange']} "
-            f"localid={SMOKE_LOCALID}; polling {args.seconds}s for notify…"
+            f"localid={smoke_localid}; polling {args.seconds}s for notify…"
         )
         deadline = time.monotonic() + max(0.0, args.seconds)
         while time.monotonic() < deadline:
@@ -88,20 +88,27 @@ def main(argv: list[str] | None = None) -> int:
             if ev is None:
                 time.sleep(0.05)
                 continue
+            tag = str(ev.get("user_tag") or ev.get("localid") or "")
+            if tag != smoke_localid:
+                continue
             status = str(ev.get("status") or "")
             text = str(ev.get("text") or ev.get("report_text") or "")
-            tag = str(ev.get("user_tag") or ev.get("localid") or "")
-            print(f"order_event: type={ev.get('type')} status={status!r} basket_id={ev.get('basket_id')} tag={tag!r} text={text!r}")
+            print(
+                f"order_event: type={ev.get('type')} status={status!r} "
+                f"basket_id={ev.get('basket_id')} tag={tag!r} text={text!r}"
+            )
             if ev.get("basket_id"):
                 basket_id = ev.get("basket_id")
             low = f"{status} {text}".lower()
             if any(tok in low for tok in ("reject", "denied", "fail", "error")):
                 saw_reject = True
                 break
-            if basket_id and any(tok in low for tok in ("open", "accept", "fill", "submit", "new")):
+            if basket_id and any(
+                tok in low for tok in ("open", "accept", "fill", "submit", "new")
+            ):
                 saw_ack = True
                 break
-            if basket_id and tag == SMOKE_LOCALID:
+            if basket_id:
                 saw_ack = True
                 break
     finally:
