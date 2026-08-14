@@ -579,6 +579,22 @@ impl PySession {
             .map_err(to_py_err)
     }
 
+    /// Resolved account triple after override or discovery (`None` until ensure).
+    fn resolved_account(&self, py: Python<'_>) -> PyResult<Option<Py<PyDict>>> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let Some(acct) = inner.resolved_account() else {
+            return Ok(None);
+        };
+        let d = PyDict::new(py);
+        d.set_item("account_id", &acct.account_id)?;
+        d.set_item("fcm_id", &acct.fcm_id)?;
+        d.set_item("ib_id", &acct.ib_id)?;
+        Ok(Some(d.into()))
+    }
+
     fn subscribe(&self, symbol: &str, exchange: &str) -> PyResult<()> {
         let inner = self
             .inner
@@ -805,11 +821,16 @@ impl PySession {
     }
 
     fn subscribe_pnl(&self) -> PyResult<()> {
-        let inner = self
+        let mut inner = self
             .inner
             .lock()
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        runtime().block_on(inner.subscribe_pnl()).map_err(to_py_err)
+        runtime()
+            .block_on(async {
+                inner.ensure_pnl_plant().await?;
+                inner.subscribe_pnl().await
+            })
+            .map_err(to_py_err)
     }
 
     fn subscribe_order_updates(&self) -> PyResult<()> {

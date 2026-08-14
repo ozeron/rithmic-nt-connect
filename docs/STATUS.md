@@ -30,8 +30,8 @@ Acceptance: **NQ / CME via LucidTrading**. One Rithmic login (close MotiveWave /
 | Catalog / Parquet | Other repo | **N/A** |
 | Order types | Market, limit, stop / stop-limit, trailing-stop (tick offset) | **Partial** — mapped and gated; live place blocked on authorized `app_name` |
 | Brackets / OCO | Not advertised | **N/A** |
-| Account / positions | Best-effort PnL | **Partial** — works when account triple is set; soft-fail otherwise |
-| Submit / cancel / modify + fills | Gated order plant | **Partial** — on `main`; post-send errors reported as reject; untracked notifications dropped. **Close-out.** |
+| Account / positions | Best-effort PnL | **Partial** — auto-discovers FCM/IB/account when unset (multi-account needs `RITHMIC_ACCOUNT_ID` selector); soft-fail PnL otherwise |
+| Submit / cancel / modify + fills | Gated order plant | **Partial** — submit pre-send deny; post-send unknown; untracked → reports; fill dedup. Live place still gated on `app_name`. |
 | Order status reports | Cache-backed only | **Done** (honest: not a venue snapshot) |
 | Fill reports | Query unavailable | **Done** (`VenueQueryUnavailable`) |
 | Reconnect + MD resubscribe | Planned | **Partial** — ticker poll resyncs last-trade/BBO + book + EXTERNAL bar intent. Gateway typed restore covers ticker/book/bars/PnL/order after plant drop. Not Lucid-proven. |
@@ -82,10 +82,10 @@ Acceptance: **NQ / CME via LucidTrading**. One Rithmic login (close MotiveWave /
 
 ### Phase 4: Execution
 
-- [~] PnL account / positions; trading still needs account triple
+- [~] PnL account / positions; auto-discovery when triple unset
 - [x] Gated submit / cancel / modify + notification fills
-- [ ] Tracked vs external; fill dedup; unknown outcomes
-- [~] **Exit:** not claimed until close-outs 2 and 3
+- [x] Tracked vs external reports; fill dedup; post-send unknown outcomes
+- [~] **Exit:** not claimed until live place / app_name close-out
 
 ### Phase 5: Optional
 
@@ -100,7 +100,7 @@ Acceptance: **NQ / CME via LucidTrading**. One Rithmic login (close MotiveWave /
 
 ### Phase 7: Conformance
 
-- [~] Unit + MD smoke + live↔history; order dry-run harness exists, Lucid run **not recorded**
+- [~] Unit + MD smoke + live↔history; order dry-run recorded LucidTrading 2026-08-14 (`artifacts/order-dry-run-20260814.json`)
 - [ ] Recovery suite; skipped-spec register
 - [~] **Exit:** not claimed until advertised close-outs have evidence
 
@@ -132,10 +132,10 @@ Cross-cutting items from [`references/nautilus-adapter-conventions.md`](referenc
 | Request always completes | [x] | History path; Rust empty window → `[]` |
 | Reconnect restores intent | [~] | Ticker resync unit-tested; gateway typed restore (ticker/book/bars/PnL/order); not Lucid-proven |
 | Partial connect teardown | [x] | Order-plant subscribe fail |
-| Three outcome classes | [ ] | Close-out 2 |
-| Tracked vs external reports | [ ] | Close-out 2 |
-| Fill dedup by venue trade id | [ ] | Close-out 2 |
-| Never drop exec events | [ ] | Close-out 2 |
+| Three outcome classes | [x] | Submit deny; modify/cancel local reject; post-send unknown |
+| Tracked vs external reports | [x] | Untracked fills → `_send_fill_report` when side/px/qty present; no invented side/type/TIF status reports |
+| Fill dedup by venue trade id | [x] | `fill_dedup_key` / `trade_id_from_fill_fields` |
+| Never drop exec events | [~] | Parseable untracked fills reported; incomplete/untyped untracked suppressed + log |
 | No empty list as “venue empty” | [x] | Cache orders; `VenueQueryUnavailable` fills |
 | No nested `block_on` on asyncio | [x] | `asyncio.to_thread` |
 | Testers default dry-run | [x] | |
@@ -147,10 +147,10 @@ Cross-cutting items from [`references/nautilus-adapter-conventions.md`](referenc
 Do not mark Phase 3, 4, or 7 `[x]` until the matching items are proven.
 
 1. **Incremental book updates** — summary snapshots only (L2); L3 MBO N/A.
-2. **Execution honesty** — three evidence classes; untracked → reports; fill query stays unavailable; dedup by venue id.
-3. **Account auto-discovery** — [`plans/2026-08-13-001-account-auto-discovery-plan.md`](plans/2026-08-13-001-account-auto-discovery-plan.md).
+2. **Execution honesty** — [x] three evidence classes; untracked → reports; fill query stays unavailable; dedup by venue id. (`cancel_all_orders` still out of honesty claim.)
+3. **Account auto-discovery** — [x] wire resolve on ensure_order/ensure_pnl; optional env triple / `ACCOUNT_ID` selector. Plan: [`plans/2026-08-13-001-account-auto-discovery-plan.md`](plans/2026-08-13-001-account-auto-discovery-plan.md) + umbrella [`plans/2026-08-14-001-exec-honesty-account-discovery-dryrun-plan.md`](plans/2026-08-14-001-exec-honesty-account-discovery-dryrun-plan.md).
 4. **Live-prove ticker resync** on LucidTrading (code + unit test landed).
-5. **Record LucidTrading order dry-run** (`python scripts/verify_order_dry_run.py --seconds 5`, no `--live-place`). Live place stays gated on authorized `app_name`.
+5. **Record LucidTrading order dry-run** — [x] 2026-08-14 `artifacts/order-dry-run-20260814.json` (`mode=dry_run`, `placed=false`, account auto-resolved). Live place stays gated on authorized `app_name`.
 
 ## Paper path (intraday)
 

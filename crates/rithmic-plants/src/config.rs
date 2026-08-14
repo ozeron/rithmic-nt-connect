@@ -88,7 +88,7 @@ impl SessionConfig {
         self.env
     }
 
-    /// Optional account triple for PnL plant.
+    /// Optional fully-specified account triple (override; skips discovery).
     pub fn account(&self) -> Option<RithmicAccount> {
         match (&self.account_id, &self.fcm_id, &self.ib_id) {
             (Some(account_id), Some(fcm_id), Some(ib_id))
@@ -98,6 +98,14 @@ impl SessionConfig {
             }
             _ => None,
         }
+    }
+
+    /// Optional `account_id` selector when FCM/IB are discovered from the wire.
+    pub fn account_id_selector(&self) -> Option<&str> {
+        self.account_id
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .filter(|_| self.account().is_none())
     }
 
     /// Convert into a [`RithmicConfig`] for plant connect.

@@ -51,6 +51,8 @@ Phase 1 does **not** submit orders by default. Phase 2 order APIs exist on the
 session / exec client when `enable_trading=True` (or `RITHMIC_ENABLE_TRADING=1`).
 Prefer `python scripts/verify_order_dry_run.py` before any live place. Never use
 `--live-place` until conformance / `app_name` authorization is confirmed.
+`RITHMIC_ACCOUNT_ID` / `FCM_ID` / `IB_ID` are optional: the order plant discovers
+the account list after login (multi-account users set `RITHMIC_ACCOUNT_ID` as a selector).
 
 Paper-trade strategies with live Rithmic MD and Nautilus sandbox execution
 (no Rithmic place): `python examples/live_nq_intraday_sandbox.py --seconds 90`.

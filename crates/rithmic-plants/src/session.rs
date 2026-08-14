@@ -8,15 +8,17 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use rithmic_rs::{
     ConnectStrategy, ManualOrAutoEntry, OrderSide, OrderType, RithmicAccount,
-    RithmicCancelAllOrders, RithmicCancelOrder, RithmicConfig, RithmicHistoryPlant,
-    RithmicHistoryPlantHandle, RithmicModifyOrder, RithmicOrder, RithmicOrderPlant,
-    RithmicOrderPlantHandle, RithmicPnlPlant, RithmicPnlPlantHandle, RithmicTickerPlant,
-    RithmicTickerPlantHandle, TimeBarType, TimeInForce,
+    RithmicBracketLevelAdjustment, RithmicBracketOrder, RithmicCancelAllOrders,
+    RithmicCancelOrder, RithmicConfig, RithmicHistoryPlant, RithmicHistoryPlantHandle,
+    RithmicModifyOrder, RithmicOrder, RithmicOrderPlant, RithmicOrderPlantHandle,
+    RithmicPnlPlant, RithmicPnlPlantHandle, RithmicTickerPlant, RithmicTickerPlantHandle,
+    TimeBarType, TimeInForce,
 };
 use rithmic_rs::rti::request_time_bar_update;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::broadcast::error::TryRecvError;
 
+use crate::account::{pick_account, rows_from_account_list};
 use crate::config::SessionConfig;
 use crate::dto::{
     FrontMonthDto, HistoryBarDto, HistoryTickDto, PlantEvent, ReferenceDataDto, TimeBarProbeRow,
@@ -79,6 +81,8 @@ pub struct RithmicSession {
     history: Option<HistoryPlant>,
     pnl: Option<PnlPlant>,
     order: Option<OrderPlant>,
+    /// Cached account after explicit override or wire discovery.
+    resolved_account: Option<RithmicAccount>,
 }
 
 impl std::fmt::Debug for RithmicSession {
@@ -102,6 +106,7 @@ impl RithmicSession {
 
     /// Create a disconnected session that will attach `plants` on connect.
     pub fn with_plants(config: SessionConfig, plants: PlantSet) -> Self {
+        let resolved_account = config.account();
         Self {
             config,
             plants,
@@ -109,7 +114,13 @@ impl RithmicSession {
             history: None,
             pnl: None,
             order: None,
+            resolved_account,
         }
+    }
+
+    /// Resolved FCM/IB/account after override or discovery (if any).
+    pub fn resolved_account(&self) -> Option<&RithmicAccount> {
+        self.resolved_account.as_ref()
     }
 
     /// Plants requested at construction.
@@ -209,7 +220,9 @@ impl RithmicSession {
         }
     }
 
-    /// Connect + login the order plant (idempotent). Requires account triple.
+    /// Connect + login the order plant (idempotent).
+    ///
+    /// Uses config triple when set; otherwise [`Self::resolve_account`].
     pub async fn ensure_order_plant(&mut self) -> Result<()> {
         if self.order.is_some() {
             return Ok(());
@@ -217,9 +230,7 @@ impl RithmicSession {
         if self.ticker.is_none() {
             return Err(Error::NotConnected { plant: "ticker" });
         }
-        let account = self.config.account().ok_or_else(|| {
-            Error::Config("order plant requires account_id/fcm_id/ib_id".into())
-        })?;
+        let account = self.resolve_account().await?;
         let rc = self.config.to_rithmic_config()?;
         let order_plant = RithmicOrderPlant::connect(&rc, ConnectStrategy::Retry).await?;
         let order_handle = order_plant.get_handle(&account);
@@ -227,6 +238,58 @@ impl RithmicSession {
         self.order = Some(OrderPlant {
             _plant: order_plant,
             handle: order_handle,
+        });
+        Ok(())
+    }
+
+    /// Resolve and cache trading account (config override or wire account list).
+    pub async fn resolve_account(&mut self) -> Result<RithmicAccount> {
+        if let Some(acct) = self.config.account() {
+            self.resolved_account = Some(acct.clone());
+            return Ok(acct);
+        }
+        if let Some(cached) = self.resolved_account.clone() {
+            return Ok(cached);
+        }
+
+        let rc = self.config.to_rithmic_config()?;
+        let order_plant = RithmicOrderPlant::connect(&rc, ConnectStrategy::Retry).await?;
+        let bootstrap_handle = order_plant.get_handle(&RithmicAccount::new("", "", ""));
+
+        let outcome = async {
+            check_response(bootstrap_handle.login().await?, "order login (discover)")?;
+            let list = bootstrap_handle.get_account_list().await?;
+            pick_account(
+                &rows_from_account_list(&list),
+                self.config.account_id_selector(),
+            )
+        }
+        .await;
+
+        let _ = bootstrap_handle.disconnect().await;
+        drop(order_plant);
+
+        let account = outcome?;
+        self.resolved_account = Some(account.clone());
+        Ok(account)
+    }
+
+    /// Connect + login the PnL plant (idempotent). Discovers account when needed.
+    pub async fn ensure_pnl_plant(&mut self) -> Result<()> {
+        if self.pnl.is_some() {
+            return Ok(());
+        }
+        if self.ticker.is_none() {
+            return Err(Error::NotConnected { plant: "ticker" });
+        }
+        let account = self.resolve_account().await?;
+        let rc = self.config.to_rithmic_config()?;
+        let pnl_plant = RithmicPnlPlant::connect(&rc, ConnectStrategy::Retry).await?;
+        let pnl_handle = pnl_plant.get_handle(&account);
+        check_response(pnl_handle.login().await?, "pnl login")?;
+        self.pnl = Some(PnlPlant {
+            _plant: pnl_plant,
+            handle: pnl_handle,
         });
         Ok(())
     }
@@ -499,28 +562,6 @@ impl RithmicSession {
         Ok(())
     }
 
-    /// Connect + login the PnL plant (idempotent). Requires account triple.
-    pub async fn ensure_pnl_plant(&mut self) -> Result<()> {
-        if self.pnl.is_some() {
-            return Ok(());
-        }
-        if self.ticker.is_none() {
-            return Err(Error::NotConnected { plant: "ticker" });
-        }
-        let account = self.config.account().ok_or_else(|| {
-            Error::Config("pnl plant requires account_id/fcm_id/ib_id".into())
-        })?;
-        let rc = self.config.to_rithmic_config()?;
-        let pnl_plant = RithmicPnlPlant::connect(&rc, ConnectStrategy::Retry).await?;
-        let pnl_handle = pnl_plant.get_handle(&account);
-        check_response(pnl_handle.login().await?, "pnl login")?;
-        self.pnl = Some(PnlPlant {
-            _plant: pnl_plant,
-            handle: pnl_handle,
-        });
-        Ok(())
-    }
-
     /// Disconnect only the order plant (leaves ticker/history/PnL connected).
     pub async fn disconnect_order_plant(&mut self) -> Result<()> {
         if let Some(order) = self.order.take() {
@@ -569,6 +610,72 @@ impl RithmicSession {
             trail_by_price_id,
         )
         .await
+    }
+
+    /// Subscribe to bracket update notifications (required for plant brackets).
+    pub async fn subscribe_bracket_updates(&mut self) -> Result<()> {
+        self.ensure_order_plant().await?;
+        let handle = self.order_handle()?;
+        check_response(
+            handle.subscribe_bracket_updates().await?,
+            "subscribe_bracket_updates",
+        )
+    }
+
+    /// Place a server-side bracket (entry + stop_ticks / target_ticks from fill).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn place_bracket_order(
+        &mut self,
+        symbol: &str,
+        exchange: &str,
+        side: &str,
+        price_type: &str,
+        quantity: i32,
+        localid: &str,
+        price: Option<f64>,
+        trigger_price: Option<f64>,
+        duration: &str,
+        stop_ticks: Option<i32>,
+        target_ticks: Option<i32>,
+    ) -> Result<()> {
+        self.ensure_order_plant().await?;
+        place_bracket_order_on(
+            self.order_handle()?,
+            symbol,
+            exchange,
+            side,
+            price_type,
+            quantity,
+            localid,
+            price,
+            trigger_price,
+            duration,
+            stop_ticks,
+            target_ticks,
+        )
+        .await
+    }
+
+    /// Adjust a bracket stop leg by basket id (ticks from fill).
+    pub async fn adjust_bracket_stop(
+        &mut self,
+        basket_id: &str,
+        ticks: i32,
+        level: Option<i32>,
+    ) -> Result<()> {
+        self.ensure_order_plant().await?;
+        adjust_bracket_stop_on(self.order_handle()?, basket_id, ticks, level).await
+    }
+
+    /// Adjust a bracket target leg by basket id (ticks from fill).
+    pub async fn adjust_bracket_target(
+        &mut self,
+        basket_id: &str,
+        ticks: i32,
+        level: Option<i32>,
+    ) -> Result<()> {
+        self.ensure_order_plant().await?;
+        adjust_bracket_target_on(self.order_handle()?, basket_id, ticks, level).await
     }
 
     /// Cancel an order by basket id.
@@ -782,6 +889,104 @@ pub async fn cancel_order_on(handle: &RithmicOrderPlantHandle, basket_id: &str) 
         .manual_or_auto(ManualOrAutoEntry::Auto)
         .build()?;
     check_responses(&handle.cancel_order(cancel).await?, "cancel_order")
+}
+
+/// Place a plant bracket on an already-connected handle (no session lock).
+///
+/// Exit geometry is **ticks from fill**. Pass `stop_ticks` and/or `target_ticks`.
+/// v1 book path uses DAY + Static shapes derived by `rithmic-rs` `build()`.
+#[allow(clippy::too_many_arguments)]
+pub async fn place_bracket_order_on(
+    handle: &RithmicOrderPlantHandle,
+    symbol: &str,
+    exchange: &str,
+    side: &str,
+    price_type: &str,
+    quantity: i32,
+    localid: &str,
+    price: Option<f64>,
+    trigger_price: Option<f64>,
+    duration: &str,
+    stop_ticks: Option<i32>,
+    target_ticks: Option<i32>,
+) -> Result<()> {
+    if stop_ticks.is_none() && target_ticks.is_none() {
+        return Err(Error::Config(
+            "place_bracket_order requires stop_ticks and/or target_ticks".into(),
+        ));
+    }
+    let side: OrderSide = side
+        .parse()
+        .map_err(|e| Error::Config(format!("invalid order side: {e}")))?;
+    let price_type: OrderType = price_type
+        .parse()
+        .map_err(|e| Error::Config(format!("invalid price type: {e}")))?;
+    let duration: TimeInForce = if duration.is_empty() {
+        TimeInForce::Day
+    } else {
+        duration
+            .parse()
+            .map_err(|e| Error::Config(format!("invalid duration: {e}")))?
+    };
+
+    let mut builder = RithmicBracketOrder::new()
+        .symbol(symbol)
+        .exchange(exchange)
+        .quantity(quantity)
+        .action(side)
+        .price_type(price_type)
+        .duration(duration)
+        .localid(localid)
+        .manual_or_auto(ManualOrAutoEntry::Auto);
+    if let Some(p) = price {
+        builder = builder.price(p);
+    }
+    if let Some(t) = trigger_price {
+        builder = builder.trigger_price(t);
+    }
+    // quantity must be set before .stop/.target sugar (sizes leg to current qty).
+    if let Some(ticks) = target_ticks {
+        builder = builder.target(ticks);
+    }
+    if let Some(ticks) = stop_ticks {
+        builder = builder.stop(ticks);
+    }
+    let order = builder.build()?;
+    check_responses(&handle.place_bracket_order(order).await?, "place_bracket_order")
+}
+
+/// Adjust bracket stop ticks on an already-connected handle.
+pub async fn adjust_bracket_stop_on(
+    handle: &RithmicOrderPlantHandle,
+    basket_id: &str,
+    ticks: i32,
+    level: Option<i32>,
+) -> Result<()> {
+    let mut builder = RithmicBracketLevelAdjustment::new()
+        .id(basket_id)
+        .ticks(ticks);
+    if let Some(lvl) = level {
+        builder = builder.level(lvl);
+    }
+    let adj = builder.build()?;
+    check_responses(&handle.adjust_stop(adj).await?, "adjust_bracket_stop")
+}
+
+/// Adjust bracket target ticks on an already-connected handle.
+pub async fn adjust_bracket_target_on(
+    handle: &RithmicOrderPlantHandle,
+    basket_id: &str,
+    ticks: i32,
+    level: Option<i32>,
+) -> Result<()> {
+    let mut builder = RithmicBracketLevelAdjustment::new()
+        .id(basket_id)
+        .ticks(ticks);
+    if let Some(lvl) = level {
+        builder = builder.level(lvl);
+    }
+    let adj = builder.build()?;
+    check_responses(&handle.adjust_target(adj).await?, "adjust_bracket_target")
 }
 
 /// Modify an order on an already-connected handle (no session lock).

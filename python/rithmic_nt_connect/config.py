@@ -384,8 +384,8 @@ class RithmicExecClientConfig:
     """Config for the Rithmic execution client.
 
     ``enable_trading=False`` (default) keeps Phase 1 read-only behavior: account/PnL
-    only; order actions are rejected. Set ``enable_trading=True`` for Phase 2 order
-    routing (requires account_id/fcm_id/ib_id and order-plant authorization).
+    only; order actions are denied. Set ``enable_trading=True`` for Phase 2 order
+    routing (account auto-discovered when unset; live place still needs authorization).
     """
 
     session: SessionConfig
