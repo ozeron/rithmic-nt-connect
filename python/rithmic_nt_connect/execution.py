@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 from decimal import Decimal
 from typing import Any, Callable
 
@@ -115,8 +116,23 @@ class RithmicExecutionClient(LiveExecutionClient):
         self._client_to_venue: dict[str, str] = {}
         self._venue_to_client: dict[str, ClientOrderId] = {}
         self._tag_to_client: dict[str, ClientOrderId] = {}
-        self._seen_fill_keys: set[str] = set()
+        # Venue-stable fill ids; retained across reconnect so snapshot replays stay idempotent.
+        self._seen_fill_keys: OrderedDict[str, None] = OrderedDict()
         self._order_plant = OrderPlantPolicy(OrderPlantState.DISCONNECTED)
+
+    _MAX_SEEN_FILL_KEYS = 10_000
+
+    def _fill_key_seen(self, key: str) -> bool:
+        if key in self._seen_fill_keys:
+            self._seen_fill_keys.move_to_end(key)
+            return True
+        return False
+
+    def _mark_fill_key(self, key: str) -> None:
+        self._seen_fill_keys[key] = None
+        self._seen_fill_keys.move_to_end(key)
+        while len(self._seen_fill_keys) > self._MAX_SEEN_FILL_KEYS:
+            self._seen_fill_keys.popitem(last=False)
 
     @property
     def enable_trading(self) -> bool:
@@ -233,7 +249,10 @@ class RithmicExecutionClient(LiveExecutionClient):
             if event is None:
                 await asyncio.sleep(0.05)
                 continue
-            on_event(event)
+            try:
+                on_event(event)
+            except Exception as exc:  # noqa: BLE001
+                self._log.error(f"{name} event handler error (suppressed): {exc}")
 
     def _dispatch_pnl_event(self, event: dict[str, Any]) -> None:
         etype = event.get("type")
@@ -254,7 +273,6 @@ class RithmicExecutionClient(LiveExecutionClient):
 
     async def _disconnect(self) -> None:
         self._order_plant.state = OrderPlantState.DISCONNECTED
-        self._seen_fill_keys.clear()
         for task_attr in ("_order_poll_task", "_poll_task"):
             task = getattr(self, task_attr)
             if task is not None:
@@ -474,7 +492,15 @@ class RithmicExecutionClient(LiveExecutionClient):
                 self._log.error(f"fill action missing fields: {slim_order_fields(fields)}")
                 return
             dedup = fill_dedup_key(fields, ts_event=ts_event)
-            if dedup in self._seen_fill_keys:
+            if self._fill_key_seen(dedup):
+                return
+            try:
+                fill_qty = Quantity.from_int(int(action.fill_qty))
+                fill_px = self._price_for_instrument(instrument_id, action.fill_px)
+            except (TypeError, ValueError, OverflowError) as exc:
+                self._log.error(
+                    f"fill suppressed (bad px/qty): {exc}; {slim_order_fields(fields)}"
+                )
                 return
             commission = Money(Decimal("0"), Currency.from_str("USD"))
             self.generate_order_filled(
@@ -486,15 +512,15 @@ class RithmicExecutionClient(LiveExecutionClient):
                 TradeId(str(action.trade_id)),
                 order.side,
                 order.order_type,
-                Quantity.from_int(int(action.fill_qty)),
-                self._price_for_instrument(instrument_id, action.fill_px),
+                fill_qty,
+                fill_px,
                 Currency.from_str("USD"),
                 commission,
                 LiquiditySide.NO_LIQUIDITY_SIDE,
                 ts_event,
                 info={"rithmic": dict(fields)},
             )
-            self._seen_fill_keys.add(dedup)
+            self._mark_fill_key(dedup)
 
     def _handle_untracked_notification(self, fields: dict[str, Any]) -> None:
         """External fills only when wire has basket, instrument, side, px, qty."""
@@ -534,7 +560,15 @@ class RithmicExecutionClient(LiveExecutionClient):
             )
             return
         dedup = fill_dedup_key(fields, ts_event=ts_event)
-        if dedup in self._seen_fill_keys:
+        if self._fill_key_seen(dedup):
+            return
+        try:
+            last_qty = Quantity.from_int(int(fill_sz))
+            last_px = self._price_for_instrument(instrument_id, fill_px)
+        except (TypeError, ValueError, OverflowError) as exc:
+            self._log.error(
+                f"untracked fill suppressed (bad px/qty): {exc}; {slim_order_fields(fields)}"
+            )
             return
         report = FillReport(
             account_id=self.account_id,
@@ -542,8 +576,8 @@ class RithmicExecutionClient(LiveExecutionClient):
             venue_order_id=VenueOrderId(str(basket)),
             trade_id=TradeId(trade_id_from_fill_fields(fields, ts_event)),
             order_side=side,
-            last_qty=Quantity.from_int(int(fill_sz)),
-            last_px=self._price_for_instrument(instrument_id, fill_px),
+            last_qty=last_qty,
+            last_px=last_px,
             commission=Money(Decimal("0"), Currency.from_str("USD")),
             liquidity_side=LiquiditySide.NO_LIQUIDITY_SIDE,
             report_id=UUID4(),
@@ -551,7 +585,7 @@ class RithmicExecutionClient(LiveExecutionClient):
             ts_init=self._clock.timestamp_ns(),
         )
         self._send_fill_report(report)
-        self._seen_fill_keys.add(dedup)
+        self._mark_fill_key(dedup)
 
     def _order_status_report_for(
         self,
@@ -682,6 +716,9 @@ class RithmicExecutionClient(LiveExecutionClient):
             )
 
     async def _submit_order_list(self, command: SubmitOrderList) -> None:
+        # NOTE: this loops independent legs — NOT a Rithmic plant bracket.
+        # Plant brackets use place_bracket_order (stop_ticks/target_ticks) via
+        # rithmic-plants; see docs/STATUS.md Brackets / OCO Partial.
         if not self.enable_trading:
             self._log_trading_disabled("submit_order_list")
             for order in command.order_list.orders:

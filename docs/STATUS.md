@@ -29,7 +29,7 @@ Acceptance: **NQ / CME via LucidTrading**. One Rithmic login (close MotiveWave /
 | Mark / index / funding / greeks | Not advertised | **N/A** |
 | Catalog / Parquet | Other repo | **N/A** |
 | Order types | Market, limit, stop / stop-limit, trailing-stop (tick offset) | **Partial** — mapped and gated; live place blocked on authorized `app_name` |
-| Brackets / OCO | Not advertised | **N/A** |
+| Brackets / OCO | Plant bracket API | **Partial** — `place_bracket_order` / adjust / `subscribe_bracket_updates` in `rithmic-plants` + PyO3 (2026-08-14). Lucid/Demo accept, basket-id semantics, disconnect survival **not proven**. OCO fallback not wired. Capability: `RITHMIC_BRACKETS=1` + `connect_mode=direct`. Spike: `scripts/spike_bracket_order.py` |
 | Account / positions | Best-effort PnL | **Partial** — auto-discovers FCM/IB/account when unset (multi-account needs `RITHMIC_ACCOUNT_ID` selector); soft-fail PnL otherwise |
 | Submit / cancel / modify + fills | Gated order plant | **Partial** — submit pre-send deny; post-send unknown; untracked → reports; fill dedup. Live place still gated on `app_name`. |
 | Order status reports | Cache-backed only | **Done** (honest: not a venue snapshot) |
@@ -100,7 +100,7 @@ Acceptance: **NQ / CME via LucidTrading**. One Rithmic login (close MotiveWave /
 
 ### Phase 7: Conformance
 
-- [~] Unit + MD smoke + live↔history; order dry-run recorded LucidTrading 2026-08-14 (`artifacts/order-dry-run-20260814.json`)
+- [~] Unit + MD smoke + live↔history; order dry-run exercised LucidTrading 2026-08-14 (local under gitignored `artifacts/`)
 - [ ] Recovery suite; skipped-spec register
 - [~] **Exit:** not claimed until advertised close-outs have evidence
 
@@ -150,7 +150,7 @@ Do not mark Phase 3, 4, or 7 `[x]` until the matching items are proven.
 2. **Execution honesty** — [x] three evidence classes; untracked → reports; fill query stays unavailable; dedup by venue id. (`cancel_all_orders` still out of honesty claim.)
 3. **Account auto-discovery** — [x] wire resolve on ensure_order/ensure_pnl; optional env triple / `ACCOUNT_ID` selector. Plan: [`plans/2026-08-13-001-account-auto-discovery-plan.md`](plans/2026-08-13-001-account-auto-discovery-plan.md) + umbrella [`plans/2026-08-14-001-exec-honesty-account-discovery-dryrun-plan.md`](plans/2026-08-14-001-exec-honesty-account-discovery-dryrun-plan.md).
 4. **Live-prove ticker resync** on LucidTrading (code + unit test landed).
-5. **Record LucidTrading order dry-run** — [x] 2026-08-14 `artifacts/order-dry-run-20260814.json` (`mode=dry_run`, `placed=false`, account auto-resolved). Live place stays gated on authorized `app_name`.
+5. **Record LucidTrading order dry-run** — [x] 2026-08-14 local dry-run (`mode=dry_run`, `placed=false`, account auto-resolved; artifact gitignored). Live place stays gated on authorized `app_name`.
 
 ## Paper path (intraday)
 
