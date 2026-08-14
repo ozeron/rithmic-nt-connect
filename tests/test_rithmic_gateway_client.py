@@ -201,8 +201,12 @@ def test_spawn_preserves_zero_idle_exit_sec(
 
 def test_resolve_bin_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("RITHMIC_GATEWAY_BIN", raising=False)
+    monkeypatch.delenv("CARGO_TARGET_DIR", raising=False)
     monkeypatch.setenv("PATH", str(tmp_path))
-    with pytest.raises(SpawnError, match="not on PATH"):
+    monkeypatch.setattr(
+        "rithmic_gateway.spawn._bin_search_starts", lambda: [tmp_path]
+    )
+    with pytest.raises(SpawnError, match="RITHMIC_GATEWAY_BIN"):
         resolve_gateway_bin(None)
 
 

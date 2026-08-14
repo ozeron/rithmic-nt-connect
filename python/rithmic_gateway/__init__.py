@@ -8,14 +8,29 @@ from __future__ import annotations
 from rithmic_gateway.client import GatewayClient, GatewayError
 from rithmic_gateway.config import GatewayConfig
 from rithmic_gateway.flock import SessionLock, SessionLockError, session_flock_held
-from rithmic_gateway.spawn import spawn_gateway
+from rithmic_gateway.history_window import (
+    BAR_TYPE_DAILY,
+    BAR_TYPE_MINUTE,
+    BAR_TYPE_SECOND,
+    BAR_TYPE_WEEKLY,
+    bar_slice_secs,
+    window_slices,
+)
+from rithmic_gateway.spawn import resolve_gateway_bin, spawn_gateway
 
 __all__ = [
+    "BAR_TYPE_DAILY",
+    "BAR_TYPE_MINUTE",
+    "BAR_TYPE_SECOND",
+    "BAR_TYPE_WEEKLY",
     "GatewayClient",
     "GatewayConfig",
     "GatewayError",
     "SessionLock",
     "SessionLockError",
+    "bar_slice_secs",
+    "resolve_gateway_bin",
     "session_flock_held",
     "spawn_gateway",
+    "window_slices",
 ]

@@ -18,6 +18,15 @@ def _require(name: str, value: str | None) -> str:
     return str(value).strip()
 
 
+def _env_first(env: Mapping[str, str], *names: str) -> str | None:
+    """First non-empty env value among ``names`` (SessionConfig / lake precedence)."""
+    for name in names:
+        value = env.get(name)
+        if value is not None and str(value).strip() != "":
+            return str(value).strip()
+    return None
+
+
 def parse_listen_url(raw: str) -> str:
     """Return absolute unix socket path from ``unix://…`` or bare absolute path.
 
@@ -133,6 +142,8 @@ class GatewayConfig:
     auto_spawn: bool = True
     gateway_bin: str | None = None
     spawn_timeout_sec: float = 30.0
+    #: Extra env merged into auto-spawn child (e.g. RITHMIC_PASSWORD). Never logged.
+    spawn_environ: dict[str, str] | None = field(default=None, repr=False)
     #: Require credential flock held before accepting Ready (disable only for mock-parent unit tests).
     attest_flock: bool = True
 
@@ -157,17 +168,23 @@ class GatewayConfig:
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> GatewayConfig:
         env = environ if environ is not None else os.environ
+        # Precedence matches SessionConfig / lake: GATEWAY before URL, SYSTEM before SYSTEM_NAME.
+        url = _env_first(env, "RITHMIC_GATEWAY", "RITHMIC_URL") or (
+            "wss://rprotocol.rithmic.com:443"
+        )
+        system_name = _env_first(env, "RITHMIC_SYSTEM", "RITHMIC_SYSTEM_NAME") or "LucidTrading"
+        user = _env_first(env, "RITHMIC_USER", "RITHMIC_USERNAME")
         return cls(
-            user=_require("user", env.get("RITHMIC_USER")),
-            system_name=env.get("RITHMIC_SYSTEM_NAME") or "LucidTrading",
-            url=env.get("RITHMIC_URL") or "wss://rprotocol.rithmic.com:443",
-            env=env.get("RITHMIC_ENV") or "Live",
-            account_id=env.get("RITHMIC_ACCOUNT_ID") or "",
-            fcm_id=env.get("RITHMIC_FCM_ID") or "",
-            ib_id=env.get("RITHMIC_IB_ID") or "",
-            auth_token=env.get("RITHMIC_GATEWAY_AUTH_TOKEN") or "",
-            listen=env.get("RITHMIC_GATEWAY_LISTEN"),
+            user=_require("user", user),
+            system_name=system_name,
+            url=url,
+            env=_env_first(env, "RITHMIC_ENV") or "Live",
+            account_id=_env_first(env, "RITHMIC_ACCOUNT_ID") or "",
+            fcm_id=_env_first(env, "RITHMIC_FCM_ID") or "",
+            ib_id=_env_first(env, "RITHMIC_IB_ID") or "",
+            auth_token=_env_first(env, "RITHMIC_GATEWAY_AUTH_TOKEN") or "",
+            listen=_env_first(env, "RITHMIC_GATEWAY_LISTEN"),
             auto_spawn=(env.get("RITHMIC_GATEWAY_AUTO_SPAWN") or "1").strip().lower()
             not in {"0", "false", "no", "off"},
-            gateway_bin=env.get("RITHMIC_GATEWAY_BIN"),
+            gateway_bin=_env_first(env, "RITHMIC_GATEWAY_BIN"),
         )
