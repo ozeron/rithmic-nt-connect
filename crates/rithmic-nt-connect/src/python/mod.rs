@@ -9,15 +9,16 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use tokio::runtime::Runtime;
 
-use crate::config::{DEFAULT_LUCID_URL, SessionConfig};
-use crate::dto::{
+use rithmic_plants::config::{DEFAULT_LUCID_URL, SessionConfig};
+use rithmic_plants::dto::{
     AccountPnlDto, BboDto, FrontMonthDto, HistoryBarDto, HistoryTickDto, InstrumentPnlDto,
-    LastTradeDto, OrderBookDto, OrderNotificationDto, ReferenceDataDto, PlantEvent,
+    LastTradeDto, OrderBookDto, OrderNotificationDto, PlantEvent, ReferenceDataDto,
+    TimeBarProbeRow,
 };
-use crate::error::Error;
-use crate::history::parse_time_bar_type;
-use crate::plants::PlantSet;
-use crate::session::{
+use rithmic_plants::error::Error;
+use rithmic_plants::history::parse_time_bar_type;
+use rithmic_plants::plants::PlantSet;
+use rithmic_plants::session::{
     RithmicSession, cancel_all_orders_on, cancel_order_on, modify_order_on, place_order_on,
 };
 
@@ -287,6 +288,30 @@ fn history_tick_dict(py: Python<'_>, t: HistoryTickDto) -> PyResult<Py<PyDict>> 
     Ok(d.unbind())
 }
 
+fn time_bar_probe_row_dict(py: Python<'_>, r: TimeBarProbeRow) -> PyResult<Py<PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("variant", r.variant)?;
+    d.set_item("source", r.source)?;
+    d.set_item("parsed", r.parsed)?;
+    d.set_item("rp_code", r.rp_code)?;
+    set_opt_str(&d, "error", r.error)?;
+    set_opt_str(&d, "skip_reason", r.skip_reason)?;
+    set_opt_str(&d, "symbol", r.symbol)?;
+    set_opt_str(&d, "exchange", r.exchange)?;
+    set_opt_i32(&d, "bar_type", r.bar_type)?;
+    set_opt_str(&d, "period", r.period)?;
+    set_opt_i32(&d, "marker", r.marker)?;
+    set_opt_f64(&d, "open_price", r.open_price)?;
+    set_opt_f64(&d, "high_price", r.high_price)?;
+    set_opt_f64(&d, "low_price", r.low_price)?;
+    set_opt_f64(&d, "close_price", r.close_price)?;
+    set_opt_f64(&d, "settlement_price", r.settlement_price)?;
+    set_opt_bool(&d, "has_settlement_price", r.has_settlement_price)?;
+    set_opt_u64(&d, "volume", r.volume)?;
+    set_opt_u64(&d, "num_trades", r.num_trades)?;
+    Ok(d.unbind())
+}
+
 fn history_bar_dict(py: Python<'_>, b: HistoryBarDto) -> PyResult<Py<PyDict>> {
     let Some(symbol) = b.symbol.clone() else {
         return Err(pyo3::exceptions::PyValueError::new_err(
@@ -544,6 +569,16 @@ impl PySession {
             .map_err(to_py_err)
     }
 
+    fn ensure_order_plant(&self) -> PyResult<()> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        runtime()
+            .block_on(inner.ensure_order_plant())
+            .map_err(to_py_err)
+    }
+
     fn subscribe(&self, symbol: &str, exchange: &str) -> PyResult<()> {
         let inner = self
             .inner
@@ -687,6 +722,16 @@ impl PySession {
             .map_err(to_py_err)
     }
 
+    fn unsubscribe_order_book_summary(&self, symbol: &str, exchange: &str) -> PyResult<()> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        runtime()
+            .block_on(inner.unsubscribe_order_book_summary(symbol, exchange))
+            .map_err(to_py_err)
+    }
+
     /// Load minute time bars for a window; returns structured OHLCV dicts.
     #[pyo3(signature = (symbol, exchange, start_time_sec, end_time_sec, bar_type=2, period=1))]
     fn load_time_bars(
@@ -718,6 +763,42 @@ impl PySession {
             let list = PyList::empty(py);
             for bar in bars {
                 list.append(history_bar_dict(py, bar)?)?;
+            }
+            Ok(list.unbind())
+        })
+    }
+
+    /// Raw history-plant time-bar replay (including dropped rows) for diagnostics.
+    #[pyo3(signature = (symbol, exchange, start_time_sec, end_time_sec, bar_type=2, period=1))]
+    fn probe_time_bars(
+        &self,
+        symbol: &str,
+        exchange: &str,
+        start_time_sec: i32,
+        end_time_sec: i32,
+        bar_type: i32,
+        period: i32,
+    ) -> PyResult<Py<PyList>> {
+        let rithmic_bar_type = parse_time_bar_type(bar_type).map_err(to_py_err)?;
+        let period = period.max(1);
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let rows = runtime()
+            .block_on(inner.probe_time_bars(
+                symbol,
+                exchange,
+                rithmic_bar_type,
+                period,
+                start_time_sec,
+                end_time_sec,
+            ))
+            .map_err(to_py_err)?;
+        Python::with_gil(|py| {
+            let list = PyList::empty(py);
+            for row in rows {
+                list.append(time_bar_probe_row_dict(py, row)?)?;
             }
             Ok(list.unbind())
         })
@@ -864,7 +945,7 @@ impl PySession {
 fn list_systems(url: Option<&str>) -> PyResult<Vec<String>> {
     let url = url.unwrap_or(DEFAULT_LUCID_URL);
     runtime()
-        .block_on(crate::systems::list_systems(url))
+        .block_on(rithmic_plants::systems::list_systems(url))
         .map_err(to_py_err)
 }
 

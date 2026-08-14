@@ -6,7 +6,7 @@ import os
 
 import pytest
 
-from rithmic_nt_connect import ConfigError, SessionConfig, VENUE
+from rithmic_nt_connect import ConfigError, ConnectMode, SessionConfig, VENUE
 from rithmic_nt_connect.config import RithmicDataClientConfig, RithmicExecClientConfig
 from rithmic_nt_connect.constants import DEFAULT_APP_NAME, DEFAULT_GATEWAY_URL, DEFAULT_SYSTEM_NAME
 
@@ -22,6 +22,7 @@ def test_my046_env_maps_to_lucid_live() -> None:
             "RITHMIC_APP_VERSION": "0.1.0",
             "RITHMIC_SYMBOL": "NQ",
             "RITHMIC_EXCHANGE": "CME",
+            "RITHMIC_CONNECT_MODE": "direct",
         }
     )
     assert cfg.user == "alice"
@@ -38,6 +39,7 @@ def test_my046_defaults_system_and_gateway() -> None:
         {
             "RITHMIC_USER": "alice",
             "RITHMIC_PASSWORD": "pw",
+            "RITHMIC_CONNECT_MODE": "direct",
         }
     )
     assert cfg.system_name == "LucidTrading"
@@ -56,6 +58,7 @@ def test_live_rs_style_env() -> None:
             "RITHMIC_LIVE_SYSTEM_NAME": "LucidTrading",
             "RITHMIC_APP_NAME": "app",
             "RITHMIC_APP_VERSION": "1",
+            "RITHMIC_CONNECT_MODE": "direct",
         }
     )
     assert cfg.env == "Live"
@@ -72,6 +75,7 @@ def test_demo_rs_style_env() -> None:
             "RITHMIC_DEMO_URL": "wss://demo.example:443",
             "RITHMIC_APP_NAME": "app",
             "RITHMIC_APP_VERSION": "1",
+            "RITHMIC_CONNECT_MODE": "direct",
         }
     )
     assert cfg.env == "Demo"
@@ -89,23 +93,26 @@ def test_missing_credentials_clear_error_no_password_echo() -> None:
 
 def test_empty_user_rejected_without_echoing_password() -> None:
     with pytest.raises(ConfigError) as exc:
-        SessionConfig(user="", password="top-secret-password")
+        SessionConfig(user="", password="top-secret-password", connect_mode=ConnectMode.DIRECT)
     msg = str(exc.value)
     assert "user" in msg
     assert "top-secret-password" not in msg
 
 
 def test_repr_redacts_password() -> None:
-    cfg = SessionConfig(user="u", password="top-secret-password")
+    cfg = SessionConfig(user="u", password="top-secret-password", connect_mode=ConnectMode.DIRECT)
     text = repr(cfg)
     assert "top-secret-password" not in text
     assert "***" in text
+    assert "connect_mode='direct'" in text
 
 
 def test_to_dict_redacts_by_default() -> None:
-    cfg = SessionConfig(user="u", password="top-secret-password")
+    cfg = SessionConfig(user="u", password="top-secret-password", connect_mode=ConnectMode.DIRECT)
     assert cfg.to_dict()["password"] == "***"
     assert cfg.to_dict(redact=False)["password"] == "top-secret-password"
+    assert cfg.to_dict()["connect_mode"] == "direct"
+    assert cfg.connect_mode is ConnectMode.DIRECT
 
 
 def test_data_and_exec_config_from_env() -> None:
@@ -114,6 +121,7 @@ def test_data_and_exec_config_from_env() -> None:
         "RITHMIC_PASSWORD": "pw",
         "RITHMIC_SYMBOL": "NQ",
         "RITHMIC_EXCHANGE": "CME",
+        "RITHMIC_CONNECT_MODE": "direct",
     }
     data = RithmicDataClientConfig.from_env(env)
     exec_cfg = RithmicExecClientConfig.from_env(env)

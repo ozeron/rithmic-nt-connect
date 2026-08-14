@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from rithmic_nt_connect.config import SessionConfig
+from rithmic_nt_connect.config import ConnectMode, SessionConfig
 
 
 class TickerSession(Protocol):
@@ -13,6 +13,7 @@ class TickerSession(Protocol):
     def subscribe(self, symbol: str, exchange: str) -> None: ...
     def unsubscribe(self, symbol: str, exchange: str) -> None: ...
     def subscribe_order_book_summary(self, symbol: str, exchange: str) -> None: ...
+    def unsubscribe_order_book_summary(self, symbol: str, exchange: str) -> None: ...
     def get_front_month(self, symbol: str, exchange: str) -> Any: ...
     def get_reference_data(self, symbol: str, exchange: str) -> Any: ...
     def poll_event(self, timeout_ms: int = 0) -> dict[str, Any] | None: ...
@@ -28,9 +29,19 @@ class TickerSession(Protocol):
         bar_type: int = 2,
         period: int = 1,
     ) -> list[dict[str, Any]]: ...
+    def probe_time_bars(
+        self,
+        symbol: str,
+        exchange: str,
+        start_ssboe: int,
+        end_ssboe: int,
+        bar_type: int = 2,
+        period: int = 1,
+    ) -> list[dict[str, Any]]: ...
     def subscribe_time_bars(self, symbol: str, exchange: str, bar_type: int, period: int) -> None: ...
     def unsubscribe_time_bars(self, symbol: str, exchange: str, bar_type: int, period: int) -> None: ...
     def poll_history_event(self) -> dict[str, Any] | None: ...
+    def request_plants(self, plants: str) -> None: ...
 
 
 class PnlSession(Protocol):
@@ -43,6 +54,7 @@ class PnlSession(Protocol):
 class OrderSession(Protocol):
     def subscribe_order_updates(self) -> None: ...
     def disconnect_order_plant(self) -> None: ...
+    def ensure_order_plant(self) -> None: ...
     def place_order(
         self,
         symbol: str,
@@ -88,12 +100,19 @@ def create_rust_session(
 ) -> WireSession:
     """Create the PyO3 session when the extension is built.
 
+    Takes the shared credential flock before constructing plants so legacy
+    callers cannot open a second Rithmic login alongside a gateway parent.
+
     ``plants`` is ``market_data`` (ticker + history) or ``execution``
     (also PnL when the account triple is set). Order plant stays lazy.
     """
+    from rithmic_gateway.flock import SessionLock
     from rithmic_nt_connect._lib import Session  # type: ignore
 
-    return Session(
+    lock = SessionLock.try_acquire(
+        session.user, session.system_name, session.url, session.env
+    )
+    inner = Session(
         user=session.user,
         password=session.password,
         system_name=session.system_name,
@@ -107,13 +126,43 @@ def create_rust_session(
         beta_url=session.beta_url,
         plants=plants,
     )
+    return _FlockedDirectSession(inner, lock)  # type: ignore[return-value]
+
+
+class _FlockedDirectSession:
+    """Keep credential flock alive for the lifetime of a direct WireSession."""
+
+    def __init__(self, inner: WireSession, lock: Any) -> None:
+        self._inner = inner
+        self._lock = lock
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+def create_session(
+    session: SessionConfig,
+    *,
+    plants: str = PLANTS_MARKET_DATA,
+) -> WireSession:
+    """Create a WireSession for ``session.connect_mode`` (``direct`` or ``gateway``).
+
+    Direct takes the credential flock and opens PyO3 plants in-process.
+    Gateway dials ``rithmic-gateway`` and never opens plants locally.
+    """
+    if session.connect_mode == ConnectMode.GATEWAY:
+        from rithmic_nt_connect.gateway_wire import create_gateway_wire_session
+
+        return create_gateway_wire_session(session)
+
+    return create_rust_session(session, plants=plants)
 
 
 def connect_market_data_session(
     config: SessionConfig | None = None,
 ) -> WireSession:
     """Create and connect a ticker+history session (no PnL / order plant)."""
-    session = create_rust_session(
+    session = create_session(
         config if config is not None else SessionConfig.from_env(),
         plants=PLANTS_MARKET_DATA,
     )
@@ -130,4 +179,5 @@ __all__ = [
     "WireSession",
     "connect_market_data_session",
     "create_rust_session",
+    "create_session",
 ]

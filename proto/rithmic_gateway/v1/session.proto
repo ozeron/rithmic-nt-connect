@@ -1,0 +1,455 @@
+syntax = "proto3";
+
+// Plant-semantic IPC for the Rithmic session gateway.
+//
+// This is NOT a mirror of R|Protocol and NOT Nautilus wire types
+// (TradeTick / InstrumentId, etc). It carries the same plant-level
+// concepts as `rithmic-plants::dto` (last trade, bbo, order book,
+// PnL, order notifications, history bars/ticks) over a transport-agnostic
+// length-delimited byte stream (unix socket today; tcp/tls later).
+//
+// Secrets: the wire NEVER carries a password. Handshake carries a
+// fingerprint (for local consistency checks) plus an `auth_token` field
+// that may be empty for v1 local (same-UID unix) trust and is required
+// for v2 remote (tls://) listeners.
+package rithmic_gateway.v1;
+
+// ---------------------------------------------------------------------------
+// Handshake / Ready
+// ---------------------------------------------------------------------------
+
+// Client -> Gateway: first frame on a new connection.
+message Handshake {
+  // Fingerprint fields identify which credential set / venue the client
+  // expects to be talking to. They are NOT authentication; they only let
+  // the gateway refuse a client that dialed the wrong parent by mistake.
+  string user = 1;
+  string system_name = 2;
+  string url = 3;
+  string env = 4; // "Live" | "Demo" | "Test"
+  string account_id = 5;
+  string fcm_id = 6;
+  string ib_id = 7;
+
+  // Auth token (may be empty for v1 local unix same-UID trust policy).
+  // Required and TLS-backed for v2 non-local listeners. Never a password.
+  string auth_token = 8;
+}
+
+// Gateway -> Client: sent once plants are connected and the client is
+// authorized to issue requests / receive events.
+message Ready {
+  // Capability scopes this connection is authorized for, e.g.
+  // "md", "history", "pnl", "trade", "cancel_all".
+  repeated string scopes = 1;
+
+  // Parent-configured gates, advertised read-only (clients cannot elevate).
+  bool trading_enabled = 2;
+  bool cancel_all_enabled = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Requests (Client -> Gateway)
+// ---------------------------------------------------------------------------
+
+message SubscribeRequest {
+  string symbol = 1;
+  string exchange = 2;
+}
+
+message UnsubscribeRequest {
+  string symbol = 1;
+  string exchange = 2;
+}
+
+message SubscribeBookRequest {
+  string symbol = 1;
+  string exchange = 2;
+}
+
+message UnsubscribeBookRequest {
+  string symbol = 1;
+  string exchange = 2;
+}
+
+message LoadTicksRequest {
+  string symbol = 1;
+  string exchange = 2;
+  int32 start_time_sec = 3;
+  int32 end_time_sec = 4;
+}
+
+message LoadTimeBarsRequest {
+  string symbol = 1;
+  string exchange = 2;
+  int32 bar_type = 3;
+  int32 period = 4;
+  int32 start_time_sec = 5;
+  int32 end_time_sec = 6;
+}
+
+message ProbeTimeBarsRequest {
+  string symbol = 1;
+  string exchange = 2;
+  int32 bar_type = 3;
+  int32 period = 4;
+  int32 start_time_sec = 5;
+  int32 end_time_sec = 6;
+}
+
+message SubscribeTimeBarsRequest {
+  string symbol = 1;
+  string exchange = 2;
+  int32 bar_type = 3;
+  int32 period = 4;
+}
+
+message UnsubscribeTimeBarsRequest {
+  string symbol = 1;
+  string exchange = 2;
+  int32 bar_type = 3;
+  int32 period = 4;
+}
+
+message RequestPlantsRequest {
+  // Bit-set / name-set of additional plants to attach; mirrors
+  // `rithmic_plants::PlantSet::parse` input, e.g. "market_data,pnl".
+  string plants = 1;
+}
+
+message PlaceOrderRequest {
+  string symbol = 1;
+  string exchange = 2;
+  string side = 3;
+  string price_type = 4;
+  int32 quantity = 5;
+  string user_tag = 6;
+  optional double price = 7;
+  optional double trigger_price = 8;
+  string duration = 9;
+  optional int32 trail_by_ticks = 10;
+  optional int32 trail_by_price_id = 11;
+}
+
+message CancelOrderRequest {
+  string basket_id = 1;
+}
+
+message ModifyOrderRequest {
+  string basket_id = 1;
+  string symbol = 2;
+  string exchange = 3;
+  int32 quantity = 4;
+  string price_type = 5;
+  optional double price = 6;
+  optional double trigger_price = 7;
+  optional int32 trail_by_ticks = 8;
+}
+
+message CancelAllOrdersRequest {}
+
+message DisconnectRequest {}
+
+message DisconnectPnlRequest {}
+
+message DisconnectOrderRequest {}
+
+message EnsurePnlRequest {}
+
+message EnsureOrderRequest {}
+
+message SubscribePnlRequest {}
+
+message SubscribeOrderUpdatesRequest {}
+
+message GetFrontMonthRequest {
+  string symbol = 1;
+  string exchange = 2;
+}
+
+message GetReferenceDataRequest {
+  string symbol = 1;
+  string exchange = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Responses (Gateway -> Client, correlated to a Request by request_id)
+// ---------------------------------------------------------------------------
+
+message Ack {}
+
+message ErrorResponse {
+  string code = 1;
+  string message = 2;
+}
+
+message FrontMonthResponse {
+  optional string symbol = 1;
+  optional string exchange = 2;
+  optional string trading_symbol = 3;
+  optional string trading_exchange = 4;
+  optional string symbol_name = 5;
+  optional bool is_front_month_symbol = 6;
+}
+
+message ReferenceDataResponse {
+  optional string symbol = 1;
+  optional string exchange = 2;
+  optional string trading_symbol = 3;
+  optional string trading_exchange = 4;
+  optional string symbol_name = 5;
+  optional string product_code = 6;
+  optional string instrument_type = 7;
+  optional string underlying = 8;
+  optional string currency = 9;
+  optional string expiration_date = 10;
+  optional double tick_size = 11;
+  optional double point_value = 12;
+  optional int32 price_precision = 13;
+  optional bool is_tradable = 14;
+}
+
+message LoadTicksResponse {
+  repeated HistoryTick ticks = 1;
+}
+
+message LoadTimeBarsResponse {
+  repeated HistoryBar bars = 1;
+}
+
+// Raw history-plant time-bar replay row (including dropped / unparsed).
+message TimeBarProbeRow {
+  string variant = 1;
+  string source = 2;
+  optional string error = 3;
+  repeated string rp_code = 4;
+  bool parsed = 5;
+  optional string skip_reason = 6;
+  optional string symbol = 7;
+  optional string exchange = 8;
+  optional int32 bar_type = 9;
+  optional string period = 10;
+  optional int32 marker = 11;
+  optional double open_price = 12;
+  optional double high_price = 13;
+  optional double low_price = 14;
+  optional double close_price = 15;
+  optional double settlement_price = 16;
+  optional bool has_settlement_price = 17;
+  optional uint64 volume = 18;
+  optional uint64 num_trades = 19;
+}
+
+message ProbeTimeBarsResponse {
+  repeated TimeBarProbeRow rows = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Events (Gateway -> Client, unsolicited push; no poll-style RPC)
+// ---------------------------------------------------------------------------
+
+message LastTrade {
+  optional string symbol = 1;
+  optional string exchange = 2;
+  optional double trade_price = 3;
+  optional int32 trade_size = 4;
+  optional int32 aggressor = 5;
+  optional int32 ssboe = 6;
+  optional int32 usecs = 7;
+  optional uint64 ts_event_ns = 8;
+  optional bool is_snapshot = 9;
+}
+
+message Bbo {
+  optional string symbol = 1;
+  optional string exchange = 2;
+  optional double bid_price = 3;
+  optional int32 bid_size = 4;
+  optional double ask_price = 5;
+  optional int32 ask_size = 6;
+  optional int32 ssboe = 7;
+  optional int32 usecs = 8;
+  optional uint64 ts_event_ns = 9;
+  optional bool is_snapshot = 10;
+}
+
+message OrderBook {
+  optional string symbol = 1;
+  optional string exchange = 2;
+  optional int32 update_type = 3;
+  repeated double bid_price = 4;
+  repeated int32 bid_size = 5;
+  repeated double ask_price = 6;
+  repeated int32 ask_size = 7;
+  optional int32 ssboe = 8;
+  optional int32 usecs = 9;
+  optional uint64 ts_event_ns = 10;
+}
+
+message AccountPnl {
+  optional string account_id = 1;
+  optional string fcm_id = 2;
+  optional string ib_id = 3;
+  optional string account_balance = 4;
+  optional string cash_on_hand = 5;
+  optional string margin_balance = 6;
+  optional string day_pnl = 7;
+  optional string open_position_pnl = 8;
+  optional string closed_position_pnl = 9;
+  optional string available_buying_power = 10;
+  optional string used_buying_power = 11;
+  optional bool is_snapshot = 12;
+  optional int32 ssboe = 13;
+  optional int32 usecs = 14;
+}
+
+message InstrumentPnl {
+  optional string account_id = 1;
+  optional string symbol = 2;
+  optional string exchange = 3;
+  optional string product_code = 4;
+  optional string instrument_type = 5;
+  optional string open_position_pnl = 6;
+  optional string closed_position_pnl = 7;
+  optional string mtm_security = 8;
+  optional int32 open_position_quantity = 9;
+  optional int32 closed_position_quantity = 10;
+  optional int32 net_quantity = 11;
+  optional double avg_open_fill_price = 12;
+  optional bool is_snapshot = 13;
+  optional int32 ssboe = 14;
+  optional int32 usecs = 15;
+}
+
+message OrderNotification {
+  string source = 1;
+  optional string kind = 2;
+  optional int32 notify_type = 3;
+  optional string notify_type_name = 4;
+  optional string status = 5;
+  optional string basket_id = 6;
+  optional string exchange_order_id = 7;
+  optional string user_tag = 8;
+  optional string account_id = 9;
+  optional string symbol = 10;
+  optional string exchange = 11;
+  optional int32 quantity = 12;
+  optional int32 total_fill_size = 13;
+  optional int32 total_unfilled_size = 14;
+  optional int32 fill_size = 15;
+  optional double price = 16;
+  optional double trigger_price = 17;
+  optional double avg_fill_price = 18;
+  optional double fill_price = 19;
+  optional int32 transaction_type = 20;
+  optional int32 price_type = 21;
+  optional string fill_id = 22;
+  optional string text = 23;
+  optional string report_text = 24;
+  optional string completion_reason = 25;
+  optional int32 ssboe = 26;
+  optional int32 usecs = 27;
+  optional uint64 ts_event_ns = 28;
+  optional bool is_snapshot = 29;
+}
+
+message HistoryTick {
+  optional string symbol = 1;
+  optional string exchange = 2;
+  optional double open_price = 3;
+  optional double high_price = 4;
+  optional double low_price = 5;
+  optional double close_price = 6;
+  optional uint64 volume = 7;
+  optional uint64 num_trades = 8;
+  optional int32 ssboe = 9;
+  optional int32 usecs = 10;
+  optional uint64 ts_event_ns = 11;
+}
+
+message HistoryBar {
+  optional string symbol = 1;
+  optional string exchange = 2;
+  optional int32 bar_type = 3;
+  optional string period = 4;
+  optional int32 marker = 5;
+  optional double open_price = 6;
+  optional double high_price = 7;
+  optional double low_price = 8;
+  optional double close_price = 9;
+  optional uint64 volume = 10;
+  optional uint64 num_trades = 11;
+  optional uint64 bid_volume = 12;
+  optional uint64 ask_volume = 13;
+  optional uint64 ts_event_ns = 14;
+}
+
+// Catch-all for plant events not otherwise modeled (mirrors
+// `rithmic_plants::dto::PlantEvent::Other`).
+message OtherEvent {
+  string type_name = 1;
+  string source = 2;
+}
+
+// Discriminated event envelope pushed from gateway to client.
+message Event {
+  oneof body {
+    LastTrade last_trade = 1;
+    Bbo bbo = 2;
+    OrderBook order_book = 3;
+    AccountPnl account_pnl = 4;
+    InstrumentPnl instrument_pnl = 5;
+    OrderNotification order_notification = 6;
+    HistoryBar time_bar = 7;
+    OtherEvent other = 8;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Frame: top-level envelope for every length-delimited message on the wire.
+// ---------------------------------------------------------------------------
+
+// Every frame carries a request_id for request/response correlation;
+// pushed events use request_id == 0 (no correlation).
+message Frame {
+  uint64 request_id = 1;
+
+  oneof body {
+    Handshake handshake = 2;
+    Ready ready = 3;
+
+    SubscribeRequest subscribe = 10;
+    UnsubscribeRequest unsubscribe = 11;
+    SubscribeBookRequest subscribe_book = 12;
+    LoadTicksRequest load_ticks = 13;
+    LoadTimeBarsRequest load_time_bars = 14;
+    SubscribeTimeBarsRequest subscribe_time_bars = 15;
+    UnsubscribeTimeBarsRequest unsubscribe_time_bars = 16;
+    RequestPlantsRequest request_plants = 17;
+    PlaceOrderRequest place_order = 18;
+    CancelOrderRequest cancel_order = 19;
+    ModifyOrderRequest modify_order = 20;
+    CancelAllOrdersRequest cancel_all_orders = 21;
+    DisconnectRequest disconnect = 22;
+    DisconnectPnlRequest disconnect_pnl = 23;
+    DisconnectOrderRequest disconnect_order = 24;
+    EnsurePnlRequest ensure_pnl = 25;
+    EnsureOrderRequest ensure_order = 26;
+    SubscribePnlRequest subscribe_pnl = 27;
+    SubscribeOrderUpdatesRequest subscribe_order_updates = 28;
+    GetFrontMonthRequest get_front_month = 29;
+    GetReferenceDataRequest get_reference_data = 30;
+    UnsubscribeBookRequest unsubscribe_book = 31;
+    ProbeTimeBarsRequest probe_time_bars = 32;
+
+    Ack ack = 50;
+    ErrorResponse error = 51;
+    FrontMonthResponse front_month_response = 52;
+    ReferenceDataResponse reference_data_response = 53;
+    LoadTicksResponse load_ticks_response = 54;
+    LoadTimeBarsResponse load_time_bars_response = 55;
+    ProbeTimeBarsResponse probe_time_bars_response = 56;
+
+    Event event = 90;
+  }
+}

@@ -6,7 +6,7 @@
 >
 > It is also **not** affiliated with, endorsed by, or supported by Rithmic, LLC.
 
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Unofficial](https://img.shields.io/badge/NautilusTrader-unofficial%20community%20adapter-orange.svg)](https://nautilustrader.io)
 
@@ -15,6 +15,8 @@
 Out-of-tree adapter for NautilusTrader **1.231.x**: live ticks/quotes, history requests, futures instruments, read-only PnL, and **gated** order-plant submit/cancel/modify.
 
 Trading is **off by default** (`enable_trading=False` / unset `RITHMIC_ENABLE_TRADING`). Live place is gated; use the dry-run harness first. Scope vs done: [`docs/STATUS.md`](docs/STATUS.md).
+
+**Connect mode (required):** set `RITHMIC_CONNECT_MODE` / `SessionConfig.connect_mode` (`ConnectMode.DIRECT` \| `ConnectMode.GATEWAY`) — this process + flock + plants, or dial `rithmic-gateway` over `unix://…` for a shared login. No silent default — see [`docs/references/ops-runbook.md`](docs/references/ops-runbook.md). Remote TLS is not shipped — [`docs/references/gateway-remote.md`](docs/references/gateway-remote.md).
 
 Paper-trade a simple NQ strategy with **live Rithmic data** and Nautilus **Sandbox** execution (no Rithmic orders):
 
@@ -33,16 +35,17 @@ python scripts/verify_order_dry_run.py --seconds 5
 ## Quick start
 
 ```bash
-# Rust extension + editable install
-maturin develop
+# Python deps (includes protobuf) + Rust extension
+uv sync --extra dev
+uv run maturin develop
 
 # Unit tests (no live credentials)
-cargo test -p rithmic-nt-connect
-pytest -q
+cargo test -p rithmic-plants -p rithmic-gateway -p rithmic-nt-connect
+uv run pytest -q
 
 # Live LucidTrading smoke (close MotiveWave first)
 cp .env.example .env   # fill credentials
-python scripts/smoke_lucid_nq.py
+uv run python scripts/smoke_lucid_nq.py
 ```
 
 Register on a `TradingNode`:
@@ -58,7 +61,7 @@ from rithmic_nt_connect import (
     ADAPTER_NAME,
 )
 
-session = SessionConfig.from_env()
+session = SessionConfig.from_env()  # requires RITHMIC_CONNECT_MODE=direct|gateway
 # node = TradingNode(config=...)
 # node.add_data_client_factory(ADAPTER_NAME, RithmicLiveDataClientFactory)
 # node.add_exec_client_factory(f"{ADAPTER_NAME}-EXEC", RithmicLiveExecClientFactory)

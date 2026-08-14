@@ -21,6 +21,7 @@ from rithmic_nt_connect._orders import nautilus_tif_to_rithmic
 from rithmic_nt_connect._orders import notification_action
 from rithmic_nt_connect._orders import order_notification_to_fields
 from rithmic_nt_connect._orders import trade_id_from_fill_fields
+from rithmic_nt_connect.config import ConnectMode
 from rithmic_nt_connect.config import RithmicExecClientConfig
 from rithmic_nt_connect.config import SessionConfig
 
@@ -193,7 +194,7 @@ def test_order_plant_policy_matrix():
 
 def test_exec_config_enable_trading_default_false():
     cfg = RithmicExecClientConfig(
-        session=SessionConfig(user="u", password="p"),
+        session=SessionConfig(user="u", password="p", connect_mode=ConnectMode.DIRECT),
     )
     assert cfg.enable_trading is False
 
@@ -204,6 +205,7 @@ def test_exec_config_from_env_enable_trading():
             "RITHMIC_USER": "u",
             "RITHMIC_PASSWORD": "p",
             "RITHMIC_ENABLE_TRADING": "true",
+            "RITHMIC_CONNECT_MODE": "direct",
         }
     )
     assert cfg.enable_trading is True

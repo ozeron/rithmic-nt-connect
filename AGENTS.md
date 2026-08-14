@@ -19,6 +19,7 @@ Related:
 | [`docs/STATUS.md`](docs/STATUS.md) | Planned vs done; update marks when you close a gap |
 | [`docs/references/nautilus-adapter-tiers.md`](docs/references/nautilus-adapter-tiers.md) | 1.231.x `TradingNode` seam; naming |
 | [`docs/references/ops-runbook.md`](docs/references/ops-runbook.md) | How to run smokes |
+| [`docs/references/gateway-remote.md`](docs/references/gateway-remote.md) | Gateway unix / tunnel / TLS roadmap |
 
 Do not invent a second status table. Do not copy upstream DataTester / ExecTester case lists into the repo.
 
@@ -32,6 +33,7 @@ After a change that emits Nautilus data or execution events, check the rows that
 - [ ] Credentials resolved at construction, not in request methods
 - [ ] Live / Demo / Test endpoints cannot mix accidentally
 - [ ] Distinct venue instruments never share an `InstrumentId`
+- [ ] `connect_mode` / `RITHMIC_CONNECT_MODE` is explicit (`ConnectMode.DIRECT` \| `GATEWAY`; no silent default)
 
 ### Data
 
@@ -70,18 +72,25 @@ After a change that emits Nautilus data or execution events, check the rows that
 - Do **not** run `scripts/verify_order_dry_run.py --live-place` unless the user asked and `app_name` authorization is confirmed. `DEFAULT_APP_NAME` is not an authorization.
 - Do not commit secrets, certs, or gated `.proto` sources.
 - `cancel_all_orders` is plant-wide; do not use it to clean up a smoke order.
+- Gateway `cancel_all` is an independent parent panic button (`RITHMIC_GATEWAY_CANCEL_ALL=1`): it does **not** require `RITHMIC_ENABLE_TRADING`. Still plant-wide — never use it to clean up a single smoke order.
 
 ## Verify
 
+Gateway client / wire tests need the plants/gateway crates, a system `protoc`
+(`protobuf-compiler` on Debian/Ubuntu; `brew install protobuf` on macOS), and
+the protobuf Python package (core dep):
+
 ```bash
-cargo test -p rithmic-nt-connect
-pytest -q
+uv sync --extra dev
+cargo test -p rithmic-plants -p rithmic-gateway -p rithmic-nt-connect
+uv run pytest -q
 ```
 
 Live (creds in `.env`, MotiveWave closed):
 
 ```bash
 python scripts/smoke_lucid_nq.py
+python scripts/smoke_gateway_shared_ticks.py --seconds 25
 python examples/live_nq_intraday_sandbox.py --seconds 90
 python scripts/verify_order_dry_run.py --seconds 5
 ```

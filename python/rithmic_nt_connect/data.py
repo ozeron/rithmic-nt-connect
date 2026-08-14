@@ -596,9 +596,10 @@ class RithmicDataClient(LiveMarketDataClient):
         self._book_subscriptions.add((symbol, exchange))
 
     async def _unsubscribe_order_book_deltas(self, command: UnsubscribeOrderBook) -> None:
-        # No dedicated book-unsubscribe on the session; ticker unsubscribe would
-        # also drop LastTrade+BBO. Drop intent so resync does not replay book.
         symbol, exchange = self._route(command.instrument_id)
+        await asyncio.to_thread(
+            self._session.unsubscribe_order_book_summary, symbol, exchange
+        )
         self._book_subscriptions.discard((symbol, exchange))
 
     async def _subscribe_bars(self, command: SubscribeBars) -> None:
