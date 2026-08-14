@@ -135,6 +135,9 @@ class GatewayWireSession:
     def subscribe_order_updates(self) -> None:
         _call(self._client.subscribe_order_updates)
 
+    def subscribe_bracket_updates(self) -> None:
+        _call(self._client.subscribe_bracket_updates)
+
     def disconnect_order_plant(self) -> None:
         _call(self._client.disconnect_order_plant)
 
@@ -166,6 +169,45 @@ class GatewayWireSession:
             trail_by_ticks=trail_by_ticks,
             trail_by_price_id=trail_by_price_id,
         )
+
+    def place_bracket_order(
+        self,
+        symbol: str,
+        exchange: str,
+        side: str,
+        price_type: str,
+        quantity: int,
+        localid: str,
+        price: float | None = None,
+        trigger_price: float | None = None,
+        duration: str = "DAY",
+        stop_ticks: int | None = None,
+        target_ticks: int | None = None,
+    ) -> None:
+        _call(
+            self._client.place_bracket_order,
+            symbol,
+            exchange,
+            side,
+            price_type,
+            quantity,
+            localid=localid,
+            price=price,
+            trigger_price=trigger_price,
+            duration=duration,
+            stop_ticks=stop_ticks,
+            target_ticks=target_ticks,
+        )
+
+    def adjust_bracket_stop(
+        self, basket_id: str, ticks: int, level: int | None = None
+    ) -> None:
+        _call(self._client.adjust_bracket_stop, basket_id, ticks, level)
+
+    def adjust_bracket_target(
+        self, basket_id: str, ticks: int, level: int | None = None
+    ) -> None:
+        _call(self._client.adjust_bracket_target, basket_id, ticks, level)
 
     def cancel_order(self, basket_id: str) -> None:
         _call(self._client.cancel_order, basket_id)

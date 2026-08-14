@@ -39,8 +39,35 @@ class SpawnError(RuntimeError):
     """Failed to locate or start the gateway binary."""
 
 
+def _bin_search_starts() -> list[Path]:
+    """Roots to walk for cargo ``target/`` binaries (cwd first, then package)."""
+    return [Path.cwd(), Path(__file__).resolve().parent]
+
+
+def _cargo_target_candidates(start: Path) -> list[Path]:
+    """Look for ``target/{release,debug}/rithmic-gateway`` under ancestors of ``start``."""
+    out: list[Path] = []
+    cargo_target = os.environ.get("CARGO_TARGET_DIR")
+    if cargo_target:
+        base = Path(cargo_target).expanduser()
+        out.append(base / "release" / "rithmic-gateway")
+        out.append(base / "debug" / "rithmic-gateway")
+    cur = start.resolve()
+    for root in [cur, *cur.parents]:
+        out.append(root / "target" / "release" / "rithmic-gateway")
+        out.append(root / "target" / "debug" / "rithmic-gateway")
+        if (root / "Cargo.toml").is_file() and (root / "crates").is_dir():
+            break
+    return out
+
+
 def resolve_gateway_bin(explicit: str | None = None) -> str:
-    """Resolve ``rithmic-gateway`` from explicit path, env, or ``PATH``."""
+    """Resolve ``rithmic-gateway`` from explicit path, env, ``PATH``, or cargo targets.
+
+    Does not run ``cargo build`` — set ``RITHMIC_GATEWAY_BIN`` or build the binary first.
+    Search order: explicit → ``RITHMIC_GATEWAY_BIN`` → ``PATH`` → cwd then package
+    ``target/{release,debug}`` (and ``CARGO_TARGET_DIR`` when set).
+    """
     if explicit:
         path = Path(explicit).expanduser()
         if not path.is_file():
@@ -53,11 +80,22 @@ def resolve_gateway_bin(explicit: str | None = None) -> str:
             raise SpawnError(f"RITHMIC_GATEWAY_BIN not found: {path}")
         return str(path.resolve())
     found = shutil.which("rithmic-gateway")
-    if not found:
-        raise SpawnError(
-            "rithmic-gateway not on PATH; set RITHMIC_GATEWAY_BIN or install the binary"
-        )
-    return found
+    if found:
+        return found
+    seen: set[str] = set()
+    for start in _bin_search_starts():
+        for candidate in _cargo_target_candidates(start):
+            key = str(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            if candidate.is_file():
+                return str(candidate.resolve())
+    raise SpawnError(
+        "rithmic-gateway not on PATH or under target/{release,debug}; "
+        "set RITHMIC_GATEWAY_BIN or build with "
+        "`cargo build -p rithmic-gateway --release`"
+    )
 
 
 def curated_env(source: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -96,19 +134,38 @@ def spawn_gateway(
 
     bin_path = resolve_gateway_bin(config.gateway_bin)
     argv = spawn_argv(bin_path)
-    # Defense in depth: argv must never contain password-looking tokens.
-    joined = " ".join(argv)
-    if "PASSWORD" in joined.upper() or (environ or os.environ).get("RITHMIC_PASSWORD", "") in joined:
-        raise SpawnError("refusing to spawn: password must not appear on argv")
+    # Defense in depth: argv must never contain the password value.
+    candidate_secrets = [
+        (environ or os.environ).get("RITHMIC_PASSWORD", ""),
+        (config.spawn_environ or {}).get("RITHMIC_PASSWORD", ""),
+    ]
+    for secret in candidate_secrets:
+        if secret and any(secret in arg for arg in argv):
+            raise SpawnError("refusing to spawn: password must not appear on argv")
 
     env = curated_env(environ)
-    env.setdefault("RITHMIC_USER", config.user)
-    env.setdefault("RITHMIC_SYSTEM_NAME", config.system_name)
-    env.setdefault("RITHMIC_URL", config.url)
-    env.setdefault("RITHMIC_ENV", config.env)
+    # Overlay spawn_environ (credentials) before fingerprint overwrite so password
+    # is present even when the process env is empty or stale.
+    if config.spawn_environ:
+        for key, val in config.spawn_environ.items():
+            if val is not None and str(val) != "":
+                env[str(key)] = str(val)
+    # Overwrite fingerprint keys from GatewayConfig (aliases must not win).
+    env["RITHMIC_USER"] = config.user
+    env["RITHMIC_SYSTEM_NAME"] = config.system_name
+    env["RITHMIC_URL"] = config.url
+    env["RITHMIC_ENV"] = config.env
+    # Password: prefer spawn_environ, else already curated from environ.
+    if config.spawn_environ and config.spawn_environ.get("RITHMIC_PASSWORD"):
+        env["RITHMIC_PASSWORD"] = config.spawn_environ["RITHMIC_PASSWORD"]
     env["RITHMIC_GATEWAY_LISTEN"] = listen
     # Auto-spawned parents exit after last client (grace); manual bin defaults to never.
     env.setdefault("RITHMIC_GATEWAY_IDLE_EXIT_SEC", "5")
+    if "RITHMIC_PASSWORD" not in env or not env["RITHMIC_PASSWORD"]:
+        raise SpawnError(
+            "missing RITHMIC_PASSWORD for auto-spawn "
+            "(set spawn_environ or process env; never put password on argv)"
+        )
 
     proc = subprocess.Popen(
         argv,

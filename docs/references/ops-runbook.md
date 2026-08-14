@@ -1,6 +1,6 @@
 # Ops runbook
 
-1. Close MotiveWave / R|Trader (one Rithmic session per login).
+1. Close MotiveWave / R|Trader whenever **any** process will hold the Rithmic login (direct plants **or** `rithmic-gateway` parent — cold-start auto-spawn counts). Shared gateway only multiplexes **gateway clients**, not MotiveWave.
 2. Copy `.env.example` → `.env` and set `RITHMIC_USER` / `RITHMIC_PASSWORD`.
 3. Install system `protoc` (`protobuf-compiler` / `brew install protobuf`) if missing.
 4. Sync + build extension: `uv sync --extra dev && uv run maturin develop`
@@ -8,7 +8,7 @@
 6. Live smoke: `uv run python scripts/smoke_lucid_nq.py` (exits `2` if credentials missing — CI-safe).
 7. Shared gateway (two consumers, one parent): `uv run python scripts/smoke_gateway_shared_ticks.py --seconds 25` (NQ + MNQ; exits `2` if no creds).
 
-## Connect mode (required)
+## Connect mode (required for Nautilus adapter)
 
 Set **`RITHMIC_CONNECT_MODE`** (or `SessionConfig.connect_mode` / `ConnectMode`) to one of:
 
@@ -17,18 +17,23 @@ Set **`RITHMIC_CONNECT_MODE`** (or `SessionConfig.connect_mode` / `ConnectMode`)
 | `direct` (`ConnectMode.DIRECT`) | This process (flock + PyO3 plants) | Single Nautilus / script process |
 | `gateway` (`ConnectMode.GATEWAY`) | Only `rithmic-gateway`; clients dial `unix://…` | Multiple processes share one login |
 
-Unset or any other value → `ConfigError`. There is no silent default.
+Unset or any other value → `ConfigError` in the **adapter**. There is no silent default.
+**market-data-lake** always uses the gateway client (ignores this key).
 
 ```bash
-# Parent (owns flock + plants)
+# Preferred for live + lake: long-lived parent (owns flock + plants)
+# Leave RITHMIC_GATEWAY_IDLE_EXIT_SEC unset/-1 so the parent stays up.
+cargo build -p rithmic-gateway --release
+export RITHMIC_GATEWAY_BIN=$PWD/target/release/rithmic-gateway
 cargo run -p rithmic-gateway --bin rithmic-gateway
-# or: set RITHMIC_GATEWAY_BIN and let clients auto-spawn
+# or: set RITHMIC_GATEWAY_AUTO_SPAWN=1 and let the first client auto-spawn
+#     (auto-spawn injects IDLE_EXIT_SEC=5 — fine for lake-only; prefer manual parent with live)
 
-# Child / lake (no maturin): pure Python — protobuf is a core dep
-#   uv sync
-#   # or: pip install -e .
-export RITHMIC_CONNECT_MODE=gateway
-export RITHMIC_GATEWAY_LISTEN=unix://$XDG_RUNTIME_DIR/rithmic-gateway-<hash>.sock
+# Child / lake (no maturin / no Nautilus):
+#   cd python && uv pip install -e .
+#   # or: PYTHONPATH=<repo>/python  +  pip install 'protobuf>=5'
+# Env aliases (WSS URL): RITHMIC_GATEWAY or RITHMIC_URL
+# Listen socket:        RITHMIC_GATEWAY_LISTEN=unix://…  (never use as WSS URL)
 # Optional: RITHMIC_GATEWAY_AUTO_SPAWN=1, RITHMIC_GATEWAY_BIN=…
 # Trading / cancel_all are parent-gated (independent toggles):
 #   RITHMIC_ENABLE_TRADING=1          # place / modify / cancel / order updates
@@ -41,6 +46,9 @@ export RITHMIC_GATEWAY_LISTEN=unix://$XDG_RUNTIME_DIR/rithmic-gateway-<hash>.soc
 #   Auto-spawn injects IDLE_EXIT_SEC=5 unless already set
 # Clients refuse a dialable unix path unless the credential flock is held
 # (impostor protection); auto-spawn also requires flock+listen before returning.
+#
+# Wide history: GatewayClient.load_time_bars_range chunks calendar windows
+# (~4h for 1m bars) so each unix RPC stays within timeout/frame limits.
 ```
 
 If a second direct/parent process hits the same `user|system|url|env` flock, it fails locally before a second Rithmic login. Default sock/lock paths live under `XDG_RUNTIME_DIR` or a private `$TMPDIR/rgw-$UID/` directory (short names so macOS `sockaddr_un` fits); oversized paths clamp to `/tmp/rgw-$UID/<hash8>.sock` (private dir, not a bare sticky `/tmp` file).

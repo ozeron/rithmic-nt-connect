@@ -29,13 +29,13 @@ Acceptance: **NQ / CME via LucidTrading**. One Rithmic login (close MotiveWave /
 | Mark / index / funding / greeks | Not advertised | **N/A** |
 | Catalog / Parquet | Other repo | **N/A** |
 | Order types | Market, limit, stop / stop-limit, trailing-stop (tick offset) | **Partial** — mapped and gated; live place blocked on authorized `app_name` |
-| Brackets / OCO | Not advertised | **N/A** |
+| Brackets / OCO | Plant bracket API | **Partial** — wire on direct + gateway; Lucid accept/survival **not proven**. Live spike: `scripts/spike_bracket_order.py` (`RITHMIC_BRACKETS=1` + `RITHMIC_ENABLE_TRADING=1`; spike-only flag, not enforced in plants/gateway). |
 | Account / positions | Best-effort PnL | **Partial** — auto-discovers FCM/IB/account when unset (multi-account needs `RITHMIC_ACCOUNT_ID` selector); soft-fail PnL otherwise |
 | Submit / cancel / modify + fills | Gated order plant | **Partial** — submit pre-send deny; post-send unknown; untracked → reports; fill dedup. Live place still gated on `app_name`. |
 | Order status reports | Cache-backed only | **Done** (honest: not a venue snapshot) |
 | Fill reports | Query unavailable | **Done** (`VenueQueryUnavailable`) |
-| Reconnect + MD resubscribe | Planned | **Partial** — ticker poll resyncs last-trade/BBO + book + EXTERNAL bar intent. Gateway typed restore covers ticker/book/bars/PnL/order after plant drop. Not Lucid-proven. |
-| Session gateway (shared login) | `connect_mode` required (`direct` / `gateway`) | **Partial** — plants/session parity on wire (incl. book unsub, `probe_time_bars`, ensure_order). Auto-spawn idle-exit after last client (`RITHMIC_GATEWAY_IDLE_EXIT_SEC`, default 5s via spawn; unset = never for standalone). Shared-consumer Lucid smoke green. Native TLS remote **N/A**. |
+| Reconnect + MD resubscribe | Planned | **Partial** — ticker poll resyncs last-trade/BBO + book + EXTERNAL bar intent. Gateway typed restore covers ticker/book/bars/PnL/order/brackets after plant drop. Not Lucid-proven. |
+| Session gateway (shared login) | `connect_mode` required (`direct` / `gateway`) | **Partial** — plants/session parity on wire (incl. book unsub, `probe_time_bars`, ensure_order). Auto-spawn idle-exit after last client (`RITHMIC_GATEWAY_IDLE_EXIT_SEC`, default 5s via spawn; unset = never for standalone). Shared-consumer Lucid smoke green. Native TLS remote **N/A**. **Lake:** market-data-lake hardcodes `GatewayClient` + `load_time_bars_range` (client-side chunks); install `python/` package (no Nautilus). |
 | Python v2 / LiveNode | Not this support line | **N/A** |
 
 **Protocol boundaries:** ticker, history, PnL, order plants. Public MD vs private exec.
@@ -89,7 +89,7 @@ Acceptance: **NQ / CME via LucidTrading**. One Rithmic login (close MotiveWave /
 
 ### Phase 5: Optional
 
-- N/A until advertised: brackets / OCO, depth-by-order, 1-SECOND-EXTERNAL, weekly/tick bars, catalog
+- N/A until advertised: depth-by-order, 1-SECOND-EXTERNAL, weekly/tick bars, catalog
 - [~] Live EXTERNAL time bars (1m/15m/1h/1d): subscribe + poll wired; Lucid proof still open
 - `cancel_all_orders` exists on the wire; not a safe default
 

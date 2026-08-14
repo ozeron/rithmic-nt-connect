@@ -24,7 +24,7 @@ use crate::reconnect::{ReconnectController, TimeBarIntent};
 use crate::subscriptions::{ClientId, FanoutHub, ParentGates, SharedFanout, SubKey};
 
 mod dispatch;
-pub use dispatch::{gate_rpc_for_test, rpc_sequence_for_test};
+pub use dispatch::{gate_rpc_for_test, rpc_sequence_with_gates};
 
 /// Shared gateway runtime state, held for the process lifetime.
 pub struct GatewayState {
@@ -33,12 +33,15 @@ pub struct GatewayState {
     pub fingerprint: Fingerprint,
     /// Cleared while plants reconnect so new Handshakes get `not_ready`.
     pub ready: AtomicBool,
+    /// Set when a plant must be rebuilt outside the poll path (e.g. failed
+    /// order-plant reseat). Event pump treats this like a connection issue.
+    pub force_reconnect: AtomicBool,
     /// Parent secret for non-empty Handshake `auth_token` (from
     /// `RITHMIC_GATEWAY_AUTH_TOKEN`). Empty means only same-UID empty-token
     /// peers are accepted.
     pub expected_auth_token: String,
-    /// `None` lets the accept loop and gate tests run without a live
-    /// Rithmic connection; RPCs that need a plant just Ack as a no-op.
+    /// `None` only in gate / RPC-sequence unit tests without plants.
+    /// Plant RPCs return `Error(no_session)` — never Ack / empty success.
     pub session: Option<Arc<TokioMutex<RithmicSession>>>,
     pub reconnect: Arc<ReconnectController>,
     /// Serialize first venue-subscribe per topic so a failing peer cannot
@@ -241,6 +244,7 @@ pub(super) struct ClientCtx {
     time_bars: HashSet<TimeBarIntent>,
     pnl: bool,
     order: bool,
+    brackets: bool,
     forwarders: HashMap<SubKey, JoinHandle<()>>,
     out_tx: mpsc::Sender<OutMsg>,
 }
@@ -255,6 +259,7 @@ impl ClientCtx {
             time_bars: HashSet::new(),
             pnl: false,
             order: false,
+            brackets: false,
             forwarders: HashMap::new(),
             out_tx,
         }
@@ -346,7 +351,30 @@ impl ClientCtx {
                 }
             }
         }
-        if self.order {
+        if self.brackets {
+            let key = crate::convert::order_key();
+            let lock = dispatch::topic_lock(state, &key).await;
+            let _guard = lock.lock().await;
+            let last_brackets = dispatch::clear_client_brackets(state, self).await;
+            let last_order = if self.order {
+                self.order = false;
+                state.reconnect.forget_order().await
+            } else {
+                false
+            };
+            if last_order {
+                if let Some(session) = &state.session {
+                    let mut guard = session.lock().await;
+                    let _ = guard.disconnect_order_plant().await;
+                }
+            } else if last_brackets && state.reconnect.restore_plan().await.order {
+                if let Err(e) = dispatch::reseat_order_plant_without_brackets(state).await {
+                    eprintln!("rithmic-gateway: teardown reseat failed: {e}");
+                    state.ready.store(false, Ordering::SeqCst);
+                    state.force_reconnect.store(true, Ordering::SeqCst);
+                }
+            }
+        } else if self.order {
             self.order = false;
             if state.reconnect.forget_order().await {
                 if let Some(session) = &state.session {

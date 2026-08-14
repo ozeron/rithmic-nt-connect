@@ -19,7 +19,8 @@ use rithmic_plants::error::Error;
 use rithmic_plants::history::parse_time_bar_type;
 use rithmic_plants::plants::PlantSet;
 use rithmic_plants::session::{
-    RithmicSession, cancel_all_orders_on, cancel_order_on, modify_order_on, place_order_on,
+    RithmicSession, adjust_bracket_stop_on, adjust_bracket_target_on, cancel_all_orders_on,
+    cancel_order_on, modify_order_on, place_bracket_order_on, place_order_on,
 };
 
 pyo3::create_exception!(rithmic_nt_connect, ChannelLaggedError, PyRuntimeError);
@@ -841,6 +842,92 @@ impl PySession {
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         runtime()
             .block_on(inner.subscribe_order_updates())
+            .map_err(to_py_err)
+    }
+
+    fn subscribe_bracket_updates(&self) -> PyResult<()> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        runtime()
+            .block_on(inner.subscribe_bracket_updates())
+            .map_err(to_py_err)
+    }
+
+    #[pyo3(signature = (
+        symbol,
+        exchange,
+        side,
+        price_type,
+        quantity,
+        localid,
+        price=None,
+        trigger_price=None,
+        duration="DAY",
+        stop_ticks=None,
+        target_ticks=None,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn place_bracket_order(
+        &self,
+        symbol: &str,
+        exchange: &str,
+        side: &str,
+        price_type: &str,
+        quantity: i32,
+        localid: &str,
+        price: Option<f64>,
+        trigger_price: Option<f64>,
+        duration: &str,
+        stop_ticks: Option<i32>,
+        target_ticks: Option<i32>,
+    ) -> PyResult<()> {
+        let _guard = self.begin_order_op()?;
+        let handle = self.acquire_order_handle()?;
+        runtime()
+            .block_on(place_bracket_order_on(
+                &handle,
+                symbol,
+                exchange,
+                side,
+                price_type,
+                quantity,
+                localid,
+                price,
+                trigger_price,
+                duration,
+                stop_ticks,
+                target_ticks,
+            ))
+            .map_err(to_py_err)
+    }
+
+    #[pyo3(signature = (basket_id, ticks, level=None))]
+    fn adjust_bracket_stop(
+        &self,
+        basket_id: &str,
+        ticks: i32,
+        level: Option<i32>,
+    ) -> PyResult<()> {
+        let _guard = self.begin_order_op()?;
+        let handle = self.acquire_order_handle()?;
+        runtime()
+            .block_on(adjust_bracket_stop_on(&handle, basket_id, ticks, level))
+            .map_err(to_py_err)
+    }
+
+    #[pyo3(signature = (basket_id, ticks, level=None))]
+    fn adjust_bracket_target(
+        &self,
+        basket_id: &str,
+        ticks: i32,
+        level: Option<i32>,
+    ) -> PyResult<()> {
+        let _guard = self.begin_order_op()?;
+        let handle = self.acquire_order_handle()?;
+        runtime()
+            .block_on(adjust_bracket_target_on(&handle, basket_id, ticks, level))
             .map_err(to_py_err)
     }
 

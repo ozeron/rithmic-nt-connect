@@ -1,7 +1,7 @@
 //! RPC body dispatch (Subscribe / Place / …) for the gateway accept loop.
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, Mutex as TokioMutex};
@@ -42,6 +42,10 @@ pub(super) fn error_frame(request_id: u64, code: &str, message: &str) -> Frame {
             message: message.into(),
         })),
     }
+}
+
+fn no_session_frame(request_id: u64) -> Frame {
+    error_frame(request_id, "no_session", "gateway has no plant session")
 }
 
 fn err_to_frame(request_id: u64, code: &str, err: impl std::fmt::Display) -> Frame {
@@ -91,6 +95,177 @@ async fn rollback_shared_topic(
     }
 }
 
+/// Order-plant notification streams (order updates / brackets): fanout + intent + restore.
+/// Anything this RPC notes / attaches must roll back on failure so Error never
+/// leaves a half-applied order+brackets intent.
+async fn rollback_order_plant_stream_introductions(
+    state: &GatewayState,
+    client: &mut ClientCtx,
+    key: &SubKey,
+    had_forwarder: bool,
+    introduced_order: bool,
+    introduced_brackets: bool,
+) {
+    if introduced_brackets {
+        client.brackets = false;
+        let _ = state.reconnect.forget_brackets().await;
+    }
+    if !introduced_order {
+        return;
+    }
+    client.order = false;
+    let last = state.reconnect.forget_order().await;
+    if last {
+        if let Some(session) = &state.session {
+            let mut guard = session.lock().await;
+            if let Err(e) = guard.disconnect_order_plant().await {
+                // Venue may still be subscribed; keep order intent for restore.
+                drop(guard);
+                eprintln!("rithmic-gateway: rollback disconnect_order_plant failed: {e}");
+                state.reconnect.note_order().await;
+                client.order = true;
+                return;
+            }
+        }
+    }
+    rollback_shared_topic(state, client, key, had_forwarder).await;
+}
+
+async fn fail_order_plant_stream(
+    state: &GatewayState,
+    client: &mut ClientCtx,
+    key: &SubKey,
+    had_forwarder: bool,
+    introduced_order: bool,
+    introduced_brackets: bool,
+    frame: Frame,
+) -> Frame {
+    rollback_order_plant_stream_introductions(
+        state,
+        client,
+        key,
+        had_forwarder,
+        introduced_order,
+        introduced_brackets,
+    )
+    .await;
+    frame
+}
+
+/// No venue unsubscribe for brackets. When the last brackets peer leaves and
+/// order peers remain, disconnect + `subscribe_order_updates` to drop brackets.
+pub(super) async fn reseat_order_plant_without_brackets(
+    state: &GatewayState,
+) -> Result<(), rithmic_plants::Error> {
+    let Some(session) = &state.session else {
+        return Ok(());
+    };
+    let mut guard = session.lock().await;
+    let _ = guard.disconnect_order_plant().await;
+    guard.subscribe_order_updates().await
+}
+
+/// Drop this client's brackets flag/intent. Returns whether this was the last
+/// brackets peer (caller may need [`reseat_order_plant_without_brackets`]).
+pub(super) async fn clear_client_brackets(state: &GatewayState, client: &mut ClientCtx) -> bool {
+    if !client.brackets {
+        return false;
+    }
+    client.brackets = false;
+    state.reconnect.forget_brackets().await
+}
+
+async fn subscribe_order_plant_stream(
+    state: &GatewayState,
+    client: &mut ClientCtx,
+    request_id: u64,
+    denied_msg: &str,
+    want_brackets: bool,
+) -> Frame {
+    if !state.gates.trading_enabled {
+        return error_frame(request_id, "trading_disabled", denied_msg);
+    }
+
+    let need_order = !client.order;
+    let need_brackets = want_brackets && !client.brackets;
+    if !need_order && !need_brackets {
+        return ack_frame(request_id);
+    }
+
+    let key = order_key();
+    let lock = topic_lock(state, &key).await;
+    let _guard = lock.lock().await;
+    let had_forwarder = attach_shared_topic(state, client, &key).await;
+
+    let first_order = if need_order {
+        state.reconnect.note_order().await
+    } else {
+        false
+    };
+    let first_brackets = if need_brackets {
+        state.reconnect.note_brackets().await
+    } else {
+        false
+    };
+
+    if need_order {
+        client.order = true;
+    }
+    if need_brackets {
+        client.brackets = true;
+    }
+
+    let Some(session) = &state.session else {
+        return fail_order_plant_stream(
+            state,
+            client,
+            &key,
+            had_forwarder,
+            need_order,
+            need_brackets,
+            no_session_frame(request_id),
+        )
+        .await;
+    };
+    if !first_order && !first_brackets {
+        return ack_frame(request_id);
+    }
+
+    let mut session_guard = session.lock().await;
+    if first_order {
+        if let Err(e) = session_guard.subscribe_order_updates().await {
+            drop(session_guard);
+            return fail_order_plant_stream(
+                state,
+                client,
+                &key,
+                had_forwarder,
+                need_order,
+                need_brackets,
+                err_to_frame(request_id, "subscribe_order_updates_failed", e),
+            )
+            .await;
+        }
+    }
+    if first_brackets {
+        if let Err(e) = session_guard.subscribe_bracket_updates().await {
+            drop(session_guard);
+            return fail_order_plant_stream(
+                state,
+                client,
+                &key,
+                had_forwarder,
+                need_order,
+                need_brackets,
+                err_to_frame(request_id, "subscribe_bracket_updates_failed", e),
+            )
+            .await;
+        }
+    }
+
+    ack_frame(request_id)
+}
+
 async fn release_md_if_unused(state: &GatewayState, client: &mut ClientCtx, key: &SubKey) {
     if !client.wants_md(key) {
         client.drop_forwarder(key);
@@ -130,15 +305,19 @@ pub(super) async fn dispatch(state: &GatewayState, client: &mut ClientCtx, reque
             let is_first = state.reconnect.note_ticker(key.clone()).await;
             client.ticker.insert(key.clone());
             if is_first {
-                if let Some(session) = &state.session {
-                    let session_guard = session.lock().await;
-                    if let Err(e) = session_guard.subscribe(&req.symbol, &req.exchange).await {
-                        drop(session_guard);
-                        client.ticker.remove(&key);
-                        state.reconnect.forget_ticker(&key).await;
-                        rollback_shared_topic(state, client, &key, had_forwarder).await;
-                        return err_to_frame(request_id, "subscribe_failed", e);
-                    }
+                let Some(session) = &state.session else {
+                    client.ticker.remove(&key);
+                    state.reconnect.forget_ticker(&key).await;
+                    rollback_shared_topic(state, client, &key, had_forwarder).await;
+                    return no_session_frame(request_id);
+                };
+                let session_guard = session.lock().await;
+                if let Err(e) = session_guard.subscribe(&req.symbol, &req.exchange).await {
+                    drop(session_guard);
+                    client.ticker.remove(&key);
+                    state.reconnect.forget_ticker(&key).await;
+                    rollback_shared_topic(state, client, &key, had_forwarder).await;
+                    return err_to_frame(request_id, "subscribe_failed", e);
                 }
             }
             ack_frame(request_id)
@@ -189,18 +368,22 @@ pub(super) async fn dispatch(state: &GatewayState, client: &mut ClientCtx, reque
             let is_first = state.reconnect.note_book(key.clone()).await;
             client.book.insert(key.clone());
             if is_first {
-                if let Some(session) = &state.session {
-                    let session_guard = session.lock().await;
-                    if let Err(e) = session_guard
-                        .subscribe_order_book_summary(&req.symbol, &req.exchange)
-                        .await
-                    {
-                        drop(session_guard);
-                        client.book.remove(&key);
-                        state.reconnect.forget_book(&key).await;
-                        rollback_shared_topic(state, client, &key, had_forwarder).await;
-                        return err_to_frame(request_id, "subscribe_book_failed", e);
-                    }
+                let Some(session) = &state.session else {
+                    client.book.remove(&key);
+                    state.reconnect.forget_book(&key).await;
+                    rollback_shared_topic(state, client, &key, had_forwarder).await;
+                    return no_session_frame(request_id);
+                };
+                let session_guard = session.lock().await;
+                if let Err(e) = session_guard
+                    .subscribe_order_book_summary(&req.symbol, &req.exchange)
+                    .await
+                {
+                    drop(session_guard);
+                    client.book.remove(&key);
+                    state.reconnect.forget_book(&key).await;
+                    rollback_shared_topic(state, client, &key, had_forwarder).await;
+                    return err_to_frame(request_id, "subscribe_book_failed", e);
                 }
             }
             ack_frame(request_id)
@@ -239,11 +422,12 @@ pub(super) async fn dispatch(state: &GatewayState, client: &mut ClientCtx, reque
         }
         Body::RequestPlants(req) => match PlantSet::parse(&req.plants) {
             Ok(extra) => {
-                if let Some(session) = &state.session {
-                    let mut guard = session.lock().await;
-                    if let Err(e) = guard.request_plants(extra).await {
-                        return err_to_frame(request_id, "request_plants_failed", e);
-                    }
+                let Some(session) = &state.session else {
+                    return no_session_frame(request_id);
+                };
+                let mut guard = session.lock().await;
+                if let Err(e) = guard.request_plants(extra).await {
+                    return err_to_frame(request_id, "request_plants_failed", e);
                 }
                 ack_frame(request_id)
             }
@@ -251,7 +435,7 @@ pub(super) async fn dispatch(state: &GatewayState, client: &mut ClientCtx, reque
         },
         Body::GetFrontMonth(req) => {
             let Some(session) = &state.session else {
-                return ack_frame(request_id);
+                return no_session_frame(request_id);
             };
             let guard = session.lock().await;
             match guard.get_front_month(&req.symbol, &req.exchange).await {
@@ -264,7 +448,7 @@ pub(super) async fn dispatch(state: &GatewayState, client: &mut ClientCtx, reque
         }
         Body::GetReferenceData(req) => {
             let Some(session) = &state.session else {
-                return ack_frame(request_id);
+                return no_session_frame(request_id);
             };
             let guard = session.lock().await;
             match guard.get_reference_data(&req.symbol, &req.exchange).await {
@@ -277,10 +461,7 @@ pub(super) async fn dispatch(state: &GatewayState, client: &mut ClientCtx, reque
         }
         Body::LoadTicks(req) => {
             let Some(session) = &state.session else {
-                return Frame {
-                    request_id,
-                    body: Some(Body::LoadTicksResponse(pb::LoadTicksResponse::default())),
-                };
+                return no_session_frame(request_id);
             };
             let guard = session.lock().await;
             match guard
@@ -298,10 +479,7 @@ pub(super) async fn dispatch(state: &GatewayState, client: &mut ClientCtx, reque
         }
         Body::LoadTimeBars(req) => {
             let Some(session) = &state.session else {
-                return Frame {
-                    request_id,
-                    body: Some(Body::LoadTimeBarsResponse(pb::LoadTimeBarsResponse::default())),
-                };
+                return no_session_frame(request_id);
             };
             let bar_type = match parse_time_bar_type(req.bar_type) {
                 Ok(bt) => bt,
@@ -330,10 +508,7 @@ pub(super) async fn dispatch(state: &GatewayState, client: &mut ClientCtx, reque
         }
         Body::ProbeTimeBars(req) => {
             let Some(session) = &state.session else {
-                return Frame {
-                    request_id,
-                    body: Some(Body::ProbeTimeBarsResponse(pb::ProbeTimeBarsResponse::default())),
-                };
+                return no_session_frame(request_id);
             };
             let bar_type = match parse_time_bar_type(req.bar_type) {
                 Ok(bt) => bt,
@@ -382,18 +557,22 @@ pub(super) async fn dispatch(state: &GatewayState, client: &mut ClientCtx, reque
             let is_first = state.reconnect.note_time_bar(intent.clone()).await;
             client.time_bars.insert(intent.clone());
             if is_first {
-                if let Some(session) = &state.session {
-                    let session_guard = session.lock().await;
-                    if let Err(e) = session_guard
-                        .subscribe_time_bars(&req.symbol, &req.exchange, req.bar_type, req.period)
-                        .await
-                    {
-                        drop(session_guard);
-                        client.time_bars.remove(&intent);
-                        state.reconnect.forget_time_bar(&intent).await;
-                        rollback_shared_topic(state, client, &key, had_forwarder).await;
-                        return err_to_frame(request_id, "subscribe_time_bars_failed", e);
-                    }
+                let Some(session) = &state.session else {
+                    client.time_bars.remove(&intent);
+                    state.reconnect.forget_time_bar(&intent).await;
+                    rollback_shared_topic(state, client, &key, had_forwarder).await;
+                    return no_session_frame(request_id);
+                };
+                let session_guard = session.lock().await;
+                if let Err(e) = session_guard
+                    .subscribe_time_bars(&req.symbol, &req.exchange, req.bar_type, req.period)
+                    .await
+                {
+                    drop(session_guard);
+                    client.time_bars.remove(&intent);
+                    state.reconnect.forget_time_bar(&intent).await;
+                    rollback_shared_topic(state, client, &key, had_forwarder).await;
+                    return err_to_frame(request_id, "subscribe_time_bars_failed", e);
                 }
             }
             ack_frame(request_id)
@@ -448,22 +627,26 @@ pub(super) async fn dispatch(state: &GatewayState, client: &mut ClientCtx, reque
             let is_first = state.reconnect.note_pnl().await;
             client.pnl = true;
             if is_first {
-                if let Some(session) = &state.session {
-                    let mut session_guard = session.lock().await;
-                    let venue_err = match session_guard.ensure_pnl_plant().await {
+                let Some(session) = &state.session else {
+                    client.pnl = false;
+                    state.reconnect.forget_pnl().await;
+                    rollback_shared_topic(state, client, &key, had_forwarder).await;
+                    return no_session_frame(request_id);
+                };
+                let mut session_guard = session.lock().await;
+                let venue_err = match session_guard.ensure_pnl_plant().await {
+                    Err(e) => Some(e),
+                    Ok(()) => match session_guard.subscribe_pnl().await {
                         Err(e) => Some(e),
-                        Ok(()) => match session_guard.subscribe_pnl().await {
-                            Err(e) => Some(e),
-                            Ok(()) => None,
-                        },
-                    };
-                    if let Some(e) = venue_err {
-                        drop(session_guard);
-                        client.pnl = false;
-                        state.reconnect.forget_pnl().await;
-                        rollback_shared_topic(state, client, &key, had_forwarder).await;
-                        return err_to_frame(request_id, "subscribe_pnl_failed", e);
-                    }
+                        Ok(()) => None,
+                    },
+                };
+                if let Some(e) = venue_err {
+                    drop(session_guard);
+                    client.pnl = false;
+                    state.reconnect.forget_pnl().await;
+                    rollback_shared_topic(state, client, &key, had_forwarder).await;
+                    return err_to_frame(request_id, "subscribe_pnl_failed", e);
                 }
             }
             ack_frame(request_id)
@@ -473,42 +656,104 @@ pub(super) async fn dispatch(state: &GatewayState, client: &mut ClientCtx, reque
             // same as EnsureOrder even though this RPC only asks for
             // notifications, so `RITHMIC_ENABLE_TRADING=0` cannot be
             // bypassed by subscribing instead of calling EnsureOrder.
-            if !state.gates.trading_enabled {
+            subscribe_order_plant_stream(
+                state,
+                client,
+                request_id,
+                "subscribe_order_updates denied: parent trading disabled",
+                false,
+            )
+            .await
+        }
+        Body::SubscribeBracketUpdates(_) => {
+            subscribe_order_plant_stream(
+                state,
+                client,
+                request_id,
+                "subscribe_bracket_updates denied: parent trading disabled",
+                true,
+            )
+            .await
+        }
+        Body::PlaceBracketOrder(req) => {
+            if !state.gates.allow_place() {
                 return error_frame(
                     request_id,
                     "trading_disabled",
-                    "subscribe_order_updates denied: parent trading disabled",
+                    "place_bracket_order denied: parent trading disabled",
                 );
             }
-            let key = order_key();
-            if client.order {
-                return ack_frame(request_id);
+            let Some(session) = &state.session else {
+                return no_session_frame(request_id);
+            };
+            let mut guard = session.lock().await;
+            match guard
+                .place_bracket_order(
+                    &req.symbol,
+                    &req.exchange,
+                    &req.side,
+                    &req.price_type,
+                    req.quantity,
+                    &req.localid,
+                    req.price,
+                    req.trigger_price,
+                    &req.duration,
+                    req.stop_ticks,
+                    req.target_ticks,
+                )
+                .await
+            {
+                Ok(()) => ack_frame(request_id),
+                Err(e) => plant_err_frame(request_id, "place_bracket_failed", e),
             }
-            let lock = topic_lock(state, &key).await;
-            let _guard = lock.lock().await;
-            let had_forwarder = attach_shared_topic(state, client, &key).await;
-            let is_first = state.reconnect.note_order().await;
-            client.order = true;
-            if is_first {
-                if let Some(session) = &state.session {
-                    let mut session_guard = session.lock().await;
-                    if let Err(e) = session_guard.subscribe_order_updates().await {
-                        drop(session_guard);
-                        client.order = false;
-                        state.reconnect.forget_order().await;
-                        rollback_shared_topic(state, client, &key, had_forwarder).await;
-                        return err_to_frame(request_id, "subscribe_order_updates_failed", e);
-                    }
-                }
+        }
+        Body::AdjustBracketStop(req) => {
+            if !state.gates.allow_place() {
+                return error_frame(
+                    request_id,
+                    "trading_disabled",
+                    "adjust_bracket_stop denied: parent trading disabled",
+                );
             }
-            ack_frame(request_id)
+            let Some(session) = &state.session else {
+                return no_session_frame(request_id);
+            };
+            let mut guard = session.lock().await;
+            match guard
+                .adjust_bracket_stop(&req.basket_id, req.ticks, req.level)
+                .await
+            {
+                Ok(()) => ack_frame(request_id),
+                Err(e) => plant_err_frame(request_id, "adjust_bracket_stop_failed", e),
+            }
+        }
+        Body::AdjustBracketTarget(req) => {
+            if !state.gates.allow_place() {
+                return error_frame(
+                    request_id,
+                    "trading_disabled",
+                    "adjust_bracket_target denied: parent trading disabled",
+                );
+            }
+            let Some(session) = &state.session else {
+                return no_session_frame(request_id);
+            };
+            let mut guard = session.lock().await;
+            match guard
+                .adjust_bracket_target(&req.basket_id, req.ticks, req.level)
+                .await
+            {
+                Ok(()) => ack_frame(request_id),
+                Err(e) => plant_err_frame(request_id, "adjust_bracket_target_failed", e),
+            }
         }
         Body::EnsurePnl(_) => {
-            if let Some(session) = &state.session {
-                let mut guard = session.lock().await;
-                if let Err(e) = guard.ensure_pnl_plant().await {
-                    return err_to_frame(request_id, "ensure_pnl_failed", e);
-                }
+            let Some(session) = &state.session else {
+                return no_session_frame(request_id);
+            };
+            let mut guard = session.lock().await;
+            if let Err(e) = guard.ensure_pnl_plant().await {
+                return err_to_frame(request_id, "ensure_pnl_failed", e);
             }
             ack_frame(request_id)
         }
@@ -516,11 +761,12 @@ pub(super) async fn dispatch(state: &GatewayState, client: &mut ClientCtx, reque
             if !state.gates.trading_enabled {
                 return error_frame(request_id, "trading_disabled", "ensure_order denied: parent trading disabled");
             }
-            if let Some(session) = &state.session {
-                let mut guard = session.lock().await;
-                if let Err(e) = guard.ensure_order_plant().await {
-                    return err_to_frame(request_id, "ensure_order_failed", e);
-                }
+            let Some(session) = &state.session else {
+                return no_session_frame(request_id);
+            };
+            let mut guard = session.lock().await;
+            if let Err(e) = guard.ensure_order_plant().await {
+                return err_to_frame(request_id, "ensure_order_failed", e);
             }
             ack_frame(request_id)
         }
@@ -528,7 +774,9 @@ pub(super) async fn dispatch(state: &GatewayState, client: &mut ClientCtx, reque
             if !state.gates.allow_place() {
                 return error_frame(request_id, "trading_disabled", "place_order denied: parent trading disabled");
             }
-            let Some(session) = &state.session else { return ack_frame(request_id) };
+            let Some(session) = &state.session else {
+                return no_session_frame(request_id);
+            };
             let mut guard = session.lock().await;
             match guard
                 .place_order(
@@ -554,7 +802,9 @@ pub(super) async fn dispatch(state: &GatewayState, client: &mut ClientCtx, reque
             if !state.gates.allow_place() {
                 return error_frame(request_id, "trading_disabled", "cancel_order denied: parent trading disabled");
             }
-            let Some(session) = &state.session else { return ack_frame(request_id) };
+            let Some(session) = &state.session else {
+                return no_session_frame(request_id);
+            };
             let mut guard = session.lock().await;
             match guard.cancel_order(&req.basket_id).await {
                 Ok(()) => ack_frame(request_id),
@@ -565,7 +815,9 @@ pub(super) async fn dispatch(state: &GatewayState, client: &mut ClientCtx, reque
             if !state.gates.allow_place() {
                 return error_frame(request_id, "trading_disabled", "modify_order denied: parent trading disabled");
             }
-            let Some(session) = &state.session else { return ack_frame(request_id) };
+            let Some(session) = &state.session else {
+                return no_session_frame(request_id);
+            };
             let mut guard = session.lock().await;
             match guard
                 .modify_order(
@@ -588,7 +840,9 @@ pub(super) async fn dispatch(state: &GatewayState, client: &mut ClientCtx, reque
             if !state.gates.allow_cancel_all() {
                 return error_frame(request_id, "cancel_all_denied", "cancel_all_orders denied: parent cancel_all disabled");
             }
-            let Some(session) = &state.session else { return ack_frame(request_id) };
+            let Some(session) = &state.session else {
+                return no_session_frame(request_id);
+            };
             let mut guard = session.lock().await;
             match guard.cancel_all_orders().await {
                 Ok(()) => ack_frame(request_id),
@@ -620,19 +874,37 @@ pub(super) async fn dispatch(state: &GatewayState, client: &mut ClientCtx, reque
         }
         Body::DisconnectOrder(_) => {
             let key = order_key();
+            let lock = topic_lock(state, &key).await;
+            let _guard = lock.lock().await;
+            let had_brackets = client.brackets;
+            let last_brackets = clear_client_brackets(state, client).await;
+            let mut last_order = false;
             if client.order {
                 client.order = false;
-                let last = state.reconnect.forget_order().await;
-                if last {
+                last_order = state.reconnect.forget_order().await;
+                if last_order {
                     if let Some(session) = &state.session {
                         let mut guard = session.lock().await;
                         if let Err(e) = guard.disconnect_order_plant().await {
                             drop(guard);
                             state.reconnect.note_order().await;
                             client.order = true;
+                            if had_brackets {
+                                state.reconnect.note_brackets().await;
+                                client.brackets = true;
+                            }
                             return err_to_frame(request_id, "disconnect_order_failed", e);
                         }
                     }
+                }
+            }
+            // Last brackets peer left but order peers remain: no brackets
+            // unsubscribe API — re-seat order-only to drop venue brackets.
+            if last_brackets && !last_order && state.reconnect.restore_plan().await.order {
+                if let Err(e) = reseat_order_plant_without_brackets(state).await {
+                    state.ready.store(false, Ordering::SeqCst);
+                    state.force_reconnect.store(true, Ordering::SeqCst);
+                    return err_to_frame(request_id, "reseat_order_failed", e);
                 }
             }
             if client.subscribed.contains(&key) {
@@ -651,17 +923,11 @@ pub(super) async fn dispatch(state: &GatewayState, client: &mut ClientCtx, reque
 /// Test helper: process one RPC against `gates` (no session, no socket) and
 /// return the response body. Used by `tests/gates.rs`.
 pub fn gate_rpc_for_test(gates: &ParentGates, body: Body) -> Body {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("current-thread runtime");
-    rt.block_on(async {
-        let hub: SharedFanout = Arc::new(FanoutHub::new(8));
-        let state = test_state(*gates, hub);
-        let (out_tx, _out_rx) = mpsc::channel::<OutMsg>(8);
-        let mut client = ClientCtx::new(out_tx);
-        dispatch(&state, &mut client, 1, body).await.body.expect("body")
-    })
+    rpc_sequence_with_gates(*gates, vec![body])
+        .0
+        .into_iter()
+        .next()
+        .expect("body")
 }
 
 pub(super) fn test_state(gates: ParentGates, hub: SharedFanout) -> GatewayState {
@@ -678,6 +944,7 @@ pub(super) fn test_state(gates: ParentGates, hub: SharedFanout) -> GatewayState 
             ib_id: "I1".into(),
         },
         ready: AtomicBool::new(true),
+        force_reconnect: AtomicBool::new(false),
         expected_auth_token: "secret".into(),
         session: None,
         reconnect: Arc::new(ReconnectController::new(hub)),
@@ -687,15 +954,17 @@ pub(super) fn test_state(gates: ParentGates, hub: SharedFanout) -> GatewayState 
 }
 
 /// Run several RPCs on one client and return response bodies + restore plan.
-/// Used by subscribe-idempotency / typed-intent tests.
-pub fn rpc_sequence_for_test(bodies: Vec<Body>) -> (Vec<Body>, crate::reconnect::RestorePlan) {
+pub fn rpc_sequence_with_gates(
+    gates: ParentGates,
+    bodies: Vec<Body>,
+) -> (Vec<Body>, crate::reconnect::RestorePlan) {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("current-thread runtime");
     rt.block_on(async {
         let hub: SharedFanout = Arc::new(FanoutHub::new(8));
-        let state = test_state(ParentGates::default(), hub);
+        let state = test_state(gates, hub);
         let (out_tx, _out_rx) = mpsc::channel::<OutMsg>(8);
         let mut client = ClientCtx::new(out_tx);
         let mut out = Vec::with_capacity(bodies.len());

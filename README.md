@@ -18,6 +18,8 @@ Trading is **off by default** (`enable_trading=False` / unset `RITHMIC_ENABLE_TR
 
 **Connect mode (required):** set `RITHMIC_CONNECT_MODE` / `SessionConfig.connect_mode` (`ConnectMode.DIRECT` \| `ConnectMode.GATEWAY`) — this process + flock + plants, or dial `rithmic-gateway` over `unix://…` for a shared login. No silent default — see [`docs/references/ops-runbook.md`](docs/references/ops-runbook.md). Remote TLS is not shipped — [`docs/references/gateway-remote.md`](docs/references/gateway-remote.md).
 
+**Lake / shared history (no Nautilus):** install the pure-Python client from `python/` (`uv pip install -e python` or `PYTHONPATH=python` + `protobuf`). Use `GatewayClient` + `load_time_bars_range` (auto-spawn or long-lived parent). market-data-lake hardcodes this path.
+
 Paper-trade a simple NQ strategy with **live Rithmic data** and Nautilus **Sandbox** execution (no Rithmic orders):
 
 ```bash

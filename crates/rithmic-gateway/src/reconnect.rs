@@ -24,6 +24,7 @@ pub struct RestorePlan {
     pub time_bars: Vec<TimeBarIntent>,
     pub pnl: bool,
     pub order: bool,
+    pub brackets: bool,
 }
 
 /// Tracks typed venue intent (refcount) separate from hub fan-out interest.
@@ -34,6 +35,7 @@ pub struct IntentStore {
     time_bars: HashMap<TimeBarIntent, usize>,
     pnl: usize,
     order: usize,
+    brackets: usize,
 }
 
 fn bump(map: &mut HashMap<SubKey, usize>, key: SubKey) -> bool {
@@ -72,6 +74,19 @@ fn drop_tb(map: &mut HashMap<TimeBarIntent, usize>, key: &TimeBarIntent) -> bool
     false
 }
 
+fn bump_flag(n: &mut usize) -> bool {
+    *n += 1;
+    *n == 1
+}
+
+fn drop_flag(n: &mut usize) -> bool {
+    if *n == 0 {
+        return false;
+    }
+    *n -= 1;
+    *n == 0
+}
+
 impl IntentStore {
     pub fn note_ticker(&mut self, key: SubKey) -> bool {
         bump(&mut self.ticker, key)
@@ -98,29 +113,27 @@ impl IntentStore {
     }
 
     pub fn note_pnl(&mut self) -> bool {
-        self.pnl += 1;
-        self.pnl == 1
+        bump_flag(&mut self.pnl)
     }
 
     pub fn forget_pnl(&mut self) -> bool {
-        if self.pnl == 0 {
-            return false;
-        }
-        self.pnl -= 1;
-        self.pnl == 0
+        drop_flag(&mut self.pnl)
     }
 
     pub fn note_order(&mut self) -> bool {
-        self.order += 1;
-        self.order == 1
+        bump_flag(&mut self.order)
     }
 
     pub fn forget_order(&mut self) -> bool {
-        if self.order == 0 {
-            return false;
-        }
-        self.order -= 1;
-        self.order == 0
+        drop_flag(&mut self.order)
+    }
+
+    pub fn note_brackets(&mut self) -> bool {
+        bump_flag(&mut self.brackets)
+    }
+
+    pub fn forget_brackets(&mut self) -> bool {
+        drop_flag(&mut self.brackets)
     }
 
     pub fn restore_plan(&self) -> RestorePlan {
@@ -130,6 +143,7 @@ impl IntentStore {
             time_bars: self.time_bars.keys().cloned().collect(),
             pnl: self.pnl > 0,
             order: self.order > 0,
+            brackets: self.brackets > 0,
         }
     }
 
@@ -139,6 +153,7 @@ impl IntentStore {
             + self.time_bars.len()
             + usize::from(self.pnl > 0)
             + usize::from(self.order > 0)
+            + usize::from(self.brackets > 0)
     }
 }
 
@@ -204,6 +219,14 @@ impl ReconnectController {
 
     pub async fn forget_order(&self) -> bool {
         self.intent.lock().await.forget_order()
+    }
+
+    pub async fn note_brackets(&self) -> bool {
+        self.intent.lock().await.note_brackets()
+    }
+
+    pub async fn forget_brackets(&self) -> bool {
+        self.intent.lock().await.forget_brackets()
     }
 
     /// After plants are back, return every typed venue join to re-issue.
@@ -282,11 +305,13 @@ mod tests {
         .await;
         ctl.note_pnl().await;
         ctl.note_order().await;
+        ctl.note_brackets().await;
         let plan = ctl.restore_plan().await;
         assert_eq!(plan.book, vec![key]);
         assert_eq!(plan.time_bars.len(), 1);
         assert!(plan.pnl);
         assert!(plan.order);
+        assert!(plan.brackets);
         assert!(plan.ticker.is_empty());
     }
 

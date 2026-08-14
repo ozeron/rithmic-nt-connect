@@ -19,6 +19,8 @@ from rithmic_gateway.v1 import session_pb2 as pb
 
 # Default dial + RPC socket timeout (seconds). Stuck parent must not hang forever.
 DEFAULT_RPC_TIMEOUT_SEC = 30.0
+# Per-chunk history RPC timeout — one plant slice can exceed the dial default.
+DEFAULT_HISTORY_RPC_TIMEOUT_SEC = 120.0
 
 _ORDER_EVENT_TYPES = frozenset({"order_notification"})
 _PNL_EVENT_TYPES = frozenset({"account_pnl", "instrument_pnl"})
@@ -63,9 +65,11 @@ class GatewayClient:
         config: GatewayConfig,
         *,
         rpc_timeout_sec: float = DEFAULT_RPC_TIMEOUT_SEC,
+        history_rpc_timeout_sec: float = DEFAULT_HISTORY_RPC_TIMEOUT_SEC,
     ) -> None:
         self._config = config
         self._rpc_timeout_sec = rpc_timeout_sec
+        self._history_rpc_timeout_sec = history_rpc_timeout_sec
         self._sock: socket.socket | None = None
         self._next_id = 1
         self._scopes: list[str] = []
@@ -226,7 +230,10 @@ class GatewayClient:
         end_ssboe: int,
         bar_type: int = 2,
         period: int = 1,
+        *,
+        rpc_timeout_sec: float | None = None,
     ) -> list[dict[str, Any]]:
+        """Single-slice history RPC (prefer :meth:`load_time_bars_range` for wide windows)."""
         resp = self._rpc(
             pb.Frame(
                 load_time_bars=pb.LoadTimeBarsRequest(
@@ -237,12 +244,128 @@ class GatewayClient:
                     bar_type=bar_type,
                     period=period,
                 )
-            )
+            ),
+            timeout_sec=rpc_timeout_sec,
         )
         which = resp.WhichOneof("body")
         if which != "load_time_bars_response":
             raise GatewayError("protocol", f"expected load_time_bars_response, got {which}")
         return [_message_to_dict(b) for b in resp.load_time_bars_response.bars]
+
+    def load_time_bars_range(
+        self,
+        symbol: str,
+        exchange: str,
+        start_ssboe: int,
+        end_ssboe: int,
+        bar_type: int = 2,
+        period: int = 1,
+        *,
+        rpc_timeout_sec: float | None = None,
+        max_workers: int = 4,
+    ) -> list[dict[str, Any]]:
+        """Load a wide window via client-side calendar chunks + merge.
+
+        Slice lengths match Rust ``bar_slice_secs``. When ``max_workers`` > 1,
+        each chunk uses its own dial to the same parent (parallel unix RPCs).
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        from rithmic_gateway.history_window import (
+            bar_slice_secs,
+            dedupe_bars_by_marker,
+            window_slices,
+        )
+
+        step = bar_slice_secs(bar_type, period)
+        timeout = (
+            self._history_rpc_timeout_sec if rpc_timeout_sec is None else float(rpc_timeout_sec)
+        )
+        slices = window_slices(int(start_ssboe), int(end_ssboe), step)
+        if not slices:
+            return []
+        if len(slices) == 1 or max_workers <= 1:
+            merged: list[dict[str, Any]] = []
+            for slice_start, slice_end in slices:
+                merged.extend(
+                    self.load_time_bars(
+                        symbol,
+                        exchange,
+                        slice_start,
+                        slice_end,
+                        bar_type=bar_type,
+                        period=period,
+                        rpc_timeout_sec=timeout,
+                    )
+                )
+            return dedupe_bars_by_marker(merged)
+
+        # Ensure parent is up on this client first (auto-spawn / warm attach).
+        if self._sock is None:
+            self.connect()
+
+        def _fetch_slice(window: tuple[int, int]) -> list[dict[str, Any]]:
+            slice_start, slice_end = window
+            peer = GatewayClient(
+                self._config,
+                rpc_timeout_sec=self._rpc_timeout_sec,
+                history_rpc_timeout_sec=self._history_rpc_timeout_sec,
+            )
+            peer.connect()
+            try:
+                return peer.load_time_bars(
+                    symbol,
+                    exchange,
+                    slice_start,
+                    slice_end,
+                    bar_type=bar_type,
+                    period=period,
+                    rpc_timeout_sec=timeout,
+                )
+            finally:
+                try:
+                    peer.disconnect()
+                except Exception:
+                    pass
+
+        merged_map: dict[tuple[int, int], list[dict[str, Any]]] = {}
+        workers = min(max_workers, len(slices))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futs = {pool.submit(_fetch_slice, window): window for window in slices}
+            for fut in as_completed(futs):
+                window = futs[fut]
+                merged_map[window] = fut.result()
+        ordered: list[dict[str, Any]] = []
+        for window in slices:
+            ordered.extend(merged_map[window])
+        return dedupe_bars_by_marker(ordered)
+
+    async def load_time_bars_range_async(
+        self,
+        symbol: str,
+        exchange: str,
+        start_ssboe: int,
+        end_ssboe: int,
+        bar_type: int = 2,
+        period: int = 1,
+        *,
+        rpc_timeout_sec: float | None = None,
+        max_workers: int = 4,
+    ) -> list[dict[str, Any]]:
+        """Async wrapper around :meth:`load_time_bars_range` (thread offload)."""
+        import asyncio
+
+        return await asyncio.to_thread(
+            self.load_time_bars_range,
+            symbol,
+            exchange,
+            start_ssboe,
+            end_ssboe,
+            bar_type,
+            period,
+            rpc_timeout_sec=rpc_timeout_sec,
+            max_workers=max_workers,
+        )
 
     def probe_time_bars(
         self,
@@ -305,6 +428,11 @@ class GatewayClient:
     def subscribe_order_updates(self) -> None:
         self._rpc(pb.Frame(subscribe_order_updates=pb.SubscribeOrderUpdatesRequest()))
 
+    def subscribe_bracket_updates(self) -> None:
+        self._rpc(
+            pb.Frame(subscribe_bracket_updates=pb.SubscribeBracketUpdatesRequest())
+        )
+
     def disconnect_order_plant(self) -> None:
         self._rpc(pb.Frame(disconnect_order=pb.DisconnectOrderRequest()))
 
@@ -340,6 +468,55 @@ class GatewayClient:
         if trail_by_price_id is not None:
             req.trail_by_price_id = trail_by_price_id
         self._rpc(pb.Frame(place_order=req))
+
+    def place_bracket_order(
+        self,
+        symbol: str,
+        exchange: str,
+        side: str,
+        price_type: str,
+        quantity: int,
+        localid: str,
+        price: float | None = None,
+        trigger_price: float | None = None,
+        duration: str = "DAY",
+        stop_ticks: int | None = None,
+        target_ticks: int | None = None,
+    ) -> None:
+        req = pb.PlaceBracketOrderRequest(
+            symbol=symbol,
+            exchange=exchange,
+            side=side,
+            price_type=price_type,
+            quantity=quantity,
+            localid=localid,
+            duration=duration,
+        )
+        if price is not None:
+            req.price = price
+        if trigger_price is not None:
+            req.trigger_price = trigger_price
+        if stop_ticks is not None:
+            req.stop_ticks = stop_ticks
+        if target_ticks is not None:
+            req.target_ticks = target_ticks
+        self._rpc(pb.Frame(place_bracket_order=req))
+
+    def adjust_bracket_stop(
+        self, basket_id: str, ticks: int, level: int | None = None
+    ) -> None:
+        req = pb.AdjustBracketStopRequest(basket_id=basket_id, ticks=ticks)
+        if level is not None:
+            req.level = level
+        self._rpc(pb.Frame(adjust_bracket_stop=req))
+
+    def adjust_bracket_target(
+        self, basket_id: str, ticks: int, level: int | None = None
+    ) -> None:
+        req = pb.AdjustBracketTargetRequest(basket_id=basket_id, ticks=ticks)
+        if level is not None:
+            req.level = level
+        self._rpc(pb.Frame(adjust_bracket_target=req))
 
     def cancel_order(self, basket_id: str) -> None:
         self._rpc(pb.Frame(cancel_order=pb.CancelOrderRequest(basket_id=basket_id)))
@@ -419,11 +596,13 @@ class GatewayClient:
         self._trading_enabled = bool(ready.trading_enabled)
         self._cancel_all_enabled = bool(ready.cancel_all_enabled)
 
-    def _rpc(self, frame: pb.Frame) -> pb.Frame:
+    def _rpc(self, frame: pb.Frame, *, timeout_sec: float | None = None) -> pb.Frame:
         with self._io_lock:
-            return self._rpc_unlocked(frame)
+            return self._rpc_unlocked(frame, timeout_sec=timeout_sec)
 
-    def _rpc_unlocked(self, frame: pb.Frame) -> pb.Frame:
+    def _rpc_unlocked(
+        self, frame: pb.Frame, *, timeout_sec: float | None = None
+    ) -> pb.Frame:
         if self._sock is None:
             raise GatewayError("not_connected", "call connect() first")
         rid = self._next_id
@@ -431,7 +610,8 @@ class GatewayClient:
         frame.request_id = rid
         self._write_frame(frame)
         assert self._sock is not None
-        self._sock.settimeout(self._rpc_timeout_sec)
+        effective = self._rpc_timeout_sec if timeout_sec is None else float(timeout_sec)
+        self._sock.settimeout(effective)
         try:
             while True:
                 resp = self._read_frame()
@@ -463,7 +643,7 @@ class GatewayClient:
         except (TimeoutError, socket.timeout) as exc:
             self._close_sock()
             raise GatewayError(
-                "timeout", f"RPC {rid} timed out after {self._rpc_timeout_sec}s"
+                "timeout", f"RPC {rid} timed out after {effective}s"
             ) from exc
 
     def _poll_filtered(

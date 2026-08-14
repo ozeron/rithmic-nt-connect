@@ -143,6 +143,7 @@ async fn run() -> Result<(), String> {
             ib_id,
         },
         ready,
+        force_reconnect: AtomicBool::new(false),
         expected_auth_token,
         session: Some(session.clone()),
         reconnect: reconnect.clone(),
@@ -196,7 +197,7 @@ async fn run_event_pump(
     state: Arc<GatewayState>,
 ) {
     loop {
-        let mut connection_issue = false;
+        let mut connection_issue = state.force_reconnect.swap(false, Ordering::SeqCst);
         {
             let mut guard = session.lock().await;
             match guard.poll_event() {
@@ -267,9 +268,9 @@ async fn reconnect_loop(
                 continue;
             }
         }
-        // Keep Ready=false while restoring so peers do not Ack against a
-        // half-rebuilt venue session. Bounded attempts, then resume the event
-        // pump even if some intents remain incomplete (best-effort restore).
+        // Connect succeeded: retry restore a bounded number of times without
+        // tearing TLS down. If still incomplete, full-reconnect (outer loop)
+        // while staying Ready=false — never claim Ready with half-restored intent.
         for attempt in 1..=6u32 {
             let mut guard = session.lock().await;
             let (restored, attempted) = restore_intents(&mut guard, reconnect).await;
@@ -284,11 +285,8 @@ async fn reconnect_loop(
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
         eprintln!(
-            "rithmic-gateway: restore still incomplete after 6 attempts; \
-             marking Ready and resuming plant poll (best-effort)"
+            "rithmic-gateway: restore still incomplete after 6 attempts; full reconnect"
         );
-        state.ready.store(true, Ordering::SeqCst);
-        return;
     }
 }
 
@@ -354,11 +352,30 @@ async fn restore_intents(
             restored += 1;
         }
     }
+    let mut order_ok = !plan.order;
     if plan.order {
         attempted += 1;
         match guard.subscribe_order_updates().await {
-            Ok(()) => restored += 1,
+            Ok(()) => {
+                restored += 1;
+                order_ok = true;
+            }
             Err(e) => eprintln!("rithmic-gateway: resubscribe order updates failed: {e}"),
+        }
+    }
+    if plan.brackets {
+        attempted += 1;
+        // Order updates failure disconnects the plant — do not ensure+subscribe
+        // brackets alone (would look like a partial restore success).
+        if plan.order && !order_ok {
+            eprintln!(
+                "rithmic-gateway: skip bracket restore; order updates not restored"
+            );
+        } else {
+            match guard.subscribe_bracket_updates().await {
+                Ok(()) => restored += 1,
+                Err(e) => eprintln!("rithmic-gateway: resubscribe bracket updates failed: {e}"),
+            }
         }
     }
     (restored, attempted)

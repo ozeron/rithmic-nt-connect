@@ -56,6 +56,27 @@ async fn disconnected_order_methods_error_without_network() {
         "unexpected place_order error: {err}"
     );
 
+    let err = session
+        .place_bracket_order(
+            "ESM6",
+            "CME",
+            "BUY",
+            "MARKET",
+            1,
+            "bracket-1",
+            None,
+            None,
+            "DAY",
+            Some(40),
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, Error::NotConnected { plant: "ticker" | "order" }),
+        "unexpected place_bracket_order error: {err}"
+    );
+
     let err = session.poll_order_event().unwrap_err();
     assert!(
         matches!(err, Error::NotConnected { plant: "order" }),

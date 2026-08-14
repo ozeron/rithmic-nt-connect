@@ -53,6 +53,7 @@ class PnlSession(Protocol):
 
 class OrderSession(Protocol):
     def subscribe_order_updates(self) -> None: ...
+    def subscribe_bracket_updates(self) -> None: ...
     def disconnect_order_plant(self) -> None: ...
     def ensure_order_plant(self) -> None: ...
     def place_order(
@@ -68,6 +69,26 @@ class OrderSession(Protocol):
         duration: str = "DAY",
         trail_by_ticks: int | None = None,
         trail_by_price_id: int | None = None,
+    ) -> None: ...
+    def place_bracket_order(
+        self,
+        symbol: str,
+        exchange: str,
+        side: str,
+        price_type: str,
+        quantity: int,
+        localid: str,
+        price: float | None = None,
+        trigger_price: float | None = None,
+        duration: str = "DAY",
+        stop_ticks: int | None = None,
+        target_ticks: int | None = None,
+    ) -> None: ...
+    def adjust_bracket_stop(
+        self, basket_id: str, ticks: int, level: int | None = None
+    ) -> None: ...
+    def adjust_bracket_target(
+        self, basket_id: str, ticks: int, level: int | None = None
     ) -> None: ...
     def cancel_order(self, basket_id: str) -> None: ...
     def modify_order(
