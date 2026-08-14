@@ -403,8 +403,26 @@ class RithmicExecutionClient(LiveExecutionClient):
             return str(basket)
         return str(self._client_to_venue.get(client_order_id.value) or client_order_id.value)
 
+    def _cache_client_for_notification(self, fields: dict[str, Any]) -> ClientOrderId | None:
+        """Recover ownership from Nautilus cache when tag/basket maps missed."""
+        basket = fields.get("basket_id")
+        if not basket:
+            return None
+        basket_s = str(basket)
+        for order in self._cache.orders(venue=self.venue):
+            vid = order.venue_order_id
+            if vid is not None and vid.value == basket_s:
+                return order.client_order_id
+        return None
+
     def _handle_order_notification(self, fields: dict[str, Any]) -> None:
         client_order_id = self._resolve_client_order_id(fields)
+        if client_order_id is None:
+            client_order_id = self._cache_client_for_notification(fields)
+            if client_order_id is not None:
+                basket = fields.get("basket_id")
+                if basket:
+                    self._bind_venue_id(client_order_id, str(basket))
         if client_order_id is None:
             self._handle_untracked_notification(fields)
             return

@@ -152,8 +152,8 @@ Files: `python/rithmic_nt_connect/execution.py`, `python/rithmic_nt_connect/_ord
 
 Approach:
 
-- When `_resolve_client_order_id` is None: if fields support status/fill report construction (instrument in cache or resolvable, venue id, required fill fields), call `_send_order_status_report` / `_send_fill_report`; else slim error-log (suppressed).
-- Dedup: key from `trade_id_from_fill_fields` + account/instrument when available; skip duplicate on tracked fill and report paths; insert key only after successful emit.
+- When `_resolve_client_order_id` is None: try Nautilus cache match on `basket_id` → `venue_order_id` and rebind maps; if still none, emit **fill reports only** when wire has enough fields (never invent status reports); else slim error-log (suppressed).
+- Dedup: only when venue `fill_id` present (`acct|inst|fill_id`); retain across disconnect (bounded LRU); mark only after successful emit. Without `fill_id`, never suppress.
 - Keep `generate_fill_reports` raising `VenueQueryUnavailable`.
 
 Test scenarios:
