@@ -13,10 +13,13 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "python"))
+
+SMOKE_LOCALID = "spike-bracket-1"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -28,6 +31,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--stop-ticks", type=int, default=40)
     p.add_argument("--target-ticks", type=int, default=None)
     p.add_argument("--side", default="Buy", choices=("Buy", "Sell"))
+    p.add_argument("--seconds", type=float, default=8.0, help="poll window after place")
     args = p.parse_args(argv)
 
     from rithmic_nt_connect import env_truthy, load_dotenv_files
@@ -56,6 +60,9 @@ def main(argv: list[str] | None = None) -> int:
     cfg = SessionConfig.from_env()
     session = create_session(cfg)
     session.connect()
+    saw_ack = False
+    saw_reject = False
+    basket_id = None
     try:
         front = resolve_front_month(session, args.root, args.exchange)
         session.subscribe_order_updates()
@@ -66,21 +73,54 @@ def main(argv: list[str] | None = None) -> int:
             side=args.side,
             price_type="Market",
             quantity=int(args.qty),
-            localid="spike-bracket-1",
+            localid=SMOKE_LOCALID,
             duration="DAY",
             stop_ticks=int(args.stop_ticks),
             target_ticks=None if args.target_ticks is None else int(args.target_ticks),
         )
         print(
-            f"PLACE submitted front={front['trading_symbol']}.{front['trading_exchange']} "
-            "— check notifications for basket_id / rp_code"
+            f"PLACE sent front={front['trading_symbol']}.{front['trading_exchange']} "
+            f"localid={SMOKE_LOCALID}; polling {args.seconds}s for notify…"
         )
+        deadline = time.monotonic() + max(0.0, args.seconds)
+        while time.monotonic() < deadline:
+            ev = session.poll_order_event()
+            if ev is None:
+                time.sleep(0.05)
+                continue
+            status = str(ev.get("status") or "")
+            text = str(ev.get("text") or ev.get("report_text") or "")
+            tag = str(ev.get("user_tag") or ev.get("localid") or "")
+            print(f"order_event: type={ev.get('type')} status={status!r} basket_id={ev.get('basket_id')} tag={tag!r} text={text!r}")
+            if ev.get("basket_id"):
+                basket_id = ev.get("basket_id")
+            low = f"{status} {text}".lower()
+            if any(tok in low for tok in ("reject", "denied", "fail", "error")):
+                saw_reject = True
+                break
+            if basket_id and any(tok in low for tok in ("open", "accept", "fill", "submit", "new")):
+                saw_ack = True
+                break
+            if basket_id and tag == SMOKE_LOCALID:
+                saw_ack = True
+                break
     finally:
         try:
             session.disconnect()
         except Exception as exc:  # noqa: BLE001
             print(f"disconnect warning: {exc}", file=sys.stderr)
-    return 0
+
+    if saw_reject:
+        print("PLACE rejected by venue/plant", file=sys.stderr)
+        return 1
+    if saw_ack or basket_id:
+        print(f"PLACE observed basket_id={basket_id}")
+        return 0
+    print(
+        "PLACE inconclusive: no basket_id / ack within poll window",
+        file=sys.stderr,
+    )
+    return 3
 
 
 if __name__ == "__main__":

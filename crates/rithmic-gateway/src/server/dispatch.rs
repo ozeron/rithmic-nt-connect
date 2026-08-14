@@ -1,7 +1,7 @@
 //! RPC body dispatch (Subscribe / Place / …) for the gateway accept loop.
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, Mutex as TokioMutex};
@@ -154,17 +154,15 @@ async fn fail_order_plant_stream(
 
 /// No venue unsubscribe for brackets. When the last brackets peer leaves and
 /// order peers remain, disconnect + `subscribe_order_updates` to drop brackets.
-pub(super) async fn reseat_order_plant_without_brackets(state: &GatewayState) {
+pub(super) async fn reseat_order_plant_without_brackets(
+    state: &GatewayState,
+) -> Result<(), rithmic_plants::Error> {
     let Some(session) = &state.session else {
-        return;
+        return Ok(());
     };
     let mut guard = session.lock().await;
     let _ = guard.disconnect_order_plant().await;
-    if let Err(e) = guard.subscribe_order_updates().await {
-        eprintln!(
-            "rithmic-gateway: reseat order updates after last brackets peer failed: {e}"
-        );
-    }
+    guard.subscribe_order_updates().await
 }
 
 /// Drop this client's brackets flag/intent. Returns whether this was the last
@@ -876,6 +874,8 @@ pub(super) async fn dispatch(state: &GatewayState, client: &mut ClientCtx, reque
         }
         Body::DisconnectOrder(_) => {
             let key = order_key();
+            let lock = topic_lock(state, &key).await;
+            let _guard = lock.lock().await;
             let had_brackets = client.brackets;
             let last_brackets = clear_client_brackets(state, client).await;
             let mut last_order = false;
@@ -901,7 +901,11 @@ pub(super) async fn dispatch(state: &GatewayState, client: &mut ClientCtx, reque
             // Last brackets peer left but order peers remain: no brackets
             // unsubscribe API — re-seat order-only to drop venue brackets.
             if last_brackets && !last_order && state.reconnect.restore_plan().await.order {
-                reseat_order_plant_without_brackets(state).await;
+                if let Err(e) = reseat_order_plant_without_brackets(state).await {
+                    state.ready.store(false, Ordering::SeqCst);
+                    state.force_reconnect.store(true, Ordering::SeqCst);
+                    return err_to_frame(request_id, "reseat_order_failed", e);
+                }
             }
             if client.subscribed.contains(&key) {
                 client.drop_forwarder(&key);
@@ -940,6 +944,7 @@ pub(super) fn test_state(gates: ParentGates, hub: SharedFanout) -> GatewayState 
             ib_id: "I1".into(),
         },
         ready: AtomicBool::new(true),
+        force_reconnect: AtomicBool::new(false),
         expected_auth_token: "secret".into(),
         session: None,
         reconnect: Arc::new(ReconnectController::new(hub)),

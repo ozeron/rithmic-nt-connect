@@ -143,6 +143,7 @@ async fn run() -> Result<(), String> {
             ib_id,
         },
         ready,
+        force_reconnect: AtomicBool::new(false),
         expected_auth_token,
         session: Some(session.clone()),
         reconnect: reconnect.clone(),
@@ -196,7 +197,7 @@ async fn run_event_pump(
     state: Arc<GatewayState>,
 ) {
     loop {
-        let mut connection_issue = false;
+        let mut connection_issue = state.force_reconnect.swap(false, Ordering::SeqCst);
         {
             let mut guard = session.lock().await;
             match guard.poll_event() {
@@ -267,21 +268,25 @@ async fn reconnect_loop(
                 continue;
             }
         }
-        // Connect succeeded: retry restore only. Incomplete restore is not a
-        // reason to tear TLS/auth down again (that was the reconnect storm).
-        // Ready only when every remembered intent is restored.
-        loop {
+        // Connect succeeded: retry restore a bounded number of times without
+        // tearing TLS down. If still incomplete, full-reconnect (outer loop)
+        // while staying Ready=false — never claim Ready with half-restored intent.
+        for attempt in 1..=6u32 {
             let mut guard = session.lock().await;
             let (restored, attempted) = restore_intents(&mut guard, reconnect).await;
             drop(guard);
-            eprintln!("rithmic-gateway: restore {restored}/{attempted} subscriptions");
+            eprintln!(
+                "rithmic-gateway: restore attempt {attempt}: {restored}/{attempted} subscriptions"
+            );
             if restored == attempted {
                 state.ready.store(true, Ordering::SeqCst);
                 return;
             }
-            eprintln!("rithmic-gateway: restore incomplete; retry restore in 5s");
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
+        eprintln!(
+            "rithmic-gateway: restore still incomplete after 6 attempts; full reconnect"
+        );
     }
 }
 

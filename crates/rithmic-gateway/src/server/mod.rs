@@ -33,6 +33,9 @@ pub struct GatewayState {
     pub fingerprint: Fingerprint,
     /// Cleared while plants reconnect so new Handshakes get `not_ready`.
     pub ready: AtomicBool,
+    /// Set when a plant must be rebuilt outside the poll path (e.g. failed
+    /// order-plant reseat). Event pump treats this like a connection issue.
+    pub force_reconnect: AtomicBool,
     /// Parent secret for non-empty Handshake `auth_token` (from
     /// `RITHMIC_GATEWAY_AUTH_TOKEN`). Empty means only same-UID empty-token
     /// peers are accepted.
@@ -349,6 +352,9 @@ impl ClientCtx {
             }
         }
         if self.brackets {
+            let key = crate::convert::order_key();
+            let lock = dispatch::topic_lock(state, &key).await;
+            let _guard = lock.lock().await;
             let last_brackets = dispatch::clear_client_brackets(state, self).await;
             let last_order = if self.order {
                 self.order = false;
@@ -362,7 +368,11 @@ impl ClientCtx {
                     let _ = guard.disconnect_order_plant().await;
                 }
             } else if last_brackets && state.reconnect.restore_plan().await.order {
-                dispatch::reseat_order_plant_without_brackets(state).await;
+                if let Err(e) = dispatch::reseat_order_plant_without_brackets(state).await {
+                    eprintln!("rithmic-gateway: teardown reseat failed: {e}");
+                    state.ready.store(false, Ordering::SeqCst);
+                    state.force_reconnect.store(true, Ordering::SeqCst);
+                }
             }
         } else if self.order {
             self.order = false;
