@@ -8,11 +8,10 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use rithmic_rs::{
     ConnectStrategy, ManualOrAutoEntry, OrderSide, OrderType, RithmicAccount,
-    RithmicBracketLevelAdjustment, RithmicBracketOrder, RithmicCancelAllOrders,
-    RithmicCancelOrder, RithmicConfig, RithmicHistoryPlant, RithmicHistoryPlantHandle,
-    RithmicModifyOrder, RithmicOrder, RithmicOrderPlant, RithmicOrderPlantHandle,
-    RithmicPnlPlant, RithmicPnlPlantHandle, RithmicTickerPlant, RithmicTickerPlantHandle,
-    TimeBarType, TimeInForce,
+    RithmicCancelAllOrders, RithmicCancelOrder, RithmicConfig, RithmicHistoryPlant,
+    RithmicHistoryPlantHandle, RithmicModifyOrder, RithmicOrder, RithmicOrderPlant,
+    RithmicOrderPlantHandle, RithmicPnlPlant, RithmicPnlPlantHandle, RithmicTickerPlant,
+    RithmicTickerPlantHandle, TimeBarType, TimeInForce,
 };
 use rithmic_rs::rti::request_time_bar_update;
 use tokio::sync::broadcast::error::RecvError;
@@ -612,72 +611,6 @@ impl RithmicSession {
         .await
     }
 
-    /// Subscribe to bracket update notifications (required for plant brackets).
-    pub async fn subscribe_bracket_updates(&mut self) -> Result<()> {
-        self.ensure_order_plant().await?;
-        let handle = self.order_handle()?;
-        check_response(
-            handle.subscribe_bracket_updates().await?,
-            "subscribe_bracket_updates",
-        )
-    }
-
-    /// Place a server-side bracket (entry + stop_ticks / target_ticks from fill).
-    #[allow(clippy::too_many_arguments)]
-    pub async fn place_bracket_order(
-        &mut self,
-        symbol: &str,
-        exchange: &str,
-        side: &str,
-        price_type: &str,
-        quantity: i32,
-        localid: &str,
-        price: Option<f64>,
-        trigger_price: Option<f64>,
-        duration: &str,
-        stop_ticks: Option<i32>,
-        target_ticks: Option<i32>,
-    ) -> Result<()> {
-        self.ensure_order_plant().await?;
-        place_bracket_order_on(
-            self.order_handle()?,
-            symbol,
-            exchange,
-            side,
-            price_type,
-            quantity,
-            localid,
-            price,
-            trigger_price,
-            duration,
-            stop_ticks,
-            target_ticks,
-        )
-        .await
-    }
-
-    /// Adjust a bracket stop leg by basket id (ticks from fill).
-    pub async fn adjust_bracket_stop(
-        &mut self,
-        basket_id: &str,
-        ticks: i32,
-        level: Option<i32>,
-    ) -> Result<()> {
-        self.ensure_order_plant().await?;
-        adjust_bracket_stop_on(self.order_handle()?, basket_id, ticks, level).await
-    }
-
-    /// Adjust a bracket target leg by basket id (ticks from fill).
-    pub async fn adjust_bracket_target(
-        &mut self,
-        basket_id: &str,
-        ticks: i32,
-        level: Option<i32>,
-    ) -> Result<()> {
-        self.ensure_order_plant().await?;
-        adjust_bracket_target_on(self.order_handle()?, basket_id, ticks, level).await
-    }
-
     /// Cancel an order by basket id.
     pub async fn cancel_order(&mut self, basket_id: &str) -> Result<()> {
         self.ensure_order_plant().await?;
@@ -889,104 +822,6 @@ pub async fn cancel_order_on(handle: &RithmicOrderPlantHandle, basket_id: &str) 
         .manual_or_auto(ManualOrAutoEntry::Auto)
         .build()?;
     check_responses(&handle.cancel_order(cancel).await?, "cancel_order")
-}
-
-/// Place a plant bracket on an already-connected handle (no session lock).
-///
-/// Exit geometry is **ticks from fill**. Pass `stop_ticks` and/or `target_ticks`.
-/// v1 book path uses DAY + Static shapes derived by `rithmic-rs` `build()`.
-#[allow(clippy::too_many_arguments)]
-pub async fn place_bracket_order_on(
-    handle: &RithmicOrderPlantHandle,
-    symbol: &str,
-    exchange: &str,
-    side: &str,
-    price_type: &str,
-    quantity: i32,
-    localid: &str,
-    price: Option<f64>,
-    trigger_price: Option<f64>,
-    duration: &str,
-    stop_ticks: Option<i32>,
-    target_ticks: Option<i32>,
-) -> Result<()> {
-    if stop_ticks.is_none() && target_ticks.is_none() {
-        return Err(Error::Config(
-            "place_bracket_order requires stop_ticks and/or target_ticks".into(),
-        ));
-    }
-    let side: OrderSide = side
-        .parse()
-        .map_err(|e| Error::Config(format!("invalid order side: {e}")))?;
-    let price_type: OrderType = price_type
-        .parse()
-        .map_err(|e| Error::Config(format!("invalid price type: {e}")))?;
-    let duration: TimeInForce = if duration.is_empty() {
-        TimeInForce::Day
-    } else {
-        duration
-            .parse()
-            .map_err(|e| Error::Config(format!("invalid duration: {e}")))?
-    };
-
-    let mut builder = RithmicBracketOrder::new()
-        .symbol(symbol)
-        .exchange(exchange)
-        .quantity(quantity)
-        .action(side)
-        .price_type(price_type)
-        .duration(duration)
-        .localid(localid)
-        .manual_or_auto(ManualOrAutoEntry::Auto);
-    if let Some(p) = price {
-        builder = builder.price(p);
-    }
-    if let Some(t) = trigger_price {
-        builder = builder.trigger_price(t);
-    }
-    // quantity must be set before .stop/.target sugar (sizes leg to current qty).
-    if let Some(ticks) = target_ticks {
-        builder = builder.target(ticks);
-    }
-    if let Some(ticks) = stop_ticks {
-        builder = builder.stop(ticks);
-    }
-    let order = builder.build()?;
-    check_responses(&handle.place_bracket_order(order).await?, "place_bracket_order")
-}
-
-/// Adjust bracket stop ticks on an already-connected handle.
-pub async fn adjust_bracket_stop_on(
-    handle: &RithmicOrderPlantHandle,
-    basket_id: &str,
-    ticks: i32,
-    level: Option<i32>,
-) -> Result<()> {
-    let mut builder = RithmicBracketLevelAdjustment::new()
-        .id(basket_id)
-        .ticks(ticks);
-    if let Some(lvl) = level {
-        builder = builder.level(lvl);
-    }
-    let adj = builder.build()?;
-    check_responses(&handle.adjust_stop(adj).await?, "adjust_bracket_stop")
-}
-
-/// Adjust bracket target ticks on an already-connected handle.
-pub async fn adjust_bracket_target_on(
-    handle: &RithmicOrderPlantHandle,
-    basket_id: &str,
-    ticks: i32,
-    level: Option<i32>,
-) -> Result<()> {
-    let mut builder = RithmicBracketLevelAdjustment::new()
-        .id(basket_id)
-        .ticks(ticks);
-    if let Some(lvl) = level {
-        builder = builder.level(lvl);
-    }
-    let adj = builder.build()?;
-    check_responses(&handle.adjust_target(adj).await?, "adjust_bracket_target")
 }
 
 /// Modify an order on an already-connected handle (no session lock).
