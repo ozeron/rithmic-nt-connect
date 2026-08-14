@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import os
 import shutil
+import socket
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -25,6 +27,7 @@ _CURATED_ENV_KEYS = (
     "RITHMIC_GATEWAY_CANCEL_ALL",
     "RITHMIC_GATEWAY_LISTEN",
     "RITHMIC_GATEWAY_AUTH_TOKEN",
+    "RITHMIC_GATEWAY_IDLE_EXIT_SEC",
     "XDG_RUNTIME_DIR",
     "PATH",
     "HOME",
@@ -104,6 +107,8 @@ def spawn_gateway(
     env.setdefault("RITHMIC_URL", config.url)
     env.setdefault("RITHMIC_ENV", config.env)
     env["RITHMIC_GATEWAY_LISTEN"] = listen
+    # Auto-spawned parents exit after last client (grace); manual bin defaults to never.
+    env.setdefault("RITHMIC_GATEWAY_IDLE_EXIT_SEC", "5")
 
     proc = subprocess.Popen(
         argv,
@@ -114,22 +119,66 @@ def spawn_gateway(
         start_new_session=True,
     )
 
+    def _drain_stderr() -> None:
+        """Prevent a long-lived child from blocking on a full stderr PIPE."""
+        if proc.stderr is None:
+            return
+        try:
+            while proc.stderr.read(65536):
+                pass
+        except Exception:
+            pass
+
     if wait_socket:
         deadline = time.monotonic() + float(config.spawn_timeout_sec)
         sock = Path(config.socket_path)
+
+        def _listening() -> bool:
+            try:
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                s.settimeout(0.2)
+                s.connect(str(sock))
+                s.close()
+                return True
+            except OSError:
+                return False
+
+        def _session_flock_held() -> bool:
+            """True when another live process holds the credential flock."""
+            from rithmic_gateway.flock import session_flock_held
+
+            return session_flock_held(
+                config.user, config.system_name, config.url, config.env
+            )
+
         while time.monotonic() < deadline:
+            # Socket alone is not proof — require the credential flock too.
+            if _listening() and _session_flock_held():
+                threading.Thread(target=_drain_stderr, name="gw-stderr", daemon=True).start()
+                return proc
             if proc.poll() is not None:
+                if _listening() and _session_flock_held():
+                    return proc
                 err = b""
                 if proc.stderr is not None:
                     err = proc.stderr.read() or b""
                 raise SpawnError(
                     f"gateway exited early (code={proc.returncode}): {err.decode(errors='replace')}"
                 )
-            if sock.exists():
-                return proc
             time.sleep(0.05)
+        # Reap the orphan so it cannot keep the flock / bind later.
+        threading.Thread(target=_drain_stderr, name="gw-stderr", daemon=True).start()
         proc.terminate()
+        try:
+            proc.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                pass
         raise SpawnError(f"timed out waiting for gateway socket {sock}")
+    threading.Thread(target=_drain_stderr, name="gw-stderr", daemon=True).start()
     return proc
 
 

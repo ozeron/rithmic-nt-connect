@@ -67,6 +67,11 @@ message SubscribeBookRequest {
   string exchange = 2;
 }
 
+message UnsubscribeBookRequest {
+  string symbol = 1;
+  string exchange = 2;
+}
+
 message LoadTicksRequest {
   string symbol = 1;
   string exchange = 2;
@@ -75,6 +80,15 @@ message LoadTicksRequest {
 }
 
 message LoadTimeBarsRequest {
+  string symbol = 1;
+  string exchange = 2;
+  int32 bar_type = 3;
+  int32 period = 4;
+  int32 start_time_sec = 5;
+  int32 end_time_sec = 6;
+}
+
+message ProbeTimeBarsRequest {
   string symbol = 1;
   string exchange = 2;
   int32 bar_type = 3;
@@ -191,8 +205,8 @@ message ReferenceDataResponse {
   optional string expiration_date = 10;
   optional double tick_size = 11;
   optional double point_value = 12;
-  int32 price_precision = 13;
-  bool is_tradable = 14;
+  optional int32 price_precision = 13;
+  optional bool is_tradable = 14;
 }
 
 message LoadTicksResponse {
@@ -201,6 +215,33 @@ message LoadTicksResponse {
 
 message LoadTimeBarsResponse {
   repeated HistoryBar bars = 1;
+}
+
+// Raw history-plant time-bar replay row (including dropped / unparsed).
+message TimeBarProbeRow {
+  string variant = 1;
+  string source = 2;
+  optional string error = 3;
+  repeated string rp_code = 4;
+  bool parsed = 5;
+  optional string skip_reason = 6;
+  optional string symbol = 7;
+  optional string exchange = 8;
+  optional int32 bar_type = 9;
+  optional string period = 10;
+  optional int32 marker = 11;
+  optional double open_price = 12;
+  optional double high_price = 13;
+  optional double low_price = 14;
+  optional double close_price = 15;
+  optional double settlement_price = 16;
+  optional bool has_settlement_price = 17;
+  optional uint64 volume = 18;
+  optional uint64 num_trades = 19;
+}
+
+message ProbeTimeBarsResponse {
+  repeated TimeBarProbeRow rows = 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -398,6 +439,8 @@ message Frame {
     SubscribeOrderUpdatesRequest subscribe_order_updates = 28;
     GetFrontMonthRequest get_front_month = 29;
     GetReferenceDataRequest get_reference_data = 30;
+    UnsubscribeBookRequest unsubscribe_book = 31;
+    ProbeTimeBarsRequest probe_time_bars = 32;
 
     Ack ack = 50;
     ErrorResponse error = 51;
@@ -405,6 +448,7 @@ message Frame {
     ReferenceDataResponse reference_data_response = 53;
     LoadTicksResponse load_ticks_response = 54;
     LoadTimeBarsResponse load_time_bars_response = 55;
+    ProbeTimeBarsResponse probe_time_bars_response = 56;
 
     Event event = 90;
   }

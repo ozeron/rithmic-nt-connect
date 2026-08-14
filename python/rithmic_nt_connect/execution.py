@@ -62,6 +62,17 @@ from rithmic_nt_connect.errors import CHANNEL_ERRORS
 from rithmic_nt_connect.errors import VenueQueryUnavailable
 from rithmic_nt_connect.providers import RithmicInstrumentProvider
 from rithmic_nt_connect.session import WireSession
+from rithmic_gateway import GatewayError
+
+# After OrderSubmitted, these gateway codes mean "unknown / in flight" — never
+# OrderRejected (adapter conventions: transport/timeout stay unknown).
+_UNKNOWN_GATEWAY_CODES = frozenset(
+    {"timeout", "eof", "desync", "not_connected", "venue_unknown"}
+)
+
+
+def _is_unknown_gateway(exc: BaseException) -> bool:
+    return isinstance(exc, GatewayError) and exc.code in _UNKNOWN_GATEWAY_CODES
 
 
 _POSITION_SIDE = {
@@ -556,6 +567,19 @@ class RithmicExecutionClient(LiveExecutionClient):
             )
             return
 
+        # Gateway parent trading gate: deny locally before OrderSubmitted
+        # (AGENTS.md: pre-send local failure is deny, not a venue reject).
+        if getattr(self._session, "trading_enabled", True) is False:
+            self._log_trading_disabled("submit_order (parent gateway)")
+            self.generate_order_rejected(
+                order.strategy_id,
+                order.instrument_id,
+                order.client_order_id,
+                "Rithmic parent gateway trading disabled",
+                self._clock.timestamp_ns(),
+            )
+            return
+
         user_tag = order.client_order_id.value
         self._tag_to_client[user_tag] = order.client_order_id
         price = float(order.price) if order.has_price else None
@@ -585,6 +609,11 @@ class RithmicExecutionClient(LiveExecutionClient):
                 trail_by_price_id,
             )
         except Exception as exc:  # noqa: BLE001
+            if _is_unknown_gateway(exc):
+                self._log.warning(
+                    f"place_order transport unknown (order left in flight): {exc}"
+                )
+                return
             self._tag_to_client.pop(user_tag, None)
             self.generate_order_rejected(
                 order.strategy_id,
@@ -698,6 +727,11 @@ class RithmicExecutionClient(LiveExecutionClient):
                 trail_by_ticks,
             )
         except Exception as exc:  # noqa: BLE001
+            if _is_unknown_gateway(exc):
+                self._log.warning(
+                    f"modify_order transport unknown (order left in flight): {exc}"
+                )
+                return
             self.generate_order_modify_rejected(
                 command.strategy_id,
                 command.instrument_id,
@@ -747,6 +781,11 @@ class RithmicExecutionClient(LiveExecutionClient):
         try:
             await asyncio.to_thread(self._session.cancel_order, venue_id)
         except Exception as exc:  # noqa: BLE001
+            if _is_unknown_gateway(exc):
+                self._log.warning(
+                    f"cancel_order transport unknown (order left in flight): {exc}"
+                )
+                return
             self.generate_order_cancel_rejected(
                 command.strategy_id,
                 command.instrument_id,

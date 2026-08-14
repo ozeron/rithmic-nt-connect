@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Mapping, MutableMapping
 
@@ -23,6 +24,26 @@ from rithmic_nt_connect.constants import (
 
 class ConfigError(ValueError):
     """Raised when session / client configuration is incomplete or invalid."""
+
+
+class ConnectMode(StrEnum):
+    """How this process opens Rithmic (required; no silent default)."""
+
+    DIRECT = "direct"
+    GATEWAY = "gateway"
+
+
+def parse_connect_mode(value: ConnectMode | str) -> ConnectMode:
+    """Coerce env / constructor input to ``ConnectMode``."""
+    if isinstance(value, ConnectMode):
+        return value
+    raw = str(value).strip().lower()
+    try:
+        return ConnectMode(raw)
+    except ValueError as exc:
+        raise ConfigError(
+            f"invalid connect_mode {value!r}; expected 'direct' or 'gateway'"
+        ) from exc
 
 
 def _require_nonempty(name: str, value: str | None) -> str:
@@ -49,12 +70,23 @@ def env_truthy(value: str | None, *, default: bool = False) -> bool:
     return value.strip().lower() in _ENV_TRUTHY
 
 
-def _session_mode_fields(env: Mapping[str, str]) -> dict[str, Any]:
-    mode = (_env_first(env, "RITHMIC_SESSION_MODE") or "direct").strip().lower()
+def _connect_mode_fields(env: Mapping[str, str]) -> dict[str, Any]:
+    raw = _env_first(env, "RITHMIC_CONNECT_MODE")
+    if raw is None or not str(raw).strip():
+        raise ConfigError(
+            "missing RITHMIC_CONNECT_MODE; set to 'direct' (in-process plants) "
+            "or 'gateway' (shared rithmic-gateway)"
+        )
     auto_raw = env.get("RITHMIC_GATEWAY_AUTO_SPAWN")
     auto = True if auto_raw is None else env_truthy(auto_raw, default=True)
+    try:
+        mode = parse_connect_mode(raw)
+    except ConfigError as exc:
+        raise ConfigError(
+            f"invalid RITHMIC_CONNECT_MODE {raw!r}; expected direct or gateway"
+        ) from exc
     return {
-        "session_mode": mode,
+        "connect_mode": mode,
         "gateway_listen": _env_first(env, "RITHMIC_GATEWAY_LISTEN"),
         "gateway_auto_spawn": auto,
         "gateway_auth_token": _env_first(env, "RITHMIC_GATEWAY_AUTH_TOKEN") or "",
@@ -106,6 +138,8 @@ class SessionConfig:
 
     user: str
     password: str
+    # Required: how this process opens Rithmic (no silent default).
+    connect_mode: ConnectMode
     system_name: str = DEFAULT_SYSTEM_NAME
     url: str = DEFAULT_GATEWAY_URL
     app_name: str = DEFAULT_APP_NAME
@@ -117,8 +151,6 @@ class SessionConfig:
     ib_id: str | None = None
     symbol: str | None = None
     exchange: str | None = None
-    # Dual-mode session broker (direct = in-process PyO3; gateway = rithmic_gateway client).
-    session_mode: str = "direct"
     gateway_listen: str | None = None
     gateway_auto_spawn: bool = True
     gateway_auth_token: str = ""
@@ -135,10 +167,7 @@ class SessionConfig:
         if env not in {"Live", "Demo", "Test"}:
             raise ConfigError(f"invalid env {env!r}; expected Live, Demo, or Test")
         self.env = env
-        mode = (self.session_mode or "direct").strip().lower()
-        if mode not in {"direct", "gateway"}:
-            raise ConfigError(f"invalid session_mode {self.session_mode!r}; expected direct or gateway")
-        self.session_mode = mode
+        self.connect_mode = parse_connect_mode(self.connect_mode)
         if self.beta_url is None or not str(self.beta_url).strip():
             self.beta_url = self.url
 
@@ -146,8 +175,9 @@ class SessionConfig:
         return (
             "SessionConfig("
             f"user={self.user!r}, password='***', system_name={self.system_name!r}, "
-            f"url={self.url!r}, env={self.env!r}, app_name={self.app_name!r}, "
-            f"app_version={self.app_version!r}, account_id={self.account_id!r})"
+            f"url={self.url!r}, env={self.env!r}, connect_mode={self.connect_mode.value!r}, "
+            f"app_name={self.app_name!r}, app_version={self.app_version!r}, "
+            f"account_id={self.account_id!r})"
         )
 
     def has_account(self) -> bool:
@@ -168,7 +198,7 @@ class SessionConfig:
             "ib_id": self.ib_id,
             "symbol": self.symbol,
             "exchange": self.exchange,
-            "session_mode": self.session_mode,
+            "connect_mode": self.connect_mode.value,
             "gateway_listen": self.gateway_listen,
             "gateway_auto_spawn": self.gateway_auto_spawn,
         }
@@ -249,7 +279,7 @@ class SessionConfig:
                 ib_id=ib_id,
                 symbol=symbol,
                 exchange=exchange,
-                **_session_mode_fields(env),
+                **_connect_mode_fields(env),
             )
 
         if _env_first(env, "RITHMIC_LIVE_USER"):
@@ -279,7 +309,7 @@ class SessionConfig:
                 ib_id=_env_first(env, "RITHMIC_LIVE_IB_ID", "RITHMIC_IB_ID"),
                 symbol=_env_first(env, "RITHMIC_SYMBOL", "SYMBOL"),
                 exchange=_env_first(env, "RITHMIC_EXCHANGE", "EXCHANGE"),
-                **_session_mode_fields(env),
+                **_connect_mode_fields(env),
             )
 
         if _env_first(env, "RITHMIC_DEMO_USER"):
@@ -307,7 +337,7 @@ class SessionConfig:
                 ib_id=_env_first(env, "RITHMIC_DEMO_IB_ID", "RITHMIC_IB_ID"),
                 symbol=_env_first(env, "RITHMIC_SYMBOL", "SYMBOL"),
                 exchange=_env_first(env, "RITHMIC_EXCHANGE", "EXCHANGE"),
-                **_session_mode_fields(env),
+                **_connect_mode_fields(env),
             )
 
         raise ConfigError(

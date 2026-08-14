@@ -47,7 +47,7 @@ def _shared_session(
     plants: str,
 ) -> WireSession:
     key = (
-        f"{config_session.session_mode}:{config_session.user}:{config_session.system_name}:"
+        f"{config_session.connect_mode}:{config_session.user}:{config_session.system_name}:"
         f"{config_session.url}:{config_session.account_id}:{config_session.fcm_id}:"
         f"{config_session.ib_id}:{config_session.gateway_listen}"
     )

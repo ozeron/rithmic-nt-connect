@@ -1,8 +1,10 @@
 //! Listen URL parsing and unix bind helpers.
 
+use std::fs::OpenOptions;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+use fs2::FileExt;
 use thiserror::Error;
 use tokio::net::UnixListener;
 
@@ -73,20 +75,21 @@ impl ListenEndpoint {
 }
 
 /// Default unix listen path for credentials.
-pub fn default_unix_path(user: &str, system_name: &str, url: &str) -> PathBuf {
-    let base = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
-    let key = format!("{user}|{system_name}|{url}");
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for b in key.as_bytes() {
-        hash ^= u64::from(*b);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    base.join(format!("rithmic-gateway-{hash}.sock"))
+pub fn default_unix_path(user: &str, system_name: &str, url: &str, env: &str) -> PathBuf {
+    let base = crate::runtime_dir::runtime_base_dir();
+    let hash = crate::singleton::credential_key_hash(user, system_name, url, env);
+    // Short filename (`rgw-<decimal>.sock`) keeps paths under macOS SUN_LEN.
+    let path = base.join(format!("rgw-{hash}.sock"));
+    crate::runtime_dir::clamp_unix_path(path, hash)
 }
 
-/// Bind a unix listener at `path` with mode 0600. Unlinks stale socket first.
+/// Bind a unix listener at `path` with mode 0600.
+///
+/// Refuses to steal a live socket: if `path` already accepts connections,
+/// returns an error. Stale (non-listening) paths are unlinked first.
+///
+/// A sibling `.bindlock` flock serializes the connect-or-unlink + bind
+/// critical section so two parents cannot race past each other.
 pub async fn bind_unix(path: &Path) -> Result<UnixListener, ListenError> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
@@ -96,15 +99,68 @@ pub async fn bind_unix(path: &Path) -> Result<UnixListener, ListenError> {
                 source,
             })?;
     }
+
+    let bindlock_path = bindlock_path(path);
+    let path_buf = path.to_path_buf();
+    tokio::task::spawn_blocking(move || bind_unix_locked(&path_buf, &bindlock_path))
+        .await
+        .map_err(|e| ListenError::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::other(format!("bindlock join: {e}")),
+        })?
+}
+
+fn bindlock_path(sock: &Path) -> PathBuf {
+    let mut s = sock.as_os_str().to_os_string();
+    s.push(".bindlock");
+    PathBuf::from(s)
+}
+
+fn bind_unix_locked(path: &Path, bindlock_path: &Path) -> Result<UnixListener, ListenError> {
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(bindlock_path)
+        .map_err(|source| ListenError::Io {
+            path: bindlock_path.to_path_buf(),
+            source,
+        })?;
+    lock_file
+        .lock_exclusive()
+        .map_err(|source| ListenError::Io {
+            path: bindlock_path.to_path_buf(),
+            source,
+        })?;
+    // Keep lock_file in scope until bind completes.
+    let _bindlock = lock_file;
+
     if path.exists() {
-        tokio::fs::remove_file(path)
-            .await
-            .map_err(|source| ListenError::Io {
-                path: path.to_path_buf(),
-                source,
-            })?;
+        match std::os::unix::net::UnixStream::connect(path) {
+            Ok(_live) => {
+                return Err(ListenError::Invalid(format!(
+                    "unix listen path {} is already accepting connections; refuse to steal",
+                    path.display()
+                )));
+            }
+            Err(_) => {
+                std::fs::remove_file(path).map_err(|source| ListenError::Io {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+            }
+        }
     }
-    let listener = UnixListener::bind(path).map_err(|source| ListenError::Io {
+
+    // Owner-only create: tighten umask around bind so the sock is never
+    // briefly world/group-accessible before chmod.
+    // SAFETY: umask is process-global; restore immediately after bind.
+    let old_umask = unsafe { libc::umask(0o077) };
+    let bind_result = UnixListener::bind(path);
+    unsafe {
+        libc::umask(old_umask);
+    }
+    let listener = bind_result.map_err(|source| ListenError::Io {
         path: path.to_path_buf(),
         source,
     })?;
@@ -126,14 +182,27 @@ pub async fn bind_unix(path: &Path) -> Result<UnixListener, ListenError> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn parses_unix_absolute() {
-        let ep = ListenEndpoint::parse("unix:///tmp/rithmic.sock").unwrap();
-        assert_eq!(ep, ListenEndpoint::Unix(PathBuf::from("/tmp/rithmic.sock")));
-    }
+#[test]
+fn parses_unix_absolute() {
+    let ep = ListenEndpoint::parse("unix:///tmp/rithmic.sock").unwrap();
+    assert_eq!(ep, ListenEndpoint::Unix(PathBuf::from("/tmp/rithmic.sock")));
+}
 
-    #[test]
-    fn rejects_tls_until_v2() {
+#[test]
+fn default_unix_path_matches_python_fnv_fixture() {
+    // Keep in sync with tests/test_rithmic_gateway_client.py::test_default_unix_path_rust_parity
+    let path = default_unix_path(
+        "alice",
+        "LucidTrading",
+        "wss://rprotocol.rithmic.com:443",
+        "Live",
+    );
+    let name = path.file_name().unwrap().to_string_lossy();
+    assert_eq!(name, "rgw-13146466402466778522.sock");
+}
+
+#[test]
+fn rejects_tls_until_v2() {
         let err = ListenEndpoint::parse("tls://0.0.0.0:7600").unwrap_err();
         assert!(matches!(err, ListenError::RemoteNotImplemented(_)));
     }

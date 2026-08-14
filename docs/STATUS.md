@@ -22,7 +22,7 @@ Acceptance: **NQ / CME via LucidTrading**. One Rithmic login (close MotiveWave /
 | Environments | `SessionConfig.env` Live / Demo / Test | **Done**. LucidTrading + `wss://rprotocol.rithmic.com:443`. |
 | Account modes | Margin + `OmsType.NETTING`; trading gated | **Partial**. `enable_trading=False` default. Trading / PnL still require FCM / IB / account triple. |
 | Live trades / quotes | `TradeTick`, `QuoteTick` | **Done** |
-| Order-book summary | `OrderBookDeltas` (L2) | **Partial** — snapshot flags `F_SNAPSHOT` / `F_LAST`. No dedicated book-unsubscribe wire (intent dropped only). |
+| Order-book summary | `OrderBookDeltas` (L2) | **Partial** — snapshot flags `F_SNAPSHOT` / `F_LAST`. Book unsubscribe wired through plants/gateway/direct. |
 | History ticks / time bars | Request path, `*_all` | **Done** — Rust slices (15m ticks / 4h bars), transient + empty retry, sort/dedup. Daily/weekly replay uses calendar `YYYYMMDD` indexes (Lucid 2026-08-13). Python `load_front_month_instrument` / `load_trade_ticks` / `load_time_bars`. |
 | Live venue `EXTERNAL` bars | 1m / 15m / 1h / 1d | **Partial** — history `request_bars` + history-plant `subscribe_time_bar_updates`. Not Lucid-proven. 1s stays INTERNAL. |
 | Depth-by-order / L3 MBO | Not advertised | **N/A** until a separate slice |
@@ -34,8 +34,8 @@ Acceptance: **NQ / CME via LucidTrading**. One Rithmic login (close MotiveWave /
 | Submit / cancel / modify + fills | Gated order plant | **Partial** — on `main`; post-send errors reported as reject; untracked notifications dropped. **Close-out.** |
 | Order status reports | Cache-backed only | **Done** (honest: not a venue snapshot) |
 | Fill reports | Query unavailable | **Done** (`VenueQueryUnavailable`) |
-| Reconnect + MD resubscribe | Planned | **Partial** — ticker poll resyncs last-trade/BBO + book + EXTERNAL bar intent. Not live-proven. |
-| Session gateway (shared login) | Direct default + unix gateway | **Partial** — `rithmic-plants` / `rithmic-gateway` / `python/rithmic_gateway`; flock; dual-mode adapter. Unit/mock green. Not Lucid multi-process proven → stay Partial. Native TLS remote **N/A** (see [`gateway-remote.md`](references/gateway-remote.md)). |
+| Reconnect + MD resubscribe | Planned | **Partial** — ticker poll resyncs last-trade/BBO + book + EXTERNAL bar intent. Gateway typed restore covers ticker/book/bars/PnL/order after plant drop. Not Lucid-proven. |
+| Session gateway (shared login) | `connect_mode` required (`direct` / `gateway`) | **Partial** — plants/session parity on wire (incl. book unsub, `probe_time_bars`, ensure_order). Auto-spawn idle-exit after last client (`RITHMIC_GATEWAY_IDLE_EXIT_SEC`, default 5s via spawn; unset = never for standalone). Shared-consumer Lucid smoke green. Native TLS remote **N/A**. |
 | Python v2 / LiveNode | Not this support line | **N/A** |
 
 **Protocol boundaries:** ticker, history, PnL, order plants. Public MD vs private exec.
@@ -46,6 +46,8 @@ Acceptance: **NQ / CME via LucidTrading**. One Rithmic login (close MotiveWave /
 | --- | --- |
 | `cargo test -p rithmic-plants -p rithmic-gateway -p rithmic-nt-connect` + `pytest -q` | Unit / conversion / gateway framing |
 | `scripts/smoke_lucid_nq.py` | Live MD (exit `2` if no creds) |
+| `scripts/smoke_gateway_shared_ticks.py` | Two consumers (NQ+MNQ) share one `rithmic-gateway` (exit `2` if no creds) |
+| `scripts/gateway_tick_consumer.py` | Single-symbol gateway tick consumer (used by shared smoke) |
 | `scripts/verify_live_vs_history.py` | Live ↔ history compare |
 | `scripts/verify_order_dry_run.py` | Order plant connect / subscribe; **no** `--live-place` until `app_name` |
 | `examples/live_nq_intraday_sandbox.py` | Live Rithmic MD + Nautilus sandbox exec (no Rithmic place) |
@@ -75,7 +77,7 @@ Acceptance: **NQ / CME via LucidTrading**. One Rithmic login (close MotiveWave /
 ### Phase 3: Market data
 
 - [x] Live last-trade + BBO; history request (sliced `*_all`); book summary subscribe
-- [~] Book snapshot flags set; no book-unsubscribe wire; ticker resync unit-tested, not live-proven
+- [x] Book snapshot flags set; book-unsubscribe wired (plants + gateway + data client); ticker resync unit-tested, not live-proven
 - [~] **Exit:** not claimed until close-out 4 is live-proven
 
 ### Phase 4: Execution
@@ -126,9 +128,9 @@ Cross-cutting items from [`references/nautilus-adapter-conventions.md`](referenc
 | One convert boundary; reject closed-set unknowns | [x] | `_convert.py` / `_orders.py` |
 | `ts_event` venue / `ts_init` clock | [x] | |
 | Book `F_LAST` / `F_SNAPSHOT` | [x] | Snapshot envelope; last delta includes `F_LAST` |
-| Subscribe intent vs confirm | [~] | Ticks/quotes tracked; book unsub drops intent only |
+| Subscribe intent vs confirm | [~] | Ticks/quotes tracked; book unsubscribe wired (plants/gateway/direct) |
 | Request always completes | [x] | History path; Rust empty window → `[]` |
-| Reconnect restores intent | [~] | Ticker resync unit-tested; not live-proven |
+| Reconnect restores intent | [~] | Ticker resync unit-tested; gateway typed restore (ticker/book/bars/PnL/order); not Lucid-proven |
 | Partial connect teardown | [x] | Order-plant subscribe fail |
 | Three outcome classes | [ ] | Close-out 2 |
 | Tracked vs external reports | [ ] | Close-out 2 |
@@ -144,7 +146,7 @@ Cross-cutting items from [`references/nautilus-adapter-conventions.md`](referenc
 
 Do not mark Phase 3, 4, or 7 `[x]` until the matching items are proven.
 
-1. **Book unsubscribe wire** — intent is dropped; no plant unsub (do not ticker-unsubscribe). Incremental book updates N/A (summary snapshots only).
+1. **Incremental book updates** — summary snapshots only (L2); L3 MBO N/A.
 2. **Execution honesty** — three evidence classes; untracked → reports; fill query stays unavailable; dedup by venue id.
 3. **Account auto-discovery** — [`plans/2026-08-13-001-account-auto-discovery-plan.md`](plans/2026-08-13-001-account-auto-discovery-plan.md).
 4. **Live-prove ticker resync** on LucidTrading (code + unit test landed).

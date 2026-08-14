@@ -4,6 +4,7 @@
 use rithmic_plants::dto::{
     AccountPnlDto, BboDto, FrontMonthDto, HistoryBarDto, HistoryTickDto, InstrumentPnlDto,
     LastTradeDto, OrderBookDto, OrderNotificationDto, PlantEvent, ReferenceDataDto,
+    TimeBarProbeRow,
 };
 
 use crate::pb;
@@ -186,8 +187,32 @@ pub fn reference_data_to_pb(r: ReferenceDataDto) -> pb::ReferenceDataResponse {
         expiration_date: r.expiration_date,
         tick_size: r.tick_size,
         point_value: r.point_value,
-        price_precision: r.price_precision as i32,
-        is_tradable: r.is_tradable,
+        price_precision: Some(r.price_precision as i32),
+        is_tradable: Some(r.is_tradable),
+    }
+}
+
+pub fn time_bar_probe_row_to_pb(r: TimeBarProbeRow) -> pb::TimeBarProbeRow {
+    pb::TimeBarProbeRow {
+        variant: r.variant,
+        source: r.source,
+        error: r.error,
+        rp_code: r.rp_code,
+        parsed: r.parsed,
+        skip_reason: r.skip_reason,
+        symbol: r.symbol,
+        exchange: r.exchange,
+        bar_type: r.bar_type,
+        period: r.period,
+        marker: r.marker,
+        open_price: r.open_price,
+        high_price: r.high_price,
+        low_price: r.low_price,
+        close_price: r.close_price,
+        settlement_price: r.settlement_price,
+        has_settlement_price: r.has_settlement_price,
+        volume: r.volume,
+        num_trades: r.num_trades,
     }
 }
 

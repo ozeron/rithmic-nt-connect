@@ -286,6 +286,22 @@ impl RithmicSession {
         Ok(())
     }
 
+    /// Unsubscribe order-book summary (does not drop LastTrade/BBO).
+    pub async fn unsubscribe_order_book_summary(
+        &self,
+        symbol: &str,
+        exchange: &str,
+    ) -> Result<()> {
+        let handle = self.ticker_handle()?;
+        check_response(
+            handle
+                .unsubscribe_order_book_summary(symbol, exchange)
+                .await?,
+            "unsubscribe_order_book_summary",
+        )?;
+        Ok(())
+    }
+
     /// Fetch instrument reference data for a trading symbol/exchange.
     pub async fn get_reference_data(
         &self,

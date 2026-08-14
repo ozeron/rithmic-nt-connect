@@ -21,11 +21,24 @@ impl ClientId {
     }
 }
 
+impl Default for ClientId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Subscription key for MD / history live feeds.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SubKey {
     pub symbol: String,
     pub exchange: String,
+}
+
+impl SubKey {
+    /// Internal sentinel topics (`__pnl__`, `__order__`, …) are not venue symbols.
+    pub fn is_internal(&self) -> bool {
+        self.symbol.starts_with("__")
+    }
 }
 
 /// Fan-out hub: one broadcast channel per sub key + per-client receivers.
@@ -106,16 +119,10 @@ impl ClientQueue {
     }
 
     pub async fn recv(&mut self) -> Result<bytes::Bytes, ClientQueueError> {
-        loop {
-            match self.rx.recv().await {
-                Ok(b) => return Ok(b),
-                Err(broadcast::error::RecvError::Lagged(_)) => {
-                    return Err(ClientQueueError::Overflow);
-                }
-                Err(broadcast::error::RecvError::Closed) => {
-                    return Err(ClientQueueError::Closed);
-                }
-            }
+        match self.rx.recv().await {
+            Ok(b) => Ok(b),
+            Err(broadcast::error::RecvError::Lagged(_)) => Err(ClientQueueError::Overflow),
+            Err(broadcast::error::RecvError::Closed) => Err(ClientQueueError::Closed),
         }
     }
 }

@@ -363,7 +363,7 @@ tests/…                                # gateway + adapter
 
 ## Open Questions
 
-- Deferred: idle-exit after last client (recommend stay until SIGTERM v1).
+- ~~Deferred: idle-exit after last client~~ — done: `RITHMIC_GATEWAY_IDLE_EXIT_SEC` (bin default never; auto-spawn injects 5s grace).
 - Deferred: whether direct-mode flock helper lives in `rithmic-plants` vs small `rithmic-gateway` client lib used by PyO3 (implementer picks; same lock key).
 - Deferred: v2 token storage (env vs file mode 0600) — document both in remote doc when implementing.
 

@@ -5,9 +5,20 @@ Plant-level dicts only — conversion to Nautilus types stays in data/execution 
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 from rithmic_gateway import GatewayClient, GatewayConfig, GatewayError
+
+T = TypeVar("T")
+
+
+def _call(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+    """Propagate gateway errors with ``code`` intact (timeouts must stay unknown)."""
+    try:
+        return fn(*args, **kwargs)
+    except GatewayError:
+        raise
 
 
 class GatewayWireSession:
@@ -15,40 +26,47 @@ class GatewayWireSession:
 
     def __init__(self, client: GatewayClient) -> None:
         self._client = client
-        self._connected = False
+
+    @property
+    def trading_enabled(self) -> bool:
+        """Parent Ready.trading_enabled (read-only; clients cannot elevate)."""
+        return self._client.trading_enabled
+
+    @property
+    def cancel_all_enabled(self) -> bool:
+        return self._client.cancel_all_enabled
 
     def connect(self) -> None:
-        self._client.connect()
-        self._connected = True
+        _call(self._client.connect)
 
     def disconnect(self) -> None:
-        self._client.disconnect()
-        self._connected = False
+        _call(self._client.disconnect)
 
     def subscribe(self, symbol: str, exchange: str) -> None:
-        self._client.subscribe(symbol, exchange)
+        _call(self._client.subscribe, symbol, exchange)
 
     def unsubscribe(self, symbol: str, exchange: str) -> None:
-        self._client.unsubscribe(symbol, exchange)
+        _call(self._client.unsubscribe, symbol, exchange)
 
     def subscribe_order_book_summary(self, symbol: str, exchange: str) -> None:
-        self._client.subscribe_order_book_summary(symbol, exchange)
+        _call(self._client.subscribe_order_book_summary, symbol, exchange)
+
+    def unsubscribe_order_book_summary(self, symbol: str, exchange: str) -> None:
+        _call(self._client.unsubscribe_order_book_summary, symbol, exchange)
 
     def get_front_month(self, symbol: str, exchange: str) -> Any:
-        raise NotImplementedError("get_front_month over gateway RPC lands with full plant surface")
+        return _call(self._client.get_front_month, symbol, exchange)
 
     def get_reference_data(self, symbol: str, exchange: str) -> Any:
-        raise NotImplementedError(
-            "get_reference_data over gateway RPC lands with full plant surface"
-        )
+        return _call(self._client.get_reference_data, symbol, exchange)
 
     def poll_event(self, timeout_ms: int = 0) -> dict[str, Any] | None:
-        return self._client.poll_event(timeout_ms=timeout_ms)
+        return _call(self._client.poll_event, timeout_ms=timeout_ms)
 
     def load_ticks(
         self, symbol: str, exchange: str, start_ssboe: int, end_ssboe: int
     ) -> list[dict[str, Any]]:
-        raise NotImplementedError("load_ticks over gateway RPC lands with full plant surface")
+        return _call(self._client.load_ticks, symbol, exchange, start_ssboe, end_ssboe)
 
     def load_time_bars(
         self,
@@ -59,40 +77,66 @@ class GatewayWireSession:
         bar_type: int = 2,
         period: int = 1,
     ) -> list[dict[str, Any]]:
-        raise NotImplementedError("load_time_bars over gateway RPC lands with full plant surface")
+        return _call(
+            self._client.load_time_bars,
+            symbol,
+            exchange,
+            start_ssboe,
+            end_ssboe,
+            bar_type=bar_type,
+            period=period,
+        )
+
+    def probe_time_bars(
+        self,
+        symbol: str,
+        exchange: str,
+        start_ssboe: int,
+        end_ssboe: int,
+        bar_type: int = 2,
+        period: int = 1,
+    ) -> list[dict[str, Any]]:
+        return _call(
+            self._client.probe_time_bars,
+            symbol,
+            exchange,
+            start_ssboe,
+            end_ssboe,
+            bar_type=bar_type,
+            period=period,
+        )
 
     def subscribe_time_bars(self, symbol: str, exchange: str, bar_type: int, period: int) -> None:
-        raise NotImplementedError(
-            "subscribe_time_bars over gateway RPC lands with full plant surface"
-        )
+        _call(self._client.subscribe_time_bars, symbol, exchange, bar_type, period)
 
     def unsubscribe_time_bars(
         self, symbol: str, exchange: str, bar_type: int, period: int
     ) -> None:
-        raise NotImplementedError(
-            "unsubscribe_time_bars over gateway RPC lands with full plant surface"
-        )
+        _call(self._client.unsubscribe_time_bars, symbol, exchange, bar_type, period)
 
     def poll_history_event(self) -> dict[str, Any] | None:
-        return None
+        return _call(self._client.poll_history_event, timeout_ms=0)
 
     def subscribe_pnl(self) -> None:
-        pass
+        _call(self._client.subscribe_pnl)
 
     def disconnect_pnl_plant(self) -> None:
-        pass
+        _call(self._client.disconnect_pnl_plant)
 
     def ensure_pnl_plant(self) -> None:
-        pass
+        _call(self._client.ensure_pnl_plant)
+
+    def ensure_order_plant(self) -> None:
+        _call(self._client.ensure_order_plant)
 
     def poll_pnl_event(self) -> dict[str, Any] | None:
-        return None
+        return _call(self._client.poll_pnl_event, timeout_ms=0)
 
     def subscribe_order_updates(self) -> None:
-        pass
+        _call(self._client.subscribe_order_updates)
 
     def disconnect_order_plant(self) -> None:
-        pass
+        _call(self._client.disconnect_order_plant)
 
     def place_order(
         self,
@@ -108,25 +152,23 @@ class GatewayWireSession:
         trail_by_ticks: int | None = None,
         trail_by_price_id: int | None = None,
     ) -> None:
-        try:
-            self._client.place_order(
-                symbol,
-                exchange,
-                side,
-                price_type,
-                quantity,
-                user_tag=user_tag,
-                price=price,
-                trigger_price=trigger_price,
-                duration=duration,
-                trail_by_ticks=trail_by_ticks,
-                trail_by_price_id=trail_by_price_id,
-            )
-        except GatewayError as exc:
-            raise RuntimeError(str(exc)) from exc
+        _call(
+            self._client.place_order,
+            symbol,
+            exchange,
+            side,
+            price_type,
+            quantity,
+            user_tag=user_tag,
+            price=price,
+            trigger_price=trigger_price,
+            duration=duration,
+            trail_by_ticks=trail_by_ticks,
+            trail_by_price_id=trail_by_price_id,
+        )
 
     def cancel_order(self, basket_id: str) -> None:
-        raise NotImplementedError("cancel_order over gateway RPC lands with full plant surface")
+        _call(self._client.cancel_order, basket_id)
 
     def modify_order(
         self,
@@ -139,19 +181,26 @@ class GatewayWireSession:
         trigger_price: float | None = None,
         trail_by_ticks: int | None = None,
     ) -> None:
-        raise NotImplementedError("modify_order over gateway RPC lands with full plant surface")
+        _call(
+            self._client.modify_order,
+            basket_id,
+            symbol,
+            exchange,
+            quantity,
+            price_type,
+            price=price,
+            trigger_price=trigger_price,
+            trail_by_ticks=trail_by_ticks,
+        )
 
     def cancel_all_orders(self) -> None:
-        try:
-            self._client.cancel_all_orders()
-        except GatewayError as exc:
-            raise RuntimeError(str(exc)) from exc
+        _call(self._client.cancel_all_orders)
 
     def poll_order_event(self) -> dict[str, Any] | None:
-        return None
+        return _call(self._client.poll_order_event, timeout_ms=0)
 
     def request_plants(self, plants: str) -> None:
-        self._client.request_plants(plants)
+        _call(self._client.request_plants, plants)
 
 
 def gateway_config_from_session(session: Any) -> GatewayConfig:

@@ -6,7 +6,7 @@ How clients reach a `rithmic-gateway` parent that holds the single Rithmic login
 
 - Listen: `unix://$XDG_RUNTIME_DIR/rithmic-gateway-<hash>.sock` (mode `0600`)
 - Auth: same UID + optional empty `auth_token`; Handshake fingerprint must match parent
-- Only the gateway process (or direct mode with flock) opens Rithmic plants
+- Only the gateway process (or `connect_mode=direct` with flock) opens Rithmic plants
 
 ## v1.5 — tunnel (no protocol change)
 

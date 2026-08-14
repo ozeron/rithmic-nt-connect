@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from rithmic_nt_connect.config import ConfigError
+from rithmic_nt_connect.config import ConnectMode
 from rithmic_nt_connect.config import RithmicDataClientConfig
 from rithmic_nt_connect.config import RithmicExecClientConfig
 from rithmic_nt_connect.config import RithmicLiveDataClientConfig
@@ -26,6 +27,7 @@ __all__ = [
     "ADAPTER_NAME",
     "VENUE",
     "ConfigError",
+    "ConnectMode",
     "FrontMonthError",
     "SessionConfig",
     "RithmicDataClientConfig",

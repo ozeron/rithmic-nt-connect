@@ -39,7 +39,9 @@ fn cancel_all_denied_by_default() {
 }
 
 #[test]
-fn place_ack_when_trading_enabled() {
+fn place_ack_when_trading_enabled_no_session_is_gate_only() {
+    // session: None → Ack means the trading gate allowed the RPC, not that an
+    // order reached the venue. Venue place / venue_unknown need a live session.
     let gates = ParentGates {
         trading_enabled: true,
         cancel_all_enabled: false,
@@ -55,5 +57,19 @@ fn place_ack_when_trading_enabled() {
             ..Default::default()
         }),
     );
+    assert!(
+        matches!(body, Body::Ack(_)),
+        "gate-allowed place with no session must Ack (no-op), got {body:?}"
+    );
+}
+
+#[test]
+fn cancel_all_ack_when_enabled_no_session() {
+    let gates = ParentGates {
+        trading_enabled: false,
+        cancel_all_enabled: true,
+    };
+    let body = gate_rpc_for_test(&gates, Body::CancelAllOrders(CancelAllOrdersRequest {}));
     assert!(matches!(body, Body::Ack(_)));
 }
+

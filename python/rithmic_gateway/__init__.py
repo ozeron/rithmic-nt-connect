@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from rithmic_gateway.client import GatewayClient, GatewayError
 from rithmic_gateway.config import GatewayConfig
-from rithmic_gateway.flock import SessionLock, SessionLockError
+from rithmic_gateway.flock import SessionLock, SessionLockError, session_flock_held
 from rithmic_gateway.spawn import spawn_gateway
 
 __all__ = [
@@ -16,5 +16,6 @@ __all__ = [
     "GatewayError",
     "SessionLock",
     "SessionLockError",
+    "session_flock_held",
     "spawn_gateway",
 ]

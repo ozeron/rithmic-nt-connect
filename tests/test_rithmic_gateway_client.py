@@ -6,6 +6,7 @@ import os
 import socket
 import struct
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,7 @@ from rithmic_gateway.spawn import (
     curated_env,
     resolve_gateway_bin,
     spawn_argv,
+    spawn_gateway,
     SpawnError,
 )
 from rithmic_gateway.v1 import session_pb2 as pb
@@ -62,6 +64,141 @@ def test_curated_env_keeps_password_in_env_only() -> None:
     assert "OTHER" not in env
 
 
+def test_spawn_injects_idle_exit_sec_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_path = tmp_path / "rithmic-gateway"
+    bin_path.write_text("#!/bin/sh\n")
+    bin_path.chmod(0o755)
+    captured: dict[str, str] = {}
+
+    class _Proc:
+        pid = 99
+        returncode = None
+        stderr = None
+
+        def poll(self) -> int | None:
+            return None
+
+        def terminate(self) -> None:
+            pass
+
+    def _popen(*_a, **kwargs):  # type: ignore[no-untyped-def]
+        captured.update(kwargs.get("env") or {})
+        return _Proc()
+
+    monkeypatch.setattr("rithmic_gateway.spawn.subprocess.Popen", _popen)
+    monkeypatch.delenv("RITHMIC_GATEWAY_IDLE_EXIT_SEC", raising=False)
+    cfg = GatewayConfig(
+        user="u",
+        system_name="LucidTrading",
+        url="wss://example",
+        env="Live",
+        listen=f"unix://{tmp_path / 'g.sock'}",
+        gateway_bin=str(bin_path),
+        auto_spawn=True,
+    )
+    spawn_gateway(
+        cfg,
+        wait_socket=False,
+        environ={
+            "RITHMIC_USER": "u",
+            "RITHMIC_PASSWORD": "unit-test-secret-zz9",
+        },
+    )
+    assert captured.get("RITHMIC_GATEWAY_IDLE_EXIT_SEC") == "5"
+
+
+def test_spawn_preserves_explicit_idle_exit_sec(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_path = tmp_path / "rithmic-gateway"
+    bin_path.write_text("#!/bin/sh\n")
+    bin_path.chmod(0o755)
+    captured: dict[str, str] = {}
+
+    class _Proc:
+        pid = 99
+        returncode = None
+        stderr = None
+
+        def poll(self) -> int | None:
+            return None
+
+        def terminate(self) -> None:
+            pass
+
+    def _popen(*_a, **kwargs):  # type: ignore[no-untyped-def]
+        captured.update(kwargs.get("env") or {})
+        return _Proc()
+
+    monkeypatch.setattr("rithmic_gateway.spawn.subprocess.Popen", _popen)
+    cfg = GatewayConfig(
+        user="u",
+        system_name="LucidTrading",
+        url="wss://example",
+        env="Live",
+        listen=f"unix://{tmp_path / 'g.sock'}",
+        gateway_bin=str(bin_path),
+        auto_spawn=True,
+    )
+    spawn_gateway(
+        cfg,
+        wait_socket=False,
+        environ={
+            "RITHMIC_USER": "u",
+            "RITHMIC_PASSWORD": "unit-test-secret-zz9",
+            "RITHMIC_GATEWAY_IDLE_EXIT_SEC": "-1",
+        },
+    )
+    assert captured.get("RITHMIC_GATEWAY_IDLE_EXIT_SEC") == "-1"
+
+
+def test_spawn_preserves_zero_idle_exit_sec(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_path = tmp_path / "rithmic-gateway"
+    bin_path.write_text("#!/bin/sh\n")
+    bin_path.chmod(0o755)
+    captured: dict[str, str] = {}
+
+    class _Proc:
+        pid = 99
+        returncode = None
+        stderr = None
+
+        def poll(self) -> int | None:
+            return None
+
+        def terminate(self) -> None:
+            pass
+
+    def _popen(*_a, **kwargs):  # type: ignore[no-untyped-def]
+        captured.update(kwargs.get("env") or {})
+        return _Proc()
+
+    monkeypatch.setattr("rithmic_gateway.spawn.subprocess.Popen", _popen)
+    cfg = GatewayConfig(
+        user="u",
+        system_name="LucidTrading",
+        url="wss://example",
+        env="Live",
+        listen=f"unix://{tmp_path / 'g.sock'}",
+        gateway_bin=str(bin_path),
+        auto_spawn=True,
+    )
+    spawn_gateway(
+        cfg,
+        wait_socket=False,
+        environ={
+            "RITHMIC_USER": "u",
+            "RITHMIC_PASSWORD": "unit-test-secret-zz9",
+            "RITHMIC_GATEWAY_IDLE_EXIT_SEC": "0",
+        },
+    )
+    assert captured.get("RITHMIC_GATEWAY_IDLE_EXIT_SEC") == "0"
+
+
 def test_resolve_bin_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("RITHMIC_GATEWAY_BIN", raising=False)
     monkeypatch.setenv("PATH", str(tmp_path))
@@ -72,6 +209,164 @@ def test_resolve_bin_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
 def test_resolve_bin_explicit_missing(tmp_path: Path) -> None:
     with pytest.raises(SpawnError, match="not found"):
         resolve_gateway_bin(str(tmp_path / "missing-bin"))
+
+
+def test_spawn_happy_path_requires_flock_not_just_listen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Listening alone must not succeed — flock must also be held."""
+    bin_path = tmp_path / "rithmic-gateway"
+    bin_path.write_text("#!/bin/sh\nsleep 30\n")
+    bin_path.chmod(0o755)
+    sock = Path(f"/tmp/rgw-impostor-{os.getpid()}.sock")
+    if sock.exists():
+        sock.unlink()
+
+    # Impostor listener with no flock.
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(sock))
+    server.listen(1)
+
+    class _Proc:
+        pid = 1
+        returncode = None
+        stderr = None
+
+        def poll(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            pass
+
+        def kill(self) -> None:
+            pass
+
+        def wait(self, timeout: float | None = None) -> int:  # noqa: ARG002
+            return 0
+
+    monkeypatch.setattr("rithmic_gateway.spawn.subprocess.Popen", lambda *_a, **_k: _Proc())
+    cfg = GatewayConfig(
+        user="u-impostor",
+        system_name="LucidTrading",
+        url="wss://example",
+        env="Live",
+        listen=f"unix://{sock}",
+        gateway_bin=str(bin_path),
+        spawn_timeout_sec=0.4,
+    )
+    try:
+        with pytest.raises(SpawnError, match="timed out"):
+            spawn_gateway(
+                cfg,
+                wait_socket=True,
+                environ={
+                    "RITHMIC_USER": "u-impostor",
+                    "RITHMIC_PASSWORD": "unit-test-secret-zz9",
+                },
+            )
+    finally:
+        server.close()
+        if sock.exists():
+            sock.unlink()
+
+
+def test_client_handshake_auth_failed() -> None:
+    sock = Path(f"/tmp/rgw-auth-{os.getpid()}.sock")
+    if sock.exists():
+        sock.unlink()
+
+    def _serve() -> None:
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(sock))
+        server.listen(1)
+        server.settimeout(5.0)
+        conn, _ = server.accept()
+        with conn:
+            header = conn.recv(4)
+            (n,) = struct.unpack("!I", header)
+            _ = conn.recv(n)
+            err = pb.Frame(
+                error=pb.ErrorResponse(code="auth_failed", message="auth_token rejected")
+            )
+            conn.sendall(encode_frame(err.SerializeToString()))
+        server.close()
+
+    threading.Thread(target=_serve, daemon=True).start()
+    time.sleep(0.05)
+    cfg = GatewayConfig(
+        user="u",
+        system_name="LucidTrading",
+        url="wss://example",
+        listen=f"unix://{sock}",
+        auto_spawn=False,
+        attest_flock=False,
+        auth_token="bad",
+    )
+    client = GatewayClient(cfg, rpc_timeout_sec=2.0)
+    try:
+        with pytest.raises(GatewayError, match="auth_failed"):
+            client.connect()
+    finally:
+        if sock.exists():
+            sock.unlink()
+
+
+def test_load_ticks_adds_trade_price_aliases() -> None:
+    sock = Path(f"/tmp/rgw-ticks-{os.getpid()}.sock")
+    if sock.exists():
+        sock.unlink()
+
+    def _serve() -> None:
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(sock))
+        server.listen(1)
+        conn, _ = server.accept()
+        with conn:
+            header = conn.recv(4)
+            (n,) = struct.unpack("!I", header)
+            _ = conn.recv(n)  # handshake
+            conn.sendall(
+                encode_frame(pb.Frame(ready=pb.Ready(scopes=["md", "history"])).SerializeToString())
+            )
+            header = conn.recv(4)
+            (n,) = struct.unpack("!I", header)
+            req = pb.Frame()
+            req.ParseFromString(conn.recv(n))
+            tick = pb.HistoryTick(
+                symbol="NQ",
+                exchange="CME",
+                close_price=1.5,
+                num_trades=3,
+                ssboe=1,
+                usecs=0,
+            )
+            resp = pb.Frame(
+                request_id=req.request_id,
+                load_ticks_response=pb.LoadTicksResponse(ticks=[tick]),
+            )
+            conn.sendall(encode_frame(resp.SerializeToString()))
+        server.close()
+
+    threading.Thread(target=_serve, daemon=True).start()
+    time.sleep(0.05)
+    cfg = GatewayConfig(
+        user="u",
+        system_name="LucidTrading",
+        url="wss://example",
+        listen=f"unix://{sock}",
+        auto_spawn=False,
+        attest_flock=False,
+    )
+    client = GatewayClient(cfg, rpc_timeout_sec=2.0)
+    try:
+        client.connect()
+        rows = client.load_ticks("NQ", "CME", 1, 2)
+        assert rows[0]["trade_price"] == 1.5
+        assert int(rows[0]["trade_size"]) == 3
+        client.disconnect()
+    finally:
+        if sock.exists():
+            sock.unlink()
 
 
 def _serve_ready(sock_path: Path, *, trading: bool = False, cancel_all: bool = False) -> None:
@@ -150,6 +445,7 @@ def test_client_handshake_ready_and_place_denied() -> None:
             url="wss://example",
             listen=f"unix://{sock}",
             auto_spawn=False,
+            attest_flock=False,
         )
         client = GatewayClient(cfg)
         client.connect()
@@ -174,6 +470,7 @@ def test_client_cancel_all_denied() -> None:
             url="wss://example",
             listen=f"unix://{sock}",
             auto_spawn=False,
+            attest_flock=False,
         )
         client = GatewayClient(cfg)
         client.connect()
@@ -184,3 +481,416 @@ def test_client_cancel_all_denied() -> None:
         if sock.exists():
             sock.unlink()
 
+
+def _serve_event_then_ack(sock_path: Path) -> None:
+    """Push an Event before the correlated Ack to exercise RPC demux."""
+    if sock_path.exists():
+        sock_path.unlink()
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(sock_path))
+    server.listen(1)
+    server.settimeout(5.0)
+
+    def _run() -> None:
+        try:
+            conn, _ = server.accept()
+        except Exception:
+            server.close()
+            return
+        with conn:
+            header = conn.recv(4)
+            (n,) = struct.unpack("!I", header)
+            payload = conn.recv(n)
+            frame = pb.Frame()
+            frame.ParseFromString(payload)
+            assert frame.WhichOneof("body") == "handshake"
+            conn.sendall(
+                encode_frame(
+                    pb.Frame(
+                        ready=pb.Ready(scopes=["md"], trading_enabled=False, cancel_all_enabled=False)
+                    ).SerializeToString()
+                )
+            )
+            header = conn.recv(4)
+            (n,) = struct.unpack("!I", header)
+            payload = conn.recv(n)
+            req = pb.Frame()
+            req.ParseFromString(payload)
+            assert req.WhichOneof("body") == "subscribe"
+            # Intervening event (must not be treated as the RPC reply).
+            evt = pb.Frame(
+                request_id=0,
+                event=pb.Event(
+                    last_trade=pb.LastTrade(symbol="NQ", exchange="CME", trade_price=1.0)
+                ),
+            )
+            conn.sendall(encode_frame(evt.SerializeToString()))
+            ack = pb.Frame(request_id=req.request_id, ack=pb.Ack())
+            conn.sendall(encode_frame(ack.SerializeToString()))
+        server.close()
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def test_default_unix_path_rust_parity() -> None:
+    """Must match crates/rithmic-gateway listen::tests::default_unix_path_matches_python_fnv_fixture."""
+    path = default_unix_path(
+        "alice", "LucidTrading", "wss://rprotocol.rithmic.com:443", "Live"
+    )
+    assert path.endswith("rgw-13146466402466778522.sock")
+    assert len(path.encode()) <= 103
+
+
+def test_live_demo_paths_differ() -> None:
+    live = default_unix_path("u", "LucidTrading", "wss://x", "Live")
+    demo = default_unix_path("u", "LucidTrading", "wss://x", "Demo")
+    assert live != demo
+
+
+def test_auth_token_omitted_from_repr() -> None:
+    cfg = GatewayConfig(
+        user="u",
+        system_name="LucidTrading",
+        url="wss://example",
+        auth_token="super-secret-token",
+        auto_spawn=False,
+            attest_flock=False,
+        listen="unix:///tmp/rgw-repr.sock",
+    )
+    text = repr(cfg)
+    assert "super-secret-token" not in text
+    assert "auth_token" not in text
+
+
+def test_client_rpc_demuxes_intervening_events() -> None:
+    sock = Path(f"/tmp/rgw-test-{os.getpid()}-demux.sock")
+    try:
+        _serve_event_then_ack(sock)
+        cfg = GatewayConfig(
+            user="u",
+            system_name="LucidTrading",
+            url="wss://example",
+            listen=f"unix://{sock}",
+            auto_spawn=False,
+            attest_flock=False,
+        )
+        client = GatewayClient(cfg, rpc_timeout_sec=5.0)
+        client.connect()
+        client.subscribe("NQ", "CME")
+        evt = client.poll_event(timeout_ms=100)
+        assert evt is not None
+        assert evt["type"] == "last_trade"
+        assert evt["symbol"] == "NQ"
+        client.disconnect()
+    finally:
+        if sock.exists():
+            sock.unlink()
+
+
+def _serve_multi_event_wrong_error_then_ack(sock_path: Path) -> None:
+    if sock_path.exists():
+        sock_path.unlink()
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(sock_path))
+    server.listen(1)
+    server.settimeout(5.0)
+
+    def _run() -> None:
+        try:
+            conn, _ = server.accept()
+        except Exception:
+            server.close()
+            return
+        with conn:
+            header = conn.recv(4)
+            (n,) = struct.unpack("!I", header)
+            payload = conn.recv(n)
+            frame = pb.Frame()
+            frame.ParseFromString(payload)
+            assert frame.WhichOneof("body") == "handshake"
+            conn.sendall(
+                encode_frame(
+                    pb.Frame(
+                        ready=pb.Ready(
+                            scopes=["md"], trading_enabled=False, cancel_all_enabled=False
+                        )
+                    ).SerializeToString()
+                )
+            )
+            header = conn.recv(4)
+            (n,) = struct.unpack("!I", header)
+            payload = conn.recv(n)
+            req = pb.Frame()
+            req.ParseFromString(payload)
+            assert req.WhichOneof("body") == "subscribe"
+            # Multiple intervening events + a stale error for another rid.
+            for price in (1.0, 2.0):
+                evt = pb.Frame(
+                    request_id=0,
+                    event=pb.Event(
+                        last_trade=pb.LastTrade(
+                            symbol="NQ", exchange="CME", trade_price=price
+                        )
+                    ),
+                )
+                conn.sendall(encode_frame(evt.SerializeToString()))
+            stale_err = pb.Frame(
+                request_id=999,
+                error=pb.ErrorResponse(code="stale", message="other rpc"),
+            )
+            conn.sendall(encode_frame(stale_err.SerializeToString()))
+            # Also push pnl/order/history events for poll routing.
+            conn.sendall(
+                encode_frame(
+                    pb.Frame(
+                        request_id=0,
+                        event=pb.Event(account_pnl=pb.AccountPnl(account_id="A1")),
+                    ).SerializeToString()
+                )
+            )
+            conn.sendall(
+                encode_frame(
+                    pb.Frame(
+                        request_id=0,
+                        event=pb.Event(
+                            order_notification=pb.OrderNotification(source="order")
+                        ),
+                    ).SerializeToString()
+                )
+            )
+            conn.sendall(
+                encode_frame(
+                    pb.Frame(
+                        request_id=0,
+                        event=pb.Event(
+                            time_bar=pb.HistoryBar(symbol="NQ", exchange="CME")
+                        ),
+                    ).SerializeToString()
+                )
+            )
+            ack = pb.Frame(request_id=req.request_id, ack=pb.Ack())
+            conn.sendall(encode_frame(ack.SerializeToString()))
+        server.close()
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def test_client_rpc_rejects_uncorrelated_error_and_routes_polls() -> None:
+    sock = Path(f"/tmp/rgw-test-{os.getpid()}-demux2.sock")
+    try:
+        _serve_multi_event_wrong_error_then_ack(sock)
+        cfg = GatewayConfig(
+            user="u",
+            system_name="LucidTrading",
+            url="wss://example",
+            listen=f"unix://{sock}",
+            auto_spawn=False,
+            attest_flock=False,
+        )
+        client = GatewayClient(cfg, rpc_timeout_sec=5.0)
+        client.connect()
+        with pytest.raises(GatewayError) as ei:
+            client.subscribe("NQ", "CME")
+        assert ei.value.code == "protocol"
+        assert "999" in str(ei.value)
+        # Connection may still have buffered events from before the raise —
+        # reconnect for clean poll routing check via a second mock.
+        client.disconnect()
+    finally:
+        if sock.exists():
+            sock.unlink()
+
+
+def _serve_push_typed_events(sock_path: Path) -> None:
+    if sock_path.exists():
+        sock_path.unlink()
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(sock_path))
+    server.listen(1)
+    server.settimeout(5.0)
+
+    def _run() -> None:
+        try:
+            conn, _ = server.accept()
+        except Exception:
+            server.close()
+            return
+        with conn:
+            header = conn.recv(4)
+            (n,) = struct.unpack("!I", header)
+            payload = conn.recv(n)
+            frame = pb.Frame()
+            frame.ParseFromString(payload)
+            assert frame.WhichOneof("body") == "handshake"
+            conn.sendall(
+                encode_frame(
+                    pb.Frame(
+                        ready=pb.Ready(
+                            scopes=["md"], trading_enabled=False, cancel_all_enabled=False
+                        )
+                    ).SerializeToString()
+                )
+            )
+            # After handshake, client will poll — push typed events.
+            for frame_bytes in (
+                pb.Frame(
+                    event=pb.Event(last_trade=pb.LastTrade(symbol="NQ", exchange="CME"))
+                ).SerializeToString(),
+                pb.Frame(
+                    event=pb.Event(account_pnl=pb.AccountPnl(account_id="A1"))
+                ).SerializeToString(),
+                pb.Frame(
+                    event=pb.Event(order_notification=pb.OrderNotification(source="o"))
+                ).SerializeToString(),
+                pb.Frame(
+                    event=pb.Event(time_bar=pb.HistoryBar(symbol="NQ", exchange="CME"))
+                ).SerializeToString(),
+            ):
+                conn.sendall(encode_frame(frame_bytes))
+            # Keep connection open briefly for polls.
+            try:
+                conn.recv(1)
+            except Exception:
+                pass
+        server.close()
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def test_poll_routes_md_pnl_order_history() -> None:
+    sock = Path(f"/tmp/rgw-test-{os.getpid()}-poll.sock")
+    try:
+        _serve_push_typed_events(sock)
+        cfg = GatewayConfig(
+            user="u",
+            system_name="LucidTrading",
+            url="wss://example",
+            listen=f"unix://{sock}",
+            auto_spawn=False,
+            attest_flock=False,
+        )
+        client = GatewayClient(cfg, rpc_timeout_sec=5.0)
+        client.connect()
+        md = client.poll_event(timeout_ms=500)
+        pnl = client.poll_pnl_event(timeout_ms=500)
+        order = client.poll_order_event(timeout_ms=500)
+        hist = client.poll_history_event(timeout_ms=500)
+        assert md is not None and md["type"] == "last_trade"
+        assert pnl is not None and pnl["type"] == "account_pnl"
+        assert order is not None and order["type"] == "order_notification"
+        assert hist is not None and hist["type"] == "time_bar"
+        client.disconnect()
+    finally:
+        if sock.exists():
+            sock.unlink()
+
+
+
+def test_order_book_event_always_has_side_keys() -> None:
+    from rithmic_gateway.client import _event_to_dict
+
+    # Single-sided book: asks only — ListFields would omit bid_* without the fix.
+    evt = pb.Event(
+        order_book=pb.OrderBook(
+            symbol="NQ",
+            exchange="CME",
+            ask_price=[1.0],
+            ask_size=[2],
+        )
+    )
+    out = _event_to_dict(evt)
+    assert out["type"] == "order_book"
+    assert out["bid_price"] == []
+    assert out["bid_size"] == []
+    assert list(out["ask_price"]) == [1.0]
+    assert list(out["ask_size"]) == [2]
+
+
+def test_desync_nulls_sock_for_next_rpc() -> None:
+    """Partial-frame timeout must yield not_connected on the next call, not OSError."""
+    sock = Path(f"/tmp/rgw-test-{os.getpid()}-desync.sock")
+    if sock.exists():
+        sock.unlink()
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(sock))
+    server.listen(1)
+    server.settimeout(5.0)
+
+    def _run() -> None:
+        try:
+            conn, _ = server.accept()
+        except Exception:
+            server.close()
+            return
+        with conn:
+            header = conn.recv(4)
+            (n,) = struct.unpack("!I", header)
+            conn.recv(n)
+            conn.sendall(
+                encode_frame(
+                    pb.Frame(
+                        ready=pb.Ready(
+                            scopes=["md"], trading_enabled=False, cancel_all_enabled=False
+                        )
+                    ).SerializeToString()
+                )
+            )
+            # Accept Subscribe request, then send a partial length-prefixed frame
+            # so the client times out mid-payload and raises desync.
+            header = conn.recv(4)
+            (n,) = struct.unpack("!I", header)
+            conn.recv(n)
+            conn.sendall(struct.pack("!I", 100))  # claim 100 bytes
+            conn.sendall(b"\x00\x01")  # only 2 bytes — then stall until client closes
+            try:
+                conn.recv(1)
+            except Exception:
+                pass
+        server.close()
+
+    threading.Thread(target=_run, daemon=True).start()
+    try:
+        cfg = GatewayConfig(
+            user="u",
+            system_name="LucidTrading",
+            url="wss://example",
+            listen=f"unix://{sock}",
+            auto_spawn=False,
+            attest_flock=False,
+        )
+        client = GatewayClient(cfg, rpc_timeout_sec=0.3)
+        client.connect()
+        with pytest.raises(GatewayError) as ei:
+            client.subscribe("NQ", "CME")
+        assert ei.value.code == "desync"
+        with pytest.raises(GatewayError) as ei2:
+            client.subscribe("ES", "CME")
+        assert ei2.value.code == "not_connected"
+    finally:
+        if sock.exists():
+            sock.unlink()
+
+
+def test_runtime_base_dir_happy_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from rithmic_gateway.config import runtime_base_dir
+
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    path = runtime_base_dir()
+    assert path.endswith(f"rgw-{os.getuid()}")
+    assert (os.stat(path).st_mode & 0o777) == 0o700
+
+
+def test_clamp_unix_path_uses_private_dir_not_sticky_tmp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from rithmic_gateway.config import _clamp_unix_path
+
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    long = "/" + "x" * 120 + "/rgw-1.sock"
+    clamped = _clamp_unix_path(long, 0xABCDEF01)
+    assert f"/tmp/rgw-{os.getuid()}/" in clamped
+    assert clamped.endswith(".sock")
+    assert f"/tmp/rgw-{os.getuid()}-" not in clamped
