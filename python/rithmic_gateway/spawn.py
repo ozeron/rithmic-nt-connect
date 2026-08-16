@@ -40,8 +40,19 @@ class SpawnError(RuntimeError):
 
 
 def _bin_search_starts() -> list[Path]:
-    """Roots to walk for cargo ``target/`` binaries (cwd first, then package)."""
-    return [Path.cwd(), Path(__file__).resolve().parent]
+    """Roots to walk for cargo ``target/`` binaries.
+
+    Include the editable ``rithmic_nt_connect`` tree. The installed
+    ``rithmic_gateway`` wheel lives under ``.venv`` and has no ``target/``.
+    """
+    starts = [Path.cwd(), Path(__file__).resolve().parent]
+    try:
+        import rithmic_nt_connect
+
+        starts.append(Path(rithmic_nt_connect.__file__).resolve().parent)
+    except ImportError:
+        pass
+    return starts
 
 
 def _cargo_target_candidates(start: Path) -> list[Path]:

@@ -11,7 +11,7 @@ use rithmic_plants::PlantSet;
 
 use crate::convert::{
     order_key, pnl_key, front_month_to_pb, history_bar_to_pb, history_tick_to_pb,
-    reference_data_to_pb, time_bar_probe_row_to_pb,
+    order_notification_to_pb, reference_data_to_pb, time_bar_probe_row_to_pb,
 };
 use crate::pb::{self, frame::Body, Ack, ErrorResponse, Frame};
 use crate::reconnect::{ReconnectController, TimeBarIntent};
@@ -457,6 +457,37 @@ pub(super) async fn dispatch(state: &GatewayState, client: &mut ClientCtx, reque
                     body: Some(Body::ReferenceDataResponse(reference_data_to_pb(dto))),
                 },
                 Err(e) => err_to_frame(request_id, "get_reference_data_failed", e),
+            }
+        }
+        Body::LoadOrders(req) => {
+            // Order-plant login is a trading capability (KTD12): gate the same as
+            // EnsureOrder / SubscribeOrderUpdates so `RITHMIC_ENABLE_TRADING=0`
+            // cannot be bypassed via the recon RPC.
+            if !state.gates.trading_enabled {
+                return error_frame(
+                    request_id,
+                    "trading_disabled",
+                    "load_orders denied: parent trading disabled",
+                );
+            }
+            let Some(session) = &state.session else {
+                return no_session_frame(request_id);
+            };
+            let mut guard = session.lock().await;
+            match guard
+                .load_orders(req.start_time_sec, req.end_time_sec)
+                .await
+            {
+                Ok(events) => Frame {
+                    request_id,
+                    body: Some(Body::LoadOrdersResponse(pb::LoadOrdersResponse {
+                        events: events.into_iter().map(order_notification_to_pb).collect(),
+                    })),
+                },
+                Err(rithmic_plants::Error::ReconciliationUnavailable(msg)) => {
+                    error_frame(request_id, "reconciliation_unavailable", &msg)
+                }
+                Err(e) => err_to_frame(request_id, "load_orders_failed", e),
             }
         }
         Body::LoadTicks(req) => {

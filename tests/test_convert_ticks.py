@@ -118,11 +118,14 @@ def test_account_pnl_requires_account_id() -> None:
         account_pnl_to_fields({"account_balance": "1", "currency": "USD"})
 
 
-def test_account_pnl_requires_balance_and_currency() -> None:
-    with pytest.raises(ConvertError):
-        account_pnl_to_fields({"account_id": "A1"})
-    with pytest.raises(ConvertError):
-        account_pnl_to_fields({"account_id": "A1", "cash_on_hand": "1"})
+def test_account_pnl_defaults_currency_and_zero_balance() -> None:
+    fields = account_pnl_to_fields({"account_id": "A1"})
+    assert fields["currency"] == "USD"
+    assert fields["cash_on_hand"] == "0"
+    assert fields["account_balance"] == "0"
+    filled = account_pnl_to_fields({"account_id": "A1", "cash_on_hand": "1"})
+    assert filled["currency"] == "USD"
+    assert filled["cash_on_hand"] == "1"
 
 
 def test_order_book_fixture_to_fields() -> None:

@@ -16,6 +16,10 @@ pub enum Error {
     #[error("session error: {0}")]
     Session(String),
 
+    /// Session already connected (idempotent connect is safe to suppress).
+    #[error("already connected")]
+    AlreadyConnected,
+
     /// Plant subscription lagged; consumer must resync.
     #[error("channel lagged: {plant}")]
     ChannelLagged {
@@ -42,6 +46,16 @@ pub enum Error {
     /// Underlying rithmic-rs / plant error.
     #[error("rithmic error: {0}")]
     Rithmic(String),
+
+    /// Order-history recon cannot be answered authoritatively.
+    ///
+    /// Rithmic order history has no completion signal (rows stream on the
+    /// subscription channel with no end marker) and replays cap at 10,000
+    /// records with no truncation indication. A silence-window drain therefore
+    /// can never prove "venue has N and I got all N". Callers must fail closed
+    /// rather than treat a lossy drain as authoritative "venue empty".
+    #[error("order-history reconciliation unavailable: {0}")]
+    ReconciliationUnavailable(String),
 
     /// Unexpected message shape.
     #[error("protocol error: {0}")]

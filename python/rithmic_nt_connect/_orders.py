@@ -165,6 +165,7 @@ def order_notification_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
         "fill_price": d.get("fill_price"),
         "transaction_type": d.get("transaction_type"),
         "price_type": d.get("price_type"),
+        "duration": d.get("duration"),
         "fill_id": d.get("fill_id"),
         "text": d.get("text"),
         "report_text": d.get("report_text"),
@@ -227,14 +228,20 @@ def trade_id_from_fill_fields(fields: Mapping[str, Any], ts_event: int) -> str:
     return f"{basket}:{exch}:{ts_event}:{fill_sz}:{fill_px}"
 
 
-def fill_dedup_key(fields: Mapping[str, Any], *, ts_event: int) -> str | None:
-    """Stable fill identity when venue ``fill_id`` is present; else ``None`` (do not suppress)."""
-    fill_id = fields.get("fill_id")
-    if not fill_id:
-        return None
+def fill_dedup_key(fields: Mapping[str, Any], *, ts_event: int) -> str:
+    """Stable fill identity for the adapter's dedup store.
+
+    Prefers the venue ``fill_id``; falls back to the same composite
+    ``(basket, exchange, ts, size, px)`` used for ``TradeId`` so a fill the
+    venue never tagged is still deduped consistently with Nautilus (which
+    collapses identical trade ids downstream).
+    """
     acct = fields.get("account_id") or ""
     inst = fields.get("instrument_id") or ""
-    return f"{acct}|{inst}|{fill_id}"
+    fill_id = fields.get("fill_id")
+    if fill_id:
+        return f"{acct}|{inst}|{fill_id}"
+    return f"{acct}|{inst}|{trade_id_from_fill_fields(fields, ts_event)}"
 
 
 def order_side_from_notification(fields: Mapping[str, Any]) -> Any | None:

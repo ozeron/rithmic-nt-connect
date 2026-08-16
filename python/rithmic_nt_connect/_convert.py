@@ -106,25 +106,29 @@ def bbo_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
 
 def account_pnl_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
     """Map an AccountPnL venue dict to AccountState-oriented fields."""
+    from rithmic_nt_connect.constants import DEFAULT_ACCOUNT_CURRENCY
+
     _require(d, "account_id")
-    if d.get("cash_on_hand") is None and d.get("account_balance") is None:
-        raise ConvertError("missing cash_on_hand or account_balance")
-    if d.get("currency") is None:
-        raise ConvertError("missing currency")
+    cash = d.get("cash_on_hand")
+    balance = d.get("account_balance")
+    if cash is None and balance is None:
+        cash = "0"
+        balance = "0"
+    currency = d.get("currency") or DEFAULT_ACCOUNT_CURRENCY
     return {
         "type": "account_pnl",
         "account_id": str(d["account_id"]),
         "fcm_id": d.get("fcm_id"),
         "ib_id": d.get("ib_id"),
-        "account_balance": d.get("account_balance"),
-        "cash_on_hand": d.get("cash_on_hand"),
+        "account_balance": balance,
+        "cash_on_hand": cash,
         "margin_balance": d.get("margin_balance"),
         "day_pnl": d.get("day_pnl"),
         "open_position_pnl": d.get("open_position_pnl"),
         "closed_position_pnl": d.get("closed_position_pnl"),
         "available_buying_power": d.get("available_buying_power"),
         "used_buying_power": d.get("used_buying_power"),
-        "currency": d.get("currency"),
+        "currency": currency,
         "is_snapshot": d.get("is_snapshot"),
         "venue": VENUE,
     }
@@ -229,7 +233,13 @@ def instrument_pnl_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def time_bar_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
-    """Map a history_bar venue dict to Bar-oriented fields."""
+    """Map a history_bar venue dict to Bar-oriented fields.
+
+    ``ts_event`` is the venue **close** time. The close→open shift is applied by
+    ``fields_to_bar`` (which knows the authoritative Nautilus ``BarType``
+    duration) — NOT here, because the wire ``period`` unit (native vs seconds)
+    is not reliable.
+    """
     _require(d, "symbol", "open_price", "high_price", "low_price", "close_price", "volume")
     symbol = str(d["symbol"])
     exchange = d.get("exchange")

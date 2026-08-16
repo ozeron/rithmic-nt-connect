@@ -28,12 +28,8 @@ class OrderPlantPolicy:
         # Cancels remain available during resync (risk-reducing); blocked only when down.
         return self.state in {OrderPlantState.LIVE, OrderPlantState.RESYNCING}
 
-    def use_cache_order_reports(self) -> bool:
-        # No venue snapshot API yet — always report from cache, never invent empty venue.
+    def load_orders_available(self) -> bool:
         return True
-
-    def fill_reports_available(self) -> bool:
-        return False
 
     def reject_reason(self, action: str) -> str:
         return f"order plant {self.state.value}; {action} blocked"

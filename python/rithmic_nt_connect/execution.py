@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import OrderedDict
 from decimal import Decimal
 from typing import Any, Callable
@@ -27,7 +28,11 @@ from nautilus_trader.live.execution_client import LiveExecutionClient
 from nautilus_trader.model.enums import AccountType
 from nautilus_trader.model.enums import LiquiditySide
 from nautilus_trader.model.enums import OmsType
+from nautilus_trader.model.enums import OrderSide
+from nautilus_trader.model.enums import OrderStatus
+from nautilus_trader.model.enums import OrderType
 from nautilus_trader.model.enums import PositionSide
+from nautilus_trader.model.enums import TimeInForce
 from nautilus_trader.model.identifiers import AccountId
 from nautilus_trader.model.identifiers import ClientId
 from nautilus_trader.model.identifiers import ClientOrderId
@@ -62,8 +67,10 @@ from rithmic_nt_connect._orders import trade_id_from_fill_fields
 from rithmic_nt_connect._orders import trailing_ticks_from_order
 from rithmic_nt_connect.config import RithmicExecClientConfig
 from rithmic_nt_connect.constants import ADAPTER_NAME
+from rithmic_nt_connect.constants import DEFAULT_ACCOUNT_CURRENCY
 from rithmic_nt_connect.constants import VENUE
 from rithmic_nt_connect.errors import CHANNEL_ERRORS
+from rithmic_nt_connect.errors import ReconciliationUnavailableError
 from rithmic_nt_connect.errors import VenueQueryUnavailable
 from rithmic_nt_connect.providers import RithmicInstrumentProvider
 from rithmic_nt_connect.session import WireSession
@@ -73,6 +80,61 @@ _POSITION_SIDE = {
     "SHORT": PositionSide.SHORT,
     "FLAT": PositionSide.FLAT,
 }
+
+# Rithmic price_type enum (1=Limit, 2=Market, 3=StopLimit, 4=StopMarket) -> Nautilus.
+_RITHMIC_PRICE_TYPE_TO_ORDER_TYPE: dict[int, OrderType] = {
+    1: OrderType.LIMIT,
+    2: OrderType.MARKET,
+    3: OrderType.STOP_LIMIT,
+    4: OrderType.STOP_MARKET,
+}
+
+# Rithmic duration enum (1=Day, 2=Gtc, 3=Ioc, 4=Fok) -> Nautilus.
+_RITHMIC_DURATION_TO_TIF: dict[int, TimeInForce] = {
+    1: TimeInForce.DAY,
+    2: TimeInForce.GTC,
+    3: TimeInForce.IOC,
+    4: TimeInForce.FOK,
+}
+
+_TERMINAL_ORDER_STATUSES = frozenset(
+    {OrderStatus.FILLED, OrderStatus.CANCELED, OrderStatus.REJECTED, OrderStatus.EXPIRED}
+)
+
+
+ACCOUNT_CACHE_TIMEOUT_S = 10.0
+
+# Recon windows are clamped to this many days so a units mistake (epoch seconds
+# passed where ns-epoch is expected) cannot build a decades-wide query window.
+_MAX_RECON_SPAN_S = 32 * 86_400
+
+
+async def wait_account_in_cache(
+    cache: Any,
+    account_id: AccountId,
+    *,
+    venue: str = VENUE,
+    timeout_s: float = ACCOUNT_CACHE_TIMEOUT_S,
+) -> None:
+    """Yield until Portfolio has applied AccountState (official connect postcondition).
+
+    ``generate_account_state`` publishes on the bus; ``_connect`` must not return
+    (and thus ``_set_connected``) until ``cache.account`` / venue lookup is set.
+    """
+    deadline = time.monotonic() + max(0.05, timeout_s)
+    venue_id = Venue(venue)
+    while True:
+        if cache.account(account_id) is not None:
+            return
+        by_venue = getattr(cache, "account_for_venue", None)
+        if callable(by_venue) and by_venue(venue_id) is not None:
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                f"account {account_id} not in cache after {timeout_s:.0f}s "
+                "(AccountState never applied; refuse set_connected)"
+            )
+        await asyncio.sleep(0.05)
 
 
 def _price(value: float | Decimal | str, precision: int | None = None) -> Price:
@@ -113,12 +175,14 @@ class RithmicExecutionClient(LiveExecutionClient):
         self._poll_task: asyncio.Task | None = None
         self._order_poll_task: asyncio.Task | None = None
         self._positions: dict[str, dict[str, Any]] = {}
-        self._client_to_venue: dict[str, str] = {}
-        self._venue_to_client: dict[str, ClientOrderId] = {}
+        # user_tag (== client_order_id.value) -> ClientOrderId. Only used for
+        # inbound correlation of order notifications; recoverable on a miss
+        # (user_tag IS the client_order_id). Pruned on terminal order state.
         self._tag_to_client: dict[str, ClientOrderId] = {}
         # Venue-stable fill ids; retained across reconnect so snapshot replays stay idempotent.
         self._seen_fill_keys: OrderedDict[str, None] = OrderedDict()
         self._order_plant = OrderPlantPolicy(OrderPlantState.DISCONNECTED)
+        self._account_seeded = False
 
     _MAX_SEEN_FILL_KEYS = 10_000
 
@@ -139,11 +203,15 @@ class RithmicExecutionClient(LiveExecutionClient):
         return bool(self._config_local.enable_trading)
 
     async def _connect(self) -> None:
-        await asyncio.to_thread(self._session.connect)
+        from rithmic_nt_connect.session import ensure_connected
+
+        await asyncio.to_thread(ensure_connected, self._session)
+        self._log.info("Rithmic exec session ready (shared with data client)")
 
         try:
             await asyncio.to_thread(self._session.subscribe_pnl)
             self._apply_resolved_account_id()
+            self._seed_account_if_needed()
             self._poll_task = self.create_task(
                 self._plant_poll_loop(
                     name="pnl",
@@ -158,6 +226,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                 self._log.warning(f"PnL/account path soft-failed: {exc}")
             else:
                 raise
+        self._seed_account_if_needed()
 
         if self.enable_trading:
             self._order_plant.state = OrderPlantState.CONNECTING
@@ -172,6 +241,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                 raise
             self._order_plant.state = OrderPlantState.LIVE
             self._apply_resolved_account_id()
+            self._seed_account_if_needed()
             self._order_poll_task = self.create_task(
                 self._plant_poll_loop(
                     name="order",
@@ -181,19 +251,77 @@ class RithmicExecutionClient(LiveExecutionClient):
                 ),
                 log_msg="rithmic_order_poll",
             )
+        await self._await_account_registered()
+
+    async def _await_account_registered(self) -> None:
+        deadline = time.monotonic() + ACCOUNT_CACHE_TIMEOUT_S
+        while self.account_id is None and time.monotonic() < deadline:
+            self._apply_resolved_account_id()
+            self._seed_account_if_needed()
+            if self.account_id is not None:
+                break
+            await asyncio.sleep(0.05)
+        if self.account_id is None:
+            if self.enable_trading:
+                raise RuntimeError(
+                    "no Rithmic account id after connect — "
+                    "set RITHMIC_ACCOUNT_ID or wait for plant resolve"
+                )
+            self._log.warning("no Rithmic account id; exec connected without AccountState")
+            return
+        remaining = max(0.5, deadline - time.monotonic())
+        await wait_account_in_cache(
+            self._cache, self.account_id, venue=VENUE, timeout_s=remaining
+        )
+        self._log.info(f"account observable in cache {self.account_id}")
 
     def _apply_resolved_account_id(self) -> None:
-        if self.account_id is not None:
-            return
+        raw = self._account_raw()
+        if raw and self.account_id is None:
+            self._set_account_id(AccountId(f"{VENUE}-{raw}"))
+
+    def _account_raw(self, hint: str | None = None) -> str | None:
+        if hint:
+            return str(hint)
         getter = getattr(self._session, "resolved_account", None)
-        if not callable(getter):
+        if callable(getter):
+            resolved = getter()
+            if isinstance(resolved, dict) and resolved.get("account_id"):
+                return str(resolved["account_id"])
+        session = getattr(self._config_local, "session", None)
+        cfg_id = getattr(session, "account_id", None)
+        if cfg_id:
+            return str(cfg_id)
+        if self.account_id is not None:
+            value = str(self.account_id)
+            prefix = f"{VENUE}-"
+            return value[len(prefix) :] if value.startswith(prefix) else value
+        return None
+
+    def _seed_account_if_needed(self, account_raw: str | None = None) -> None:
+        """Register a USD margin account so Portfolio can apply fills.
+
+        Lucid PnL often omits currency; without generate_account_state the
+        engine drops fills (``no account registered``) and flatten is a no-op.
+        """
+        raw = self._account_raw(account_raw)
+        if not raw:
             return
-        resolved = getter()
-        if not isinstance(resolved, dict):
+        if self.account_id is None:
+            self._set_account_id(AccountId(f"{VENUE}-{raw}"))
+        if self._account_seeded:
             return
-        account_raw = resolved.get("account_id")
-        if account_raw:
-            self._set_account_id(AccountId(f"{VENUE}-{account_raw}"))
+        usd = Currency.from_str(DEFAULT_ACCOUNT_CURRENCY)
+        zero = Money(Decimal("0"), usd)
+        self.generate_account_state(
+            balances=[AccountBalance(zero, zero, zero)],
+            margins=[],
+            reported=True,
+            ts_event=self._clock.timestamp_ns(),
+            info={"rithmic_account_id": raw, "seeded": "true"},
+        )
+        self._account_seeded = True
+        self._log.info(f"seeded account {self.account_id} currency={DEFAULT_ACCOUNT_CURRENCY}")
 
     async def _resync_order_subscription(self) -> None:
         self._order_plant.state = OrderPlantState.RESYNCING
@@ -293,13 +421,11 @@ class RithmicExecutionClient(LiveExecutionClient):
         except Exception as exc:  # noqa: BLE001
             self._log.error(f"invalid account_pnl: {exc}")
             return
+        self._seed_account_if_needed(str(fields["account_id"]))
         account_id = AccountId(f"{VENUE}-{fields['account_id']}")
         if self.account_id is None:
             self._set_account_id(account_id)
-        currency_raw = fields.get("currency")
-        if currency_raw is None:
-            self._log.error("account_pnl missing currency")
-            return
+        currency_raw = fields.get("currency") or DEFAULT_ACCOUNT_CURRENCY
         currency = Currency.from_str(str(currency_raw))
         free_raw = fields.get("cash_on_hand")
         if free_raw is None:
@@ -332,8 +458,8 @@ class RithmicExecutionClient(LiveExecutionClient):
             return
         self._positions[str(fields["instrument_id"])] = fields
         account_raw = fields.get("account_id")
-        if account_raw and self.account_id is None:
-            self._set_account_id(AccountId(f"{VENUE}-{account_raw}"))
+        if account_raw:
+            self._seed_account_if_needed(str(account_raw))
 
     def _position_report_from_fields(
         self,
@@ -384,38 +510,41 @@ class RithmicExecutionClient(LiveExecutionClient):
         tag = fields.get("user_tag")
         if tag and str(tag) in self._tag_to_client:
             return self._tag_to_client[str(tag)]
+        # user_tag == client_order_id.value, so the tag fallback is authoritative.
+        if tag:
+            return ClientOrderId(str(tag))
         basket = fields.get("basket_id")
-        if basket and str(basket) in self._venue_to_client:
-            return self._venue_to_client[str(basket)]
+        if basket:
+            return self._cache.client_order_id(VenueOrderId(str(basket)))
         return None
 
     def _bind_venue_id(self, client_order_id: ClientOrderId, venue_id: str) -> None:
-        self._client_to_venue[client_order_id.value] = venue_id
-        self._venue_to_client[venue_id] = client_order_id
+        # Record the venue -> client mapping in the cache (authoritative source).
+        self._cache.add_venue_order_id(client_order_id, VenueOrderId(venue_id))
 
-    def _venue_id_for(
-        self,
-        client_order_id: ClientOrderId,
-        fields: dict[str, Any],
-    ) -> str:
+    def _venue_id_for(self, fields: dict[str, Any], fallback: str) -> str:
         basket = fields.get("basket_id")
         if basket:
             return str(basket)
-        return str(self._client_to_venue.get(client_order_id.value) or client_order_id.value)
+        tag = fields.get("user_tag")
+        return str(tag or fallback)
 
     def _cache_client_for_notification(self, fields: dict[str, Any]) -> ClientOrderId | None:
-        """Recover ownership from Nautilus cache when tag/basket maps missed."""
+        """Recover ownership from the Nautilus cache by venue basket id."""
         basket = fields.get("basket_id")
         if not basket:
             return None
-        basket_s = str(basket)
-        for order in self._cache.orders(venue=self.venue):
-            vid = order.venue_order_id
-            if vid is not None and vid.value == basket_s:
-                return order.client_order_id
-        return None
+        return self._cache.client_order_id(VenueOrderId(str(basket)))
+
+    def _forget_tag(self, client_order_id: ClientOrderId) -> None:
+        # user_tag == client_order_id.value; recoverable on a later miss, so
+        # safe to evict once the order reaches a terminal state.
+        self._tag_to_client.pop(client_order_id.value, None)
 
     def _handle_order_notification(self, fields: dict[str, Any]) -> None:
+        account_hint = fields.get("account_id")
+        if account_hint:
+            self._seed_account_if_needed(str(account_hint))
         client_order_id = self._resolve_client_order_id(fields)
         if client_order_id is None:
             client_order_id = self._cache_client_for_notification(fields)
@@ -438,7 +567,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         basket = fields.get("basket_id")
         if basket:
             self._bind_venue_id(client_order_id, str(basket))
-        venue_order_id = VenueOrderId(self._venue_id_for(client_order_id, fields))
+        venue_order_id = VenueOrderId(self._venue_id_for(fields, client_order_id.value))
         action = notification_action(fields, order)
         if action is None:
             return
@@ -452,6 +581,7 @@ class RithmicExecutionClient(LiveExecutionClient):
             self.generate_order_rejected(
                 strategy_id, instrument_id, client_order_id, str(action.reason), ts_event
             )
+            self._forget_tag(client_order_id)
         elif action.kind == "modify_rejected":
             self.generate_order_modify_rejected(
                 strategy_id,
@@ -501,6 +631,7 @@ class RithmicExecutionClient(LiveExecutionClient):
             self.generate_order_canceled(
                 strategy_id, instrument_id, client_order_id, venue_order_id, ts_event
             )
+            self._forget_tag(client_order_id)
         elif action.kind == "triggered":
             self.generate_order_triggered(
                 strategy_id, instrument_id, client_order_id, venue_order_id, ts_event
@@ -510,7 +641,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                 self._log.error(f"fill action missing fields: {slim_order_fields(fields)}")
                 return
             dedup = fill_dedup_key(fields, ts_event=ts_event)
-            if dedup is not None and self._fill_key_seen(dedup):
+            if self._fill_key_seen(dedup):
                 return
             try:
                 fill_qty = Quantity.from_int(int(action.fill_qty))
@@ -538,8 +669,54 @@ class RithmicExecutionClient(LiveExecutionClient):
                 ts_event,
                 info={"rithmic": dict(fields)},
             )
-            if dedup is not None:
-                self._mark_fill_key(dedup)
+            self._mark_fill_key(dedup)
+            # A fill may complete the order; once closed, the tag mapping is no
+            # longer needed (recoverable on miss since user_tag == COID).
+            if order.is_closed():
+                self._forget_tag(client_order_id)
+
+    def _fill_report_from_fields(
+        self, fields: dict[str, Any], ts_event: int
+    ) -> FillReport | None:
+        """Build a FillReport from a normalized order_notification fields dict."""
+        basket = fields.get("basket_id")
+        instrument_raw = fields.get("instrument_id")
+        symbol = fields.get("symbol")
+        if not basket or not (instrument_raw or symbol):
+            return None
+        try:
+            instrument_id = InstrumentId.from_str(str(instrument_raw or f"{symbol}.{VENUE}"))
+        except Exception:  # noqa: BLE001
+            return None
+        account_raw = fields.get("account_id")
+        if account_raw:
+            self._seed_account_if_needed(str(account_raw))
+        if self.account_id is None:
+            return None
+        fill_px = fields.get("fill_price")
+        fill_sz = fields.get("fill_size")
+        side = order_side_from_notification(fields)
+        if fill_px is None or fill_sz is None or side is None:
+            return None
+        try:
+            last_qty = Quantity.from_int(int(fill_sz))
+            last_px = self._price_for_instrument(instrument_id, fill_px)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return FillReport(
+            account_id=self.account_id,
+            instrument_id=instrument_id,
+            venue_order_id=VenueOrderId(str(basket)),
+            trade_id=TradeId(trade_id_from_fill_fields(fields, ts_event)),
+            order_side=side,
+            last_qty=last_qty,
+            last_px=last_px,
+            commission=Money(Decimal("0"), Currency.from_str("USD")),
+            liquidity_side=LiquiditySide.NO_LIQUIDITY_SIDE,
+            report_id=UUID4(),
+            ts_event=ts_event,
+            ts_init=self._clock.timestamp_ns(),
+        )
 
     def _handle_untracked_notification(self, fields: dict[str, Any]) -> None:
         """External fills only when wire has basket, instrument, side, px, qty."""
@@ -562,57 +739,35 @@ class RithmicExecutionClient(LiveExecutionClient):
             )
             return
         account_raw = fields.get("account_id")
-        if self.account_id is None and account_raw:
-            self._set_account_id(AccountId(f"{VENUE}-{account_raw}"))
+        if account_raw:
+            self._seed_account_if_needed(str(account_raw))
         if self.account_id is None:
             self._log.error(
                 f"untracked order notification suppressed (no account): {slim_order_fields(fields)}"
             )
             return
 
-        fill_px = fields.get("fill_price")
-        fill_sz = fields.get("fill_size")
-        side = order_side_from_notification(fields)
-        if fill_px is None or fill_sz is None or side is None:
-            self._log.error(
-                f"untracked fill suppressed (missing px/qty/side): {slim_order_fields(fields)}"
-            )
-            return
         dedup = fill_dedup_key(fields, ts_event=ts_event)
-        if dedup is not None and self._fill_key_seen(dedup):
+        if self._fill_key_seen(dedup):
             return
-        try:
-            last_qty = Quantity.from_int(int(fill_sz))
-            last_px = self._price_for_instrument(instrument_id, fill_px)
-        except (TypeError, ValueError, OverflowError) as exc:
+        report = self._fill_report_from_fields(fields, ts_event)
+        if report is None:
             self._log.error(
-                f"untracked fill suppressed (bad px/qty): {exc}; {slim_order_fields(fields)}"
+                f"untracked fill suppressed (build failed): {slim_order_fields(fields)}"
             )
             return
-        report = FillReport(
-            account_id=self.account_id,
-            instrument_id=instrument_id,
-            venue_order_id=VenueOrderId(str(basket)),
-            trade_id=TradeId(trade_id_from_fill_fields(fields, ts_event)),
-            order_side=side,
-            last_qty=last_qty,
-            last_px=last_px,
-            commission=Money(Decimal("0"), Currency.from_str("USD")),
-            liquidity_side=LiquiditySide.NO_LIQUIDITY_SIDE,
-            report_id=UUID4(),
-            ts_event=ts_event,
-            ts_init=self._clock.timestamp_ns(),
-        )
         self._send_fill_report(report)
-        if dedup is not None:
-            self._mark_fill_key(dedup)
+        self._mark_fill_key(dedup)
 
     def _order_status_report_for(
         self,
         order: Order,
         ts_init: int,
     ) -> OrderStatusReport | None:
-        venue_id = self._client_to_venue.get(order.client_order_id.value)
+        venue_id = None
+        cached_venue = self._cache.venue_order_id(order.client_order_id)
+        if cached_venue is not None:
+            venue_id = cached_venue.value
         if venue_id is None and order.venue_order_id is not None:
             venue_id = order.venue_order_id.value
         if venue_id is None:
@@ -795,7 +950,10 @@ class RithmicExecutionClient(LiveExecutionClient):
                 self._clock.timestamp_ns(),
             )
             return
-        venue_id = self._client_to_venue.get(command.client_order_id.value)
+        venue_id = None
+        cached_venue = self._cache.venue_order_id(command.client_order_id)
+        if cached_venue is not None:
+            venue_id = cached_venue.value
         if not venue_id and order.venue_order_id is not None:
             venue_id = order.venue_order_id.value
         if not venue_id:
@@ -872,7 +1030,9 @@ class RithmicExecutionClient(LiveExecutionClient):
         if command.venue_order_id is not None:
             venue_id = command.venue_order_id.value
         if not venue_id:
-            venue_id = self._client_to_venue.get(command.client_order_id.value)
+            cached_venue = self._cache.venue_order_id(command.client_order_id)
+            if cached_venue is not None:
+                venue_id = cached_venue.value
         if not venue_id:
             self.generate_order_cancel_rejected(
                 command.strategy_id,
@@ -909,28 +1069,298 @@ class RithmicExecutionClient(LiveExecutionClient):
     ) -> OrderStatusReport | None:
         order = self._cache.order(command.client_order_id) if command.client_order_id else None
         if order is None and command.venue_order_id is not None:
-            mapped = self._venue_to_client.get(command.venue_order_id.value)
+            mapped = self._cache.client_order_id(command.venue_order_id)
             if mapped is not None:
                 order = self._cache.order(mapped)
         if order is None:
             return None
         return self._order_status_report_for(order, self._clock.timestamp_ns())
 
+    def _recon_window_sec(self, start: Any, end: Any) -> tuple[int, int]:
+        now_sec = int(time.time())
+
+        def _to_sec(value: Any) -> int | None:
+            if value is None:
+                return None
+            ts = getattr(value, "timestamp", None)
+            if callable(ts):
+                return max(0, int(ts()))
+            if isinstance(value, (int, float)):
+                # Nautilus passes datetime; tolerate ns-epoch ints defensively.
+                return max(0, int(value) // 1_000_000_000)
+            return None
+
+        end_sec = _to_sec(end) if end is not None else now_sec
+        start_sec = _to_sec(start)
+        if start_sec is None:
+            start_sec = int((now_sec // 86_400) * 86_400)  # UTC day start
+        # Clamp so a units mistake (epoch seconds vs ns) cannot build a
+        # decades-wide window that would issue thousands of history queries.
+        if end_sec < start_sec:
+            start_sec = end_sec
+        if end_sec - start_sec > _MAX_RECON_SPAN_S:
+            start_sec = end_sec - _MAX_RECON_SPAN_S
+        return start_sec, end_sec
+
+    def _is_recon_unavailable(self, exc: BaseException) -> bool:
+        # A definitive "reconciliation cannot be answered" is non-retryable:
+        # the venue has no provably-complete order-history retrieval path. Retry
+        # only genuine transport/channel failures.
+        if isinstance(exc, ReconciliationUnavailableError):
+            return True
+        if isinstance(exc, VenueQueryUnavailable):
+            return True
+        return getattr(exc, "code", None) == "reconciliation_unavailable"
+
+    async def _load_orders_events(self, start_sec: int, end_sec: int) -> list[dict[str, Any]]:
+        # A transient plant error must not be reported as an empty venue (which
+        # Nautilus would reconcile against and could strip tracked order state).
+        # Reconciliation-unavailable is non-retryable (fail immediately); only
+        # transport/channel failures get the brief retry+backoff before fail.
+        attempts = 3
+        backoff = 0.05
+        last_exc: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                events = await asyncio.to_thread(self._session.load_orders, start_sec, end_sec)
+            except Exception as exc:
+                if self._is_recon_unavailable(exc):
+                    raise
+                last_exc = exc
+                if attempt + 1 < attempts:
+                    self._log.warning(
+                        f"load_orders recon failed ({start_sec}..{end_sec}), "
+                        f"retry {attempt + 1}/{attempts}: {exc}"
+                    )
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, 1.0)
+                continue
+            if not events:
+                # The order-history drain currently yields no rows even when the
+                # venue has orders (see ops-runbook). A clean-but-empty result is
+                # indistinguishable from a lossy one, so fail instead of feeding
+                # Nautilus an authoritative "venue empty" that would cancel
+                # tracked open orders.
+                last_exc = RuntimeError(
+                    "load_orders recon returned no rows; refusing to report "
+                    "venue-empty from a lossy order-history source"
+                )
+                if attempt + 1 < attempts:
+                    self._log.warning(f"{last_exc}; retry {attempt + 1}/{attempts}")
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, 1.0)
+                continue
+            return events
+        raise RuntimeError(
+            f"load_orders recon failed after {attempts} attempts ({start_sec}..{end_sec})"
+        ) from last_exc
+
+    def _matches_instrument(
+        self,
+        fields: dict[str, Any],
+        instrument_id: Any | None,
+        venue_order_id: Any | None,
+    ) -> bool:
+        if venue_order_id is not None:
+            return bool(fields.get("basket_id")) and str(fields["basket_id"]) == venue_order_id.value
+        if instrument_id is None:
+            return True
+        event_inst = str(fields.get("instrument_id") or "")
+        want = str(instrument_id)
+        if event_inst == want:
+            return True
+        root = want.split(".")[0]
+        ev_root = event_inst.split(".")[0]
+        return bool(root and ev_root and (ev_root.startswith(root) or root.startswith(ev_root)))
+
+    def _order_type_from_event(self, fields: dict[str, Any]) -> OrderType:
+        raw = fields.get("price_type")
+        try:
+            return _RITHMIC_PRICE_TYPE_TO_ORDER_TYPE.get(int(raw), OrderType.MARKET)
+        except (TypeError, ValueError):
+            return OrderType.MARKET
+
+    def _tif_from_event(self, fields: dict[str, Any]) -> TimeInForce:
+        raw = fields.get("duration")
+        try:
+            return _RITHMIC_DURATION_TO_TIF.get(int(raw), TimeInForce.GTC)
+        except (TypeError, ValueError):
+            return TimeInForce.GTC
+
+    def _order_status_from_event(self, fields: dict[str, Any]) -> OrderStatus:
+        kind = fields.get("kind")
+        status_u = str(fields.get("status") or "").upper()
+        try:
+            qty = int(fields.get("quantity") or 0)
+            filled = int(fields.get("total_fill_size") or 0)
+        except (TypeError, ValueError):
+            qty = filled = 0
+        if kind == "filled" or (qty > 0 and filled >= qty):
+            return OrderStatus.FILLED
+        # A rejected cancel means the venue refused the cancel and the order is
+        # still working — not rejected, not pending-cancel. Evaluate before the
+        # REJECT substring so a cancel-rejected row whose status string contains
+        # "REJECT" (e.g. a venue "REJECTED"/"CANCELLATION_REJECTED") is not
+        # misreported as terminal REJECTED. Reporting PENDING_CANCEL during
+        # recon would leave the OMS believing a cancel is in flight forever.
+        if kind == "cancel_rejected":
+            return OrderStatus.ACCEPTED
+        # Check reject kinds/status before the CANCEL substring so a rejected
+        # cancel (e.g. "CANCELLATION_FAILED") is not misreported as CANCELED.
+        if kind in ("rejected", "modify_rejected") or "REJECT" in status_u:
+            return OrderStatus.REJECTED
+        if kind == "canceled" or status_u in ("CANCELLED", "CANCELED"):
+            return OrderStatus.CANCELED
+        if kind == "expired" or "EXPIRED" in status_u:
+            return OrderStatus.EXPIRED
+        if qty > 0 and 0 < filled < qty:
+            return OrderStatus.PARTIALLY_FILLED
+        if kind in ("accepted", "updated") or status_u in ("OPEN", "WORKING"):
+            return OrderStatus.ACCEPTED
+        return OrderStatus.ACCEPTED
+
+    def _client_order_id_for_tag(self, tag: Any) -> ClientOrderId | None:
+        if not tag:
+            return None
+        if str(tag) in self._tag_to_client:
+            return self._tag_to_client[str(tag)]
+        return ClientOrderId(str(tag))
+
+    def _order_status_report_from_fields(
+        self, fields: dict[str, Any], ts_event: int
+    ) -> OrderStatusReport | None:
+        basket = fields.get("basket_id")
+        instrument_raw = fields.get("instrument_id")
+        symbol = fields.get("symbol")
+        if not basket or not (instrument_raw or symbol):
+            return None
+        try:
+            instrument_id = InstrumentId.from_str(str(instrument_raw or f"{symbol}.{VENUE}"))
+        except Exception:  # noqa: BLE001
+            return None
+        account_raw = fields.get("account_id")
+        if account_raw:
+            self._seed_account_if_needed(str(account_raw))
+        if self.account_id is None:
+            return None
+        try:
+            side = order_side_from_notification(fields) or OrderSide.BUY
+            qty = Quantity.from_int(max(0, int(fields.get("quantity") or 0)))
+            filled = Quantity.from_int(max(0, int(fields.get("total_fill_size") or 0)))
+            price = _price(fields["price"]) if fields.get("price") is not None else None
+            trigger = (
+                _price(fields["trigger_price"]) if fields.get("trigger_price") is not None else None
+            )
+            avg = fields.get("avg_fill_price")
+            avg_px = Decimal(str(avg)) if avg is not None else None
+        except (TypeError, ValueError, OverflowError):
+            # Skip a malformed row rather than abort the whole recon response.
+            return None
+        return OrderStatusReport(
+            account_id=self.account_id,
+            instrument_id=instrument_id,
+            venue_order_id=VenueOrderId(str(basket)),
+            order_side=side,
+            order_type=self._order_type_from_event(fields),
+            time_in_force=self._tif_from_event(fields),
+            order_status=self._order_status_from_event(fields),
+            quantity=qty,
+            filled_qty=filled,
+            report_id=UUID4(),
+            ts_accepted=ts_event,
+            ts_last=ts_event,
+            ts_init=self._clock.timestamp_ns(),
+            client_order_id=self._client_order_id_for_tag(fields.get("user_tag")),
+            price=price,
+            trigger_price=trigger,
+            avg_px=avg_px,
+        )
+
     async def generate_order_status_reports(
         self,
         command: GenerateOrderStatusReports,
     ) -> list[OrderStatusReport]:
-        # No venue snapshot API — always cache-backed. Never return [] as "venue empty".
-        return self._cache_backed_order_status_reports(command)
+        # Venue recon touches the order plant (a trading capability); a read-only
+        # client must not log the order plant in during reconciliation, and
+        # reports only its locally cached orders (never claims venue authority).
+        if not self.enable_trading:
+            return self._cache_backed_order_status_reports(command)
+        if not self._order_plant.load_orders_available():
+            # A trading client must not present local cache as authoritative
+            # venue state. Fail closed rather than reconcile against a source
+            # that has no provably-complete order-history retrieval path.
+            raise VenueQueryUnavailable(
+                "Rithmic order reconciliation unavailable (no authoritative "
+                "order-history retrieval path)"
+            )
+        start_sec, end_sec = self._recon_window_sec(command.start, command.end)
+        events = await self._load_orders_events(start_sec, end_sec)
+        latest: dict[str, tuple[int, OrderStatusReport]] = {}
+        for raw in events:
+            try:
+                fields = order_notification_to_fields(raw)
+            except Exception:  # noqa: BLE001
+                continue
+            basket = fields.get("basket_id")
+            if not basket:
+                continue
+            # GenerateOrderStatusReports carries no venue_order_id (only
+            # GenerateFillReports does); treat it as absent for filtering.
+            venue_order_id = getattr(command, "venue_order_id", None)
+            if (command.instrument_id is not None or venue_order_id is not None) and not (
+                self._matches_instrument(fields, command.instrument_id, venue_order_id)
+            ):
+                continue
+            ts_event = int(fields.get("ts_event") or 0)
+            report = self._order_status_report_from_fields(fields, ts_event)
+            if report is None:
+                continue
+            key = str(basket)
+            # Keep the latest row; on an equal timestamp (e.g. both 0 when
+            # ts_event is missing) prefer the last-arrived row so a terminal
+            # status following an earlier non-terminal is not masked.
+            if key not in latest or ts_event >= latest[key][0]:
+                latest[key] = (ts_event, report)
+        reports = [report for _, report in latest.values()]
+        if command.open_only:
+            reports = [r for r in reports if r.order_status not in _TERMINAL_ORDER_STATUSES]
+        return reports
 
     async def generate_fill_reports(
         self,
         command: GenerateFillReports,
     ) -> list[FillReport]:
-        _ = command
-        raise VenueQueryUnavailable(
-            "Rithmic fill report query unavailable (no venue fill snapshot API)"
-        )
+        if not self.enable_trading or not self._order_plant.load_orders_available():
+            raise VenueQueryUnavailable(
+                "Rithmic fill reconciliation unavailable (no authoritative "
+                "order-history retrieval path)"
+            )
+        start_sec, end_sec = self._recon_window_sec(command.start, command.end)
+        events = await self._load_orders_events(start_sec, end_sec)
+        reports: list[FillReport] = []
+        for raw in events:
+            try:
+                fields = order_notification_to_fields(raw)
+            except Exception:  # noqa: BLE001
+                continue
+            if fields.get("kind") != "filled":
+                continue
+            if not self._matches_instrument(
+                fields, command.instrument_id, command.venue_order_id
+            ):
+                continue
+            ts_event = int(fields.get("ts_event") or self._clock.timestamp_ns())
+            # Share the adapter-wide fill dedup store (live path + recon) so a
+            # fill already emitted live, or duplicated across the summary/today
+            # drains, is not re-emitted as a second reconciliation fill.
+            dedup = fill_dedup_key(fields, ts_event=ts_event)
+            if self._fill_key_seen(dedup):
+                continue
+            report = self._fill_report_from_fields(fields, ts_event)
+            if report is not None:
+                reports.append(report)
+                self._mark_fill_key(dedup)
+        return reports
 
     async def generate_position_status_reports(
         self,

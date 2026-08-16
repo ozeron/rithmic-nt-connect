@@ -69,4 +69,24 @@ Do not register both sandbox and Rithmic exec for venue `RITHMIC`.
 Current advertised scope vs done: [`../STATUS.md`](../STATUS.md).
 Phases / conventions: [`nautilus-adapter-phases.md`](nautilus-adapter-phases.md), [`nautilus-adapter-conventions.md`](nautilus-adapter-conventions.md).
 
+## Order-history reconciliation is fail-closed
+
+Rithmic order history has no completion signal (order-notification rows stream
+on the subscription channel with no end marker; the request returns only an
+ack) and replays silently cap at 10,000 records with no truncation indication.
+A silence-window drain therefore can never prove "venue has N and I got all N".
+**Observed 2026-08-16:** both the return value and a 10s channel drain yield
+zero rows despite the venue reporting orders (`user_msg` count).
+
+So `load_orders` returns `Err(ReconciliationUnavailable)` unconditionally, and
+the exec generators (`generate_order_status_reports` / `generate_fill_reports`)
+**raise** when the venue source is unavailable — never reporting `[]` as
+authoritative venue-empty (which would let Nautilus cancel tracked open orders),
+and never presenting local cache as venue state while trading. Read-only status
+recon stays cache-backed (honest: not a venue snapshot).
+
+Recon will stay refused until a provably-complete retrieval path (e.g. per-basket
+`show_order_history_detail` with exhaustive enumeration) is implemented and
+validated against a non-empty, permissioned account.
+
 See also: `docs/references/my046-rithmic-access.md`, `docs/references/plant-probe-2026-08-12.md`.

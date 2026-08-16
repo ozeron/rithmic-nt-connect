@@ -16,7 +16,6 @@ from rithmic_nt_connect._order_plant import OrderPlantPolicy
 from rithmic_nt_connect._order_plant import OrderPlantState
 from rithmic_nt_connect._orders import notification_action
 from rithmic_nt_connect._orders import order_notification_to_fields
-from rithmic_nt_connect.errors import VenueQueryUnavailable
 
 
 def _mock_order() -> SimpleNamespace:
@@ -147,14 +146,9 @@ def test_notification_action_reject_fill_cancel_complete() -> None:
     assert notification_action(complete, order).kind == "canceled"
 
 
-def test_report_policy_never_empty_venue_contract() -> None:
+def test_report_policy_venue_backed_contract() -> None:
     policy = OrderPlantPolicy(OrderPlantState.LIVE)
-    assert policy.use_cache_order_reports() is True
-    assert policy.fill_reports_available() is False
-    try:
-        raise VenueQueryUnavailable("no fill snapshot")
-    except VenueQueryUnavailable as exc:
-        assert "fill" in str(exc).lower()
+    assert policy.load_orders_available() is True
 
 
 def test_resync_blocks_submit_allows_cancel() -> None:

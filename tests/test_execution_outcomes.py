@@ -17,7 +17,7 @@ def test_fill_dedup_key_includes_account_and_instrument():
     assert fill_dedup_key(fields, ts_event=1) == "A1|NQU6.RITHMIC|F1"
 
 
-def test_fill_dedup_key_none_without_fill_id():
+def test_fill_dedup_key_fallback_without_fill_id():
     fields = {
         "basket_id": "B1",
         "exchange_order_id": "E1",
@@ -26,7 +26,9 @@ def test_fill_dedup_key_none_without_fill_id():
         "account_id": "A",
         "instrument_id": "I",
     }
-    assert fill_dedup_key(fields, ts_event=99) is None
+    # No venue fill_id: dedup key falls back to the trade_id composite so fills
+    # the venue never tagged are still deduped consistently with Nautilus.
+    assert fill_dedup_key(fields, ts_event=99) == "A|I|B1:E1:99:1:21000.0"
     assert trade_id_from_fill_fields(fields, 99) == "B1:E1:99:1:21000.0"
 
 
