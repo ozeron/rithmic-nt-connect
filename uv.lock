@@ -367,7 +367,7 @@ nautilus = [
 requires-dist = [
     { name = "nautilus-trader", specifier = "==1.231.0" },
     { name = "nautilus-trader", marker = "extra == 'nautilus'", specifier = "==1.231.0" },
-    { name = "protobuf", specifier = ">=5.0" },
+    { name = "protobuf", specifier = ">=7.34.1" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
 ]
 provides-extras = ["dev", "nautilus"]
