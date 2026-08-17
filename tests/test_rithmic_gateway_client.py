@@ -21,6 +21,7 @@ from rithmic_gateway.config import (
 from rithmic_gateway.framing import encode_frame
 from rithmic_gateway.spawn import (
     assert_no_password_in_argv,
+    _bundled_bin,
     curated_env,
     resolve_gateway_bin,
     spawn_argv,
@@ -213,6 +214,64 @@ def test_resolve_bin_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
 def test_resolve_bin_explicit_missing(tmp_path: Path) -> None:
     with pytest.raises(SpawnError, match="not found"):
         resolve_gateway_bin(str(tmp_path / "missing-bin"))
+
+
+def test_resolve_bin_prefers_bundled_over_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A binary bundled in the wheel must win over PATH / target fallback."""
+    monkeypatch.delenv("RITHMIC_GATEWAY_BIN", raising=False)
+    monkeypatch.delenv("CARGO_TARGET_DIR", raising=False)
+    bundled = tmp_path / "bundled" / "rithmic-gateway"
+    bundled.parent.mkdir(parents=True)
+    bundled.write_text("#!/bin/sh\nexit 0\n")
+    bundled.chmod(0o755)
+    monkeypatch.setattr("rithmic_gateway.spawn._bundled_bin", lambda: str(bundled))
+    # PATH points at an empty dir with no binary; target fallback also empty.
+    monkeypatch.setenv("PATH", str(tmp_path / "nobin"))
+    (tmp_path / "nobin").mkdir(exist_ok=True)
+    monkeypatch.setattr("rithmic_gateway.spawn._bin_search_starts", lambda: [tmp_path])
+    assert resolve_gateway_bin(None) == str(bundled.resolve())
+
+
+def test_resolve_bin_prefers_explicit_and_env_over_bundled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """explicit and RITHMIC_GATEWAY_BIN must still override the bundled binary."""
+    bundled = tmp_path / "bundled" / "rithmic-gateway"
+    bundled.parent.mkdir(parents=True)
+    bundled.write_text("x")
+    bundled.chmod(0o755)
+    monkeypatch.setattr("rithmic_gateway.spawn._bundled_bin", lambda: str(bundled))
+
+    env_bin = tmp_path / "env-bin" / "rithmic-gateway"
+    env_bin.parent.mkdir(parents=True)
+    env_bin.write_text("x")
+    env_bin.chmod(0o755)
+    monkeypatch.setenv("RITHMIC_GATEWAY_BIN", str(env_bin))
+    assert resolve_gateway_bin(None) == str(env_bin.resolve())
+
+    explicit = tmp_path / "explicit" / "rithmic-gateway"
+    explicit.parent.mkdir(parents=True)
+    explicit.write_text("x")
+    explicit.chmod(0o755)
+    assert resolve_gateway_bin(str(explicit)) == str(explicit.resolve())
+
+
+def test_bundled_bin_requires_executable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """_bundled_bin() returns None unless the bundled binary is executable."""
+    pkg_dir = tmp_path / "pkg"
+    pkg_dir.mkdir()
+    bin_dir = pkg_dir / "bin"
+    bin_dir.mkdir()
+    binary = bin_dir / "rithmic-gateway"
+    binary.write_text("#!/bin/sh\n")
+    # Point the module's __file__ at the fake package dir so _bundled_bin looks
+    # in tmp_path/pkg/bin/rithmic-gateway.
+    monkeypatch.setattr("rithmic_gateway.spawn.__file__", str(pkg_dir / "spawn.py"))
+    assert _bundled_bin() is None
+    binary.chmod(0o755)
+    assert _bundled_bin() == str(binary.resolve())
 
 
 def test_spawn_happy_path_requires_flock_not_just_listen(

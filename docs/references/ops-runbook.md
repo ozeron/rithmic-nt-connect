@@ -8,6 +8,21 @@
 6. Live smoke: `uv run python scripts/smoke_lucid_nq.py` (exits `2` if credentials missing — CI-safe).
 7. Shared gateway (two consumers, one parent): `uv run python scripts/smoke_gateway_shared_ticks.py --seconds 25` (NQ + MNQ; exits `2` if no creds).
 
+## Building a self-contained wheel
+
+The wheel carries the adapter, the `rithmic_gateway` pure-Python client, **and** the
+`rithmic-gateway` native binary in one artifact — consumers `pip install` it and the
+binary is auto-resolved from `rithmic_gateway/bin/`, no `RITHMIC_GATEWAY_BIN`, no
+`cargo build`, no `target/` on their disk.
+
+```bash
+scripts/build_wheel.sh            # cargo build -p rithmic-gateway --release, bundle, maturin build
+scripts/build_wheel.sh --install  # also pip install the built wheel into the current env
+```
+
+`maturin develop` (step 4 above) leaves the binary out; `resolve_gateway_bin` then
+falls back to `PATH` / `target/{release,debug}` for local dev.
+
 ## Connect mode (required for Nautilus adapter)
 
 Set **`RITHMIC_CONNECT_MODE`** (or `SessionConfig.connect_mode` / `ConnectMode`) to one of:

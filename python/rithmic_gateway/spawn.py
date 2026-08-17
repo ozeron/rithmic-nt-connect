@@ -72,12 +72,25 @@ def _cargo_target_candidates(start: Path) -> list[Path]:
     return out
 
 
+def _bundled_bin() -> str | None:
+    """Return the gateway binary bundled inside the installed package, if present.
+
+    Wheels built via ``scripts/build_wheel.sh`` carry ``rithmic_gateway/bin/``
+    alongside the Python client, so an installed wheel self-contains the native
+    binary with no ``cargo build`` and no ``target/`` on the consumer's disk.
+    """
+    path = Path(__file__).resolve().parent / "bin" / "rithmic-gateway"
+    if path.is_file() and os.access(path, os.X_OK):
+        return str(path.resolve())
+    return None
+
+
 def resolve_gateway_bin(explicit: str | None = None) -> str:
-    """Resolve ``rithmic-gateway`` from explicit path, env, ``PATH``, or cargo targets.
+    """Resolve ``rithmic-gateway`` from explicit path, env, bundled, PATH, or cargo targets.
 
     Does not run ``cargo build`` — set ``RITHMIC_GATEWAY_BIN`` or build the binary first.
-    Search order: explicit → ``RITHMIC_GATEWAY_BIN`` → ``PATH`` → cwd then package
-    ``target/{release,debug}`` (and ``CARGO_TARGET_DIR`` when set).
+    Search order: explicit → ``RITHMIC_GATEWAY_BIN`` → bundled ``rithmic_gateway/bin`` →
+    ``PATH`` → cwd then package ``target/{release,debug}`` (and ``CARGO_TARGET_DIR``).
     """
     if explicit:
         path = Path(explicit).expanduser()
@@ -90,6 +103,9 @@ def resolve_gateway_bin(explicit: str | None = None) -> str:
         if not path.is_file():
             raise SpawnError(f"RITHMIC_GATEWAY_BIN not found: {path}")
         return str(path.resolve())
+    bundled = _bundled_bin()
+    if bundled is not None:
+        return bundled
     found = shutil.which("rithmic-gateway")
     if found:
         return found

@@ -32,6 +32,7 @@ manifest-path = "crates/rithmic-nt-connect/Cargo.toml"
 module-name = "rithmic_nt_connect._lib"
 python-source = "python"
 features = ["python", "extension-module"]
+data = "wheel-data"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
