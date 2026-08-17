@@ -177,10 +177,11 @@ class RithmicExecutionClient(LiveExecutionClient):
         self._poll_task: asyncio.Task | None = None
         self._order_poll_task: asyncio.Task | None = None
         self._positions: dict[str, dict[str, Any]] = {}
-        # user_tag (== client_order_id.value) -> ClientOrderId. Only used for
-        # inbound correlation of order notifications; recoverable on a miss
-        # (user_tag IS the client_order_id). Pruned on terminal order state.
-        self._tag_to_client: dict[str, ClientOrderId] = {}
+        # Client<->venue correlation lives solely on the Nautilus Cache
+        # (add_venue_order_id / client_order_id / venue_order_id / order); there
+        # is no parallel tag dictionary to keep in sync. user_tag ==
+        # client_order_id.value for orders this client placed, so tracked-ness is
+        # decided by whether the order is present in the cache.
         # Venue-stable fill ids; retained across reconnect so snapshot replays stay idempotent.
         self._seen_fill_keys: OrderedDict[str, None] = OrderedDict()
         self._order_plant = OrderPlantPolicy(OrderPlantState.DISCONNECTED)
@@ -423,11 +424,9 @@ class RithmicExecutionClient(LiveExecutionClient):
         except Exception as exc:  # noqa: BLE001
             self._log.error(f"invalid account_pnl: {exc}")
             return
-        account_id = AccountId(f"{VENUE}-{fields['account_id']}")
-        if self.account_id is None:
-            self._set_account_id(account_id)
-        currency_raw = fields.get("currency") or DEFAULT_ACCOUNT_CURRENCY
-        currency = Currency.from_str(str(currency_raw))
+        # Validate the full payload BEFORE mutating any state (account id, seed).
+        # A malformed balance must not register a fabricated zero-balance account
+        # that would then block the later, valid AccountState via _account_seeded.
         free_raw = fields.get("cash_on_hand")
         if free_raw is None:
             free_raw = fields.get("account_balance")
@@ -439,6 +438,11 @@ class RithmicExecutionClient(LiveExecutionClient):
         except Exception as exc:  # noqa: BLE001
             self._log.error(f"account_pnl balance not numeric ({free_raw!r}): {exc}")
             return
+        currency_raw = fields.get("currency") or DEFAULT_ACCOUNT_CURRENCY
+        currency = Currency.from_str(str(currency_raw))
+        account_id = AccountId(f"{VENUE}-{fields['account_id']}")
+        if self.account_id is None:
+            self._set_account_id(account_id)
         self._seed_account_if_needed(str(fields["account_id"]))
         free = Money(free_dec, currency)
         locked = Money(Decimal("0"), currency)
@@ -509,17 +513,23 @@ class RithmicExecutionClient(LiveExecutionClient):
         self._log.error(f"Rithmic exec client trading disabled: {action}")
 
     def _resolve_client_order_id(self, fields: dict[str, Any]) -> ClientOrderId | None:
-        tag = fields.get("user_tag")
-        if tag and str(tag) in self._tag_to_client:
-            return self._tag_to_client[str(tag)]
-        # Unknown nonempty tag: do NOT synthesize a ClientOrderId here, else a
-        # notification for an external order would be mistaken for a tracked one
-        # and suppressed before reaching the untracked path. Fall back to the
-        # basket lookup below and let an unmatched notification route to
-        # _handle_untracked_notification.
+        """Resolve a notification to a tracked order, or None (external).
+
+        The Nautilus cache is the single source of truth for tracked orders.
+        Prefer the venue basket id (strongest identity). Fall back to the
+        user_tag, which equals ``client_order_id.value`` for orders this client
+        placed and is only treated as tracked when that order is actually
+        present in the cache — an unknown external tag therefore never
+        resolves here and routes to the untracked path.
+        """
         basket = fields.get("basket_id")
         if basket:
-            return self._cache.client_order_id(VenueOrderId(str(basket)))
+            cached = self._cache.client_order_id(VenueOrderId(str(basket)))
+            if cached is not None:
+                return cached
+        tag = fields.get("user_tag")
+        if tag and self._cache.order(ClientOrderId(str(tag))) is not None:
+            return ClientOrderId(str(tag))
         return None
 
     def _bind_venue_id(self, client_order_id: ClientOrderId, venue_id: str) -> None:
@@ -542,29 +552,11 @@ class RithmicExecutionClient(LiveExecutionClient):
         tag = fields.get("user_tag")
         return str(tag or (client_order_id.value if client_order_id is not None else ""))
 
-    def _cache_client_for_notification(self, fields: dict[str, Any]) -> ClientOrderId | None:
-        """Recover ownership from the Nautilus cache by venue basket id."""
-        basket = fields.get("basket_id")
-        if not basket:
-            return None
-        return self._cache.client_order_id(VenueOrderId(str(basket)))
-
-    def _forget_tag(self, client_order_id: ClientOrderId) -> None:
-        # user_tag == client_order_id.value; recoverable on a later miss, so
-        # safe to evict once the order reaches a terminal state.
-        self._tag_to_client.pop(client_order_id.value, None)
-
     def _handle_order_notification(self, fields: dict[str, Any]) -> None:
         account_hint = fields.get("account_id")
         if account_hint:
             self._seed_account_if_needed(str(account_hint))
         client_order_id = self._resolve_client_order_id(fields)
-        if client_order_id is None:
-            client_order_id = self._cache_client_for_notification(fields)
-            if client_order_id is not None:
-                basket = fields.get("basket_id")
-                if basket:
-                    self._bind_venue_id(client_order_id, str(basket))
         if client_order_id is None:
             self._handle_untracked_notification(fields)
             return
@@ -594,7 +586,6 @@ class RithmicExecutionClient(LiveExecutionClient):
             self.generate_order_rejected(
                 strategy_id, instrument_id, client_order_id, str(action.reason), ts_event
             )
-            self._forget_tag(client_order_id)
         elif action.kind == "modify_rejected":
             self.generate_order_modify_rejected(
                 strategy_id,
@@ -644,7 +635,6 @@ class RithmicExecutionClient(LiveExecutionClient):
             self.generate_order_canceled(
                 strategy_id, instrument_id, client_order_id, venue_order_id, ts_event
             )
-            self._forget_tag(client_order_id)
         elif action.kind == "triggered":
             self.generate_order_triggered(
                 strategy_id, instrument_id, client_order_id, venue_order_id, ts_event
@@ -683,10 +673,6 @@ class RithmicExecutionClient(LiveExecutionClient):
                 info={"rithmic": dict(fields)},
             )
             self._mark_fill_key(dedup)
-            # A fill may complete the order; once closed, the tag mapping is no
-            # longer needed (recoverable on miss since user_tag == COID).
-            if order.is_closed():
-                self._forget_tag(client_order_id)
 
     def _fill_report_from_fields(
         self, fields: dict[str, Any], ts_event: int
@@ -871,7 +857,6 @@ class RithmicExecutionClient(LiveExecutionClient):
             return
 
         user_tag = order.client_order_id.value
-        self._tag_to_client[user_tag] = order.client_order_id
         price = float(order.price) if order.has_price else None
         trigger = float(order.trigger_price) if order.has_trigger_price else None
         qty = int(order.quantity)
@@ -1233,10 +1218,11 @@ class RithmicExecutionClient(LiveExecutionClient):
         return OrderStatus.ACCEPTED
 
     def _client_order_id_for_tag(self, tag: Any) -> ClientOrderId | None:
+        # user_tag == client_order_id.value for orders this client placed, so
+        # the tag is the client order id. External orders keep their tag as the
+        # report's client_order_id (honest: it is the id on the wire).
         if not tag:
             return None
-        if str(tag) in self._tag_to_client:
-            return self._tag_to_client[str(tag)]
         return ClientOrderId(str(tag))
 
     def _order_status_report_from_fields(

@@ -177,7 +177,6 @@ class _FlockedDirectSession:
     def __init__(self, inner: WireSession, lock: Any) -> None:
         self._inner = inner
         self._lock = lock
-        self._connected = False
         self._connect_gate = threading.Lock()
 
     def connect(self) -> None:
@@ -185,26 +184,27 @@ class _FlockedDirectSession:
 
     def disconnect(self) -> None:
         with self._connect_gate:
-            try:
-                self._inner.disconnect()
-            finally:
-                self._connected = False
+            self._inner.disconnect()
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
 
 
 def ensure_connected(session: Any) -> None:
-    """Connect once. Safe if the shared plant is already up."""
+    """Connect once. Safe if the shared plant is already up.
+
+    There is no parallel ``_connected`` boolean: the inner plant session is the
+    source of truth for connection state, and ``_connect_once`` swallows the
+    typed ``AlreadyConnectedError`` it raises when already up. A stale parallel
+    flag drifting True across a delegated ``disconnect()`` is what previously
+    made reconnect short-circuit.
+    """
     gate = getattr(session, "_connect_gate", None)
     if gate is None:
         _connect_once(session)
         return
     with gate:
-        if getattr(session, "_connected", False):
-            return
         _connect_once(session)
-        session._connected = True
 
 
 def _connect_once(session: Any) -> None:

@@ -12,13 +12,20 @@ def test_flocked_session_connect_is_idempotent() -> None:
     from rithmic_nt_connect.session import _FlockedDirectSession
 
     class _Inner:
+        # Models the real Rust session: connect() is a safe no-op when already
+        # connected (it raises AlreadyConnectedError without reconnecting).
         def __init__(self) -> None:
+            self.connected = False
             self.calls = 0
 
         def connect(self) -> None:
             self.calls += 1
-            if self.calls > 1:
+            if self.connected:
                 raise AlreadyConnectedError("already connected")
+            self.connected = True
+
+        def disconnect(self) -> None:
+            self.connected = False
 
         def request_plants(self, _plants: str) -> None:
             return None
@@ -27,7 +34,9 @@ def test_flocked_session_connect_is_idempotent() -> None:
     wrapped = _FlockedDirectSession(inner, lock=object())
     wrapped.connect()
     wrapped.connect()
-    assert inner.calls == 1
+    # No parallel _connected flag: idempotency comes from the inner refusing a
+    # redundant connect (AlreadyConnectedError, swallowed). Still connected.
+    assert inner.connected
     assert callable(wrapped.request_plants)
 
     from concurrent.futures import ThreadPoolExecutor
@@ -36,7 +45,7 @@ def test_flocked_session_connect_is_idempotent() -> None:
     wrapped2 = _FlockedDirectSession(inner2, lock=object())
     with ThreadPoolExecutor(max_workers=2) as pool:
         list(pool.map(lambda _: wrapped2.connect(), range(2)))
-    assert inner2.calls == 1
+    assert inner2.connected
 
 
 def test_flocked_session_reconnects_after_disconnect() -> None:
