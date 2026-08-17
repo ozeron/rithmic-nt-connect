@@ -163,10 +163,19 @@ def test_recon_window_clamps_inverted_bounds():
 # --------------------------------------------------------------------------- #
 
 
+class _CacheOrder:
+    def __init__(self, closed: bool = False) -> None:
+        self._closed = closed
+
+    def is_closed(self) -> bool:
+        return self._closed
+
+
 class _CacheStub:
     def __init__(self) -> None:
         self._venue_to_client: dict[str, ClientOrderId] = {}
         self._client_to_venue: dict[str, VenueOrderId] = {}
+        self._orders: dict[str, _CacheOrder] = {}
 
     def client_order_id(self, venue_order_id: VenueOrderId) -> ClientOrderId | None:
         return self._venue_to_client.get(venue_order_id.value)
@@ -177,6 +186,10 @@ class _CacheStub:
     def add_venue_order_id(self, client: ClientOrderId, venue: VenueOrderId) -> None:
         self._client_to_venue[client.value] = venue
         self._venue_to_client[venue.value] = client
+
+    def order(self, client_order_id: ClientOrderId) -> _CacheOrder | None:
+        # Presence in the cache is the adapter's source of truth for "tracked".
+        return self._orders.get(client_order_id.value)
 
 
 class _CacheClient(_TestClient):
@@ -193,7 +206,6 @@ class _CacheClient(_TestClient):
 
 def _cache_client() -> _CacheClient:
     client = _CacheClient.__new__(_CacheClient)
-    client._tag_to_client = {}
     client._cache = _CacheStub()
     return client
 
@@ -214,9 +226,20 @@ def test_resolve_unknown_external_tag_falls_back_to_basket_cache():
 
 def test_resolve_known_tag_maps_to_client_order():
     client = _cache_client()
+    # A tag owned by this client resolves to a ClientOrderId only when the
+    # order is actually tracked in the cache (the single source of truth).
     coid = ClientOrderId("C1")
-    client._tag_to_client["C1"] = coid
+    client._cache._orders["C1"] = _CacheOrder(closed=False)
     assert client._resolve_client_order_id({"user_tag": "C1"}) == coid
+
+
+def test_resolve_tag_of_closed_order_goes_untracked():
+    # A terminal order remains in the cache. A later external order reusing its
+    # tag must NOT be attributed to the old (closed) order; it routes to the
+    # untracked path instead.
+    client = _cache_client()
+    client._cache._orders["C1"] = _CacheOrder(closed=True)
+    assert client._resolve_client_order_id({"user_tag": "C1"}) is None
 
 
 def test_venue_id_for_prefers_cached_venue_id_over_tag():
@@ -232,6 +255,29 @@ def test_venue_id_for_falls_back_to_tag_when_not_cached():
     client = _cache_client()
     coid = ClientOrderId("C1")
     assert client._venue_id_for({"user_tag": "C1"}, coid) == "C1"
+
+
+def test_resolve_prefers_venue_basket_over_colliding_tag():
+    # A tracked order owns the tag, but the notification's basket maps to a
+    # different venue order; the basket (venue identity) must win so an external
+    # order is not misattributed to our tracked order.
+    client = _cache_client()
+    coid = ClientOrderId("C1")
+    other = ClientOrderId("C2")
+    client._cache._orders["C1"] = object()
+    client._cache._venue_to_client["B-EXT"] = other
+    assert (
+        client._resolve_client_order_id({"user_tag": "C1", "basket_id": "B-EXT"}) == other
+    )
+
+
+def test_resolve_tag_when_basket_not_yet_bound():
+    # First (accept) notification carries a basket that is not yet bound in the
+    # cache; the tracked tag must still resolve the order by cache presence.
+    client = _cache_client()
+    coid = ClientOrderId("C1")
+    client._cache._orders["C1"] = _CacheOrder(closed=False)
+    assert client._resolve_client_order_id({"user_tag": "C1", "basket_id": "B1"}) == coid
 
 
 def test_publish_account_nonnumeric_balance_does_not_seed(monkeypatch: pytest.MonkeyPatch):
@@ -250,6 +296,26 @@ def test_publish_account_nonnumeric_balance_does_not_seed(monkeypatch: pytest.Mo
     # Non-numeric balance must not seed/publish fabricated funds.
     client._publish_account(
         {"type": "account_pnl", "account_id": "ACC1", "cash_on_hand": "abc"}
+    )
+    assert ("seed", "ACC1") not in calls
+
+
+def test_publish_account_nonfinite_balance_does_not_seed(monkeypatch: pytest.MonkeyPatch):
+    client = _client()
+    client._account_seeded = False
+    calls: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(
+        RithmicExecutionClient, "_set_account_id", lambda self, aid: calls.append(("set", aid))
+    )
+    monkeypatch.setattr(
+        RithmicExecutionClient,
+        "_seed_account_if_needed",
+        lambda self, account_raw=None: calls.append(("seed", account_raw)),
+    )
+    # Decimal("NaN")/Decimal("Infinity") are valid Decimal but must be rejected.
+    client._publish_account(
+        {"type": "account_pnl", "account_id": "ACC1", "cash_on_hand": "NaN"}
     )
     assert ("seed", "ACC1") not in calls
 
