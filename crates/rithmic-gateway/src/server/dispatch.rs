@@ -475,6 +475,11 @@ pub(super) async fn dispatch(state: &GatewayState, client: &mut ClientCtx, reque
             let Some(session) = &state.session else {
                 return no_session_frame(request_id);
             };
+            // Serialize the whole show_orders + drain: concurrent drains on the
+            // shared order-updates channel would observe each other's replays
+            // and return mixed/duplicated snapshots. This lock is separate from
+            // the session lock so the drain never blocks the event pump.
+            let _recon_guard = state.recon_lock.lock().await;
             // Clone the order handle and release the session lock before the
             // bounded drain so the event pump keeps forwarding plant events.
             let handle = {
@@ -990,6 +995,7 @@ pub(super) fn test_state(gates: ParentGates, hub: SharedFanout) -> GatewayState 
         session: None,
         reconnect: Arc::new(ReconnectController::new(hub)),
         topic_locks: TokioMutex::new(HashMap::new()),
+        recon_lock: Arc::new(TokioMutex::new(())),
         idle: IdleExit::new(IdleExitPolicy::Never),
     }
 }
