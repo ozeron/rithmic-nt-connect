@@ -61,7 +61,28 @@ fn main() {
     // Native gateway binary: prefer a release build, fall back to debug (e.g.
     // after `cargo test` in CI). Absent => the wheel simply has no `bin/` and
     // `resolve_gateway_bin` falls back to PATH / `target/` — same as before.
-    let target = root.join("target");
+    //
+    // Resolve the real target dir the way cargo does: honor an explicit
+    // `CARGO_TARGET_DIR` env var (scripts/build_wheel.sh honors it too), then
+    // derive it from `OUT_DIR` (always inside the configured target dir, which
+    // also covers `.cargo/config.toml` `target-dir`), then fall back to
+    // `<repo>/target`.
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                root.join(path)
+            }
+        })
+        .or_else(|| {
+            std::env::var_os("OUT_DIR").map(PathBuf::from).and_then(|out| {
+                let out = if out.is_absolute() { out } else { root.join(out) };
+                out.ancestors().nth(4).map(PathBuf::from)
+            })
+        })
+        .unwrap_or_else(|| root.join("target"));
     for profile in ["release", "debug"] {
         for name in ["rithmic-gateway", "rithmic-gateway.exe"] {
             let bin = target.join(profile).join(name);
