@@ -127,8 +127,10 @@ async def wait_account_in_cache(
         if cache.account(account_id) is not None:
             return
         by_venue = getattr(cache, "account_for_venue", None)
-        if callable(by_venue) and by_venue(venue_id) is not None:
-            return
+        if callable(by_venue):
+            venue_account = by_venue(venue_id)
+            if venue_account is not None and str(venue_account.id) == str(account_id):
+                return
         if time.monotonic() >= deadline:
             raise RuntimeError(
                 f"account {account_id} not in cache after {timeout_s:.0f}s "
@@ -421,7 +423,6 @@ class RithmicExecutionClient(LiveExecutionClient):
         except Exception as exc:  # noqa: BLE001
             self._log.error(f"invalid account_pnl: {exc}")
             return
-        self._seed_account_if_needed(str(fields["account_id"]))
         account_id = AccountId(f"{VENUE}-{fields['account_id']}")
         if self.account_id is None:
             self._set_account_id(account_id)
@@ -438,6 +439,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         except Exception as exc:  # noqa: BLE001
             self._log.error(f"account_pnl balance not numeric ({free_raw!r}): {exc}")
             return
+        self._seed_account_if_needed(str(fields["account_id"]))
         free = Money(free_dec, currency)
         locked = Money(Decimal("0"), currency)
         total = free
@@ -510,9 +512,11 @@ class RithmicExecutionClient(LiveExecutionClient):
         tag = fields.get("user_tag")
         if tag and str(tag) in self._tag_to_client:
             return self._tag_to_client[str(tag)]
-        # user_tag == client_order_id.value, so the tag fallback is authoritative.
-        if tag:
-            return ClientOrderId(str(tag))
+        # Unknown nonempty tag: do NOT synthesize a ClientOrderId here, else a
+        # notification for an external order would be mistaken for a tracked one
+        # and suppressed before reaching the untracked path. Fall back to the
+        # basket lookup below and let an unmatched notification route to
+        # _handle_untracked_notification.
         basket = fields.get("basket_id")
         if basket:
             return self._cache.client_order_id(VenueOrderId(str(basket)))
@@ -522,12 +526,21 @@ class RithmicExecutionClient(LiveExecutionClient):
         # Record the venue -> client mapping in the cache (authoritative source).
         self._cache.add_venue_order_id(client_order_id, VenueOrderId(venue_id))
 
-    def _venue_id_for(self, fields: dict[str, Any], fallback: str) -> str:
+    def _venue_id_for(
+        self, fields: dict[str, Any], client_order_id: ClientOrderId | None
+    ) -> str:
         basket = fields.get("basket_id")
         if basket:
             return str(basket)
+        # No basket in the notification: recover the real venue order id from
+        # the cache (bound at accept) so modify_rejected/cancel_rejected
+        # reference the venue order, not the client/tag id.
+        if client_order_id is not None:
+            cached = self._cache.venue_order_id(client_order_id)
+            if cached is not None:
+                return cached.value
         tag = fields.get("user_tag")
-        return str(tag or fallback)
+        return str(tag or (client_order_id.value if client_order_id is not None else ""))
 
     def _cache_client_for_notification(self, fields: dict[str, Any]) -> ClientOrderId | None:
         """Recover ownership from the Nautilus cache by venue basket id."""
@@ -567,7 +580,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         basket = fields.get("basket_id")
         if basket:
             self._bind_venue_id(client_order_id, str(basket))
-        venue_order_id = VenueOrderId(self._venue_id_for(fields, client_order_id.value))
+        venue_order_id = VenueOrderId(self._venue_id_for(fields, client_order_id))
         action = notification_action(fields, order)
         if action is None:
             return

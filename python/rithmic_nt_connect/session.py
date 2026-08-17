@@ -183,6 +183,13 @@ class _FlockedDirectSession:
     def connect(self) -> None:
         ensure_connected(self)
 
+    def disconnect(self) -> None:
+        with self._connect_gate:
+            try:
+                self._inner.disconnect()
+            finally:
+                self._connected = False
+
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
 

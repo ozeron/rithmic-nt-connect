@@ -38,7 +38,7 @@ Last run **2026-08-14**: unit 137 passed; live 5 passed, 3 skipped
 | TC-D11 | Subscribe book at interval | [ ] | Not implemented — no periodic snapshot push |
 | TC-D12 | Subscribe book depth | [ ] | Not implemented — summary-only L2, no depth-by-level |
 | TC-D13 | Request book snapshot | [ ] | Not implemented — no one-shot snapshot request |
-| TC-D14 | Managed book from deltas | [x] | `test_depth_convert.py` (unit) — CLEAR+ADD, F_SNAPSHOT/F_LAST |
+| TC-D14 | Managed book from deltas | [~] | `test_depth_convert.py` (unit) — CLEAR+ADD, F_SNAPSHOT/F_LAST |
 | TC-D15 | Request historical book deltas | [ ] | Not implemented — no plant endpoint |
 
 ## Group 3: Quotes
@@ -60,7 +60,12 @@ Last run **2026-08-14**: unit 137 passed; live 5 passed, 3 skipped
 | TC | Name | Status | Where verified |
 |---|---|---|---|
 | TC-D40 | Subscribe bars | [x] | `test_TC_D40_subscribe_external_bars` — **1m EXTERNAL live-proven** on Lucid 2026-08-14; 15m/1h/1d wired |
-| TC-D41 | Request historical bars | [x] | `test_TC_D41_request_historical_bars` (live, OHLCV + ordering) |
+| TC-D41 | Request historical bars | [~] | `test_TC_D41_request_historical_bars` (live; skips on transient-empty, so OHLCV/ordering not always verified) |
+
+> **Coverage note:** not every advertised data type has a green live test. L2 book
+> (`TC-D10/D12/D13`) is blocked by Lucid L2 permission and is unit/wired-only;
+> the history plant (`TC-D31/D41`) intermittently returns transient-empty, so
+> those cases are marked `[~]` and verified when the venue cooperates.
 
 ## Group 6: Derivatives — all N/A (futures; no mark/index/funding stream)
 

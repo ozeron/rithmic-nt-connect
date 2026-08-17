@@ -95,6 +95,7 @@ class _DelayedCache:
         self.calls = 0
         self.ready_after = ready_after
         self.obj = object()
+        self.venue_account = None
 
     def account(self, _account_id: AccountId) -> object | None:
         self.calls += 1
@@ -103,7 +104,12 @@ class _DelayedCache:
         return None
 
     def account_for_venue(self, _venue: Venue) -> object | None:
-        return None
+        return self.venue_account
+
+
+class _NamedAccount:
+    def __init__(self, id_: str) -> None:
+        self.id = AccountId(id_)
 
 
 def test_wait_account_in_cache_returns_when_present() -> None:
@@ -111,6 +117,24 @@ def test_wait_account_in_cache_returns_when_present() -> None:
     aid = AccountId(f"{VENUE}-ACC1")
     asyncio.run(wait_account_in_cache(cache, aid, timeout_s=2.0))
     assert cache.calls >= 3
+
+
+def test_wait_account_in_cache_ignores_other_venue_account() -> None:
+    # A different account already registered at the RITHMIC venue must not
+    # satisfy the wait for the requested account id.
+    cache = _DelayedCache(ready_after=10_000)
+    cache.venue_account = _NamedAccount(f"{VENUE}-OTHER")
+    aid = AccountId(f"{VENUE}-ACC1")
+    with pytest.raises(RuntimeError, match="not in cache"):
+        asyncio.run(wait_account_in_cache(cache, aid, timeout_s=0.12))
+
+
+def test_wait_account_in_cache_matching_venue_account() -> None:
+    cache = _DelayedCache(ready_after=10_000)
+    cache.venue_account = _NamedAccount(f"{VENUE}-ACC1")
+    aid = AccountId(f"{VENUE}-ACC1")
+    asyncio.run(wait_account_in_cache(cache, aid, timeout_s=2.0))
+    assert cache.calls >= 1
 
 
 def test_wait_account_in_cache_times_out() -> None:

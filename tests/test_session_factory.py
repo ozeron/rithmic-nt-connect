@@ -39,6 +39,31 @@ def test_flocked_session_connect_is_idempotent() -> None:
     assert inner2.calls == 1
 
 
+def test_flocked_session_reconnects_after_disconnect() -> None:
+    from rithmic_nt_connect.session import _FlockedDirectSession
+
+    class _Inner:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.disconnects = 0
+
+        def connect(self) -> None:
+            self.calls += 1
+
+        def disconnect(self) -> None:
+            self.disconnects += 1
+
+    inner = _Inner()
+    wrapped = _FlockedDirectSession(inner, lock=object())
+    wrapped.connect()
+    assert inner.calls == 1
+    wrapped.disconnect()
+    assert inner.disconnects == 1
+    # A later connect() must not short-circuit on a stale _connected flag.
+    wrapped.connect()
+    assert inner.calls == 2
+
+
 def test_gateway_factory_does_not_share_wire_session(monkeypatch: pytest.MonkeyPatch) -> None:
     from rithmic_nt_connect.config import ConnectMode, SessionConfig
     from rithmic_nt_connect.factories import _shared_session

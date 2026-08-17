@@ -11,6 +11,8 @@ from nautilus_trader.core.uuid import UUID4
 from nautilus_trader.execution.messages import GenerateFillReports
 from nautilus_trader.execution.messages import GenerateOrderStatusReports
 from nautilus_trader.model.enums import OrderStatus
+from nautilus_trader.model.identifiers import ClientOrderId
+from nautilus_trader.model.identifiers import VenueOrderId
 
 from rithmic_nt_connect._order_plant import OrderPlantPolicy
 from rithmic_nt_connect._order_plant import OrderPlantState
@@ -154,6 +156,102 @@ def test_recon_window_clamps_inverted_bounds():
     client = _client()
     start, end = client._recon_window_sec(200, 100)
     assert end - start == 0
+
+
+# --------------------------------------------------------------------------- #
+# _resolve_client_order_id / _venue_id_for: external tags and venue-id recovery.
+# --------------------------------------------------------------------------- #
+
+
+class _CacheStub:
+    def __init__(self) -> None:
+        self._venue_to_client: dict[str, ClientOrderId] = {}
+        self._client_to_venue: dict[str, VenueOrderId] = {}
+
+    def client_order_id(self, venue_order_id: VenueOrderId) -> ClientOrderId | None:
+        return self._venue_to_client.get(venue_order_id.value)
+
+    def venue_order_id(self, client_order_id: ClientOrderId) -> VenueOrderId | None:
+        return self._client_to_venue.get(client_order_id.value)
+
+    def add_venue_order_id(self, client: ClientOrderId, venue: VenueOrderId) -> None:
+        self._client_to_venue[client.value] = venue
+        self._venue_to_client[venue.value] = client
+
+
+class _CacheClient(_TestClient):
+    """Injects a writable ``_cache`` past the Cython read-only base attribute."""
+
+    @property
+    def _cache(self) -> _CacheStub:
+        return self.__cache  # type: ignore[attr-defined]
+
+    @_cache.setter
+    def _cache(self, value: _CacheStub) -> None:
+        self.__cache = value  # type: ignore[attr-defined]
+
+
+def _cache_client() -> _CacheClient:
+    client = _CacheClient.__new__(_CacheClient)
+    client._tag_to_client = {}
+    client._cache = _CacheStub()
+    return client
+
+
+def test_resolve_unknown_external_tag_without_basket_is_none():
+    client = _cache_client()
+    # An external (untracked) notification must NOT resolve to a synthetic
+    # ClientOrderId; it must fall through to the untracked path.
+    assert client._resolve_client_order_id({"user_tag": "EXT-1"}) is None
+
+
+def test_resolve_unknown_external_tag_falls_back_to_basket_cache():
+    client = _cache_client()
+    coid = ClientOrderId("C1")
+    client._cache._venue_to_client["B1"] = coid
+    assert client._resolve_client_order_id({"user_tag": "EXT-1", "basket_id": "B1"}) == coid
+
+
+def test_resolve_known_tag_maps_to_client_order():
+    client = _cache_client()
+    coid = ClientOrderId("C1")
+    client._tag_to_client["C1"] = coid
+    assert client._resolve_client_order_id({"user_tag": "C1"}) == coid
+
+
+def test_venue_id_for_prefers_cached_venue_id_over_tag():
+    client = _cache_client()
+    coid = ClientOrderId("C1")
+    client._cache.add_venue_order_id(coid, VenueOrderId("VB1"))
+    # No basket_id in the notification: the cached venue id must win, so
+    # modify_rejected/cancel_rejected reference the real venue order.
+    assert client._venue_id_for({"user_tag": "C1"}, coid) == "VB1"
+
+
+def test_venue_id_for_falls_back_to_tag_when_not_cached():
+    client = _cache_client()
+    coid = ClientOrderId("C1")
+    assert client._venue_id_for({"user_tag": "C1"}, coid) == "C1"
+
+
+def test_publish_account_nonnumeric_balance_does_not_seed(monkeypatch: pytest.MonkeyPatch):
+    client = _client()
+    client._account_seeded = False
+    calls: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(
+        RithmicExecutionClient, "_set_account_id", lambda self, aid: calls.append(("set", aid))
+    )
+    monkeypatch.setattr(
+        RithmicExecutionClient,
+        "_seed_account_if_needed",
+        lambda self, account_raw=None: calls.append(("seed", account_raw)),
+    )
+    # Non-numeric balance must not seed/publish fabricated funds.
+    client._publish_account(
+        {"type": "account_pnl", "account_id": "ACC1", "cash_on_hand": "abc"}
+    )
+    assert ("seed", "ACC1") not in calls
 
 
 # --------------------------------------------------------------------------- #
