@@ -33,7 +33,14 @@ cargo build -p rithmic-gateway --release
 
 # Honor CARGO_TARGET_DIR (resolve_gateway_bin also respects it).
 cargo_target_dir="${CARGO_TARGET_DIR:-target}"
-bin_path="$cargo_target_dir/release/rithmic-gateway"
+# Windows Cargo emits rithmic-gateway.exe; keep the suffixed name for both the
+# build lookup and the bundled copy so the resolver can launch it.
+exe_suffix=""
+case "$(rustc -vV | sed -n 's/^host: //p')" in
+  *-windows-*) exe_suffix=".exe" ;;
+esac
+bin_name="rithmic-gateway$exe_suffix"
+bin_path="$cargo_target_dir/release/$bin_name"
 if [ ! -x "$bin_path" ]; then
   echo "gateway binary not found: $bin_path" >&2
   exit 1
@@ -51,7 +58,7 @@ rm -rf "$dest"
 mkdir -p "$dest/bin"
 cp -R python/rithmic_gateway/*.py "$dest/"
 cp -R python/rithmic_gateway/v1 "$dest/v1"
-cp "$bin_path" "$dest/bin/rithmic-gateway"
+cp "$bin_path" "$dest/bin/$bin_name"
 find "$dest" -name '__pycache__' -type d -prune -exec rm -rf {} +
 
 echo "==> maturin build"

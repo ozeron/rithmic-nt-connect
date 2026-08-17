@@ -39,11 +39,17 @@ class SpawnError(RuntimeError):
     """Failed to locate or start the gateway binary."""
 
 
+# Cargo emits ``rithmic-gateway.exe`` on Windows and ``rithmic-gateway`` elsewhere.
+_GATEWAY_BIN_NAME = "rithmic-gateway"
+_GATEWAY_BIN_NAMES = (_GATEWAY_BIN_NAME, _GATEWAY_BIN_NAME + ".exe")
+
+
 def _bin_search_starts() -> list[Path]:
     """Roots to walk for cargo ``target/`` binaries.
 
     Include the editable ``rithmic_nt_connect`` tree. The installed
-    ``rithmic_gateway`` wheel lives under ``.venv`` and has no ``target/``.
+    ``rithmic_gateway`` wheel carries its own ``bin/`` (resolved separately via
+    :func:`_bundled_bin`) and has no ``target/``.
     """
     starts = [Path.cwd(), Path(__file__).resolve().parent]
     try:
@@ -56,17 +62,19 @@ def _bin_search_starts() -> list[Path]:
 
 
 def _cargo_target_candidates(start: Path) -> list[Path]:
-    """Look for ``target/{release,debug}/rithmic-gateway`` under ancestors of ``start``."""
+    """Look for ``target/{release,debug}/rithmic-gateway[.exe]`` under ``start`` ancestors."""
     out: list[Path] = []
     cargo_target = os.environ.get("CARGO_TARGET_DIR")
     if cargo_target:
         base = Path(cargo_target).expanduser()
-        out.append(base / "release" / "rithmic-gateway")
-        out.append(base / "debug" / "rithmic-gateway")
+        for name in _GATEWAY_BIN_NAMES:
+            out.append(base / "release" / name)
+            out.append(base / "debug" / name)
     cur = start.resolve()
     for root in [cur, *cur.parents]:
-        out.append(root / "target" / "release" / "rithmic-gateway")
-        out.append(root / "target" / "debug" / "rithmic-gateway")
+        for name in _GATEWAY_BIN_NAMES:
+            out.append(root / "target" / "release" / name)
+            out.append(root / "target" / "debug" / name)
         if (root / "Cargo.toml").is_file() and (root / "crates").is_dir():
             break
     return out
@@ -79,10 +87,22 @@ def _bundled_bin() -> str | None:
     alongside the Python client, so an installed wheel self-contains the native
     binary with no ``cargo build`` and no ``target/`` on the consumer's disk.
     """
-    path = Path(__file__).resolve().parent / "bin" / "rithmic-gateway"
-    if path.is_file() and os.access(path, os.X_OK):
-        return str(path.resolve())
+    base = Path(__file__).resolve().parent / "bin"
+    for name in _GATEWAY_BIN_NAMES:
+        path = base / name
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path.resolve())
     return None
+
+
+def _resolve_user_bin(raw: str, label: str) -> str | None:
+    """Resolve a user-supplied binary path or ``None`` when unset; ``SpawnError`` if missing."""
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    if not path.is_file():
+        raise SpawnError(f"{label} not found: {path}")
+    return str(path.resolve())
 
 
 def resolve_gateway_bin(explicit: str | None = None) -> str:
@@ -92,21 +112,17 @@ def resolve_gateway_bin(explicit: str | None = None) -> str:
     Search order: explicit → ``RITHMIC_GATEWAY_BIN`` → bundled ``rithmic_gateway/bin`` →
     ``PATH`` → cwd then package ``target/{release,debug}`` (and ``CARGO_TARGET_DIR``).
     """
-    if explicit:
-        path = Path(explicit).expanduser()
-        if not path.is_file():
-            raise SpawnError(f"gateway bin not found: {path}")
-        return str(path.resolve())
-    env_bin = os.environ.get("RITHMIC_GATEWAY_BIN")
-    if env_bin:
-        path = Path(env_bin).expanduser()
-        if not path.is_file():
-            raise SpawnError(f"RITHMIC_GATEWAY_BIN not found: {path}")
-        return str(path.resolve())
+    for label, raw in (
+        ("gateway bin", explicit),
+        ("RITHMIC_GATEWAY_BIN", os.environ.get("RITHMIC_GATEWAY_BIN")),
+    ):
+        resolved = _resolve_user_bin(raw, label)
+        if resolved is not None:
+            return resolved
     bundled = _bundled_bin()
     if bundled is not None:
         return bundled
-    found = shutil.which("rithmic-gateway")
+    found = shutil.which(_GATEWAY_BIN_NAME)
     if found:
         return found
     seen: set[str] = set()

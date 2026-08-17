@@ -258,20 +258,39 @@ def test_resolve_bin_prefers_explicit_and_env_over_bundled(
     assert resolve_gateway_bin(str(explicit)) == str(explicit.resolve())
 
 
+def _bundled_bin_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Fake package dir so _bundled_bin looks in ``tmp_path/pkg/bin``."""
+    pkg_dir = tmp_path / "pkg"
+    bin_dir = pkg_dir / "bin"
+    bin_dir.mkdir(parents=True)
+    monkeypatch.setattr("rithmic_gateway.spawn.__file__", str(pkg_dir / "spawn.py"))
+    return bin_dir
+
+
 def test_bundled_bin_requires_executable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """_bundled_bin() returns None unless the bundled binary is executable."""
-    pkg_dir = tmp_path / "pkg"
-    pkg_dir.mkdir()
-    bin_dir = pkg_dir / "bin"
-    bin_dir.mkdir()
-    binary = bin_dir / "rithmic-gateway"
+    binary = _bundled_bin_dir(tmp_path, monkeypatch) / "rithmic-gateway"
     binary.write_text("#!/bin/sh\n")
-    # Point the module's __file__ at the fake package dir so _bundled_bin looks
-    # in tmp_path/pkg/bin/rithmic-gateway.
-    monkeypatch.setattr("rithmic_gateway.spawn.__file__", str(pkg_dir / "spawn.py"))
     assert _bundled_bin() is None
     binary.chmod(0o755)
     assert _bundled_bin() == str(binary.resolve())
+
+
+def test_bundled_bin_prefers_extensionless_over_exe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When both names exist, the plain name wins; .exe is the fallback."""
+    bin_dir = _bundled_bin_dir(tmp_path, monkeypatch)
+    plain = bin_dir / "rithmic-gateway"
+    exe = bin_dir / "rithmic-gateway.exe"
+    plain.write_text("plain")
+    exe.write_text("exe")
+    plain.chmod(0o755)
+    exe.chmod(0o755)
+    assert _bundled_bin() == str(plain.resolve())
+
+    plain.unlink()
+    assert _bundled_bin() == str(exe.resolve())
 
 
 def test_spawn_happy_path_requires_flock_not_just_listen(
