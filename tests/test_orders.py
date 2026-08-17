@@ -178,8 +178,7 @@ def test_trade_id_unique_without_fill_id():
 def test_order_plant_policy_matrix():
     live = OrderPlantPolicy(OrderPlantState.LIVE)
     assert live.allow_submit() and live.allow_modify() and live.allow_cancel()
-    assert live.use_cache_order_reports()
-    assert not live.fill_reports_available()
+    assert live.load_orders_available()
 
     resync = OrderPlantPolicy(OrderPlantState.RESYNCING)
     assert not resync.allow_submit()

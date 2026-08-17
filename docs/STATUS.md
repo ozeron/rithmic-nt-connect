@@ -24,7 +24,7 @@ Acceptance: **NQ / CME via LucidTrading**. One Rithmic login (close MotiveWave /
 | Live trades / quotes | `TradeTick`, `QuoteTick` | **Done** |
 | Order-book summary | `OrderBookDeltas` (L2) | **Partial** — snapshot flags `F_SNAPSHOT` / `F_LAST`. Book unsubscribe wired through plants/gateway/direct. |
 | History ticks / time bars | Request path, `*_all` | **Done** — Rust slices (15m ticks / 4h bars), transient + empty retry, sort/dedup. Daily/weekly replay uses calendar `YYYYMMDD` indexes (Lucid 2026-08-13). Python `load_front_month_instrument` / `load_trade_ticks` / `load_time_bars`. |
-| Live venue `EXTERNAL` bars | 1m / 15m / 1h / 1d | **Partial** — history `request_bars` + history-plant `subscribe_time_bar_updates`. Not Lucid-proven. 1s stays INTERNAL. |
+| Live venue `EXTERNAL` bars | 1m / 15m / 1h / 1d | **Partial** — history `request_bars` + history-plant `subscribe_time_bar_updates`. 1m EXTERNAL subscribe **live-proven on LucidTrading 2026-08-14** (`test_TC_D40_subscribe_external_bars`). 1s stays INTERNAL. |
 | Depth-by-order / L3 MBO | Not advertised | **N/A** until a separate slice |
 | Mark / index / funding / greeks | Not advertised | **N/A** |
 | Catalog / Parquet | Other repo | **N/A** |
@@ -32,8 +32,8 @@ Acceptance: **NQ / CME via LucidTrading**. One Rithmic login (close MotiveWave /
 | Brackets / OCO | Plant bracket API | **Partial** — wire on direct + gateway; Lucid accept/survival **not proven**. Live spike: `scripts/spike_bracket_order.py` (`RITHMIC_BRACKETS=1` + `RITHMIC_ENABLE_TRADING=1`; spike-only flag, not enforced in plants/gateway). |
 | Account / positions | Best-effort PnL | **Partial** — auto-discovers FCM/IB/account when unset (multi-account needs `RITHMIC_ACCOUNT_ID` selector); soft-fail PnL otherwise |
 | Submit / cancel / modify + fills | Gated order plant | **Partial** — submit pre-send deny; post-send unknown; untracked → reports; fill dedup. Live place still gated on `app_name`. |
-| Order status reports | Cache-backed only | **Done** (honest: not a venue snapshot) |
-| Fill reports | Query unavailable | **Done** (`VenueQueryUnavailable`) |
+| Order status reports | Venue recon when trading; cache-backed when read-only | **Partial (fail-closed)** — `load_orders` refuses all recon because Rithmic order history has no completion signal and replays silently cap at 10k (see ops-runbook probe). When trading, `generate_order_status_reports` **raises** `ReconciliationUnavailable` / `VenueQueryUnavailable` rather than present a lossy drain or local cache as authoritative venue state (which would cancel tracked open orders). Read-only returns cache-backed (honest: not a venue snapshot). |
+| Fill reports | Venue recon when trading; read-only declines | **Partial (fail-closed)** — `generate_fill_reports` queries `load_orders` when trading is enabled; with no authoritative retrieval path it **raises** `ReconciliationUnavailable` / `VenueQueryUnavailable` (never `[]` as venue-empty). Read-only declines with the same error. |
 | Reconnect + MD resubscribe | Planned | **Partial** — ticker poll resyncs last-trade/BBO + book + EXTERNAL bar intent. Gateway typed restore covers ticker/book/bars/PnL/order/brackets after plant drop. Not Lucid-proven. |
 | Session gateway (shared login) | `connect_mode` required (`direct` / `gateway`) | **Partial** — plants/session parity on wire (incl. book unsub, `probe_time_bars`, ensure_order). Auto-spawn idle-exit after last client (`RITHMIC_GATEWAY_IDLE_EXIT_SEC`, default 5s via spawn; unset = never for standalone). Shared-consumer Lucid smoke green. Native TLS remote **N/A**. **Lake:** market-data-lake hardcodes `GatewayClient` + `load_time_bars_range` (client-side chunks); install `python/` package (no Nautilus). |
 | Python v2 / LiveNode | Not this support line | **N/A** |
@@ -90,7 +90,7 @@ Acceptance: **NQ / CME via LucidTrading**. One Rithmic login (close MotiveWave /
 ### Phase 5: Optional
 
 - N/A until advertised: depth-by-order, 1-SECOND-EXTERNAL, weekly/tick bars, catalog
-- [~] Live EXTERNAL time bars (1m/15m/1h/1d): subscribe + poll wired; Lucid proof still open
+- [x] Live EXTERNAL time bars (1m/15m/1h/1d): subscribe + poll wired; **1m live-proven on LucidTrading 2026-08-14** (`test_TC_D40_subscribe_external_bars`). 15m/1h/1d still need live proof.
 - `cancel_all_orders` exists on the wire; not a safe default
 
 ### Phase 6: Factories
@@ -136,7 +136,7 @@ Cross-cutting items from [`references/nautilus-adapter-conventions.md`](referenc
 | Tracked vs external reports | [x] | Untracked fills → `_send_fill_report` when side/px/qty present; no invented side/type/TIF status reports |
 | Fill dedup by venue trade id | [x] | `fill_dedup_key` / `trade_id_from_fill_fields` |
 | Never drop exec events | [~] | Parseable untracked fills reported; incomplete/untyped untracked suppressed + log |
-| No empty list as “venue empty” | [x] | Cache orders; `VenueQueryUnavailable` fills |
+| No empty list as “venue empty” | [x] | Cache orders; recon is **fail-closed** (`load_orders` returns `ReconciliationUnavailable`; exec raises rather than present lossy/empty as authoritative venue state) |
 | No nested `block_on` on asyncio | [x] | `asyncio.to_thread` |
 | Testers default dry-run | [x] | |
 
@@ -147,9 +147,10 @@ Cross-cutting items from [`references/nautilus-adapter-conventions.md`](referenc
 Do not mark Phase 3, 4, or 7 `[x]` until the matching items are proven.
 
 1. **Incremental book updates** — summary snapshots only (L2); L3 MBO N/A.
-2. **Execution honesty** — [x] three evidence classes; untracked → reports; fill query stays unavailable; dedup by venue id. (`cancel_all_orders` still out of honesty claim.)
+2. **Execution honesty** — [x] three evidence classes; untracked → reports; recon is **fail-closed** (`ReconciliationUnavailable` / `VenueQueryUnavailable`, never a misleading venue-empty); dedup by venue id. (`cancel_all_orders` still out of honesty claim.)
 3. **Account auto-discovery** — [x] wire resolve on ensure_order/ensure_pnl; optional env triple / `ACCOUNT_ID` selector. Plan: [`plans/2026-08-13-001-account-auto-discovery-plan.md`](plans/2026-08-13-001-account-auto-discovery-plan.md) + umbrella [`plans/2026-08-14-001-exec-honesty-account-discovery-dryrun-plan.md`](plans/2026-08-14-001-exec-honesty-account-discovery-dryrun-plan.md).
 4. **Live-prove ticker resync** on LucidTrading (code + unit test landed).
+4. **Data Testing Spec (TC-D) sweep** — [x] 2026-08-14 `tests/test_data_client_live.py` (7 passed / 2 skipped; TC-D01/03/20/30/40/41/70). TC-D40 1m EXTERNAL bars live-proven on LucidTrading. Skips: TC-D10 (Lucid denies L2 book `[13] permission denied`), TC-D31 (history plant transient empty).
 5. **Record LucidTrading order dry-run** — [x] 2026-08-14 local dry-run (`mode=dry_run`, `placed=false`, account auto-resolved; artifact gitignored). Live place stays gated on authorized `app_name`.
 
 ## Paper path (intraday)

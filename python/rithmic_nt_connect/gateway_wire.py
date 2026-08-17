@@ -77,14 +77,19 @@ class GatewayWireSession:
         bar_type: int = 2,
         period: int = 1,
     ) -> list[dict[str, Any]]:
+        # A wide 1m window cannot fit one server-chunked RPC (the parent holds a
+        # session mutex while slicing internally — minutes for months of bars).
+        # Chunk client-side like the lake ingest path (calendar slices, 120s
+        # history timeout each) and merge.
         return _call(
-            self._client.load_time_bars,
+            self._client.load_time_bars_range,
             symbol,
             exchange,
             start_ssboe,
             end_ssboe,
             bar_type=bar_type,
             period=period,
+            max_workers=1,
         )
 
     def probe_time_bars(
@@ -134,6 +139,9 @@ class GatewayWireSession:
 
     def subscribe_order_updates(self) -> None:
         _call(self._client.subscribe_order_updates)
+
+    def load_orders(self, start_ssboe: int, end_ssboe: int) -> list[dict[str, Any]]:
+        return _call(self._client.load_orders, start_ssboe, end_ssboe)
 
     def subscribe_bracket_updates(self) -> None:
         _call(self._client.subscribe_bracket_updates)

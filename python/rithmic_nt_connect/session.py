@@ -2,9 +2,24 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Protocol
 
 from rithmic_nt_connect.config import ConnectMode, SessionConfig
+from rithmic_nt_connect.errors import AlreadyConnectedError
+
+
+def _load_session_lock() -> Any:
+    """Load ``SessionLock`` from the pure-Python gateway package.
+
+    The ``rithmic_gateway`` wheel uses protobuf 7 gencode, which crashes
+    when Nautilus IB has pinned protobuf 5.29. But ``rithmic_gateway/__init__.py``
+    now imports ``GatewayClient`` lazily via ``__getattr__``, so importing
+    ``SessionLock`` from ``flock`` does not trigger protobuf at all.
+    """
+    from rithmic_gateway.flock import SessionLock
+
+    return SessionLock
 
 
 class TickerSession(Protocol):
@@ -103,6 +118,7 @@ class OrderSession(Protocol):
         trail_by_ticks: int | None = None,
     ) -> None: ...
     def cancel_all_orders(self) -> None: ...
+    def load_orders(self, start_ssboe: int, end_ssboe: int) -> list[dict[str, Any]]: ...
     def poll_order_event(self) -> dict[str, Any] | None: ...
 
 
@@ -127,8 +143,9 @@ def create_rust_session(
     ``plants`` is ``market_data`` (ticker + history) or ``execution``
     (also PnL when the account triple is set). Order plant stays lazy.
     """
-    from rithmic_gateway.flock import SessionLock
     from rithmic_nt_connect._lib import Session  # type: ignore
+
+    SessionLock = _load_session_lock()
 
     lock = SessionLock.try_acquire(
         session.user, session.system_name, session.url, session.env
@@ -151,14 +168,54 @@ def create_rust_session(
 
 
 class _FlockedDirectSession:
-    """Keep credential flock alive for the lifetime of a direct WireSession."""
+    """Keep the credential flock for the life of a direct plant session.
+
+    Data and exec clients share one instance. ``connect()`` is idempotent
+    because Nautilus starts both clients in parallel and each calls connect.
+    """
 
     def __init__(self, inner: WireSession, lock: Any) -> None:
         self._inner = inner
         self._lock = lock
+        self._connected = False
+        self._connect_gate = threading.Lock()
+
+    def connect(self) -> None:
+        ensure_connected(self)
+
+    def disconnect(self) -> None:
+        with self._connect_gate:
+            try:
+                self._inner.disconnect()
+            finally:
+                self._connected = False
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
+
+
+def ensure_connected(session: Any) -> None:
+    """Connect once. Safe if the shared plant is already up."""
+    gate = getattr(session, "_connect_gate", None)
+    if gate is None:
+        _connect_once(session)
+        return
+    with gate:
+        if getattr(session, "_connected", False):
+            return
+        _connect_once(session)
+        session._connected = True
+
+
+def _connect_once(session: Any) -> None:
+    inner = getattr(session, "_inner", session)
+    try:
+        inner.connect()
+    except AlreadyConnectedError:
+        # The plant session is genuinely already connected (Rust raises this
+        # type only from that exact state); a partial connect failure raises
+        # any other error and must not be swallowed.
+        return
 
 
 def create_session(
@@ -201,4 +258,5 @@ __all__ = [
     "connect_market_data_session",
     "create_rust_session",
     "create_session",
+    "ensure_connected",
 ]

@@ -26,6 +26,12 @@ use rithmic_plants::session::{
 pyo3::create_exception!(rithmic_nt_connect, ChannelLaggedError, PyRuntimeError);
 pyo3::create_exception!(rithmic_nt_connect, ChannelClosedError, PyRuntimeError);
 pyo3::create_exception!(rithmic_nt_connect, NotConnectedError, PyRuntimeError);
+pyo3::create_exception!(rithmic_nt_connect, AlreadyConnectedError, PyRuntimeError);
+pyo3::create_exception!(
+    rithmic_nt_connect,
+    ReconciliationUnavailableError,
+    PyRuntimeError
+);
 
 fn runtime() -> &'static Runtime {
     static RT: OnceLock<Runtime> = OnceLock::new();
@@ -35,11 +41,15 @@ fn runtime() -> &'static Runtime {
 fn to_py_err(err: Error) -> PyErr {
     match err {
         Error::Config(msg) => PyValueError::new_err(msg),
+        Error::AlreadyConnected => AlreadyConnectedError::new_err("already connected"),
         Error::ChannelLagged { plant, skipped } => {
             ChannelLaggedError::new_err(format!("{plant}:{skipped}"))
         }
         Error::ChannelClosed { plant } => ChannelClosedError::new_err(plant),
         Error::NotConnected { plant } => NotConnectedError::new_err(plant),
+        Error::ReconciliationUnavailable(msg) => {
+            ReconciliationUnavailableError::new_err(msg)
+        }
         other => PyRuntimeError::new_err(other.to_string()),
     }
 }
@@ -191,6 +201,7 @@ fn order_notification_dict(py: Python<'_>, n: OrderNotificationDto) -> PyResult<
     set_opt_f64(&d, "fill_price", n.fill_price)?;
     set_opt_i32(&d, "transaction_type", n.transaction_type)?;
     set_opt_i32(&d, "price_type", n.price_type)?;
+    set_opt_i32(&d, "duration", n.duration)?;
     set_opt_str(&d, "fill_id", n.fill_id)?;
     set_opt_str(&d, "text", n.text)?;
     set_opt_str(&d, "report_text", n.report_text)?;
@@ -845,6 +856,26 @@ impl PySession {
             .map_err(to_py_err)
     }
 
+    /// Load order events (fills + cancels + rejects + working) over a window.
+    fn load_orders(
+        &self,
+        py: Python<'_>,
+        start_sec: i32,
+        end_sec: i32,
+    ) -> PyResult<Vec<Py<PyDict>>> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let events = runtime()
+            .block_on(inner.load_orders(start_sec, end_sec))
+            .map_err(to_py_err)?;
+        events
+            .into_iter()
+            .map(|n| order_notification_dict(py, n))
+            .collect()
+    }
+
     fn subscribe_bracket_updates(&self) -> PyResult<()> {
         let mut inner = self
             .inner
@@ -1065,6 +1096,11 @@ fn _lib(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("ChannelLaggedError", m.py().get_type::<ChannelLaggedError>())?;
     m.add("ChannelClosedError", m.py().get_type::<ChannelClosedError>())?;
     m.add("NotConnectedError", m.py().get_type::<NotConnectedError>())?;
+    m.add("AlreadyConnectedError", m.py().get_type::<AlreadyConnectedError>())?;
+    m.add(
+        "ReconciliationUnavailableError",
+        m.py().get_type::<ReconciliationUnavailableError>(),
+    )?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

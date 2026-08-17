@@ -1,11 +1,15 @@
 """Lake-friendly Rithmic gateway client (no Nautilus, no maturin).
 
 Talks plant-semantic protobuf over a unix socket to ``rithmic-gateway``.
+
+``GatewayClient`` is imported lazily so ``direct`` plant sessions can take
+the credential flock without loading protobuf 7 gencode (Nautilus IB pins 5.29).
 """
 
 from __future__ import annotations
 
-from rithmic_gateway.client import GatewayClient, GatewayError
+from typing import Any
+
 from rithmic_gateway.config import GatewayConfig
 from rithmic_gateway.flock import SessionLock, SessionLockError, session_flock_held
 from rithmic_gateway.history_window import (
@@ -34,3 +38,11 @@ __all__ = [
     "spawn_gateway",
     "window_slices",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    if name in {"GatewayClient", "GatewayError"}:
+        from rithmic_gateway.client import GatewayClient, GatewayError
+
+        return GatewayClient if name == "GatewayClient" else GatewayError
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -16,3 +16,6 @@ DEFAULT_GATEWAY_URL: str = "wss://rprotocol.rithmic.com:443"
 
 DEFAULT_APP_NAME: str = "rithmic-nt-connect"
 DEFAULT_APP_VERSION: str = "0.1.0"
+
+DEFAULT_ACCOUNT_CURRENCY: str = "USD"
+"""Lucid/CME account PnL often omits currency; Nautilus still needs one to register."""

@@ -299,6 +299,26 @@ async def resync_ticker_session(
         await asyncio.to_thread(session.subscribe_time_bars, symbol, exchange, rtype, period)
 
 
+def _bar_type_duration_ns(bar_type: BarType) -> int:
+    """Duration in nanoseconds of a Nautilus ``BarType`` spec.
+
+    Used to shift a venue bar CLOSE time back to the OPEN time for intraday
+    bars. Derived from the authoritative ``BarType`` (aggregation + step) rather
+    than the wire ``period`` field, whose unit (native vs seconds) is not
+    reliable. Daily/weekly markers are calendar ``YYYYMMDD`` (not a close epoch),
+    so their ``ts_event`` is left untouched.
+    """
+    aggregation = bar_type.spec.aggregation
+    step = int(bar_type.spec.step)
+    if aggregation == BarAggregation.SECOND:
+        return step * 1_000_000_000
+    if aggregation == BarAggregation.MINUTE:
+        return step * 60 * 1_000_000_000
+    if aggregation == BarAggregation.HOUR:
+        return step * 60 * 60 * 1_000_000_000
+    return 0  # DAY / WEEK / other: calendar marker, no close→open shift
+
+
 def fields_to_bar(
     fields: dict[str, Any],
     bar_type: BarType,
@@ -309,6 +329,10 @@ def fields_to_bar(
     volume = int(fields["volume"])
     if volume < 0:
         raise ConvertError(f"bar volume must be >= 0, got {volume}")
+    # Rithmic ts_event/marker is the bar CLOSE time; Nautilus Bar.ts_event is
+    # the OPEN time. Shift intraday bars back by their duration so the tape
+    # aligns with the lake / IBKR / Databento open-time convention.
+    ts_event = int(fields["ts_event"]) - _bar_type_duration_ns(bar_type)
     return Bar(
         bar_type,
         _price(fields["open"], price_precision),
@@ -316,7 +340,7 @@ def fields_to_bar(
         _price(fields["low"], price_precision),
         _price(fields["close"], price_precision),
         Quantity.from_int(volume),
-        int(fields["ts_event"]),
+        ts_event,
         ts_init,
     )
 
@@ -394,7 +418,9 @@ class RithmicDataClient(LiveMarketDataClient):
         self._resync_generation = 0
 
     async def _connect(self) -> None:
-        await asyncio.to_thread(self._session.connect)
+        from rithmic_nt_connect.session import ensure_connected
+
+        await asyncio.to_thread(ensure_connected, self._session)
         await self._instrument_provider.initialize()
         for instrument in self._instrument_provider.list_all():
             self._handle_data(instrument)

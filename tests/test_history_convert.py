@@ -56,15 +56,19 @@ def test_time_bar_to_fields_and_bar():
         "volume": 42,
         "marker": 1_700_000_000,
         "bar_type": 2,
-        "period": "1",
+        "period": "60",
     }
     fields = time_bar_to_fields(raw)
     assert fields["open"] == 100.0
+    # time_bar_to_fields reports the venue CLOSE time unshifted; the close→open
+    # shift is applied by fields_to_bar using the authoritative BarType.
     assert fields["ts_event"] == 1_700_000_000 * 1_000_000_000
     bar_type = BarType.from_str("NQU6.RITHMIC-1-MINUTE-LAST-EXTERNAL")
     bar = fields_to_bar(fields, bar_type, ts_init=1)
     assert float(bar.close) == 100.5
     assert int(bar.volume) == 42
+    # 1-minute bar: Bar.ts_event = close (marker) − 60s = open time.
+    assert bar.ts_event == (1_700_000_000 - 60) * 1_000_000_000
 
 
 def test_time_bar_requires_volume():
@@ -93,15 +97,105 @@ def test_live_time_bar_dict_converts():
         "volume": 42,
         "marker": 1_700_000_000,
         "bar_type": 2,
-        "period": "15",
+        "period": "900",
     }
     fields = time_bar_to_fields(raw)
+    # Close time reported unshifted by time_bar_to_fields.
+    assert fields["ts_event"] == 1_700_000_000 * 1_000_000_000
     bar = fields_to_bar(
         fields,
         BarType.from_str("NQU6.RITHMIC-15-MINUTE-LAST-EXTERNAL"),
         ts_init=1,
     )
+    # 15-minute bar: Bar.ts_event = marker − 15*60s = open time.
+    assert bar.ts_event == (1_700_000_000 - 900) * 1_000_000_000
     assert float(bar.close) == 100.5
+
+
+def test_time_bar_close_to_open_shift():
+    # Shift is driven by the authoritative BarType (SECOND step), independent of
+    # the wire `period` unit; daily marker (YYYYMMDD) is left as-is.
+    sec_fields = time_bar_to_fields(
+        {
+            "type": "history_bar",
+            "symbol": "NQU6",
+            "exchange": "CME",
+            "open_price": 1.0, "high_price": 1.0, "low_price": 1.0, "close_price": 1.0,
+            "volume": 1,
+            "marker": 1_700_000_000,
+            "bar_type": 1,
+            "period": "1",
+        }
+    )
+    sec = fields_to_bar(
+        sec_fields,
+        BarType.from_str("NQU6.RITHMIC-1-SECOND-LAST-EXTERNAL"),
+        ts_init=1,
+    )
+    # 1-second bar shifts by 1s.
+    assert sec.ts_event == (1_700_000_000 - 1) * 1_000_000_000
+
+    # 1-minute live bar whose wire `period` is the request's native unit ("1"):
+    # the shift must still be 60s (from the BarType), not 1s.
+    min_fields = time_bar_to_fields(
+        {
+            "type": "time_bar",
+            "symbol": "NQU6",
+            "exchange": "CME",
+            "open_price": 1.0, "high_price": 1.0, "low_price": 1.0, "close_price": 1.0,
+            "volume": 1,
+            "marker": 1_700_000_000,
+            "bar_type": 2,
+            "period": "1",
+        }
+    )
+    one_min = fields_to_bar(
+        min_fields,
+        BarType.from_str("NQU6.RITHMIC-1-MINUTE-LAST-EXTERNAL"),
+        ts_init=1,
+    )
+    assert one_min.ts_event == (1_700_000_000 - 60) * 1_000_000_000
+
+    # 1-hour bar maps to MINUTE bar_type period=60 (request native unit); the
+    # shift must be 3600s, not 60s.
+    hour_fields = time_bar_to_fields(
+        {
+            "type": "time_bar",
+            "symbol": "NQU6",
+            "exchange": "CME",
+            "open_price": 1.0, "high_price": 1.0, "low_price": 1.0, "close_price": 1.0,
+            "volume": 1,
+            "marker": 1_700_000_000,
+            "bar_type": 2,
+            "period": "60",
+        }
+    )
+    hour = fields_to_bar(
+        hour_fields,
+        BarType.from_str("NQU6.RITHMIC-1-HOUR-LAST-EXTERNAL"),
+        ts_init=1,
+    )
+    assert hour.ts_event == (1_700_000_000 - 3600) * 1_000_000_000
+
+    daily_fields = time_bar_to_fields(
+        {
+            "type": "history_bar",
+            "symbol": "NQU6",
+            "exchange": "CME",
+            "open_price": 1.0, "high_price": 1.0, "low_price": 1.0, "close_price": 1.0,
+            "volume": 1,
+            "marker": 20_260_804,
+            "ts_event_ns": 1_780_000_000 * 1_000_000_000,
+            "bar_type": 3,
+            "period": "1",
+        }
+    )
+    daily = fields_to_bar(
+        daily_fields,
+        BarType.from_str("NQU6.RITHMIC-1-DAY-LAST-EXTERNAL"),
+        ts_init=1,
+    )
+    assert daily.ts_event == 1_780_000_000 * 1_000_000_000  # untouched
 
 
 def test_external_bar_advertised_slice():

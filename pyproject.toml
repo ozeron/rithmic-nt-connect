@@ -36,3 +36,7 @@ features = ["python", "extension-module"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["python"]
+markers = [
+    "live: needs LucidTrading credentials + network (auto-skip without RITHMIC_USER/PW)",
+    "slow: takes >30s (1m EXTERNAL bar poll); deselect with -m 'not slow'",
+]

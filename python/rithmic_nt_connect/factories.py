@@ -15,6 +15,7 @@ from nautilus_trader.config import InstrumentProviderConfig
 from nautilus_trader.live.factories import LiveDataClientFactory
 from nautilus_trader.live.factories import LiveExecClientFactory
 
+from rithmic_nt_connect.config import ConnectMode
 from rithmic_nt_connect.config import RithmicDataClientConfig
 from rithmic_nt_connect.config import RithmicExecClientConfig
 from rithmic_nt_connect.config import SessionConfig
@@ -46,6 +47,15 @@ def _shared_session(
     *,
     plants: str,
 ) -> WireSession:
+    """Direct: one in-process plant session (Rithmic allows one login).
+
+    Gateway: a **new** unix client per Nautilus client. The parent
+    ``rithmic-gateway`` holds the single Rithmic login; sharing one
+    ``GatewayClient`` would interleave tick and order polls.
+    """
+    if config_session.connect_mode == ConnectMode.GATEWAY:
+        return create_session(config_session, plants=plants)
+
     key = (
         f"{config_session.connect_mode}:{config_session.user}:{config_session.system_name}:"
         f"{config_session.url}:{config_session.account_id}:{config_session.fcm_id}:"

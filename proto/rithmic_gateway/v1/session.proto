@@ -200,6 +200,13 @@ message GetReferenceDataRequest {
   string exchange = 2;
 }
 
+// Load order events (fills + cancels + rejects + working) over a window.
+// Mirrors `rithmic-plants::load_orders`; each event is an OrderNotification.
+message LoadOrdersRequest {
+  int32 start_time_sec = 1;
+  int32 end_time_sec = 2;
+}
+
 // ---------------------------------------------------------------------------
 // Responses (Gateway -> Client, correlated to a Request by request_id)
 // ---------------------------------------------------------------------------
@@ -270,6 +277,10 @@ message TimeBarProbeRow {
 
 message ProbeTimeBarsResponse {
   repeated TimeBarProbeRow rows = 1;
+}
+
+message LoadOrdersResponse {
+  repeated OrderNotification events = 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -379,6 +390,7 @@ message OrderNotification {
   optional int32 usecs = 27;
   optional uint64 ts_event_ns = 28;
   optional bool is_snapshot = 29;
+  optional int32 duration = 31;
 }
 
 message HistoryTick {
@@ -473,6 +485,7 @@ message Frame {
     PlaceBracketOrderRequest place_bracket_order = 34;
     AdjustBracketStopRequest adjust_bracket_stop = 35;
     AdjustBracketTargetRequest adjust_bracket_target = 36;
+    LoadOrdersRequest load_orders = 37;
 
     Ack ack = 50;
     ErrorResponse error = 51;
@@ -481,6 +494,7 @@ message Frame {
     LoadTicksResponse load_ticks_response = 54;
     LoadTimeBarsResponse load_time_bars_response = 55;
     ProbeTimeBarsResponse probe_time_bars_response = 56;
+    LoadOrdersResponse load_orders_response = 57;
 
     Event event = 90;
   }

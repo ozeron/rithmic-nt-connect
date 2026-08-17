@@ -2,7 +2,7 @@
 
 use rithmic_gateway::pb::frame::Body;
 use rithmic_gateway::pb::{
-    CancelAllOrdersRequest, PlaceBracketOrderRequest, PlaceOrderRequest,
+    CancelAllOrdersRequest, LoadOrdersRequest, PlaceBracketOrderRequest, PlaceOrderRequest,
     SubscribeBracketUpdatesRequest, SubscribeOrderUpdatesRequest,
 };
 use rithmic_gateway::server::{gate_rpc_for_test, rpc_sequence_with_gates};
@@ -138,6 +138,36 @@ fn subscribe_bracket_denied_when_trading_disabled() {
         ),
         "trading_disabled",
     );
+}
+
+#[test]
+fn load_orders_denied_when_trading_disabled() {
+    assert_error_code(
+        gate_rpc_for_test(
+            &ParentGates {
+                trading_enabled: false,
+                cancel_all_enabled: false,
+            },
+            Body::LoadOrders(LoadOrdersRequest {
+                start_time_sec: 0,
+                end_time_sec: 1,
+            }),
+        ),
+        "trading_disabled",
+    );
+}
+
+#[test]
+fn load_orders_errors_when_no_session() {
+    let (bodies, plan) = rpc_sequence_with_gates(
+        trading_on(),
+        vec![Body::LoadOrders(LoadOrdersRequest {
+            start_time_sec: 0,
+            end_time_sec: 1,
+        })],
+    );
+    assert_error_code(bodies.into_iter().next().expect("body"), "no_session");
+    assert!(!plan.order, "failed load_orders must not leave order intent");
 }
 
 #[test]

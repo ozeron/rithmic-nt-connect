@@ -21,7 +21,8 @@ use tokio::sync::broadcast::error::TryRecvError;
 use crate::account::{pick_account, rows_from_account_list};
 use crate::config::SessionConfig;
 use crate::dto::{
-    FrontMonthDto, HistoryBarDto, HistoryTickDto, PlantEvent, ReferenceDataDto, TimeBarProbeRow,
+    FrontMonthDto, HistoryBarDto, HistoryTickDto, OrderNotificationDto, PlantEvent,
+    ReferenceDataDto, TimeBarProbeRow,
 };
 use crate::error::{Error, Result};
 use crate::history::{
@@ -174,7 +175,7 @@ impl RithmicSession {
     /// Partial failure disconnects whatever already logged in.
     pub async fn connect(&mut self) -> Result<()> {
         if self.ticker.is_some() || self.history.is_some() || self.pnl.is_some() {
-            return Err(Error::Session("already connected".into()));
+            return Err(Error::AlreadyConnected);
         }
 
         let rc = self.config.to_rithmic_config()?;
@@ -560,6 +561,27 @@ impl RithmicSession {
             return Err(e);
         }
         Ok(())
+    }
+
+    /// Load order events (fills + cancels + rejects + working) over a window.
+    ///
+    /// **Always fails closed.** Rithmic order history has no completion signal
+    /// (order-notification rows stream on the subscription channel with no end
+    /// marker), and replays silently cap at 10,000 records with no truncation
+    /// indication. A silence-window drain therefore can never prove "venue has
+    /// N and I got all N". Returning a partial or empty set as authoritative
+    /// venue state would let Nautilus reconciliation cancel tracked open orders.
+    ///
+    /// This returns [`Error::ReconciliationUnavailable`] unconditionally until a
+    /// retrieval path with known completion semantics (e.g. per-basket
+    /// `show_order_history_detail`) is implemented and validated.
+    pub async fn load_orders(&mut self, start: i32, end: i32) -> Result<Vec<OrderNotificationDto>> {
+        let _ = (start, end);
+        Err(Error::ReconciliationUnavailable(
+            "order history has no completion signal; recon unavailable until a \
+             provably-complete retrieval path exists"
+                .into(),
+        ))
     }
 
     /// Disconnect only the order plant (leaves ticker/history/PnL connected).

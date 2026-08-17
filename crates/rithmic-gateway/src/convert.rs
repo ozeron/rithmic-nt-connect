@@ -116,6 +116,7 @@ pub fn order_notification_to_pb(n: OrderNotificationDto) -> pb::OrderNotificatio
         fill_price: n.fill_price,
         transaction_type: n.transaction_type,
         price_type: n.price_type,
+        duration: n.duration,
         fill_id: n.fill_id,
         text: n.text,
         report_text: n.report_text,

@@ -204,6 +204,23 @@ class GatewayClient:
             raise GatewayError("protocol", f"expected reference_data_response, got {which}")
         return _message_to_dict(resp.reference_data_response)
 
+    def load_orders(self, start_ssboe: int, end_ssboe: int) -> list[dict[str, Any]]:
+        """Load order events (fills + cancels + rejects + working) over a window.
+
+        Each event is a normalized ``OrderNotification``-shaped dict.
+        """
+        resp = self._rpc(
+            pb.Frame(
+                load_orders=pb.LoadOrdersRequest(
+                    start_time_sec=start_ssboe, end_time_sec=end_ssboe
+                )
+            )
+        )
+        which = resp.WhichOneof("body")
+        if which != "load_orders_response":
+            raise GatewayError("protocol", f"expected load_orders_response, got {which}")
+        return [_message_to_dict(e) for e in resp.load_orders_response.events]
+
     def load_ticks(
         self, symbol: str, exchange: str, start_ssboe: int, end_ssboe: int
     ) -> list[dict[str, Any]]:
