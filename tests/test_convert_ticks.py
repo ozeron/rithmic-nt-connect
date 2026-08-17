@@ -101,16 +101,48 @@ def test_malformed_last_trade_raises() -> None:
     assert "missing required fields" in str(exc.value)
 
 
-def test_partial_bbo_raises() -> None:
+def test_partial_bbo_returns_none() -> None:
+    # missing sizes + timestamp → not ready to emit
+    assert bbo_to_fields({"symbol": "NQU6", "bid_price": 1.0, "ask_price": 2.0}) is None
+
+
+def test_bbo_missing_symbol_raises() -> None:
     with pytest.raises(ConvertError):
+        bbo_to_fields({"bid_price": 1.0})
+
+
+def test_one_sided_bbo_merges_into_two_sided_quote() -> None:
+    state = {}
+    assert (
         bbo_to_fields(
             {
                 "symbol": "NQU6",
-                "bid_price": 1.0,
-                "ask_price": 2.0,
-                # missing sizes + timestamp
-            }
+                "exchange": "CME",
+                "bid_price": 21012.0,
+                "bid_size": 3,
+                "ts_event_ns": 1_700_000_000_000_000_000,
+            },
+            state,
         )
+        is None
+    )
+    fields = bbo_to_fields(
+        {
+            "symbol": "NQU6",
+            "exchange": "CME",
+            "ask_price": 21012.25,
+            "ask_size": 2,
+            "ts_event_ns": 1_700_000_000_000_000_001,
+        },
+        state,
+    )
+    assert fields is not None
+    assert fields["instrument_id"] == f"NQU6.{VENUE}"
+    assert fields["bid_price"] == 21012.0
+    assert fields["ask_price"] == 21012.25
+    assert fields["bid_size"] == 3.0
+    assert fields["ask_size"] == 2.0
+    assert fields["ts_event"] == 1_700_000_000_000_000_001
 
 
 def test_account_pnl_requires_account_id() -> None:

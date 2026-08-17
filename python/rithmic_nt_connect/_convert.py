@@ -82,24 +82,51 @@ def last_trade_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def bbo_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
-    """Map a BestBidOffer venue dict to QuoteTick-oriented fields."""
-    _require(d, "symbol", "bid_price", "ask_price", "bid_size", "ask_size")
-    symbol = str(d["symbol"])
-    exchange = d.get("exchange")
+def bbo_to_fields(
+    d: Mapping[str, Any],
+    state: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Merge a possibly one-sided ``BestBidOffer`` into a two-sided quote map.
+
+    Rithmic pushes the best bid and best ask as *separate* ``BestBidOffer``
+    messages (``presence_bits`` BID / ASK), so a single message usually carries
+    only one side. ``state`` is the caller's mutable per-symbol accumulator;
+    the present side(s) are merged into it in place, and a full QuoteTick field
+    map is returned only once both sides are known. Returns ``None`` while the
+    book is still one-sided (or a side size is empty).
+    """
+    _require(d, "symbol")
+    state = state if state is not None else {}
+    state["symbol"] = str(d["symbol"])
+    if d.get("exchange") is not None:
+        state["exchange"] = d["exchange"]
     ts = _ts_ns(d)
-    if ts is None:
-        raise ConvertError("missing timestamp fields: ts_event_ns or ssboe")
+    if ts is not None:
+        state["ts_event"] = ts
+    for side in ("bid", "ask"):
+        price_k = f"{side}_price"
+        size_k = f"{side}_size"
+        if d.get(price_k) is not None:
+            state[price_k] = float(d[price_k])
+            state[size_k] = float(d.get(size_k) or 0)
+    if state.get("bid_price") is None or state.get("ask_price") is None:
+        return None
+    if state.get("ts_event") is None:
+        return None
+    if float(state.get("bid_size") or 0) < 1 or float(state.get("ask_size") or 0) < 1:
+        return None
     return {
         "type": "quote",
-        "instrument_id": instrument_id_from_symbol(symbol, exchange),
-        "symbol": symbol,
-        "exchange": exchange,
-        "bid_price": float(d["bid_price"]),
-        "ask_price": float(d["ask_price"]),
-        "bid_size": float(d["bid_size"]),
-        "ask_size": float(d["ask_size"]),
-        "ts_event": ts,
+        "instrument_id": instrument_id_from_symbol(
+            str(state["symbol"]), state.get("exchange")
+        ),
+        "symbol": state["symbol"],
+        "exchange": state.get("exchange"),
+        "bid_price": float(state["bid_price"]),
+        "ask_price": float(state["ask_price"]),
+        "bid_size": float(state["bid_size"]),
+        "ask_size": float(state["ask_size"]),
+        "ts_event": state["ts_event"],
         "venue": VENUE,
     }
 
