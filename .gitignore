@@ -10,6 +10,12 @@
 target/
 dist/
 build/
+# Bundled wheel data (build output from scripts/build_wheel.sh); only the
+# marker wheel-data/purelib/.gitkeep is committed so maturin's data dir exists.
+wheel-data/*
+!wheel-data/purelib/
+wheel-data/purelib/*
+!wheel-data/purelib/.gitkeep
 *.egg-info/
 __pycache__/
 *.py[cod]

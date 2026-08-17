@@ -35,7 +35,7 @@ Acceptance: **NQ / CME via LucidTrading**. One Rithmic login (close MotiveWave /
 | Order status reports | Venue recon when trading; cache-backed when read-only | **Partial (fail-closed)** — `load_orders` refuses all recon because Rithmic order history has no completion signal and replays silently cap at 10k (see ops-runbook probe). When trading, `generate_order_status_reports` **raises** `ReconciliationUnavailable` / `VenueQueryUnavailable` rather than present a lossy drain or local cache as authoritative venue state (which would cancel tracked open orders). Read-only returns cache-backed (honest: not a venue snapshot). |
 | Fill reports | Venue recon when trading; read-only declines | **Partial (fail-closed)** — `generate_fill_reports` queries `load_orders` when trading is enabled; with no authoritative retrieval path it **raises** `ReconciliationUnavailable` / `VenueQueryUnavailable` (never `[]` as venue-empty). Read-only declines with the same error. |
 | Reconnect + MD resubscribe | Planned | **Partial** — ticker poll resyncs last-trade/BBO + book + EXTERNAL bar intent. Gateway typed restore covers ticker/book/bars/PnL/order/brackets after plant drop. Not Lucid-proven. |
-| Session gateway (shared login) | `connect_mode` required (`direct` / `gateway`) | **Partial** — plants/session parity on wire (incl. book unsub, `probe_time_bars`, ensure_order). Auto-spawn idle-exit after last client (`RITHMIC_GATEWAY_IDLE_EXIT_SEC`, default 5s via spawn; unset = never for standalone). Shared-consumer Lucid smoke green. Native TLS remote **N/A**. **Lake:** market-data-lake hardcodes `GatewayClient` + `load_time_bars_range` (client-side chunks); install `python/` package (no Nautilus). |
+| Session gateway (shared login) | `connect_mode` required (`direct` / `gateway`) | **Partial** — plants/session parity on wire (incl. book unsub, `probe_time_bars`, ensure_order). Auto-spawn idle-exit after last client (`RITHMIC_GATEWAY_IDLE_EXIT_SEC`, default 5s via spawn; unset = never for standalone). Shared-consumer Lucid smoke green. Native TLS remote **N/A**. **Wheel:** self-contained — `scripts/build_wheel.sh` bundles the `rithmic-gateway` binary + `rithmic_gateway` client into the maturin wheel; `resolve_gateway_bin` prefers `rithmic_gateway/bin/`. **Lake:** market-data-lake hardcodes `GatewayClient` + `load_time_bars_range` (client-side chunks); install `python/` package (no Nautilus). |
 | Python v2 / LiveNode | Not this support line | **N/A** |
 
 **Protocol boundaries:** ticker, history, PnL, order plants. Public MD vs private exec.
@@ -111,6 +111,7 @@ Acceptance: **NQ / CME via LucidTrading**. One Rithmic login (close MotiveWave /
 ### Phase 9: Docs / ops
 
 - [x] Matrix in this file; testers default dry-run
+- [x] Self-contained wheel (`scripts/build_wheel.sh`) bundles `rithmic-gateway` binary + client
 - [~] Recovery / troubleshooting still thin ([`references/ops-runbook.md`](references/ops-runbook.md))
 
 ---

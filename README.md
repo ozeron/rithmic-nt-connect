@@ -20,6 +20,8 @@ Trading is **off by default** (`enable_trading=False` / unset `RITHMIC_ENABLE_TR
 
 **Lake / shared history (no Nautilus):** install the pure-Python client from `python/` (`uv pip install -e python` or `PYTHONPATH=python` + `protobuf`). Use `GatewayClient` + `load_time_bars_range` (auto-spawn or long-lived parent). market-data-lake hardcodes this path.
 
+**Self-contained wheel:** `scripts/build_wheel.sh` produces a wheel that carries the adapter, the `rithmic_gateway` client, **and** the `rithmic-gateway` binary — consumers `pip install` one artifact and the gateway binary is resolved from `rithmic_gateway/bin/` (no `RITHMIC_GATEWAY_BIN`, no `cargo build`).
+
 Paper-trade a simple NQ strategy with **live Rithmic data** and Nautilus **Sandbox** execution (no Rithmic orders):
 
 ```bash

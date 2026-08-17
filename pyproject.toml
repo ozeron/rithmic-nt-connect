@@ -8,7 +8,7 @@ license = { text = "Apache-2.0" }
 authors = [{ name = "rithmic-nt-connect contributors" }]
 dependencies = [
   "nautilus_trader==1.231.0",
-  "protobuf>=5.0",
+  "protobuf>=7.34.1",
 ]
 
 [project.urls]
@@ -32,6 +32,7 @@ manifest-path = "crates/rithmic-nt-connect/Cargo.toml"
 module-name = "rithmic_nt_connect._lib"
 python-source = "python"
 features = ["python", "extension-module"]
+data = "wheel-data"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
