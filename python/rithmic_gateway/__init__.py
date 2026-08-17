@@ -3,7 +3,10 @@
 Talks plant-semantic protobuf over a unix socket to ``rithmic-gateway``.
 
 ``GatewayClient`` is imported lazily so ``direct`` plant sessions can take
-the credential flock without loading protobuf 7 gencode (Nautilus IB pins 5.29).
+the credential flock without loading the protobuf gencode at all. The
+bundled gencode is generated with protoc 5.29.6 — the exact version
+``nautilus_trader[ib]==1.231.0`` pins — so the wire client imports on that
+runtime (and any newer one).
 """
 
 from __future__ import annotations
