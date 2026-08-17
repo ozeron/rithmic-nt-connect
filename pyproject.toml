@@ -8,7 +8,7 @@ license = { text = "Apache-2.0" }
 authors = [{ name = "rithmic-nt-connect contributors" }]
 dependencies = [
   "nautilus_trader==1.231.0",
-  "protobuf>=7.34.1",
+  "protobuf>=5.29.6",
 ]
 
 [project.urls]
