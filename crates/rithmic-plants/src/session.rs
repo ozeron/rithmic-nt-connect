@@ -5,6 +5,7 @@
 
 use std::future::Future;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+use std::time::{Duration, Instant};
 
 use rithmic_rs::{
     ConnectStrategy, ManualOrAutoEntry, OrderSide, OrderType, RithmicAccount,
@@ -14,6 +15,7 @@ use rithmic_rs::{
     RithmicPnlPlant, RithmicPnlPlantHandle, RithmicTickerPlant, RithmicTickerPlantHandle,
     TimeBarType, TimeInForce,
 };
+use rithmic_rs::SubscriptionFilter;
 use rithmic_rs::rti::request_time_bar_update;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::broadcast::error::TryRecvError;
@@ -30,6 +32,11 @@ use crate::history::{
     load_sliced, parse_time_bar_type,
 };
 use crate::plants::PlantSet;
+
+/// Silence window (ms) that ends the best-effort `load_orders` drain.
+const ORDER_DRAIN_SETTLE_MS: u64 = 1_000;
+/// Hard cap (ms) on the `load_orders` drain against continuous live traffic.
+const ORDER_DRAIN_MAX_MS: u64 = 10_000;
 
 fn noop_waker() -> Waker {
     fn clone(_: *const ()) -> RawWaker {
@@ -563,25 +570,24 @@ impl RithmicSession {
         Ok(())
     }
 
-    /// Load order events (fills + cancels + rejects + working) over a window.
+    /// Load current working orders via a bounded silence-window drain.
     ///
-    /// **Always fails closed.** Rithmic order history has no completion signal
-    /// (order-notification rows stream on the subscription channel with no end
-    /// marker), and replays silently cap at 10,000 records with no truncation
-    /// indication. A silence-window drain therefore can never prove "venue has
-    /// N and I got all N". Returning a partial or empty set as authoritative
-    /// venue state would let Nautilus reconciliation cancel tracked open orders.
+    /// Rithmic has no end-of-list signal for order notifications: `show_orders`
+    /// triggers a replay of the current working orders, which arrive on the
+    /// order-updates subscription channel with no completion marker. This drains
+    /// that channel until `ORDER_DRAIN_SETTLE_MS` of silence (or the hard cap)
+    /// and returns every order notification seen in arrival order.
     ///
-    /// This returns [`Error::ReconciliationUnavailable`] unconditionally until a
-    /// retrieval path with known completion semantics (e.g. per-basket
-    /// `show_order_history_detail`) is implemented and validated.
+    /// **Best-effort, not provably complete.** Replays silently cap at 10,000
+    /// records and a quiet channel cannot distinguish "venue has no orders" from
+    /// "rows were lost". Callers that need a hard guarantee must treat the
+    /// result as advisory (see `death_policy=trust_stop`) rather than as an
+    /// authoritative venue snapshot. The `start`/`end` window is intentionally
+    /// ignored: only the *current* working set is requested.
     pub async fn load_orders(&mut self, start: i32, end: i32) -> Result<Vec<OrderNotificationDto>> {
         let _ = (start, end);
-        Err(Error::ReconciliationUnavailable(
-            "order history has no completion signal; recon unavailable until a \
-             provably-complete retrieval path exists"
-                .into(),
-        ))
+        self.ensure_order_plant().await?;
+        load_orders_on(self.order_handle()?).await
     }
 
     /// Disconnect only the order plant (leaves ticker/history/PnL connected).
@@ -1052,6 +1058,186 @@ pub async fn cancel_all_orders_on(handle: &RithmicOrderPlantHandle) -> Result<()
         .manual_or_auto(ManualOrAutoEntry::Auto)
         .build()?;
     check_response(handle.cancel_all_orders(cmd).await?, "cancel_all_orders")
+}
+
+/// Drain current working orders on an already-connected handle (no session lock).
+///
+/// `show_orders` triggers a replay of the current working orders, which arrive
+/// on the order-updates subscription channel with no completion marker. This
+/// drains that channel until `ORDER_DRAIN_SETTLE_MS` of silence (or the hard
+/// cap) and returns every order notification seen in arrival order.
+///
+/// **Best-effort, not provably complete.** Replays silently cap at 10,000
+/// records and a quiet channel cannot distinguish "venue has no orders" from
+/// "rows were lost". Callers that need a hard guarantee must treat the result
+/// as advisory (see `death_policy=trust_stop`) rather than as an authoritative
+/// venue snapshot.
+/// A pull source the order-drain reads `PlantEvent`s from.
+///
+/// Implemented for `SubscriptionFilter` (production, over the order-plant
+/// subscription) and for `broadcast::Receiver<PlantEvent>` (tests). Keeping the
+/// drain generic over this trait lets the timing/collection logic be unit-tested
+/// without constructing rithmic-rs's non-exhaustive `RithmicResponse`.
+pub(crate) trait OrderDrainSource {
+    async fn recv_order(&mut self) -> std::result::Result<PlantEvent, RecvError>;
+}
+
+impl OrderDrainSource for SubscriptionFilter {
+    async fn recv_order(&mut self) -> std::result::Result<PlantEvent, RecvError> {
+        let resp = self.recv().await?;
+        Ok(PlantEvent::from(&resp))
+    }
+}
+
+/// Drain order notifications off an order-plant subscription source.
+///
+/// The drain collects `OrderNotification` events until
+/// `ORDER_DRAIN_SETTLE_MS` of silence (or the `ORDER_DRAIN_MAX_MS` hard cap)
+/// and returns them in arrival order. A `Closed` / `Lagged` source aborts the
+/// drain with the corresponding error (so a dropped order-plant connection
+/// surfaces as `ChannelClosed`).
+///
+/// **Best-effort, not provably complete.** Replays silently cap at 10,000
+/// records and a quiet channel cannot distinguish "venue has no orders" from
+/// "rows were lost". Callers that need a hard guarantee must treat the result
+/// as advisory (see `death_policy=trust_stop`) rather than as an authoritative
+/// venue snapshot.
+pub(crate) async fn drain_order_notifications<S>(
+    mut src: S,
+) -> Result<Vec<OrderNotificationDto>>
+where
+    S: OrderDrainSource,
+{
+    let settle = Duration::from_millis(ORDER_DRAIN_SETTLE_MS);
+    let deadline = Instant::now() + Duration::from_millis(ORDER_DRAIN_MAX_MS);
+    let mut out: Vec<OrderNotificationDto> = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(settle.min(remaining), src.recv_order()).await {
+            Ok(Ok(PlantEvent::OrderNotification(dto))) => out.push(dto),
+            Ok(Ok(_)) => {} // non-order events (PnL, brackets, …) are ignored
+            Ok(Err(RecvError::Lagged(skipped))) => {
+                return Err(Error::ChannelLagged {
+                    plant: "order",
+                    skipped,
+                });
+            }
+            Ok(Err(RecvError::Closed)) => return Err(Error::ChannelClosed { plant: "order" }),
+            Err(_elapsed) => break, // silence window elapsed -> drain complete
+        }
+    }
+    Ok(out)
+}
+
+/// Drain current working orders on an already-connected handle (no session lock).
+///
+/// `show_orders` triggers a replay of the current working orders, which arrive
+/// on the order-updates subscription channel with no completion marker. This
+/// drains that channel until `ORDER_DRAIN_SETTLE_MS` of silence (or the hard
+/// cap) and returns every order notification seen in arrival order.
+///
+/// **Best-effort, not provably complete.** Replays silently cap at 10,000
+/// records and a quiet channel cannot distinguish "venue has no orders" from
+/// "rows were lost". Callers that need a hard guarantee must treat the result
+/// as advisory (see `death_policy=trust_stop`) rather than as an authoritative
+/// venue snapshot.
+pub async fn load_orders_on(
+    handle: &RithmicOrderPlantHandle,
+) -> Result<Vec<OrderNotificationDto>> {
+    // A fresh receiver so the gateway event pump's own receiver is not consumed.
+    let rx = handle.subscription_receiver.resubscribe();
+    check_response(handle.show_orders().await?, "show_orders")?;
+    drain_order_notifications(rx).await
+}
+
+#[cfg(test)]
+mod drain_tests {
+    use super::*;
+    use tokio::sync::broadcast;
+    use tokio::time::{timeout, Duration};
+
+    // Make the production drain loop testable with a plain `PlantEvent` channel
+    // instead of rithmic-rs's non-exhaustive `RithmicResponse`.
+    impl OrderDrainSource for broadcast::Receiver<PlantEvent> {
+        async fn recv_order(&mut self) -> std::result::Result<PlantEvent, RecvError> {
+            Ok(self.recv().await?)
+        }
+    }
+
+    fn order_event() -> PlantEvent {
+        PlantEvent::OrderNotification(OrderNotificationDto {
+            source: "rithmic".into(),
+            kind: None,
+            notify_type: None,
+            notify_type_name: None,
+            status: None,
+            basket_id: Some("B1".into()),
+            exchange_order_id: None,
+            user_tag: None,
+            account_id: None,
+            symbol: None,
+            exchange: None,
+            quantity: None,
+            total_fill_size: None,
+            total_unfilled_size: None,
+            fill_size: None,
+            price: None,
+            trigger_price: None,
+            avg_fill_price: None,
+            fill_price: None,
+            transaction_type: None,
+            price_type: None,
+            duration: None,
+            fill_id: None,
+            text: None,
+            report_text: None,
+            completion_reason: None,
+            ssboe: None,
+            usecs: None,
+            ts_event_ns: None,
+            is_snapshot: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn drain_collects_order_notifications() {
+        let (tx, rx) = broadcast::channel(16);
+        tx.send(order_event()).unwrap();
+        tx.send(order_event()).unwrap();
+        let got = timeout(Duration::from_secs(5), drain_order_notifications(rx))
+            .await
+            .expect("drain should finish within the silence window")
+            .expect("drain should succeed");
+        assert_eq!(got.len(), 2, "both replayed order notifications collected");
+    }
+
+    #[tokio::test]
+    async fn drain_errors_on_closed_channel() {
+        let (tx, rx) = broadcast::channel(16);
+        drop(tx);
+        let res = drain_order_notifications(rx).await;
+        assert!(
+            matches!(res, Err(Error::ChannelClosed { plant: "order" })),
+            "closed channel must surface as ChannelClosed, got {res:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_errors_on_lagged_channel() {
+        let (tx, rx) = broadcast::channel(8);
+        // Overflow the buffer so the never-drained receiver falls behind.
+        for _ in 0..32 {
+            let _ = tx.send(order_event());
+        }
+        let res = drain_order_notifications(rx).await;
+        assert!(
+            matches!(res, Err(Error::ChannelLagged { plant: "order", .. })),
+            "overflowed channel must surface as ChannelLagged, got {res:?}"
+        );
+    }
 }
 
 async fn connect_ticker(rc: &RithmicConfig) -> Result<TickerPlant> {
