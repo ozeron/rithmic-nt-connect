@@ -47,6 +47,13 @@ pub struct GatewayState {
     /// Serialize first venue-subscribe per topic so a failing peer cannot
     /// leave concurrent Ack'd clients without a live venue join.
     pub topic_locks: TokioMutex<HashMap<SubKey, Arc<TokioMutex<()>>>>,
+    /// Serialize the complete `show_orders` + bounded-drain reconciliation so
+    /// concurrent `LoadOrders` requests cannot interleave their replays on the
+    /// shared order-updates subscription channel (each drain would otherwise
+    /// observe the other's working-order replay and return a mixed snapshot).
+    /// Kept separate from the session lock so the drain can run without
+    /// blocking the event pump.
+    pub recon_lock: Arc<TokioMutex<()>>,
     /// Ready peer count + optional idle-exit after last client.
     pub idle: IdleExit,
 }

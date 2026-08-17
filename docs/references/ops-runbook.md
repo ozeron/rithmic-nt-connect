@@ -84,24 +84,36 @@ Do not register both sandbox and Rithmic exec for venue `RITHMIC`.
 Current advertised scope vs done: [`../STATUS.md`](../STATUS.md).
 Phases / conventions: [`nautilus-adapter-phases.md`](nautilus-adapter-phases.md), [`nautilus-adapter-conventions.md`](nautilus-adapter-conventions.md).
 
-## Order-history reconciliation is fail-closed
+## Order-history reconciliation is best-effort (not provably complete)
 
 Rithmic order history has no completion signal (order-notification rows stream
 on the subscription channel with no end marker; the request returns only an
 ack) and replays silently cap at 10,000 records with no truncation indication.
 A silence-window drain therefore can never prove "venue has N and I got all N".
 **Observed 2026-08-16:** both the return value and a 10s channel drain yield
-zero rows despite the venue reporting orders (`user_msg` count).
+zero rows despite the venue reporting orders (`user_msg` count). The drain is
+live-venue-unproven as of this writing — see the TODO below.
 
-So `load_orders` returns `Err(ReconciliationUnavailable)` unconditionally, and
-the exec generators (`generate_order_status_reports` / `generate_fill_reports`)
-**raise** when the venue source is unavailable — never reporting `[]` as
-authoritative venue-empty (which would let Nautilus cancel tracked open orders),
-and never presenting local cache as venue state while trading. Read-only status
-recon stays cache-backed (honest: not a venue snapshot).
+`load_orders` now performs a best-effort drain: it calls `show_orders` and then
+collects current working-order notifications off the order-plant stream until a
+bounded silence window elapses (hard-capped at `ORDER_DRAIN_MAX_MS`). The result
+is **advisory, not an authoritative venue snapshot**: empty means "no working
+orders seen", which is *not* proof the venue has none (a lossy or premature
+drain looks identical). The exec generators (`generate_order_status_reports` /
+`generate_fill_reports`) therefore return whatever the drain yields — including
+`[]` — when trading is enabled, and read-only status recon stays cache-backed
+(honest: not a venue snapshot).
 
-Recon will stay refused until a provably-complete retrieval path (e.g. per-basket
-`show_order_history_detail` with exhaustive enumeration) is implemented and
-validated against a non-empty, permissioned account.
+**Consumer requirement (important):** because an empty best-effort drain can
+look like "no orders", a trading consumer must run with
+`death_policy=trust_stop` (or otherwise not cancel on empty recon). Nautilus'
+default `death_policy=TRACKED` would reconcile an empty result as "no working
+orders" and **cancel tracked open orders**. The adapter does not enforce this;
+the node operator is responsible for it.
+
+TODO (live proof): validate against a non-empty, permissioned Lucid account that
+the `show_orders` drain actually returns the venue's working orders (not zero).
+A provably-complete retrieval path (e.g. per-basket `show_order_history_detail`
+with exhaustive enumeration) would remove the best-effort caveat.
 
 See also: `docs/references/my046-rithmic-access.md`, `docs/references/plant-probe-2026-08-12.md`.

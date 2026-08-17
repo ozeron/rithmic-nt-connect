@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex as TokioMutex};
 
 use rithmic_plants::history::parse_time_bar_type;
+use rithmic_plants::session::load_orders_on;
 use rithmic_plants::PlantSet;
 
 use crate::convert::{
@@ -459,10 +460,11 @@ pub(super) async fn dispatch(state: &GatewayState, client: &mut ClientCtx, reque
                 Err(e) => err_to_frame(request_id, "get_reference_data_failed", e),
             }
         }
-        Body::LoadOrders(req) => {
+        Body::LoadOrders(_req) => {
             // Order-plant login is a trading capability (KTD12): gate the same as
             // EnsureOrder / SubscribeOrderUpdates so `RITHMIC_ENABLE_TRADING=0`
-            // cannot be bypassed via the recon RPC.
+            // cannot be bypassed via the recon RPC. The window is intentionally
+            // ignored: only the current working set is requested.
             if !state.gates.trading_enabled {
                 return error_frame(
                     request_id,
@@ -473,11 +475,24 @@ pub(super) async fn dispatch(state: &GatewayState, client: &mut ClientCtx, reque
             let Some(session) = &state.session else {
                 return no_session_frame(request_id);
             };
-            let mut guard = session.lock().await;
-            match guard
-                .load_orders(req.start_time_sec, req.end_time_sec)
-                .await
-            {
+            // Serialize the whole show_orders + drain: concurrent drains on the
+            // shared order-updates channel would observe each other's replays
+            // and return mixed/duplicated snapshots. This lock is separate from
+            // the session lock so the drain never blocks the event pump.
+            let _recon_guard = state.recon_lock.lock().await;
+            // Clone the order handle and release the session lock before the
+            // bounded drain so the event pump keeps forwarding plant events.
+            let handle = {
+                let mut guard = session.lock().await;
+                match guard.ensure_order_plant().await {
+                    Ok(()) => match guard.clone_order_handle() {
+                        Ok(handle) => handle,
+                        Err(e) => return err_to_frame(request_id, "load_orders_failed", e),
+                    },
+                    Err(e) => return err_to_frame(request_id, "load_orders_failed", e),
+                }
+            };
+            match load_orders_on(&handle).await {
                 Ok(events) => Frame {
                     request_id,
                     body: Some(Body::LoadOrdersResponse(pb::LoadOrdersResponse {
@@ -980,6 +995,7 @@ pub(super) fn test_state(gates: ParentGates, hub: SharedFanout) -> GatewayState 
         session: None,
         reconnect: Arc::new(ReconnectController::new(hub)),
         topic_locks: TokioMutex::new(HashMap::new()),
+        recon_lock: Arc::new(TokioMutex::new(())),
         idle: IdleExit::new(IdleExitPolicy::Never),
     }
 }

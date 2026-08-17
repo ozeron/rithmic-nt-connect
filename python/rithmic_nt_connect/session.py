@@ -12,9 +12,10 @@ from rithmic_nt_connect.errors import AlreadyConnectedError
 def _load_session_lock() -> Any:
     """Load ``SessionLock`` from the pure-Python gateway package.
 
-    The ``rithmic_gateway`` wheel uses protobuf 7 gencode, which crashes
-    when Nautilus IB has pinned protobuf 5.29. But ``rithmic_gateway/__init__.py``
-    now imports ``GatewayClient`` lazily via ``__getattr__``, so importing
+    The ``rithmic_gateway`` gencode is generated with protoc 5.29.6 to match
+    the ``nautilus_trader[ib]==1.231.0`` pin of ``protobuf==5.29.6``, so the
+    wire client imports on that runtime (and any newer one). ``rithmic_gateway/__init__.py``
+    imports ``GatewayClient`` lazily via ``__getattr__``, so importing
     ``SessionLock`` from ``flock`` does not trigger protobuf at all.
     """
     from rithmic_gateway.flock import SessionLock

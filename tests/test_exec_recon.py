@@ -10,8 +10,10 @@ import pytest
 from nautilus_trader.core.uuid import UUID4
 from nautilus_trader.execution.messages import GenerateFillReports
 from nautilus_trader.execution.messages import GenerateOrderStatusReports
+from nautilus_trader.execution.messages import GeneratePositionStatusReports
 from nautilus_trader.model.enums import OrderStatus
 from nautilus_trader.model.identifiers import ClientOrderId
+from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.identifiers import VenueOrderId
 
 from rithmic_nt_connect._order_plant import OrderPlantPolicy
@@ -321,16 +323,13 @@ def test_publish_account_nonfinite_balance_does_not_seed(monkeypatch: pytest.Mon
 
 
 # --------------------------------------------------------------------------- #
-# _load_orders_events: a clean-but-empty drain is NOT authoritative venue-empty.
+# _load_orders_events: an empty bounded drain is a valid best-effort answer.
 # --------------------------------------------------------------------------- #
 
 
-def test_load_orders_events_raises_on_empty_recon():
+def test_load_orders_events_returns_empty_recon():
     client = _trading_client(_EmptyLoadOrdersSession())
-    with pytest.raises(RuntimeError, match="failed after 3 attempts") as exc_info:
-        asyncio.run(client._load_orders_events(1, 2))
-    assert exc_info.value.__cause__ is not None
-    assert "no rows" in str(exc_info.value.__cause__)
+    assert asyncio.run(client._load_orders_events(1, 2)) == []
 
 
 # --------------------------------------------------------------------------- #
@@ -513,3 +512,88 @@ def test_load_orders_events_does_not_retry_unavailable_error():
     with pytest.raises(ReconciliationUnavailableError, match="unavailable"):
         asyncio.run(client._load_orders_events(1, 2))
     assert calls["n"] == 1
+
+
+class _PositionClient(_TestClient):
+    """Writable ``_cache`` / ``_clock`` / ``_log`` for position-report tests."""
+
+    @property
+    def _clock(self) -> object:
+        return SimpleNamespace(timestamp_ns=lambda: 123)
+
+    @property
+    def _cache(self) -> object:
+        return self.__cache  # type: ignore[attr-defined]
+
+    @_cache.setter
+    def _cache(self, value: object) -> None:
+        self.__cache = value  # type: ignore[attr-defined]
+
+    @property
+    def _log(self) -> object:
+        return self.__log  # type: ignore[attr-defined]
+
+    @_log.setter
+    def _log(self, value: object) -> None:
+        self.__log = value  # type: ignore[attr-defined]
+
+
+class _InstrumentCache:
+    def __init__(self, loaded: set[str]) -> None:
+        self._loaded = loaded
+
+    def instrument(self, instrument_id: InstrumentId) -> str | None:
+        key = str(instrument_id)
+        return key if key in self._loaded else None
+
+
+def _position_cmd() -> GeneratePositionStatusReports:
+    return GeneratePositionStatusReports(
+        instrument_id=None,
+        start=None,
+        end=None,
+        command_id=UUID4(),
+        ts_init=1,
+    )
+
+
+def test_position_status_reports_skip_unloaded_instruments() -> None:
+    client = _PositionClient.__new__(_PositionClient)
+    client._positions = {
+        "MNQU6.RITHMIC": {"instrument_id": "MNQU6.RITHMIC", "quantity": 0},
+        "NQU6.RITHMIC": {"instrument_id": "NQU6.RITHMIC", "quantity": 0},
+    }
+    client._cache = _InstrumentCache({"MNQU6.RITHMIC"})
+    emitted: list[str] = []
+    client._position_report_from_fields = (  # type: ignore[method-assign]
+        lambda fields, ts_init: (
+            emitted.append(str(fields["instrument_id"]))
+            or f"R:{fields['instrument_id']}"
+        )
+    )
+    reports = asyncio.run(client.generate_position_status_reports(_position_cmd()))
+    assert [str(r) for r in reports] == ["R:MNQU6.RITHMIC"]
+    assert emitted == ["MNQU6.RITHMIC"]
+
+
+def test_position_status_reports_warn_on_unloaded_nonzero_position() -> None:
+    client = _PositionClient.__new__(_PositionClient)
+    client._positions = {
+        "NQU6.RITHMIC": {"instrument_id": "NQU6.RITHMIC", "quantity": 2},
+    }
+    client._cache = _InstrumentCache(set())
+    warnings: list[str] = []
+    client._log = SimpleNamespace(warning=lambda msg, *a, **k: warnings.append(str(msg)))
+    emitted: list[str] = []
+    client._position_report_from_fields = (  # type: ignore[method-assign]
+        lambda fields, ts_init: (
+            emitted.append(str(fields["instrument_id"]))
+            or f"R:{fields['instrument_id']}"
+        )
+    )
+    reports = asyncio.run(client.generate_position_status_reports(_position_cmd()))
+    assert reports == []
+    assert emitted == []
+    assert len(warnings) == 1
+    assert "NQU6.RITHMIC" in warnings[0]
+    assert "qty=2" in warnings[0]

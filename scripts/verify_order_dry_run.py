@@ -4,8 +4,9 @@ Default mode is **dry-run**: connect, login order plant, subscribe to order
 updates, optionally poll for a few seconds, and exit **without placing orders**.
 
 Live place is intentionally gated behind ``--live-place`` **and**
-``RITHMIC_ENABLE_TRADING=1``. Do not run ``--live-place`` until conformance /
-``app_name`` authorization is confirmed.
+``RITHMIC_ENABLE_TRADING=1`` (plus an explicit far ``--price``). Test-plant order
+routing with ``DEFAULT_APP_NAME`` is confirmed authorized (proven 2026-08-17); the
+script cancels only its own basket, never ``cancel_all``.
 
 Examples::
 

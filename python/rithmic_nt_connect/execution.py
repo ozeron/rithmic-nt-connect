@@ -1121,16 +1121,17 @@ class RithmicExecutionClient(LiveExecutionClient):
         return getattr(exc, "code", None) == "reconciliation_unavailable"
 
     async def _load_orders_events(self, start_sec: int, end_sec: int) -> list[dict[str, Any]]:
-        # A transient plant error must not be reported as an empty venue (which
-        # Nautilus would reconcile against and could strip tracked order state).
-        # Reconciliation-unavailable is non-retryable (fail immediately); only
-        # transport/channel failures get the brief retry+backoff before fail.
+        # The gateway performs a bounded silence-window drain of the current
+        # working orders (`show_orders`). An empty result means "no working
+        # orders after the drain" and is a valid best-effort answer, not an
+        # error. Only transport/channel failures retry; a definitive
+        # unavailable result fails immediately.
         attempts = 3
         backoff = 0.05
         last_exc: Exception | None = None
         for attempt in range(attempts):
             try:
-                events = await asyncio.to_thread(self._session.load_orders, start_sec, end_sec)
+                return await asyncio.to_thread(self._session.load_orders, start_sec, end_sec)
             except Exception as exc:
                 if self._is_recon_unavailable(exc):
                     raise
@@ -1143,22 +1144,6 @@ class RithmicExecutionClient(LiveExecutionClient):
                     await asyncio.sleep(backoff)
                     backoff = min(backoff * 2, 1.0)
                 continue
-            if not events:
-                # The order-history drain currently yields no rows even when the
-                # venue has orders (see ops-runbook). A clean-but-empty result is
-                # indistinguishable from a lossy one, so fail instead of feeding
-                # Nautilus an authoritative "venue empty" that would cancel
-                # tracked open orders.
-                last_exc = RuntimeError(
-                    "load_orders recon returned no rows; refusing to report "
-                    "venue-empty from a lossy order-history source"
-                )
-                if attempt + 1 < attempts:
-                    self._log.warning(f"{last_exc}; retry {attempt + 1}/{attempts}")
-                    await asyncio.sleep(backoff)
-                    backoff = min(backoff * 2, 1.0)
-                continue
-            return events
         raise RuntimeError(
             f"load_orders recon failed after {attempts} attempts ({start_sec}..{end_sec})"
         ) from last_exc
@@ -1295,15 +1280,22 @@ class RithmicExecutionClient(LiveExecutionClient):
         if not self.enable_trading:
             return self._cache_backed_order_status_reports(command)
         if not self._order_plant.load_orders_available():
-            # A trading client must not present local cache as authoritative
-            # venue state. Fail closed rather than reconcile against a source
-            # that has no provably-complete order-history retrieval path.
             raise VenueQueryUnavailable(
-                "Rithmic order reconciliation unavailable (no authoritative "
-                "order-history retrieval path)"
+                "Rithmic order reconciliation unavailable (order plant not ready)"
             )
         start_sec, end_sec = self._recon_window_sec(command.start, command.end)
         events = await self._load_orders_events(start_sec, end_sec)
+        if not events:
+            # Best-effort drain returned nothing. This is advisory, not proof the
+            # venue is empty: a quiet or lossy channel looks identical. Under
+            # Nautilus' default death_policy=TRACKED an empty recon would cancel
+            # tracked open orders, so the operator must run with trust_stop.
+            self._log.warning(
+                "order recon returned no working orders from the best-effort "
+                "drain; advisory, not an authoritative venue-empty. Set "
+                "death_policy=trust_stop (or equivalent) so Nautilus does not "
+                "cancel tracked open orders on an empty recon."
+            )
         latest: dict[str, tuple[int, OrderStatusReport]] = {}
         for raw in events:
             try:
@@ -1341,8 +1333,7 @@ class RithmicExecutionClient(LiveExecutionClient):
     ) -> list[FillReport]:
         if not self.enable_trading or not self._order_plant.load_orders_available():
             raise VenueQueryUnavailable(
-                "Rithmic fill reconciliation unavailable (no authoritative "
-                "order-history retrieval path)"
+                "Rithmic fill reconciliation unavailable (order plant not ready)"
             )
         start_sec, end_sec = self._recon_window_sec(command.start, command.end)
         events = await self._load_orders_events(start_sec, end_sec)
@@ -1379,9 +1370,21 @@ class RithmicExecutionClient(LiveExecutionClient):
         reports: list[PositionStatusReport] = []
         instrument_filter = command.instrument_id
         for fields in self._positions.values():
-            if instrument_filter is not None and str(fields["instrument_id"]) != str(
-                instrument_filter
-            ):
+            instrument_id = InstrumentId.from_str(str(fields["instrument_id"]))
+            if instrument_filter is not None and instrument_id != instrument_filter:
+                continue
+            # The Rithmic account can report contracts this node never loaded
+            # (e.g. NQU6 alongside MNQU6). Reconciling an unloaded instrument
+            # cannot resolve (no instrument/price precision in cache) and only
+            # logs "instrument not found" noise, so skip it — loudly if the
+            # venue shows a non-zero position we would otherwise hide.
+            if self._cache.instrument(instrument_id) is None:
+                qty = int(fields.get("quantity") or 0)
+                if qty != 0:
+                    self._log.warning(
+                        f"venue reports {instrument_id} position qty={qty} but the "
+                        "instrument is not loaded by this node — skipping recon"
+                    )
                 continue
             report = self._position_report_from_fields(fields, ts_init)
             if report is not None:

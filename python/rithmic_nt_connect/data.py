@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 from nautilus_trader.cache.cache import Cache
@@ -416,6 +417,11 @@ class RithmicDataClient(LiveMarketDataClient):
         self._history_poll_task: asyncio.Task | None = None
         self._resync_lock = asyncio.Lock()
         self._resync_generation = 0
+        # One-sided BestBidOffer merge state, keyed by symbol[:exchange].
+        self._bbo_state: dict[str, dict[str, Any]] = {}
+        # Rate-limited skip diagnostics (Rithmic push feed is presence-bit based).
+        self._skip_counts: dict[str, int] = {}
+        self._skip_last_flush = 0.0
 
     async def _connect(self) -> None:
         from rithmic_nt_connect.session import ensure_connected
@@ -539,18 +545,53 @@ class RithmicDataClient(LiveMarketDataClient):
             raise ConvertError(f"instrument not in cache: {instrument_id}")
         return int(instrument.price_precision)
 
+    _skip_log_interval_secs = 60.0
+
+    def _count_skip(self, reason: str) -> None:
+        """Rate-limit skip diagnostics to one aggregate line per minute.
+
+        Rithmic's push feed is presence-bit based, so one-sided BBOs and
+        stats-only LastTrade messages are expected; per-event DEBUG logging of
+        those floods the log with thousands of lines per minute.
+        """
+        self._skip_counts[reason] = self._skip_counts.get(reason, 0) + 1
+        now = time.monotonic()
+        if now - self._skip_last_flush < self._skip_log_interval_secs:
+            return
+        if self._skip_counts:
+            summary = ", ".join(
+                f"{reason}={count}" for reason, count in sorted(self._skip_counts.items())
+            )
+            self._log.debug(
+                f"data skip summary ({self._skip_log_interval_secs:.0f}s): {summary}"
+            )
+        self._skip_counts.clear()
+        self._skip_last_flush = now
+
     def _dispatch_event(self, event: dict[str, Any]) -> None:
         etype = event.get("type")
         ts_init = self._clock.timestamp_ns()
         try:
             if etype == "last_trade":
+                if event.get("trade_price") is None:
+                    # Stats-only update (net_change/volume/vwap) — no trade print.
+                    self._count_skip("last_trade_summary")
+                    return
                 fields = last_trade_to_fields(event)
                 prec = self._price_precision(InstrumentId.from_str(fields["instrument_id"]))
                 self._handle_data(
                     fields_to_trade_tick(fields, ts_init, price_precision=prec)
                 )
             elif etype == "bbo":
-                fields = bbo_to_fields(event)
+                symbol = str(event.get("symbol") or "")
+                if not symbol:
+                    raise ConvertError("missing required fields: symbol")
+                key = f"{symbol}:{event.get('exchange') or ''}"
+                state = self._bbo_state.setdefault(key, {})
+                fields = bbo_to_fields(event, state)
+                if fields is None:
+                    self._count_skip("bbo_one_sided")
+                    return
                 prec = self._price_precision(InstrumentId.from_str(fields["instrument_id"]))
                 self._handle_data(
                     fields_to_quote_tick(fields, ts_init, price_precision=prec)
@@ -564,7 +605,7 @@ class RithmicDataClient(LiveMarketDataClient):
             elif etype == "time_bar":
                 bar_types = self._bar_types_for_event(event)
                 if not bar_types:
-                    self._log.debug(f"skip time_bar with no matching subscribe: {event.get('symbol')}")
+                    self._count_skip("time_bar_unsubscribed")
                     return
                 fields = time_bar_to_fields(event)
                 for bar_type in bar_types:
@@ -573,7 +614,7 @@ class RithmicDataClient(LiveMarketDataClient):
                         fields_to_bar(fields, bar_type, ts_init, price_precision=prec)
                     )
         except ConvertError as exc:
-            self._log.debug(f"skip event {etype}: {exc}")
+            self._count_skip(f"{etype}: {exc}")
         except Exception as exc:  # noqa: BLE001 — never kill the poll loop
             self._log.exception(f"failed to dispatch {etype}", exc)
 

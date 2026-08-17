@@ -28,12 +28,14 @@ Acceptance: **NQ / CME via LucidTrading**. One Rithmic login (close MotiveWave /
 | Depth-by-order / L3 MBO | Not advertised | **N/A** until a separate slice |
 | Mark / index / funding / greeks | Not advertised | **N/A** |
 | Catalog / Parquet | Other repo | **N/A** |
-| Order types | Market, limit, stop / stop-limit, trailing-stop (tick offset) | **Partial** — mapped and gated; live place blocked on authorized `app_name` |
+| Order types | Market, limit, stop / stop-limit, trailing-stop (tick offset) | **Partial** — mapped; test-plant live place confirmed 2026-08-17 (default `app_name` authorized to exchange) |
 | Brackets / OCO | Plant bracket API | **Partial** — wire on direct + gateway; Lucid accept/survival **not proven**. Live spike: `scripts/spike_bracket_order.py` (`RITHMIC_BRACKETS=1` + `RITHMIC_ENABLE_TRADING=1`; spike-only flag, not enforced in plants/gateway). |
 | Account / positions | Best-effort PnL | **Partial** — auto-discovers FCM/IB/account when unset (multi-account needs `RITHMIC_ACCOUNT_ID` selector); soft-fail PnL otherwise |
-| Submit / cancel / modify + fills | Gated order plant | **Partial** — submit pre-send deny; post-send unknown; untracked → reports; fill dedup. Live place still gated on `app_name`. |
-| Order status reports | Venue recon when trading; cache-backed when read-only | **Partial (fail-closed)** — `load_orders` refuses all recon because Rithmic order history has no completion signal and replays silently cap at 10k (see ops-runbook probe). When trading, `generate_order_status_reports` **raises** `ReconciliationUnavailable` / `VenueQueryUnavailable` rather than present a lossy drain or local cache as authoritative venue state (which would cancel tracked open orders). Read-only returns cache-backed (honest: not a venue snapshot). |
-| Fill reports | Venue recon when trading; read-only declines | **Partial (fail-closed)** — `generate_fill_reports` queries `load_orders` when trading is enabled; with no authoritative retrieval path it **raises** `ReconciliationUnavailable` / `VenueQueryUnavailable` (never `[]` as venue-empty). Read-only declines with the same error. |
+| Submit / cancel / modify + fills | Gated order plant | **Partial** — submit pre-send deny; post-send unknown; untracked → reports; fill dedup. Test-plant live place confirmed 2026-08-17 (default `app_name` authorized to exchange). |
+| Order status reports | Venue recon when trading; cache-backed when read-only | **Partial (best-effort)** — `load_orders` drains the current working orders via `show_orders` + a bounded silence window. Not provably complete (no end-of-list signal; replays cap at 10k), so the result is advisory, not an authoritative venue snapshot. Read-only returns cache-backed. |
+| Fill reports | Venue recon when trading; read-only declines | **Partial (best-effort)** — `generate_fill_reports` filters the same bounded `load_orders` drain for filled rows; working-order replays carry no historical fills, so fills are only those seen on the live stream. Read-only declines. |
+
+> ⚠ **Recon honesty caveat (trading):** the `load_orders` drain is best-effort and *not* provably complete — an empty result means "no working orders seen", not "venue has none". A trading consumer **must** run with `death_policy=trust_stop` (or otherwise not cancel on empty recon). Nautilus' default `death_policy=TRACKED` would reconcile an empty drain as "no working orders" and **cancel tracked open orders**. The adapter does not enforce this; the node operator is responsible (see `docs/references/ops-runbook.md`). Live-venue proof that the drain returns the venue's working orders is still TODO.
 | Reconnect + MD resubscribe | Planned | **Partial** — ticker poll resyncs last-trade/BBO + book + EXTERNAL bar intent. Gateway typed restore covers ticker/book/bars/PnL/order/brackets after plant drop. Not Lucid-proven. |
 | Session gateway (shared login) | `connect_mode` required (`direct` / `gateway`) | **Partial** — plants/session parity on wire (incl. book unsub, `probe_time_bars`, ensure_order). Auto-spawn idle-exit after last client (`RITHMIC_GATEWAY_IDLE_EXIT_SEC`, default 5s via spawn; unset = never for standalone). Shared-consumer Lucid smoke green. Native TLS remote **N/A**. **Wheel:** self-contained — `scripts/build_wheel.sh` bundles the `rithmic-gateway` binary + `rithmic_gateway` client into the maturin wheel; `resolve_gateway_bin` prefers `rithmic_gateway/bin/`. **Lake:** market-data-lake hardcodes `GatewayClient` + `load_time_bars_range` (client-side chunks); install `python/` package (no Nautilus). |
 | Python v2 / LiveNode | Not this support line | **N/A** |
@@ -49,7 +51,7 @@ Acceptance: **NQ / CME via LucidTrading**. One Rithmic login (close MotiveWave /
 | `scripts/smoke_gateway_shared_ticks.py` | Two consumers (NQ+MNQ) share one `rithmic-gateway` (exit `2` if no creds) |
 | `scripts/gateway_tick_consumer.py` | Single-symbol gateway tick consumer (used by shared smoke) |
 | `scripts/verify_live_vs_history.py` | Live ↔ history compare |
-| `scripts/verify_order_dry_run.py` | Order plant connect / subscribe; **no** `--live-place` until `app_name` |
+| `scripts/verify_order_dry_run.py` | Order plant connect / subscribe; `--live-place` allowed with `RITHMIC_ENABLE_TRADING=1` + far `--price` (test-plant `app_name` authorized) |
 | `examples/live_nq_intraday_sandbox.py` | Live Rithmic MD + Nautilus sandbox exec (no Rithmic place) |
 
 ---
@@ -85,7 +87,7 @@ Acceptance: **NQ / CME via LucidTrading**. One Rithmic login (close MotiveWave /
 - [~] PnL account / positions; auto-discovery when triple unset
 - [x] Gated submit / cancel / modify + notification fills
 - [x] Tracked vs external reports; fill dedup; post-send unknown outcomes
-- [~] **Exit:** not claimed until live place / app_name close-out
+- [x] **Exit:** test-plant live place confirmed 2026-08-17 (default `app_name` authorized to exchange); production `app_name` conformance still open
 
 ### Phase 5: Optional
 
@@ -137,7 +139,7 @@ Cross-cutting items from [`references/nautilus-adapter-conventions.md`](referenc
 | Tracked vs external reports | [x] | Untracked fills → `_send_fill_report` when side/px/qty present; no invented side/type/TIF status reports |
 | Fill dedup by venue trade id | [x] | `fill_dedup_key` / `trade_id_from_fill_fields` |
 | Never drop exec events | [~] | Parseable untracked fills reported; incomplete/untyped untracked suppressed + log |
-| No empty list as “venue empty” | [x] | Cache orders; recon is **fail-closed** (`load_orders` returns `ReconciliationUnavailable`; exec raises rather than present lossy/empty as authoritative venue state) |
+| No empty list as “venue empty” | [~] | Cache orders; recon is a bounded `show_orders` drain — empty means “no working orders seen”, best-effort not provably complete |
 | No nested `block_on` on asyncio | [x] | `asyncio.to_thread` |
 | Testers default dry-run | [x] | |
 
@@ -148,11 +150,11 @@ Cross-cutting items from [`references/nautilus-adapter-conventions.md`](referenc
 Do not mark Phase 3, 4, or 7 `[x]` until the matching items are proven.
 
 1. **Incremental book updates** — summary snapshots only (L2); L3 MBO N/A.
-2. **Execution honesty** — [x] three evidence classes; untracked → reports; recon is **fail-closed** (`ReconciliationUnavailable` / `VenueQueryUnavailable`, never a misleading venue-empty); dedup by venue id. (`cancel_all_orders` still out of honesty claim.)
+2. **Execution honesty** — [~] three evidence classes; untracked → reports; recon is a bounded `show_orders` drain (best-effort, not provably complete); dedup by venue id. (`cancel_all_orders` still out of honesty claim.)
 3. **Account auto-discovery** — [x] wire resolve on ensure_order/ensure_pnl; optional env triple / `ACCOUNT_ID` selector. Plan: [`plans/2026-08-13-001-account-auto-discovery-plan.md`](plans/2026-08-13-001-account-auto-discovery-plan.md) + umbrella [`plans/2026-08-14-001-exec-honesty-account-discovery-dryrun-plan.md`](plans/2026-08-14-001-exec-honesty-account-discovery-dryrun-plan.md).
 4. **Live-prove ticker resync** on LucidTrading (code + unit test landed).
 4. **Data Testing Spec (TC-D) sweep** — [x] 2026-08-14 `tests/test_data_client_live.py` (7 passed / 2 skipped; TC-D01/03/20/30/40/41/70). TC-D40 1m EXTERNAL bars live-proven on LucidTrading. Skips: TC-D10 (Lucid denies L2 book `[13] permission denied`), TC-D31 (history plant transient empty).
-5. **Record LucidTrading order dry-run** — [x] 2026-08-14 local dry-run (`mode=dry_run`, `placed=false`, account auto-resolved; artifact gitignored). Live place stays gated on authorized `app_name`.
+5. **Record LucidTrading order dry-run** — [x] 2026-08-14 local dry-run (`mode=dry_run`, `placed=false`, account auto-resolved; artifact gitignored). Test-plant live place confirmed 2026-08-17 (default `app_name` authorized; order routed to exchange). Production LucidTrading place still needs conformance `app_name`.
 
 ## Paper path (intraday)
 

@@ -148,6 +148,7 @@ async fn run() -> Result<(), String> {
         session: Some(session.clone()),
         reconnect: reconnect.clone(),
         topic_locks: TokioMutex::new(std::collections::HashMap::new()),
+        recon_lock: Arc::new(TokioMutex::new(())),
         idle: IdleExit::new(idle_policy),
     });
 

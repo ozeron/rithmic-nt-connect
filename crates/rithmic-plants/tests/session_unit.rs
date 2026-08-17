@@ -82,6 +82,15 @@ async fn disconnected_order_methods_error_without_network() {
         matches!(err, Error::NotConnected { plant: "order" }),
         "unexpected poll_order_event error: {err}"
     );
+
+    // load_orders is a bounded drain of the order plant (no longer the
+    // unconditional ReconciliationUnavailable stub), so a disconnected
+    // session must fail on the missing ticker/order plant, not on recon.
+    let err = session.load_orders(0, 0).await.unwrap_err();
+    assert!(
+        matches!(err, Error::NotConnected { plant: "ticker" | "order" }),
+        "unexpected load_orders error: {err}"
+    );
 }
 
 #[test]
