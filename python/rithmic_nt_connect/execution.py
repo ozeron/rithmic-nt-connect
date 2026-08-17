@@ -438,6 +438,9 @@ class RithmicExecutionClient(LiveExecutionClient):
         except Exception as exc:  # noqa: BLE001
             self._log.error(f"account_pnl balance not numeric ({free_raw!r}): {exc}")
             return
+        if not free_dec.is_finite():
+            self._log.error(f"account_pnl balance must be finite ({free_raw!r})")
+            return
         currency_raw = fields.get("currency") or DEFAULT_ACCOUNT_CURRENCY
         currency = Currency.from_str(str(currency_raw))
         account_id = AccountId(f"{VENUE}-{fields['account_id']}")
@@ -528,8 +531,15 @@ class RithmicExecutionClient(LiveExecutionClient):
             if cached is not None:
                 return cached
         tag = fields.get("user_tag")
-        if tag and self._cache.order(ClientOrderId(str(tag))) is not None:
-            return ClientOrderId(str(tag))
+        if tag:
+            cached_order = self._cache.order(ClientOrderId(str(tag)))
+            # Only attribute the tag to a tracked order that is still open. A
+            # terminal order remains in the cache; a later external order that
+            # happens to reuse that tag must NOT be attributed to the old order
+            # (it would inherit its strategy/instrument/side and never reach the
+            # untracked path).
+            if cached_order is not None and not cached_order.is_closed():
+                return ClientOrderId(str(tag))
         return None
 
     def _bind_venue_id(self, client_order_id: ClientOrderId, venue_id: str) -> None:
