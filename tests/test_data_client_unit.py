@@ -26,6 +26,31 @@ def test_last_trade_fields_to_trade_tick():
     assert float(tick.price) == 20000.25
 
 
+def test_trade_tick_ids_unique_per_message() -> None:
+    """Every received print gets a distinct trade id.
+
+    Rithmic has no venue trade id and identical fields can be a genuine second
+    print, so even identical (ts, price, size, aggressor) must not collapse.
+    """
+    base = {
+        "type": "last_trade",
+        "symbol": "NQU6",
+        "exchange": "CME",
+        "aggressor": 1,
+        "ts_event_ns": 1_700_000_000_000_000_000,
+    }
+    sweep_a = dict(base, trade_price=20000.25, trade_size=1)
+    sweep_b = dict(base, trade_price=20000.0, trade_size=1)
+    identical = dict(base, trade_price=20000.25, trade_size=1)
+
+    ids = {
+        fields_to_trade_tick(last_trade_to_fields(raw), ts_init=1).trade_id
+        for raw in (sweep_a, sweep_b, identical)
+    }
+
+    assert len(ids) == 3, "every received message has a distinct trade id"
+
+
 def test_trade_tick_uses_instrument_price_precision() -> None:
     raw = {
         "type": "last_trade",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import time
 from typing import Any
 
@@ -206,6 +207,20 @@ def payloads_to_bars(
     return bars
 
 
+_TRADE_ID_SEQ = itertools.count(1)
+
+
+def _trade_id(fields: dict[str, Any]) -> TradeId:
+    """Synthesize a unique trade id per received message.
+
+    Rithmic's LastTrade carries no venue trade id, and identical fields can be
+    either a re-push or a genuine second print, so no field tuple can
+    disambiguate them. A per-message sequence guarantees every received print
+    has a distinct id (the engine's bar aggregator reads price/size only).
+    """
+    return TradeId(f"{int(fields['ts_event'])}-{next(_TRADE_ID_SEQ)}")
+
+
 def fields_to_trade_tick(
     fields: dict[str, Any],
     ts_init: int,
@@ -220,7 +235,7 @@ def fields_to_trade_tick(
         _price(fields["price"], price_precision),
         Quantity.from_int(size),
         _aggressor(fields.get("aggressor")),
-        TradeId(str(fields["ts_event"])),
+        _trade_id(fields),
         int(fields["ts_event"]),
         ts_init,
     )
