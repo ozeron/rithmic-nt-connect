@@ -12,7 +12,8 @@ use rithmic_plants::PlantSet;
 
 use crate::convert::{
     order_key, pnl_key, front_month_to_pb, history_bar_to_pb, history_tick_to_pb,
-    order_notification_to_pb, reference_data_to_pb, time_bar_probe_row_to_pb,
+    order_notification_to_pb, reference_data_to_pb, resolved_account_to_pb,
+    time_bar_probe_row_to_pb,
 };
 use crate::pb::{self, frame::Body, Ack, ErrorResponse, Frame};
 use crate::reconnect::{ReconnectController, TimeBarIntent};
@@ -458,6 +459,23 @@ pub(super) async fn dispatch(state: &GatewayState, client: &mut ClientCtx, reque
                     body: Some(Body::ReferenceDataResponse(reference_data_to_pb(dto))),
                 },
                 Err(e) => err_to_frame(request_id, "get_reference_data_failed", e),
+            }
+        }
+        Body::ResolvedAccount(_) => {
+            let Some(session) = &state.session else {
+                return no_session_frame(request_id);
+            };
+            let guard = session.lock().await;
+            // None (not yet resolved) is a valid answer: an empty response lets
+            // the client fall back to its configured account id, mirroring the
+            // direct path's `resolved_account() -> None`.
+            let body = match guard.resolved_account() {
+                Some(acct) => Body::ResolvedAccountResponse(resolved_account_to_pb(acct.clone())),
+                None => Body::ResolvedAccountResponse(pb::ResolvedAccountResponse::default()),
+            };
+            Frame {
+                request_id,
+                body: Some(body),
             }
         }
         Body::LoadOrders(_req) => {

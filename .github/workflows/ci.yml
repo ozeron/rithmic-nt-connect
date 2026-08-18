@@ -20,5 +20,7 @@ jobs:
         run: uv sync --extra dev
       - name: Cargo test
         run: cargo test -p rithmic-plants -p rithmic-gateway -p rithmic-nt-connect
+      - name: ty (uv typecheck)
+        run: uv run ty check python/rithmic_nt_connect tests
       - name: Pytest (no secrets)
         run: uv run pytest -q

@@ -60,6 +60,9 @@ class GatewayWireSession:
     def get_reference_data(self, symbol: str, exchange: str) -> Any:
         return _call(self._client.get_reference_data, symbol, exchange)
 
+    def resolved_account(self) -> dict[str, Any] | None:
+        return _call(self._client.resolved_account)
+
     def poll_event(self, timeout_ms: int = 0) -> dict[str, Any] | None:
         return _call(self._client.poll_event, timeout_ms=timeout_ms)
 

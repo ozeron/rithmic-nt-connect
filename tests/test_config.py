@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import os
 
 import pytest
@@ -234,8 +235,10 @@ def test_package_imports_without_network() -> None:
 
     assert rithmic_nt_connect.VENUE == "RITHMIC"
     assert rithmic_nt_connect.__version__
+    # The legacy package name is gone; assert it raises at runtime without a
+    # static import (which a checker would flag as unresolvable).
     with pytest.raises(ModuleNotFoundError):
-        import rithmic_connect  # noqa: F401
+        importlib.import_module("rithmic_connect")
 
 
 def test_live_data_client_config_is_nautilus_config() -> None:

@@ -1,0 +1,4 @@
+import _cython_3_2_9
+
+__test__: dict
+quadratic_interpolation: _cython_3_2_9.cython_function_or_method

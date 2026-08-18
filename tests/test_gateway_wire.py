@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import inspect
+from typing import Any
+
 import pytest
 
 from rithmic_nt_connect.config import ConfigError, ConnectMode, SessionConfig
@@ -10,20 +13,23 @@ from rithmic_nt_connect.session import create_session
 
 
 def _cfg(**kwargs: object) -> SessionConfig:
-    base = dict(
-        user="alice",
-        password="pw",
-        system_name="LucidTrading",
-        url="wss://rprotocol.rithmic.com:443",
-        connect_mode=ConnectMode.DIRECT,
-    )
+    # ``connect_mode`` accepts a ``str`` at runtime (``__post_init__`` coerces);
+    # ``Any`` keeps the override dict valid for both str and ConnectMode values.
+    base: dict[str, Any] = {
+        "user": "alice",
+        "password": "pw",
+        "system_name": "LucidTrading",
+        "url": "wss://rprotocol.rithmic.com:443",
+        "connect_mode": ConnectMode.DIRECT,
+    }
     base.update(kwargs)
-    return SessionConfig(**base)  # type: ignore[arg-type]
+    return SessionConfig(**base)
 
 
 def test_connect_mode_required() -> None:
-    with pytest.raises(TypeError):
-        SessionConfig(user="alice", password="pw")  # type: ignore[call-arg]
+    # ``connect_mode`` carries no default: the dataclass contract requires it.
+    params = inspect.signature(SessionConfig).parameters
+    assert params["connect_mode"].default is inspect.Parameter.empty
 
 
 def test_connect_mode_invalid() -> None:
@@ -83,5 +89,6 @@ def test_create_session_gateway_returns_adapter_without_pyo3() -> None:
         "subscribe_bracket_updates",
         "adjust_bracket_stop",
         "adjust_bracket_target",
+        "resolved_account",
     ):
         assert hasattr(session, name), f"gateway wire missing {name} (direct/gateway parity)"

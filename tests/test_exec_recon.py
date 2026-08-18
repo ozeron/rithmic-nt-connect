@@ -4,30 +4,46 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
+from decimal import Decimal
 from types import SimpleNamespace
+from typing import Any
+from typing import cast
 
 import pytest
 from nautilus_trader.core.uuid import UUID4
 from nautilus_trader.execution.messages import GenerateFillReports
+from nautilus_trader.execution.messages import GenerateOrderStatusReport
 from nautilus_trader.execution.messages import GenerateOrderStatusReports
 from nautilus_trader.execution.messages import GeneratePositionStatusReports
+from nautilus_trader.model.enums import LiquiditySide
 from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.enums import OrderStatus
 from nautilus_trader.model.enums import OrderType
 from nautilus_trader.model.enums import TimeInForce
 from nautilus_trader.model.enums import TriggerType
+from nautilus_trader.model.events import OrderAccepted
+from nautilus_trader.model.events import OrderFilled
+from nautilus_trader.model.events import OrderSubmitted
 from nautilus_trader.model.identifiers import AccountId
 from nautilus_trader.model.identifiers import ClientOrderId
 from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.model.identifiers import StrategyId
+from nautilus_trader.model.identifiers import TradeId
+from nautilus_trader.model.identifiers import TraderId
 from nautilus_trader.model.identifiers import VenueOrderId
+from nautilus_trader.model.objects import Currency
+from nautilus_trader.model.objects import Money
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
+from nautilus_trader.model.orders import LimitOrder
+from nautilus_trader.model.orders import Order
 
 from rithmic_nt_connect._order_plant import OrderPlantPolicy
 from rithmic_nt_connect._order_plant import OrderPlantState
 from rithmic_nt_connect.errors import ReconciliationUnavailableError
 from rithmic_nt_connect.errors import VenueQueryUnavailable
 from rithmic_nt_connect.execution import RithmicExecutionClient
+from rithmic_nt_connect.session import WireSession
 
 
 def _client() -> _TestClient:
@@ -50,37 +66,41 @@ class _TestClient(RithmicExecutionClient):
     read-only ``_log`` / ``_clock`` / ``_cache`` / ``account_id`` as writable
     properties, so real adapter methods run on a bare instance."""
 
+    # The cdef base declares these read-only; re-expose as writable via
+    # name-mangled storage. ``object.__getattribute__`` / ``__setattr__`` keep
+    # the dynamic slots invisible to the type checker (no ``type: ignore``).
+
     @property
     def _log(self) -> _Log:
-        return self.__log  # type: ignore[attr-defined]
+        return cast(_Log, object.__getattribute__(self, "_TestClient__log"))
 
     @_log.setter
     def _log(self, value: _Log) -> None:
-        self.__log = value  # type: ignore[attr-defined]
+        object.__setattr__(self, "_TestClient__log", value)
 
     @property
     def _clock(self) -> SimpleNamespace:
-        return self.__clock  # type: ignore[attr-defined]
+        return cast(SimpleNamespace, object.__getattribute__(self, "_TestClient__clock"))
 
     @_clock.setter
     def _clock(self, value: SimpleNamespace) -> None:
-        self.__clock = value  # type: ignore[attr-defined]
+        object.__setattr__(self, "_TestClient__clock", value)
 
     @property
     def _cache(self) -> _CacheStub:
-        return self.__cache  # type: ignore[attr-defined]
+        return cast(_CacheStub, object.__getattribute__(self, "_TestClient__cache"))
 
     @_cache.setter
     def _cache(self, value: _CacheStub) -> None:
-        self.__cache = value  # type: ignore[attr-defined]
+        object.__setattr__(self, "_TestClient__cache", value)
 
     @property
     def account_id(self) -> AccountId | None:
-        return self.__account_id  # type: ignore[attr-defined]
+        return cast(AccountId | None, object.__getattribute__(self, "_TestClient__account_id"))
 
     @account_id.setter
     def account_id(self, value: AccountId | None) -> None:
-        self.__account_id = value  # type: ignore[attr-defined]
+        object.__setattr__(self, "_TestClient__account_id", value)
 
 
 class _Log:
@@ -123,7 +143,7 @@ class _CacheStub:
         self._client_to_venue[client.value] = venue
         self._venue_to_client[venue.value] = client
 
-    def order(self, client_order_id: ClientOrderId) -> _CacheOrder | None:
+    def order(self, client_order_id: ClientOrderId) -> object | None:
         # Presence in the cache is the adapter's source of truth for "tracked".
         return self._orders.get(client_order_id.value)
 
@@ -188,9 +208,10 @@ def _trading_client(
     ``session=None`` uses a source that raises ``ReconciliationUnavailableError``.
     """
     client = _client()
-    client._config_local = SimpleNamespace(enable_trading=enable_trading)
+    client._config_local = cast(Any, SimpleNamespace(enable_trading=enable_trading))
     client._order_plant = OrderPlantPolicy(OrderPlantState.LIVE)
-    client._session = session if session is not None else _UnavailableLoadOrdersSession()
+    source = session if session is not None else _UnavailableLoadOrdersSession()
+    client._session = cast(WireSession, source)
     client._seen_fill_keys = OrderedDict()
     return client
 
@@ -245,9 +266,9 @@ def test_order_handler_failure_stops_order_poll_and_fails_closed() -> None:
     )
 
     async def poll_session_event(poll_fn):
-        return await poll_fn()
+        return poll_fn()
 
-    async def poll_fn():
+    def poll_fn() -> dict[str, object] | None:
         return {"type": "order_notification"}
 
     def on_event(event: dict[str, object]) -> None:
@@ -255,7 +276,7 @@ def test_order_handler_failure_stops_order_poll_and_fails_closed() -> None:
 
     client._poll_session_event = poll_session_event
     awaitable = RithmicExecutionClient._plant_poll_loop(
-        client,
+        cast(RithmicExecutionClient, client),
         name="order",
         poll_fn=poll_fn,
         on_event=on_event,
@@ -277,7 +298,7 @@ def test_untracked_order_reports_status_without_strategy_ownership() -> None:
         _untracked_status_keys={},
     )
     status_report = SimpleNamespace(venue_order_id="B-EXTERNAL", client_order_id=None)
-    client._order_status_report_from_fields = lambda event, ts: status_report  # type: ignore[attr-defined]
+    client._order_status_report_from_fields = lambda event, ts: status_report
     fields = {
         "basket_id": "B-EXTERNAL",
         "symbol": "MNQU6",
@@ -291,7 +312,9 @@ def test_untracked_order_reports_status_without_strategy_ownership() -> None:
         "transaction_type": 1,
     }
 
-    RithmicExecutionClient._handle_untracked_notification(client, fields)
+    RithmicExecutionClient._handle_untracked_notification(
+        cast(RithmicExecutionClient, client), fields
+    )
 
     assert len(status_reports) == 1
     assert status_reports[0] is status_report
@@ -307,7 +330,7 @@ def test_untracked_status_suppresses_unchanged_re_push() -> None:
         _seed_account_if_needed=lambda account_raw: None,
     )
     status = SimpleNamespace(venue_order_id="B-EXT", order_status="OPEN", filled_qty="1", avg_px="100.5")
-    client._order_status_report_from_fields = lambda event, ts: status  # type: ignore[attr-defined]
+    client._order_status_report_from_fields = lambda event, ts: status
     client._untracked_status_keys = {}
     fields = {
         "basket_id": "B-EXT",
@@ -322,16 +345,19 @@ def test_untracked_status_suppresses_unchanged_re_push() -> None:
         "transaction_type": 1,
     }
 
-    RithmicExecutionClient._handle_untracked_notification(client, fields)
-    RithmicExecutionClient._handle_untracked_notification(client, fields)  # re-push
+    handle = RithmicExecutionClient._handle_untracked_notification
+    handle(cast(RithmicExecutionClient, client), fields)
+    handle(cast(RithmicExecutionClient, client), fields)  # re-push
 
     assert len(published) == 1
 
     changed = SimpleNamespace(
         venue_order_id="B-EXT", order_status="FILLED", filled_qty="1", avg_px="100.5"
     )
-    client._order_status_report_from_fields = lambda event, ts: changed  # type: ignore[attr-defined]
-    RithmicExecutionClient._handle_untracked_notification(client, fields)
+    client._order_status_report_from_fields = lambda event, ts: changed
+    RithmicExecutionClient._handle_untracked_notification(
+        cast(RithmicExecutionClient, client), fields
+    )
 
     assert len(published) == 2
 
@@ -361,7 +387,7 @@ def test_untracked_status_re_push_with_changed_terms_reports() -> None:
         filled_qty="0",
         avg_px="",
     )
-    client._order_status_report_from_fields = lambda event, ts: status  # type: ignore[attr-defined]
+    client._order_status_report_from_fields = lambda event, ts: status
     fields = {
         "basket_id": "B-EXT",
         "symbol": "MNQU6",
@@ -375,8 +401,9 @@ def test_untracked_status_re_push_with_changed_terms_reports() -> None:
         "transaction_type": 1,
     }
 
-    RithmicExecutionClient._handle_untracked_notification(client, fields)
-    RithmicExecutionClient._handle_untracked_notification(client, fields)
+    handle = RithmicExecutionClient._handle_untracked_notification
+    handle(cast(RithmicExecutionClient, client), fields)
+    handle(cast(RithmicExecutionClient, client), fields)
     assert len(published) == 1
 
     # Same status + fill data, but the order quantity changed: must re-publish.
@@ -389,8 +416,10 @@ def test_untracked_status_re_push_with_changed_terms_reports() -> None:
         filled_qty="0",
         avg_px="",
     )
-    client._order_status_report_from_fields = lambda event, ts: changed  # type: ignore[attr-defined]
-    RithmicExecutionClient._handle_untracked_notification(client, fields)
+    client._order_status_report_from_fields = lambda event, ts: changed
+    RithmicExecutionClient._handle_untracked_notification(
+        cast(RithmicExecutionClient, client), fields
+    )
 
     assert len(published) == 2
 
@@ -407,10 +436,10 @@ def test_untracked_status_publication_failure_does_not_escape_handler() -> None:
         _untracked_status_keys={},
     )
     status_report = SimpleNamespace(venue_order_id="B-EXTERNAL", client_order_id=None)
-    client._order_status_report_from_fields = lambda event, ts: status_report  # type: ignore[attr-defined]
+    client._order_status_report_from_fields = lambda event, ts: status_report
 
     RithmicExecutionClient._handle_untracked_notification(
-        client,
+        cast(RithmicExecutionClient, client),
         {
             "basket_id": "B-EXTERNAL",
             "symbol": "MNQU6",
@@ -423,10 +452,12 @@ def test_untracked_status_publication_failure_does_not_escape_handler() -> None:
 
 def test_status_report_publication_failure_is_non_fatal_to_fill_reconciliation() -> None:
     client = _trading_client(_LoadOrdersSession([_fill_event()]))
-    client._fill_report_from_fields = lambda fields, ts_event: object()  # type: ignore[method-assign]
-    client._order_status_report_from_fields = lambda fields, ts_event: object()  # type: ignore[method-assign]
-    client._send_order_status_report = lambda report: (_ for _ in ()).throw(
-        RuntimeError("stale report")
+    setattr(client, "_fill_report_from_fields", lambda fields, ts_event: object())
+    setattr(client, "_order_status_report_from_fields", lambda fields, ts_event: object())
+    setattr(
+        client,
+        "_send_order_status_report",
+        lambda report: (_ for _ in ()).throw(RuntimeError("stale report")),
     )
 
     reports = asyncio.run(client.generate_fill_reports(_fill_cmd()))
@@ -442,9 +473,9 @@ def test_fill_reconciliation_skips_fill_without_status_prerequisite() -> None:
     returned ``None``, so Nautilus received a fill with no order prerequisite.
     """
     client = _trading_client(_LoadOrdersSession([_fill_event()]))
-    client._fill_report_from_fields = lambda fields, ts_event: object()  # type: ignore[method-assign]
-    client._order_status_report_from_fields = lambda fields, ts_event: None  # type: ignore[method-assign]
-    client._send_order_status_report = lambda report: None
+    setattr(client, "_fill_report_from_fields", lambda fields, ts_event: object())
+    setattr(client, "_order_status_report_from_fields", lambda fields, ts_event: None)
+    setattr(client, "_send_order_status_report", lambda report: None)
 
     reports = asyncio.run(client.generate_fill_reports(_fill_cmd()))
 
@@ -457,11 +488,9 @@ def test_replayed_fill_publishes_status_before_fill_and_is_idempotent() -> None:
     status_report = object()
     fill_report = object()
     published: list[tuple[str, object]] = []
-    client._order_status_report_from_fields = (  # type: ignore[method-assign]
-        lambda fields, ts_event: status_report
-    )
-    client._fill_report_from_fields = lambda fields, ts_event: fill_report  # type: ignore[method-assign]
-    client._send_order_status_report = lambda report: published.append(("status", report))
+    setattr(client, "_order_status_report_from_fields", lambda fields, ts_event: status_report)
+    setattr(client, "_fill_report_from_fields", lambda fields, ts_event: fill_report)
+    setattr(client, "_send_order_status_report", lambda report: published.append(("status", report)))
 
     first = asyncio.run(client.generate_fill_reports(_fill_cmd()))
     second = asyncio.run(client.generate_fill_reports(_fill_cmd()))
@@ -490,7 +519,9 @@ def test_recovered_external_fill_status_has_no_client_order_id() -> None:
     )
     fields = _fill_event(fill_id="EXTERNAL-1", basket="EXTERNAL-BASKET")
     fields.pop("user_tag", None)
-    report = RithmicExecutionClient._order_status_report_from_fields(client, fields, 2)
+    report = RithmicExecutionClient._order_status_report_from_fields(
+        cast(RithmicExecutionClient, client), fields, 2
+    )
     assert report is not None
     assert report.client_order_id is None
 
@@ -513,7 +544,9 @@ def test_recovered_reports_preserve_exact_instrument_and_account_identity() -> N
             "total_fill_size": 0,
             "price": 21000.0,
         }
-        report = RithmicExecutionClient._order_status_report_from_fields(client, fields, 2)
+        report = RithmicExecutionClient._order_status_report_from_fields(
+            cast(RithmicExecutionClient, client), fields, 2
+        )
         assert report is not None
         assert str(report.instrument_id) == f"{symbol}.RITHMIC"
         assert str(report.account_id) == "RITHMIC-ACC1"
@@ -574,7 +607,9 @@ def test_stop_order_status_report_has_trigger_type() -> None:
         "trigger_price": 30263.25,
     }
 
-    report = RithmicExecutionClient._order_status_report_from_fields(client, fields, 2)
+    report = RithmicExecutionClient._order_status_report_from_fields(
+        cast(RithmicExecutionClient, client), fields, 2
+    )
 
     assert report is not None
     assert report.order_type.name == "STOP_MARKET"
@@ -604,7 +639,9 @@ def test_stop_query_replay_never_returns_none_trigger_type_or_attribute_error() 
         "price": 21010.0,
         "trigger_price": 21005.0,
     }
-    report = RithmicExecutionClient._order_status_report_from_fields(client, fields, 2)
+    report = RithmicExecutionClient._order_status_report_from_fields(
+        cast(RithmicExecutionClient, client), fields, 2
+    )
     assert report is not None
     assert report.trigger_type is TriggerType.DEFAULT
     assert report.trigger_price == Price.from_str("21005.00")
@@ -641,8 +678,8 @@ def test_generate_order_status_reports_preserves_stop_trigger_type() -> None:
     """
     client = _trading_client(_LoadOrdersSession([_stop_recon_event()]))
     client.account_id = "RITHMIC-ACC1"
-    client._seed_account_if_needed = lambda account_raw: None
-    client._client_order_id_for_tag = lambda tag: None
+    setattr(client, "_seed_account_if_needed", lambda account_raw: None)
+    setattr(client, "_client_order_id_for_tag", lambda tag: None)
 
     reports = asyncio.run(client.generate_order_status_reports(_status_cmd()))
 
@@ -673,9 +710,12 @@ def test_order_plant_failure_latches_across_resync() -> None:
     client = _client()
     client._order_plant = OrderPlantPolicy(OrderPlantState.LIVE)
     client._order_plant_latched = False
-    client._session = SimpleNamespace(
-        disconnect_order_plant=lambda: None,
-        subscribe_order_updates=lambda: None,
+    client._session = cast(
+        WireSession,
+        SimpleNamespace(
+            disconnect_order_plant=lambda: None,
+            subscribe_order_updates=lambda: None,
+        ),
     )
 
     client._mark_order_plant_failed("submit", RuntimeError("timeout after send"))
@@ -692,9 +732,12 @@ def test_resync_without_latch_restores_live() -> None:
     client = _client()
     client._order_plant = OrderPlantPolicy(OrderPlantState.LIVE)
     client._order_plant_latched = False
-    client._session = SimpleNamespace(
-        disconnect_order_plant=lambda: None,
-        subscribe_order_updates=lambda: None,
+    client._session = cast(
+        WireSession,
+        SimpleNamespace(
+            disconnect_order_plant=lambda: None,
+            subscribe_order_updates=lambda: None,
+        ),
     )
 
     asyncio.run(client._resync_order_subscription())
@@ -723,18 +766,22 @@ def test_cached_stop_order_status_report_preserves_native_order_metadata() -> No
         trigger_price=Price.from_str("30203.00"),
         trigger_type=TriggerType.DEFAULT,
         is_reduce_only=True,
+        avg_px=0.0,  # resting stop: no fills yet
     )
     client = SimpleNamespace(
         _cache=SimpleNamespace(venue_order_id=lambda cid: venue_order_id),
         account_id=AccountId("RITHMIC-ACC1"),
     )
 
-    report = RithmicExecutionClient._order_status_report_for(client, order, 3)
+    report = RithmicExecutionClient._order_status_report_for(
+        cast(RithmicExecutionClient, client), cast(Order, order), 3
+    )
 
     assert report is not None
     assert report.venue_order_id == venue_order_id
     assert report.trigger_type is TriggerType.DEFAULT
     assert report.reduce_only is True
+    assert report.avg_px is None
 
 
 def test_true_reject_still_terminal_rejected():
@@ -822,7 +869,7 @@ def test_resolve_prefers_venue_basket_over_colliding_tag():
     client = _client()
     coid = ClientOrderId("C1")
     other = ClientOrderId("C2")
-    client._cache._orders["C1"] = object()
+    client._cache._orders["C1"] = _CacheOrder(closed=False)
     client._cache._venue_to_client["B-EXT"] = other
     assert (
         client._resolve_client_order_id({"user_tag": "C1", "basket_id": "B-EXT"}) == other
@@ -879,7 +926,7 @@ def test_publish_account_nonfinite_balance_does_not_seed(monkeypatch: pytest.Mon
 
 
 def test_publish_account_suppresses_unchanged_state() -> None:
-    published: list[dict[str, object]] = []
+    published: list[dict[str, Any]] = []
 
     def set_account_id(client: SimpleNamespace, account_id: object) -> None:
         client.account_id = account_id
@@ -894,10 +941,11 @@ def test_publish_account_suppresses_unchanged_state() -> None:
     )
     event = {"type": "account_pnl", "account_id": "ACC1", "cash_on_hand": "49977.00"}
 
-    RithmicExecutionClient._publish_account(client, event)
-    RithmicExecutionClient._publish_account(client, dict(event))
-    RithmicExecutionClient._publish_account(
-        client,
+    publish = RithmicExecutionClient._publish_account
+    publish(cast(RithmicExecutionClient, client), event)
+    publish(cast(RithmicExecutionClient, client), dict(event))
+    publish(
+        cast(RithmicExecutionClient, client),
         {"type": "account_pnl", "account_id": "ACC1", "cash_on_hand": "49978.00"},
     )
 
@@ -932,11 +980,13 @@ def _fill_reports_client(
     if report is None:
         report = object()
     client = _trading_client(_LoadOrdersSession(events))
-    client._fill_report_from_fields = lambda fields, ts_event: report  # type: ignore[method-assign]
-    client._order_status_report_from_fields = (  # type: ignore[method-assign]
-        lambda fields, ts_event: SimpleNamespace(venue_order_id="V-EXT")
+    setattr(client, "_fill_report_from_fields", lambda fields, ts_event: report)
+    setattr(
+        client,
+        "_order_status_report_from_fields",
+        lambda fields, ts_event: SimpleNamespace(venue_order_id="V-EXT"),
     )
-    client._send_order_status_report = lambda status_report: None  # type: ignore[method-assign]
+    setattr(client, "_send_order_status_report", lambda status_report: None)
     return client
 
 
@@ -978,9 +1028,13 @@ def test_order_status_reports_last_row_wins_on_equal_ts():
             ]
         )
     )
-    client._matches_instrument = lambda fields, instrument_id, venue_order_id: True  # type: ignore[method-assign]
-    client._order_status_report_from_fields = (  # type: ignore[method-assign]
-        lambda fields, ts_event: SimpleNamespace(order_status=fields["kind"])
+    setattr(
+        client, "_matches_instrument", lambda fields, instrument_id, venue_order_id: True
+    )
+    setattr(
+        client,
+        "_order_status_report_from_fields",
+        lambda fields, ts_event: SimpleNamespace(order_status=fields["kind"]),
     )
     reports = asyncio.run(client.generate_order_status_reports(_status_cmd()))
     assert [r.order_status for r in reports] == ["canceled"]
@@ -1022,7 +1076,7 @@ def test_status_reports_cache_backed_for_read_only():
     # A read-only client legitimately reports only its locally cached orders
     # (never claims venue authority); it must not raise.
     client = _trading_client(enable_trading=False)
-    client._cache_backed_order_status_reports = lambda cmd: ["cached"]  # type: ignore[method-assign]
+    setattr(client, "_cache_backed_order_status_reports", lambda cmd: ["cached"])
     reports = asyncio.run(client.generate_order_status_reports(_status_cmd()))
     assert reports == ["cached"]
 
@@ -1068,13 +1122,15 @@ def test_position_status_reports_skip_unloaded_instruments() -> None:
         "MNQU6.RITHMIC": {"instrument_id": "MNQU6.RITHMIC", "quantity": 0},
         "NQU6.RITHMIC": {"instrument_id": "NQU6.RITHMIC", "quantity": 0},
     }
-    client._cache = _InstrumentCache({"MNQU6.RITHMIC"})
+    setattr(client, "_cache", _InstrumentCache({"MNQU6.RITHMIC"}))
     emitted: list[str] = []
-    client._position_report_from_fields = (  # type: ignore[method-assign]
+    setattr(
+        client,
+        "_position_report_from_fields",
         lambda fields, ts_init: (
             emitted.append(str(fields["instrument_id"]))
             or f"R:{fields['instrument_id']}"
-        )
+        ),
     )
     reports = asyncio.run(client.generate_position_status_reports(_position_cmd()))
     assert [str(r) for r in reports] == ["R:MNQU6.RITHMIC"]
@@ -1086,15 +1142,19 @@ def test_position_status_reports_warn_on_unloaded_nonzero_position() -> None:
     client._positions = {
         "NQU6.RITHMIC": {"instrument_id": "NQU6.RITHMIC", "quantity": 2},
     }
-    client._cache = _InstrumentCache(set())
+    setattr(client, "_cache", _InstrumentCache(set()))
     warnings: list[str] = []
-    client._log = SimpleNamespace(warning=lambda msg, *a, **k: warnings.append(str(msg)))
+    setattr(
+        client, "_log", SimpleNamespace(warning=lambda msg, *a, **k: warnings.append(str(msg)))
+    )
     emitted: list[str] = []
-    client._position_report_from_fields = (  # type: ignore[method-assign]
+    setattr(
+        client,
+        "_position_report_from_fields",
         lambda fields, ts_init: (
             emitted.append(str(fields["instrument_id"]))
             or f"R:{fields['instrument_id']}"
-        )
+        ),
     )
     reports = asyncio.run(client.generate_position_status_reports(_position_cmd()))
     assert reports == []
@@ -1102,3 +1162,112 @@ def test_position_status_reports_warn_on_unloaded_nonzero_position() -> None:
     assert len(warnings) == 1
     assert "NQU6.RITHMIC" in warnings[0]
     assert "qty=2" in warnings[0]
+
+
+class _SingleOrderCache(_CacheStub):
+    """Cache that resolves one real Nautilus order for status queries."""
+
+    def __init__(self, order: object) -> None:
+        super().__init__()
+        self._only = order
+
+    def order(self, client_order_id: ClientOrderId) -> object:
+        return self._only
+
+
+def _filled_limit_order() -> LimitOrder:
+    """A real Nautilus order driven through SUBMITTED/ACCEPTED to FILLED."""
+    iid = InstrumentId.from_str("NQ.GLBX")
+    cid = ClientOrderId("O-1")
+    trader = TraderId("TRADER-1")
+    strategy = StrategyId("STRATEGY-1")
+    account = AccountId("RITHMIC-ACC1")
+    ts = 1_700_000_000_000_000_000
+    order = LimitOrder(
+        trader,
+        strategy,
+        iid,
+        cid,
+        OrderSide.BUY,
+        Quantity.from_int(2),
+        Price.from_str("21000.0"),
+        UUID4(),
+        0,
+        TimeInForce.GTC,
+    )
+    order.apply(OrderSubmitted(trader, strategy, iid, cid, account, UUID4(), ts, ts))
+    order.apply(
+        OrderAccepted(
+            trader, strategy, iid, cid, VenueOrderId("B-1"), account, UUID4(), ts, ts
+        )
+    )
+    order.apply(
+        OrderFilled(
+            trader,
+            strategy,
+            iid,
+            cid,
+            VenueOrderId("B-1"),
+            account,
+            TradeId("T1"),
+            None,  # position_id
+            OrderSide.BUY,
+            OrderType.LIMIT,
+            Quantity.from_int(2),
+            Price.from_str("21000.5"),
+            Currency.from_str("USD"),
+            Money(0, Currency.from_str("USD")),
+            LiquiditySide.NO_LIQUIDITY_SIDE,
+            UUID4(),
+            ts,
+            ts,
+        )
+    )
+    return order
+
+
+def test_cached_status_query_carries_avg_px_for_filled_order() -> None:
+    """A status query for a FILLED order must report its average fill price.
+
+    Nautilus ExecEngine warns on ``report.avg_px is None`` when reconciling a
+    filled order, so the cache-backed pull path must not drop the fill price.
+    """
+    order = _filled_limit_order()
+    client = _trading_client()
+    client.account_id = AccountId("RITHMIC-ACC1")
+    client._cache = _SingleOrderCache(order)
+
+    command = GenerateOrderStatusReport(
+        None,
+        ClientOrderId("O-1"),
+        None,
+        UUID4(),
+        1,
+    )
+    report = asyncio.run(client.generate_order_status_report(command))
+
+    assert report is not None
+    assert report.order_status == OrderStatus.FILLED
+    assert report.avg_px == Decimal("21000.5")
+
+
+def test_cached_status_query_non_stop_order_does_not_crash_on_trigger_type() -> None:
+    """Only stop orders expose ``trigger_type`` on the 1.231.x model; a limit
+    order status query must not raise and reports NO_TRIGGER."""
+    order = _filled_limit_order()
+    client = _trading_client()
+    client.account_id = AccountId("RITHMIC-ACC1")
+    client._cache = _SingleOrderCache(order)
+
+    command = GenerateOrderStatusReport(
+        None,
+        ClientOrderId("O-1"),
+        None,
+        UUID4(),
+        1,
+    )
+    report = asyncio.run(client.generate_order_status_report(command))
+
+    assert report is not None
+    assert report.trigger_type == TriggerType.NO_TRIGGER
+    assert report.avg_px == Decimal("21000.5")

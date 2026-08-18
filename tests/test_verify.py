@@ -11,8 +11,10 @@ from rithmic_nt_connect.verify import RecordedTick
 from rithmic_nt_connect.verify import compare_ticks
 from rithmic_nt_connect.verify import run_front_month_verify
 
+from _stubs import WireSessionStub
 
-class FakeSession:
+
+class FakeSession(WireSessionStub):
     def __init__(self) -> None:
         self._events = [
             {
@@ -32,7 +34,7 @@ class FakeSession:
         ]
         self.subscribed: list[tuple[str, str]] = []
 
-    def get_front_month(self, root: str, exchange: str):
+    def get_front_month(self, symbol: str, exchange: str):
         return {
             "trading_symbol": "NQU6",
             "trading_exchange": exchange,
@@ -48,12 +50,13 @@ class FakeSession:
     def unsubscribe(self, symbol: str, exchange: str) -> None:
         return
 
-    def poll_event(self):
+    def poll_event(self, timeout_ms: int = 0):
+        _ = timeout_ms
         if self._events:
             return self._events.pop(0)
         return None
 
-    def load_ticks(self, symbol, exchange, start, end):
+    def load_ticks(self, symbol, exchange, start_ssboe, end_ssboe):
         return [
             {
                 "type": "history_tick",
@@ -81,12 +84,12 @@ def test_resolve_front_month():
 
 
 def test_resolve_front_month_missing_symbol():
-    class Bad:
-        def get_front_month(self, root, exchange):
+    class Bad(WireSessionStub):
+        def get_front_month(self, symbol, exchange):
             return {"exchange": exchange}
 
     try:
-        resolve_front_month(Bad(), "NQ", "CME")  # type: ignore[arg-type]
+        resolve_front_month(Bad(), "NQ", "CME")
         assert False
     except FrontMonthError:
         pass

@@ -126,6 +126,8 @@ class OrderSession(Protocol):
 class WireSession(TickerSession, PnlSession, OrderSession, Protocol):
     """Full multi-plant session facade (composition of ticker / PnL / order)."""
 
+    def resolved_account(self) -> dict[str, Any] | None: ...
+
 
 PLANTS_MARKET_DATA = "market_data"
 PLANTS_EXECUTION = "execution"
@@ -144,7 +146,7 @@ def create_rust_session(
     ``plants`` is ``market_data`` (ticker + history) or ``execution``
     (also PnL when the account triple is set). Order plant stays lazy.
     """
-    from rithmic_nt_connect._lib import Session  # type: ignore
+    from rithmic_nt_connect._lib import Session
 
     SessionLock = _load_session_lock()
 
@@ -165,7 +167,11 @@ def create_rust_session(
         beta_url=session.beta_url,
         plants=plants,
     )
-    return _FlockedDirectSession(inner, lock)  # type: ignore[return-value]
+    # ``_FlockedDirectSession`` delegates the full facade via ``__getattr__``,
+    # so a checker cannot see its protocol conformance; the Rust ``Session``
+    # itself is verified against ``WireSession`` above (it is the ``inner``
+    # argument's declared type).
+    return _FlockedDirectSession(inner, lock)
 
 
 class _FlockedDirectSession:
@@ -173,6 +179,9 @@ class _FlockedDirectSession:
 
     Data and exec clients share one instance. ``connect()`` is idempotent
     because Nautilus starts both clients in parallel and each calls connect.
+    The full ``WireSession`` surface is forwarded explicitly so checkers see
+    the protocol conformance (a bare ``__getattr__`` delegate is invisible to
+    them); ``__getattr__`` remains as a safety net for future additions.
     """
 
     def __init__(self, inner: WireSession, lock: Any) -> None:
@@ -186,6 +195,185 @@ class _FlockedDirectSession:
     def disconnect(self) -> None:
         with self._connect_gate:
             self._inner.disconnect()
+
+    # -- TickerSession -----------------------------------------------------
+    def subscribe(self, symbol: str, exchange: str) -> None:
+        self._inner.subscribe(symbol, exchange)
+
+    def unsubscribe(self, symbol: str, exchange: str) -> None:
+        self._inner.unsubscribe(symbol, exchange)
+
+    def subscribe_order_book_summary(self, symbol: str, exchange: str) -> None:
+        self._inner.subscribe_order_book_summary(symbol, exchange)
+
+    def unsubscribe_order_book_summary(self, symbol: str, exchange: str) -> None:
+        self._inner.unsubscribe_order_book_summary(symbol, exchange)
+
+    def get_front_month(self, symbol: str, exchange: str) -> Any:
+        return self._inner.get_front_month(symbol, exchange)
+
+    def get_reference_data(self, symbol: str, exchange: str) -> Any:
+        return self._inner.get_reference_data(symbol, exchange)
+
+    def resolved_account(self) -> dict[str, Any] | None:
+        return self._inner.resolved_account()
+
+    def poll_event(self, timeout_ms: int = 0) -> dict[str, Any] | None:
+        return self._inner.poll_event(timeout_ms)
+
+    def load_ticks(
+        self, symbol: str, exchange: str, start_ssboe: int, end_ssboe: int
+    ) -> list[dict[str, Any]]:
+        return self._inner.load_ticks(symbol, exchange, start_ssboe, end_ssboe)
+
+    def load_time_bars(
+        self,
+        symbol: str,
+        exchange: str,
+        start_ssboe: int,
+        end_ssboe: int,
+        bar_type: int = 2,
+        period: int = 1,
+    ) -> list[dict[str, Any]]:
+        return self._inner.load_time_bars(symbol, exchange, start_ssboe, end_ssboe, bar_type, period)
+
+    def probe_time_bars(
+        self,
+        symbol: str,
+        exchange: str,
+        start_ssboe: int,
+        end_ssboe: int,
+        bar_type: int = 2,
+        period: int = 1,
+    ) -> list[dict[str, Any]]:
+        return self._inner.probe_time_bars(symbol, exchange, start_ssboe, end_ssboe, bar_type, period)
+
+    def subscribe_time_bars(self, symbol: str, exchange: str, bar_type: int, period: int) -> None:
+        self._inner.subscribe_time_bars(symbol, exchange, bar_type, period)
+
+    def unsubscribe_time_bars(self, symbol: str, exchange: str, bar_type: int, period: int) -> None:
+        self._inner.unsubscribe_time_bars(symbol, exchange, bar_type, period)
+
+    def poll_history_event(self) -> dict[str, Any] | None:
+        return self._inner.poll_history_event()
+
+    def request_plants(self, plants: str) -> None:
+        self._inner.request_plants(plants)
+
+    # -- PnlSession --------------------------------------------------------
+    def subscribe_pnl(self) -> None:
+        self._inner.subscribe_pnl()
+
+    def disconnect_pnl_plant(self) -> None:
+        self._inner.disconnect_pnl_plant()
+
+    def ensure_pnl_plant(self) -> None:
+        self._inner.ensure_pnl_plant()
+
+    def poll_pnl_event(self) -> dict[str, Any] | None:
+        return self._inner.poll_pnl_event()
+
+    # -- OrderSession ------------------------------------------------------
+    def subscribe_order_updates(self) -> None:
+        self._inner.subscribe_order_updates()
+
+    def subscribe_bracket_updates(self) -> None:
+        self._inner.subscribe_bracket_updates()
+
+    def disconnect_order_plant(self) -> None:
+        self._inner.disconnect_order_plant()
+
+    def ensure_order_plant(self) -> None:
+        self._inner.ensure_order_plant()
+
+    def place_order(
+        self,
+        symbol: str,
+        exchange: str,
+        side: str,
+        price_type: str,
+        quantity: int,
+        user_tag: str,
+        price: float | None = None,
+        trigger_price: float | None = None,
+        duration: str = "DAY",
+        trail_by_ticks: int | None = None,
+        trail_by_price_id: int | None = None,
+    ) -> None:
+        self._inner.place_order(
+            symbol,
+            exchange,
+            side,
+            price_type,
+            quantity,
+            user_tag,
+            price,
+            trigger_price,
+            duration,
+            trail_by_ticks,
+            trail_by_price_id,
+        )
+
+    def place_bracket_order(
+        self,
+        symbol: str,
+        exchange: str,
+        side: str,
+        price_type: str,
+        quantity: int,
+        localid: str,
+        price: float | None = None,
+        trigger_price: float | None = None,
+        duration: str = "DAY",
+        stop_ticks: int | None = None,
+        target_ticks: int | None = None,
+    ) -> None:
+        self._inner.place_bracket_order(
+            symbol,
+            exchange,
+            side,
+            price_type,
+            quantity,
+            localid,
+            price,
+            trigger_price,
+            duration,
+            stop_ticks,
+            target_ticks,
+        )
+
+    def adjust_bracket_stop(self, basket_id: str, ticks: int, level: int | None = None) -> None:
+        self._inner.adjust_bracket_stop(basket_id, ticks, level)
+
+    def adjust_bracket_target(self, basket_id: str, ticks: int, level: int | None = None) -> None:
+        self._inner.adjust_bracket_target(basket_id, ticks, level)
+
+    def cancel_order(self, basket_id: str) -> None:
+        self._inner.cancel_order(basket_id)
+
+    def modify_order(
+        self,
+        basket_id: str,
+        symbol: str,
+        exchange: str,
+        quantity: int,
+        price_type: str,
+        price: float | None = None,
+        trigger_price: float | None = None,
+        trail_by_ticks: int | None = None,
+    ) -> None:
+        self._inner.modify_order(
+            basket_id, symbol, exchange, quantity, price_type, price, trigger_price, trail_by_ticks
+        )
+
+    def cancel_all_orders(self) -> None:
+        self._inner.cancel_all_orders()
+
+    def load_orders(self, start_ssboe: int, end_ssboe: int) -> list[dict[str, Any]]:
+        return self._inner.load_orders(start_ssboe, end_ssboe)
+
+    def poll_order_event(self) -> dict[str, Any] | None:
+        return self._inner.poll_order_event()
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)

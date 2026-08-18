@@ -87,6 +87,10 @@ def future_from_reference(
     underlying = ref.get("underlying") or ref.get("product_code")
     if not underlying:
         raise InstrumentBuildError("reference data missing underlying/product_code")
+    if tick_size is None or price_precision is None or point_value is None:
+        # The required-field check above already rejected None; this narrows the
+        # types for the numeric conversions below.
+        raise InstrumentBuildError("reference data missing numeric fields")
 
     now = int(datetime.now(timezone.utc).timestamp() * 1_000_000_000)
     # 0 = tradable for any backtest window. "now" rejects historical orders

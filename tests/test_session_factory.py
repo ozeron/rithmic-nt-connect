@@ -6,12 +6,14 @@ import pytest
 
 from rithmic_gateway.flock import SessionLock, SessionLockError
 
+from _stubs import WireSessionStub
+
 
 def test_flocked_session_connect_is_idempotent() -> None:
     from rithmic_nt_connect.errors import AlreadyConnectedError
     from rithmic_nt_connect.session import _FlockedDirectSession
 
-    class _Inner:
+    class _Inner(WireSessionStub):
         # Models the real Rust session: connect() is a safe no-op when already
         # connected (it raises AlreadyConnectedError without reconnecting).
         def __init__(self) -> None:
@@ -27,7 +29,7 @@ def test_flocked_session_connect_is_idempotent() -> None:
         def disconnect(self) -> None:
             self.connected = False
 
-        def request_plants(self, _plants: str) -> None:
+        def request_plants(self, plants: str) -> None:
             return None
 
     inner = _Inner()
@@ -51,7 +53,7 @@ def test_flocked_session_connect_is_idempotent() -> None:
 def test_flocked_session_reconnects_after_disconnect() -> None:
     from rithmic_nt_connect.session import _FlockedDirectSession
 
-    class _Inner:
+    class _Inner(WireSessionStub):
         def __init__(self) -> None:
             self.calls = 0
             self.disconnects = 0
@@ -71,6 +73,21 @@ def test_flocked_session_reconnects_after_disconnect() -> None:
     # A later connect() must not short-circuit on a stale _connected flag.
     wrapped.connect()
     assert inner.calls == 2
+
+
+def test_flocked_session_forwards_resolved_account() -> None:
+    from rithmic_nt_connect.session import _FlockedDirectSession
+
+    class _Inner(WireSessionStub):
+        def resolved_account(self) -> dict[str, object] | None:
+            return {"account_id": "A1", "fcm_id": "F1", "ib_id": "I1"}
+
+    wrapped = _FlockedDirectSession(_Inner(), lock=object())
+    assert wrapped.resolved_account() == {
+        "account_id": "A1",
+        "fcm_id": "F1",
+        "ib_id": "I1",
+    }
 
 
 def test_gateway_factory_does_not_share_wire_session(monkeypatch: pytest.MonkeyPatch) -> None:

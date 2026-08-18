@@ -14,8 +14,16 @@ from nautilus_trader.model.objects import Quantity
 
 from rithmic_nt_connect._order_plant import OrderPlantPolicy
 from rithmic_nt_connect._order_plant import OrderPlantState
+from rithmic_nt_connect._orders import OrderAction
 from rithmic_nt_connect._orders import notification_action
 from rithmic_nt_connect._orders import order_notification_to_fields
+
+
+def _action(fields: dict[str, object], order: SimpleNamespace) -> OrderAction:
+    """Resolve a notification action, failing on an unmapped ``None``."""
+    action = notification_action(fields, order)
+    assert action is not None
+    return action
 
 
 def _mock_order() -> SimpleNamespace:
@@ -47,7 +55,7 @@ def test_notification_action_open_modified_trigger_not_modified() -> None:
             "ssboe": 1_700_000_000,
         }
     )
-    assert notification_action(open_fields, order).kind == "accepted"
+    assert _action(open_fields, order).kind == "accepted"
 
     updated = order_notification_to_fields(
         {
@@ -61,7 +69,7 @@ def test_notification_action_open_modified_trigger_not_modified() -> None:
             "ssboe": 1_700_000_000,
         }
     )
-    action = notification_action(updated, order)
+    action = _action(updated, order)
     assert action.kind == "updated"
     assert action.quantity == 2
 
@@ -75,7 +83,7 @@ def test_notification_action_open_modified_trigger_not_modified() -> None:
             "ssboe": 1_700_000_000,
         }
     )
-    assert notification_action(triggered, order).kind == "triggered"
+    assert _action(triggered, order).kind == "triggered"
 
     not_mod = order_notification_to_fields(
         {
@@ -87,7 +95,7 @@ def test_notification_action_open_modified_trigger_not_modified() -> None:
             "ssboe": 1_700_000_000,
         }
     )
-    assert notification_action(not_mod, order).kind == "modify_rejected"
+    assert _action(not_mod, order).kind == "modify_rejected"
 
 
 def test_notification_action_reject_fill_cancel_complete() -> None:
@@ -103,7 +111,7 @@ def test_notification_action_reject_fill_cancel_complete() -> None:
             "ssboe": 1_700_000_000,
         }
     )
-    assert notification_action(reject, order).kind == "rejected"
+    assert _action(reject, order).kind == "rejected"
 
     fill = order_notification_to_fields(
         {
@@ -118,7 +126,7 @@ def test_notification_action_reject_fill_cancel_complete() -> None:
             "ssboe": 1_700_000_000,
         }
     )
-    assert notification_action(fill, order).kind == "filled"
+    assert _action(fill, order).kind == "filled"
 
     cancel = order_notification_to_fields(
         {
@@ -130,7 +138,7 @@ def test_notification_action_reject_fill_cancel_complete() -> None:
             "ssboe": 1_700_000_000,
         }
     )
-    assert notification_action(cancel, order).kind == "canceled"
+    assert _action(cancel, order).kind == "canceled"
 
     complete = order_notification_to_fields(
         {
@@ -143,7 +151,7 @@ def test_notification_action_reject_fill_cancel_complete() -> None:
             "ssboe": 1_700_000_000,
         }
     )
-    assert notification_action(complete, order).kind == "canceled"
+    assert _action(complete, order).kind == "canceled"
 
 
 def test_report_policy_venue_backed_contract() -> None:

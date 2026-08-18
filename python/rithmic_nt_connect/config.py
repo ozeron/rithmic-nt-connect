@@ -173,7 +173,8 @@ def explicit_test_env(environ: Mapping[str, str] | None = None) -> dict[str, str
     for key in ("RITHMIC_USER", "RITHMIC_PASSWORD", "RITHMIC_SYSTEM_NAME", "RITHMIC_CONNECT_MODE"):
         if not _env_first(values, key):
             raise ConfigError(f"explicit test env file is missing {key}")
-    mode = parse_connect_mode(values.get("RITHMIC_CONNECT_MODE"))
+    # RITHMIC_CONNECT_MODE is validated non-empty above, so direct indexing is safe.
+    mode = parse_connect_mode(values["RITHMIC_CONNECT_MODE"])
     if mode == ConnectMode.GATEWAY and not _env_first(values, "RITHMIC_GATEWAY"):
         # A gateway test env must name its endpoint; a direct env never uses one.
         raise ConfigError("explicit test env file is missing RITHMIC_GATEWAY")
@@ -438,11 +439,13 @@ class RithmicDataClientConfig:
 
 try:
     from nautilus_trader.config import LiveDataClientConfig
+    _LIVE_DATA_CONFIG_BASE: Any = LiveDataClientConfig
 except ImportError:  # pragma: no cover - nautilus not installed
-    RithmicLiveDataClientConfig = None  # type: ignore[misc, assignment]
-else:
+    _LIVE_DATA_CONFIG_BASE = None
 
-    class RithmicLiveDataClientConfig(LiveDataClientConfig, frozen=True, kw_only=True):
+if _LIVE_DATA_CONFIG_BASE is not None:
+
+    class RithmicLiveDataClientConfig(_LIVE_DATA_CONFIG_BASE, frozen=True, kw_only=True):
         """TradingNode-facing data config. Factory loads ``SessionConfig.from_env()``."""
 
         session: SessionConfig | None = None
@@ -450,11 +453,15 @@ else:
 
 try:
     from nautilus_trader.config import LiveExecClientConfig
+    _LIVE_EXEC_CONFIG_BASE: Any = LiveExecClientConfig
 except ImportError:  # pragma: no cover - nautilus not installed
-    RithmicLiveExecClientConfig = None  # type: ignore[misc, assignment]
-else:
+    _LIVE_EXEC_CONFIG_BASE = None
 
-    class RithmicLiveExecClientConfig(LiveExecClientConfig, kw_only=True):
+if _LIVE_EXEC_CONFIG_BASE is not None:
+
+    # msgspec ``frozen=True`` (inherited from ``NautilusConfig``); stated here so
+    # the class is self-describing and checkers don't flag the subclass.
+    class RithmicLiveExecClientConfig(_LIVE_EXEC_CONFIG_BASE, kw_only=True, frozen=True):
         """TradingNode-facing exec config. Factory loads ``SessionConfig.from_env()``.
 
         Adds the Rithmic ``session`` + ``enable_trading`` knobs on top of the base
@@ -463,6 +470,19 @@ else:
 
         session: SessionConfig | None = None
         enable_trading: bool = False
+        soft_fail_pnl: bool = True
+
+
+def __getattr__(name: str) -> Any:
+    """Return ``None`` for the live config classes when Nautilus is absent.
+
+    The classes are only defined when ``nautilus_trader`` imports. A ``= None``
+    fallback branch beside the class would make type checkers union ``None`` into
+    the class name's type, so the fallback lives in this module ``__getattr__``.
+    """
+    if name in ("RithmicLiveDataClientConfig", "RithmicLiveExecClientConfig"):
+        return None
+    raise AttributeError(name)
 
 
 @dataclass

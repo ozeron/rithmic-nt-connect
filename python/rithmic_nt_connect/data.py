@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import itertools
 import time
+from collections.abc import Callable, Coroutine
 from typing import Any
 
 from nautilus_trader.cache.cache import Cache
 from nautilus_trader.common.component import LiveClock
 from nautilus_trader.common.component import MessageBus
+from nautilus_trader.common.enums import LogColor
 from nautilus_trader.data.messages import RequestBars
 from nautilus_trader.data.messages import RequestTradeTicks
 from nautilus_trader.data.messages import SubscribeBars
@@ -20,6 +22,7 @@ from nautilus_trader.data.messages import UnsubscribeBars
 from nautilus_trader.data.messages import UnsubscribeOrderBook
 from nautilus_trader.data.messages import UnsubscribeQuoteTicks
 from nautilus_trader.data.messages import UnsubscribeTradeTicks
+from nautilus_trader.live.data_client import LiveDataClient
 from nautilus_trader.live.data_client import LiveMarketDataClient
 from nautilus_trader.model.data import Bar
 from nautilus_trader.model.data import BarType
@@ -66,8 +69,8 @@ def _reconnectable_poll_error(exc: BaseException) -> bool:
         or "channel lagged" in text
     )
 
-_F_SNAPSHOT = int(RecordFlag.F_SNAPSHOT)
-_F_LAST = int(RecordFlag.F_LAST)
+_F_SNAPSHOT = int(RecordFlag.F_SNAPSHOT.value)
+_F_LAST = int(RecordFlag.F_LAST.value)
 _F_SNAPSHOT_LAST = _F_SNAPSHOT | _F_LAST
 
 
@@ -447,8 +450,35 @@ def bar_type_to_rithmic(bar_type: BarType) -> tuple[int, int]:
     )
 
 
-class RithmicDataClient(LiveMarketDataClient):
-    """Out-of-tree LiveMarketDataClient backed by the Rust Rithmic session."""
+class RithmicDataClient(LiveMarketDataClient, LiveDataClient):
+    """Out-of-tree live market-data client backed by the Rust Rithmic session.
+
+    Nautilus 1.231.x models ``LiveMarketDataClient`` as a ``MarketDataClient``
+    rather than a ``LiveDataClient``, yet ``LiveDataClientFactory.create``
+    contracts ``-> LiveDataClient``. Taking both bases makes this client
+    genuinely satisfy that contract (``isinstance`` included) instead of
+    suppressing the mismatch. The ``create_task`` diamond is resolved below.
+    """
+
+    def create_task(
+        self,
+        coro: Coroutine,
+        log_msg: str | None = None,
+        actions: Callable | None = None,
+        success_msg: str | None = None,
+        success_color: LogColor = LogColor.NORMAL,
+    ) -> asyncio.Task:
+        """Resolve the ``LiveDataClient``/``LiveMarketDataClient`` diamond.
+
+        The bases declare incompatible return types (``Task`` vs ``Task | None``);
+        ``Task`` satisfies both. ``None`` is only returned when the loop is not
+        running or the client is disposed — a programming error for a live
+        client, so fail loudly instead of silently dropping the task.
+        """
+        task = super().create_task(coro, log_msg, actions, success_msg, success_color)
+        if task is None:
+            raise RuntimeError("Rithmic data client cannot start task: not running")
+        return task
 
     def __init__(
         self,

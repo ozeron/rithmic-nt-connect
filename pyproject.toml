@@ -41,3 +41,21 @@ markers = [
     "live: real-connection e2e (tests/e2e); auto-skip without RITHMIC_TEST_DOTENV",
     "slow: takes >30s (1m EXTERNAL bar poll); deselect with -m 'not slow'",
 ]
+
+[tool.ty.environment]
+# Nautilus model classes (orders/events/data/...) are compiled Cython with no
+# shipped stubs, so ty sees them as Unknown. ``stubs/`` holds stubgen output
+# generated from the installed nautilus_trader (runtime attribute surface) plus
+# hand-ported ctor fixes; regenerate with:
+#   uv run --with mypy python scripts/gen_nautilus_stubs.py
+extra-paths = ["stubs", "tests"]
+
+[tool.ty.analysis]
+# session_pb2 is protoc-generated: its message classes are created dynamically
+# (``BuildMessageAndEnumDescriptors``), so no checker can see them.
+replace-imports-with-any = ["rithmic_gateway.v1.**"]
+
+[dependency-groups]
+dev = [
+    "ty>=0.0.72",
+]

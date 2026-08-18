@@ -105,6 +105,7 @@ the protobuf Python package (core dep):
 ```bash
 uv sync --extra dev
 cargo test -p rithmic-plants -p rithmic-gateway -p rithmic-nt-connect
+uv run ty check python/rithmic_nt_connect tests
 uv run pytest -q
 ```
 

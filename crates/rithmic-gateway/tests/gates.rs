@@ -3,7 +3,7 @@
 use rithmic_gateway::pb::frame::Body;
 use rithmic_gateway::pb::{
     CancelAllOrdersRequest, LoadOrdersRequest, PlaceBracketOrderRequest, PlaceOrderRequest,
-    SubscribeBracketUpdatesRequest, SubscribeOrderUpdatesRequest,
+    ResolvedAccountRequest, SubscribeBracketUpdatesRequest, SubscribeOrderUpdatesRequest,
 };
 use rithmic_gateway::server::{gate_rpc_for_test, rpc_sequence_with_gates};
 use rithmic_gateway::subscriptions::ParentGates;
@@ -71,6 +71,14 @@ fn cancel_all_denied_by_default() {
     assert_error_code(
         gate_rpc_for_test(&ParentGates::default(), Body::CancelAllOrders(CancelAllOrdersRequest {})),
         "cancel_all_denied",
+    );
+}
+
+#[test]
+fn resolved_account_errors_when_no_session() {
+    assert_error_code(
+        gate_rpc_for_test(&trading_on(), Body::ResolvedAccount(ResolvedAccountRequest {})),
+        "no_session",
     );
 }
 

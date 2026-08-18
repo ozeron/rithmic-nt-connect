@@ -1,0 +1,1 @@
+from nautilus_trader.model.tick_scheme.implementations.fixed import FOREX_3DECIMAL_TICK_SCHEME as FOREX_3DECIMAL_TICK_SCHEME, FOREX_5DECIMAL_TICK_SCHEME as FOREX_5DECIMAL_TICK_SCHEME

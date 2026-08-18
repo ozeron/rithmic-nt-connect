@@ -35,10 +35,17 @@ class _HarnessDriver(OrderDriver):
         self.submitted: list[object] = []
         self.order_factory = SimpleNamespace(market=lambda *args, **kwargs: object())
 
-    def subscribe_quote_ticks(self, instrument_id) -> None:
+    def subscribe_quote_ticks(
+        self,
+        instrument_id,
+        client_id=None,
+        update_catalog=True,
+        aggregate_spread_quotes=True,
+        params=None,
+    ) -> None:
         pass
 
-    def submit_order(self, order) -> None:
+    def submit_order(self, order, position_id=None, client_id=None, params=None) -> None:
         self.submitted.append(order)
 
     @property
@@ -46,11 +53,13 @@ class _HarnessDriver(OrderDriver):
         # ``order_factory`` is cdef read-only on the Cython ``Strategy`` base;
         # re-expose it as a writable property (same trick as the exec-recon
         # unit doubles) so the ``market()`` DSL spec can build its order.
-        return self.__factory  # type: ignore[attr-defined]
+        # ``object.__getattribute__``/``__setattr__`` keep the dynamic slot
+        # invisible to the type checker (no ``type: ignore``).
+        return object.__getattribute__(self, "_OrderDriver__factory")
 
     @order_factory.setter
     def order_factory(self, value) -> None:
-        self.__factory = value  # type: ignore[attr-defined]
+        object.__setattr__(self, "_OrderDriver__factory", value)
 
 
 def _quote_tick(*, bid=None, ask=None) -> SimpleNamespace:
