@@ -1,0 +1,23 @@
+import _cython_3_2_9
+from _typeshed import Incomplete
+from typing import Any, ClassVar
+
+__pyx_capi__: dict
+__test__: dict
+get_tick_scheme: _cython_3_2_9.cython_function_or_method
+list_tick_schemes: _cython_3_2_9.cython_function_or_method
+register_tick_scheme: _cython_3_2_9.cython_function_or_method
+round_down: _cython_3_2_9.cython_function_or_method
+round_up: _cython_3_2_9.cython_function_or_method
+
+class TickScheme:
+    __pyx_vtable__: ClassVar[PyCapsule] = ...
+    max_price: Incomplete
+    min_price: Incomplete
+    name: Incomplete
+    def __init__(self, strname, Pricemin_tick, Pricemax_tick) -> Any: ...
+    def next_ask_price(self, doublevalue, intn=...) -> Price: ...
+    def next_bid_price(self, doublevalue, intn=...) -> Price: ...
+    def __reduce__(self): ...
+    def __reduce_cython__(self) -> Any: ...
+    def __setstate_cython__(self, __pyx_state) -> Any: ...

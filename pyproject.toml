@@ -46,6 +46,12 @@ markers = [
 include = ["python"]
 pythonVersion = "3.13"
 typeCheckingMode = "standard"
+# Nautilus model classes (orders/events/data/...) are compiled Cython with no
+# shipped stubs, so pyright sees them as Unknown. ``stubs/`` holds stubgen
+# output generated from the installed nautilus_trader (runtime attribute
+# surface) plus hand-ported ctor fixes; regenerate with:
+#   uv run --with mypy python scripts/gen_nautilus_stubs.py
+stubPath = "stubs"
 # The package lazily re-exports factory/historical helpers via PEP 562
 # ``__getattr__`` (avoids importing nautilus_trader at package import); pyright
 # cannot see those names and flags them in ``__all__``.

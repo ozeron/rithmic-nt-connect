@@ -907,9 +907,9 @@ class RithmicExecutionClient(LiveExecutionClient):
             trigger_price=order.trigger_price if order.has_trigger_price else None,
             # Only stop orders expose ``trigger_type`` on the 1.231.x model;
             # plain limit/market orders must not be touched (AttributeError).
-            trigger_type=(
-                order.trigger_type if order.has_trigger_price else TriggerType.NO_TRIGGER
-            ),
+            # ``getattr`` keeps this statically honest: the base ``Order`` stub
+            # deliberately does not declare the attribute.
+            trigger_type=getattr(order, "trigger_type", TriggerType.NO_TRIGGER),
             reduce_only=order.is_reduce_only,
             avg_px=Decimal(str(order.avg_px)) if order.avg_px else None,
         )
