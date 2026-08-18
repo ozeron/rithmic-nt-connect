@@ -17,9 +17,8 @@ from typing import Iterator
 
 import pytest
 
-from rithmic_nt_connect.config import PRODUCTION_SYSTEM_MARKERS
-from rithmic_nt_connect.config import TEST_SYSTEM_MARKERS
 from rithmic_nt_connect.config import env_truthy
+from rithmic_nt_connect.config import system_kind
 
 if TYPE_CHECKING:
     from rithmic_nt_connect.session import WireSession
@@ -88,16 +87,16 @@ def require_test_plant(test_env) -> str:
     """
     if test_env is None:
         pytest.skip("explicit test env unavailable (RITHMIC_TEST_DOTENV)")
-    upper = test_env["RITHMIC_SYSTEM_NAME"].upper()
-    if any(marker in upper for marker in PRODUCTION_SYSTEM_MARKERS):
+    kind = system_kind(test_env["RITHMIC_SYSTEM_NAME"])
+    if kind == "production":
         raise RuntimeError(
             "REFUSING exec live test: RITHMIC_SYSTEM_NAME looks like a production "
             "system. Exec live tests may ONLY run against a test/demo plant."
         )
-    if not any(marker in upper for marker in TEST_SYSTEM_MARKERS):
+    if kind != "test":
         raise RuntimeError(
             f"REFUSING exec live test: RITHMIC_SYSTEM_NAME={test_env['RITHMIC_SYSTEM_NAME']!r} "
-            f"is not recognized as a test/demo plant (expected one of {TEST_SYSTEM_MARKERS})."
+            "is not recognized as a test/demo plant."
         )
     return test_env["RITHMIC_SYSTEM_NAME"]
 
