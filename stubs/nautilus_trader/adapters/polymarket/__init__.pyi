@@ -1,9 +1,0 @@
-from nautilus_trader.adapters.polymarket.common.constants import POLYMARKET as POLYMARKET, POLYMARKET_CLIENT_ID as POLYMARKET_CLIENT_ID, POLYMARKET_MAX_PRECISION_MAKER as POLYMARKET_MAX_PRECISION_MAKER, POLYMARKET_MAX_PRECISION_TAKER as POLYMARKET_MAX_PRECISION_TAKER, POLYMARKET_MAX_PRICE as POLYMARKET_MAX_PRICE, POLYMARKET_MIN_PRICE as POLYMARKET_MIN_PRICE, POLYMARKET_VENUE as POLYMARKET_VENUE
-from nautilus_trader.adapters.polymarket.common.parsing import parse_polymarket_instrument as parse_polymarket_instrument
-from nautilus_trader.adapters.polymarket.common.symbol import get_polymarket_instrument_id as get_polymarket_instrument_id
-from nautilus_trader.adapters.polymarket.config import PolymarketDataClientConfig as PolymarketDataClientConfig, PolymarketExecClientConfig as PolymarketExecClientConfig
-from nautilus_trader.adapters.polymarket.factories import PolymarketLiveDataClientFactory as PolymarketLiveDataClientFactory, PolymarketLiveExecClientFactory as PolymarketLiveExecClientFactory, get_polymarket_http_client as get_polymarket_http_client, get_polymarket_instrument_provider as get_polymarket_instrument_provider
-from nautilus_trader.adapters.polymarket.loaders import PolymarketDataLoader as PolymarketDataLoader
-from nautilus_trader.adapters.polymarket.providers import PolymarketInstrumentProvider as PolymarketInstrumentProvider
-
-__all__ = ['POLYMARKET', 'POLYMARKET_CLIENT_ID', 'POLYMARKET_MAX_PRECISION_MAKER', 'POLYMARKET_MAX_PRECISION_TAKER', 'POLYMARKET_MAX_PRICE', 'POLYMARKET_MIN_PRICE', 'POLYMARKET_VENUE', 'parse_polymarket_instrument', 'get_polymarket_instrument_id', 'PolymarketDataClientConfig', 'PolymarketExecClientConfig', 'PolymarketLiveDataClientFactory', 'PolymarketLiveExecClientFactory', 'get_polymarket_http_client', 'get_polymarket_instrument_provider', 'PolymarketDataLoader', 'PolymarketInstrumentProvider']

@@ -17,6 +17,16 @@ its output needs fixes:
    it, and unguarded access must stay a static error.
 4. ``nautilus_trader/__init__.pyi`` truncated to empty: the package init
    imports ``nautilus_pyo3`` which adds no signal for adapter checks.
+5. Unused subpackages pruned: ``stubgen`` emits the whole package (~435 files)
+   but the adapter + tests only use nine subpackages, so anything outside
+   ``_EXPECTED_TOP_LEVEL`` is deleted (~300 files / ~9.6k lines). ``ty check``
+   is the final gate: if code later imports a pruned subpackage, ty hard-errors
+   on the missing module and the allowlist gets reviewed (never silent).
+
+   Trade-off: kept stubs that import a pruned subpackage (e.g. ``live/node.pyi``
+   -> ``portfolio``/``system``) resolve those symbols to ``Any`` rather than
+   erroring, so pruning is not lossless for stub-internal references. That is
+   fine as long as the adapter only consumes symbols from the kept set.
 
 Run from the repo root (regenerates ``stubs/`` in place):
     uv run --with mypy python scripts/gen_nautilus_stubs.py
@@ -24,12 +34,31 @@ Run from the repo root (regenerates ``stubs/`` in place):
 
 from __future__ import annotations
 
+import os
 import pathlib
 import re
+import shutil
 import subprocess
+import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 STUBS = ROOT / "stubs"
+
+# The subpackages the adapter + tests are allowed to pull in. Regeneration
+# deletes any stub outside this set; ``ty check`` then hard-errors if the
+# checked code actually imports a pruned subpackage, so the expansion is caught
+# in CI (never silently) and this list is reviewed.
+_EXPECTED_TOP_LEVEL = {
+    "cache",
+    "common",
+    "config",
+    "core",
+    "data",
+    "execution",
+    "live",
+    "model",
+    "trading",
+}
 
 _FUTURES_CTOR_IMPORTS = """from nautilus_trader.model.enums import AssetClass
 from nautilus_trader.model.identifiers import InstrumentId
@@ -168,11 +197,10 @@ _LIVE_MDC_HANDLERS = """    # cdef handler surface adapters override (data_clien
 """
 
 
-def _run_stubgen() -> None:
+def _run_stubgen(dest: pathlib.Path) -> None:
     # ``uv run --with mypy`` (not ``-m mypy.stubgen``): the with-injected env
-    # has no code object for the module under ``sys.executable``. The full
-    # package must be stubbed (not just model): ty hard-errors on compiled-only
-    # modules that have no stub at all.
+    # has no code object for the module under ``sys.executable``. ``dest`` is a
+    # fresh temp dir, so a failed run can't clobber the committed tree.
     subprocess.run(
         [
             "uv",
@@ -183,26 +211,29 @@ def _run_stubgen() -> None:
             "-p",
             "nautilus_trader",
             "-o",
-            str(STUBS),
+            str(dest),
         ],
         cwd=ROOT,
         check=True,
     )
 
 
-def _strip_self_imports() -> int:
+def _strip_self_imports(pkg: pathlib.Path) -> int:
     """Drop ``import X`` when the same stub also declares ``class X``."""
     fixed = 0
-    for pyi in STUBS.rglob("*.pyi"):
+    for pyi in pkg.rglob("*.pyi"):
         text = pyi.read_text()
         classes = set(re.findall(r"^class (\w+)", text, re.M))
-        kept = [
-            line
-            for line in text.splitlines()
-            if not (re.match(r"^import (\w+)$", line) and re.match(r"^import (\w+)$", line).group(1) in classes)
-        ]
-        if len(kept) != len(text.splitlines()):
-            fixed += len(text.splitlines()) - len(kept)
+        lines = text.splitlines()
+        kept = []
+        for line in lines:
+            m = re.match(r"^import (\w+)$", line)
+            if m and m.group(1) in classes:
+                continue
+            kept.append(line)
+        if len(kept) == len(lines):
+            continue
+        fixed += len(lines) - len(kept)
         pyi.write_text("\n".join(kept) + "\n")
     return fixed
 
@@ -218,16 +249,45 @@ def _patch(path: pathlib.Path, old: str, new: str, *, marker: str) -> bool:
     return True
 
 
-def _apply_hand_patches() -> int:
+def _prune_unused_subpackages(pkg: pathlib.Path) -> int:
+    """Delete stubs outside the subpackages the checked code uses.
+
+    ``stubgen`` emits the whole package; ty only needs the subpackages our code
+    imports (see ``_EXPECTED_TOP_LEVEL``). Anything else is pruned (~300 files /
+    ~9.6k lines). The allowlist is also the change-control: if a Nautilus patch
+    or new adapter code pulls in a subpackage outside it, ``ty check`` hard-errors
+    on the missing module, so the expansion is noticed and the list reviewed.
+    """
+    removed = 0
+    for pyi in pkg.rglob("*.pyi"):
+        rel = pyi.relative_to(pkg)
+        # ``nautilus_trader/__init__.pyi`` has a single part; keep it. Everything
+        # else is ``<subpackage>/...`` and is pruned unless allowlisted.
+        if len(rel.parts) > 1 and rel.parts[0] not in _EXPECTED_TOP_LEVEL:
+            pyi.unlink()
+            removed += 1
+    # Drop the now-empty directories (git doesn't track empty dirs, but a clean
+    # tree is nicer to inspect after a regenerate). Bottom-up so children are
+    # removed before parents; ``os.rmdir`` only succeeds on an empty dir.
+    for dirpath, _, _ in os.walk(pkg, topdown=False):
+        if dirpath != str(pkg):
+            try:
+                os.rmdir(dirpath)
+            except OSError:
+                pass
+    return removed
+
+
+def _apply_hand_patches(pkg: pathlib.Path) -> int:
     applied = 0
 
     # The package init imports nautilus_pyo3; nothing the adapter checks needs it.
-    init = STUBS / "nautilus_trader/__init__.pyi"
+    init = pkg / "__init__.pyi"
     if init.read_text().strip():
         init.write_text("")
         applied += 1
 
-    component = STUBS / "nautilus_trader/common/component.pyi"
+    component = pkg / "common/component.pyi"
     applied += _patch(
         component,
         "class Component:\n    fully_qualified_name: ClassVar[method] = ...\n    __pyx_vtable__: ClassVar[PyCapsule] = ...\n",
@@ -236,7 +296,7 @@ def _apply_hand_patches() -> int:
         marker="# cdef attribute surface (from component.pxd)",
     )
 
-    data_client = STUBS / "nautilus_trader/data/client.pyi"
+    data_client = pkg / "data/client.pyi"
     if "from nautilus_trader.cache.cache import Cache" not in data_client.read_text():
         text = data_client.read_text().replace(
             "from _typeshed import Incomplete\n",
@@ -253,7 +313,7 @@ def _apply_hand_patches() -> int:
         marker="# cdef readonly Cache _cache",
     )
 
-    exec_client = STUBS / "nautilus_trader/execution/client.pyi"
+    exec_client = pkg / "execution/client.pyi"
     applied += _patch(
         exec_client,
         "    def generate_account_state(self, listbalances, listmargins, boolreported, uint64_tts_event, dictinfo=...) -> void: ...\n",
@@ -267,7 +327,7 @@ def _apply_hand_patches() -> int:
         marker="info: dict | None = ...",
     )
 
-    exec_msgs = STUBS / "nautilus_trader/execution/messages.pyi"
+    exec_msgs = pkg / "execution/messages.pyi"
     applied += _patch(
         exec_msgs,
         "    def __init__(self, TraderIdtrader_id, StrategyIdstrategy_id, Orderorder, UUID4command_id, uint64_tts_init, PositionIdposition_id: PositionId | None = ..., ClientIdclient_id=..., dictparams: dict | None = ..., UUID4correlation_id=...) -> None: ...\n",
@@ -296,7 +356,7 @@ def _apply_hand_patches() -> int:
         exec_msgs.write_text(text[:start] + patched_body + text[end:])
         applied += 1
 
-    strategy = STUBS / "nautilus_trader/trading/strategy.pyi"
+    strategy = pkg / "trading/strategy.pyi"
     text = strategy.read_text()
     # e2e strategy doubles override the order/position handlers; stubgen mangles
     # cdef param names (``OrderAcceptedevent``) so the names must be restored.
@@ -322,7 +382,7 @@ def _apply_hand_patches() -> int:
         strategy.write_text(text)
         applied += 1
 
-    actor = STUBS / "nautilus_trader/common/actor.pyi"
+    actor = pkg / "common/actor.pyi"
     text = actor.read_text()
     if "# Hand-ported handler param names (actor.pxd)" not in text:
         text = text.replace(
@@ -345,7 +405,7 @@ def _apply_hand_patches() -> int:
         actor.write_text(text)
         applied += 1
 
-    live_mdc = STUBS / "nautilus_trader/live/data_client.pyi"
+    live_mdc = pkg / "live/data_client.pyi"
     applied += _patch(
         live_mdc,
         "class LiveMarketDataClient(MarketDataClient):\n",
@@ -353,7 +413,7 @@ def _apply_hand_patches() -> int:
         marker="# cdef handler surface adapters override (data_client.pxd)",
     )
 
-    futures = STUBS / "nautilus_trader/model/instruments/futures_contract.pyi"
+    futures = pkg / "model/instruments/futures_contract.pyi"
     text = futures.read_text()
     if _FUTURES_CTOR not in text:
         # Idempotent: patch the mangled one-liner ctor and add the type imports.
@@ -371,7 +431,7 @@ def _apply_hand_patches() -> int:
         futures.write_text(text)
         applied += 1
 
-    data = STUBS / "nautilus_trader/model/data.pyi"
+    data = pkg / "model/data.pyi"
     text = data.read_text()
     if _DATA_DELTAS_CTOR not in text:
         text = re.sub(
@@ -388,7 +448,7 @@ def _apply_hand_patches() -> int:
         data.write_text(text)
         applied += 1
 
-    base = STUBS / "nautilus_trader/model/orders/base.pyi"
+    base = pkg / "model/orders/base.pyi"
     text = base.read_text()
     # Guard on the comment, not ``price: Incomplete`` — ``has_activation_price:
     # Incomplete`` contains that substring and would skip the patch.
@@ -403,13 +463,44 @@ def _apply_hand_patches() -> int:
     return applied
 
 
+def _install(staged_pkg: pathlib.Path) -> None:
+    """Swap ``stubs/nautilus_trader`` for ``staged_pkg`` without a partial tree.
+
+    Both live under ``STUBS`` (same filesystem), so ``os.replace``/``shutil.move``
+    are renames. The current tree is moved aside first; if the move-in fails it is
+    restored, so a bad generation never leaves the repo without stubs.
+    """
+    target = STUBS / "nautilus_trader"
+    backup = STUBS / "nautilus_trader.old"
+    shutil.rmtree(backup, ignore_errors=True)
+    had_old = target.exists()
+    if had_old:
+        os.replace(target, backup)
+    try:
+        shutil.move(str(staged_pkg), str(target))
+    except BaseException:
+        if had_old:
+            os.replace(backup, target)
+        raise
+    shutil.rmtree(backup, ignore_errors=True)
+
+
 def main() -> None:
-    _run_stubgen()
-    stripped = _strip_self_imports()
-    applied = _apply_hand_patches()
+    # Stage into a temp dir inside ``stubs`` so the final swap is an atomic
+    # rename (same filesystem) and a failed ``stubgen``/patch run never touches
+    # the committed tree.
+    with tempfile.TemporaryDirectory(dir=STUBS, prefix=".gen-") as tmp:
+        dest = pathlib.Path(tmp)
+        _run_stubgen(dest)
+        pkg = dest / "nautilus_trader"
+        stripped = _strip_self_imports(pkg)
+        applied = _apply_hand_patches(pkg)
+        pruned = _prune_unused_subpackages(pkg)
+        _install(pkg)
     print(
-        f"regenerated stubs under {STUBS} "
-        f"(dropped {stripped} bogus self-imports, applied {applied} hand-patches)"
+        f"regenerated stubs under {STUBS / 'nautilus_trader'} "
+        f"(dropped {stripped} bogus self-imports, applied {applied} hand-patches, "
+        f"pruned {pruned} unused-subpackage stubs)"
     )
 
 
