@@ -308,11 +308,9 @@ class RithmicExecutionClient(LiveExecutionClient):
     def _account_raw(self, hint: str | None = None) -> str | None:
         if hint:
             return str(hint)
-        getter = getattr(self._session, "resolved_account", None)
-        if callable(getter):
-            resolved = getter()
-            if isinstance(resolved, dict) and resolved.get("account_id"):
-                return str(resolved["account_id"])
+        resolved = self._session.resolved_account()
+        if resolved is not None and resolved.get("account_id"):
+            return str(resolved["account_id"])
         session = getattr(self._config_local, "session", None)
         cfg_id = getattr(session, "account_id", None)
         if cfg_id:

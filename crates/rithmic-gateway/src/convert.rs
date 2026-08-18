@@ -6,6 +6,7 @@ use rithmic_plants::dto::{
     LastTradeDto, OrderBookDto, OrderNotificationDto, PlantEvent, ReferenceDataDto,
     TimeBarProbeRow,
 };
+use rithmic_rs::RithmicAccount;
 
 use crate::pb;
 use crate::subscriptions::SubKey;
@@ -190,6 +191,14 @@ pub fn reference_data_to_pb(r: ReferenceDataDto) -> pb::ReferenceDataResponse {
         point_value: r.point_value,
         price_precision: Some(r.price_precision as i32),
         is_tradable: Some(r.is_tradable),
+    }
+}
+
+pub fn resolved_account_to_pb(a: RithmicAccount) -> pb::ResolvedAccountResponse {
+    pb::ResolvedAccountResponse {
+        account_id: Some(a.account_id),
+        fcm_id: Some(a.fcm_id),
+        ib_id: Some(a.ib_id),
     }
 }
 

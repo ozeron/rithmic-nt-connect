@@ -89,5 +89,6 @@ def test_create_session_gateway_returns_adapter_without_pyo3() -> None:
         "subscribe_bracket_updates",
         "adjust_bracket_stop",
         "adjust_bracket_target",
+        "resolved_account",
     ):
         assert hasattr(session, name), f"gateway wire missing {name} (direct/gateway parity)"

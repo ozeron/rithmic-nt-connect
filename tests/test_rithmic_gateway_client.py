@@ -977,3 +977,92 @@ def test_clamp_unix_path_uses_private_dir_not_sticky_tmp(
     assert f"/tmp/rgw-{os.getuid()}/" in clamped
     assert clamped.endswith(".sock")
     assert f"/tmp/rgw-{os.getuid()}-" not in clamped
+
+
+def _serve_resolved_account(sock_path: Path, account_id: str | None) -> None:
+    """One-shot mock parent: Handshake → Ready, then answer resolved_account."""
+    if sock_path.exists():
+        sock_path.unlink()
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(sock_path))
+    server.listen(1)
+    server.settimeout(5.0)
+
+    def _run() -> None:
+        try:
+            conn, _ = server.accept()
+        except Exception:
+            server.close()
+            return
+        with conn:
+            header = conn.recv(4)
+            (n,) = struct.unpack("!I", header)
+            conn.recv(n)  # handshake
+            conn.sendall(
+                encode_frame(
+                    pb.Frame(ready=pb.Ready(scopes=["md", "pnl"])).SerializeToString()
+                )
+            )
+            header = conn.recv(4)
+            (n,) = struct.unpack("!I", header)
+            req = pb.Frame()
+            req.ParseFromString(conn.recv(n))
+            assert req.WhichOneof("body") == "resolved_account"
+            if account_id is None:
+                resp = pb.ResolvedAccountResponse()
+            else:
+                resp = pb.ResolvedAccountResponse(
+                    account_id=account_id, fcm_id="F1", ib_id="I1"
+                )
+            conn.sendall(
+                encode_frame(
+                    pb.Frame(
+                        request_id=req.request_id, resolved_account_response=resp
+                    ).SerializeToString()
+                )
+            )
+        server.close()
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _resolved_account_client(sock: Path) -> GatewayClient:
+    cfg = GatewayConfig(
+        user="u",
+        system_name="LucidTrading",
+        url="wss://example",
+        listen=f"unix://{sock}",
+        auto_spawn=False,
+        attest_flock=False,
+    )
+    return GatewayClient(cfg, rpc_timeout_sec=2.0)
+
+
+def test_client_resolved_account_roundtrip() -> None:
+    sock = Path(f"/tmp/rgw-ra-{os.getpid()}.sock")
+    try:
+        _serve_resolved_account(sock, account_id="A1")
+        client = _resolved_account_client(sock)
+        client.connect()
+        assert client.resolved_account() == {
+            "account_id": "A1",
+            "fcm_id": "F1",
+            "ib_id": "I1",
+        }
+        client.disconnect()
+    finally:
+        if sock.exists():
+            sock.unlink()
+
+
+def test_client_resolved_account_none_when_unresolved() -> None:
+    sock = Path(f"/tmp/rgw-ra-none-{os.getpid()}.sock")
+    try:
+        _serve_resolved_account(sock, account_id=None)
+        client = _resolved_account_client(sock)
+        client.connect()
+        assert client.resolved_account() is None
+        client.disconnect()
+    finally:
+        if sock.exists():
+            sock.unlink()

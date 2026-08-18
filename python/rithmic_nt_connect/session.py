@@ -126,6 +126,8 @@ class OrderSession(Protocol):
 class WireSession(TickerSession, PnlSession, OrderSession, Protocol):
     """Full multi-plant session facade (composition of ticker / PnL / order)."""
 
+    def resolved_account(self) -> dict[str, Any] | None: ...
+
 
 PLANTS_MARKET_DATA = "market_data"
 PLANTS_EXECUTION = "execution"
@@ -212,6 +214,9 @@ class _FlockedDirectSession:
 
     def get_reference_data(self, symbol: str, exchange: str) -> Any:
         return self._inner.get_reference_data(symbol, exchange)
+
+    def resolved_account(self) -> dict[str, Any] | None:
+        return self._inner.resolved_account()
 
     def poll_event(self, timeout_ms: int = 0) -> dict[str, Any] | None:
         return self._inner.poll_event(timeout_ms)

@@ -52,6 +52,9 @@ class WireSessionStub:
     def get_reference_data(self, *args: Any, **kwargs: Any) -> Any:
         raise NotImplementedError
 
+    def resolved_account(self, *args: Any, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
     def poll_event(self, *args: Any, **kwargs: Any) -> Any:
         raise NotImplementedError
 

@@ -207,6 +207,11 @@ message LoadOrdersRequest {
   int32 end_time_sec = 2;
 }
 
+// Read the resolved account triple (override or discovery), if any.
+// Mirrors `rithmic_plants::RithmicSession::resolved_account` (None until
+// a config override is set or PnL/order ensure resolves it).
+message ResolvedAccountRequest {}
+
 // ---------------------------------------------------------------------------
 // Responses (Gateway -> Client, correlated to a Request by request_id)
 // ---------------------------------------------------------------------------
@@ -281,6 +286,12 @@ message ProbeTimeBarsResponse {
 
 message LoadOrdersResponse {
   repeated OrderNotification events = 1;
+}
+
+message ResolvedAccountResponse {
+  optional string account_id = 1;
+  optional string fcm_id = 2;
+  optional string ib_id = 3;
 }
 
 // ---------------------------------------------------------------------------
@@ -486,6 +497,7 @@ message Frame {
     AdjustBracketStopRequest adjust_bracket_stop = 35;
     AdjustBracketTargetRequest adjust_bracket_target = 36;
     LoadOrdersRequest load_orders = 37;
+    ResolvedAccountRequest resolved_account = 38;
 
     Ack ack = 50;
     ErrorResponse error = 51;
@@ -495,6 +507,7 @@ message Frame {
     LoadTimeBarsResponse load_time_bars_response = 55;
     ProbeTimeBarsResponse probe_time_bars_response = 56;
     LoadOrdersResponse load_orders_response = 57;
+    ResolvedAccountResponse resolved_account_response = 58;
 
     Event event = 90;
   }

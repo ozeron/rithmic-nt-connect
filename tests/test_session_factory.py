@@ -75,6 +75,21 @@ def test_flocked_session_reconnects_after_disconnect() -> None:
     assert inner.calls == 2
 
 
+def test_flocked_session_forwards_resolved_account() -> None:
+    from rithmic_nt_connect.session import _FlockedDirectSession
+
+    class _Inner(WireSessionStub):
+        def resolved_account(self) -> dict[str, object] | None:
+            return {"account_id": "A1", "fcm_id": "F1", "ib_id": "I1"}
+
+    wrapped = _FlockedDirectSession(_Inner(), lock=object())
+    assert wrapped.resolved_account() == {
+        "account_id": "A1",
+        "fcm_id": "F1",
+        "ib_id": "I1",
+    }
+
+
 def test_gateway_factory_does_not_share_wire_session(monkeypatch: pytest.MonkeyPatch) -> None:
     from rithmic_nt_connect.config import ConnectMode, SessionConfig
     from rithmic_nt_connect.factories import _shared_session

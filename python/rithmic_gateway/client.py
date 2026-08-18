@@ -204,6 +204,17 @@ class GatewayClient:
             raise GatewayError("protocol", f"expected reference_data_response, got {which}")
         return _message_to_dict(resp.reference_data_response)
 
+    def resolved_account(self) -> dict[str, Any] | None:
+        """Resolved account triple, or None when the parent has not resolved one."""
+        resp = self._rpc(pb.Frame(resolved_account=pb.ResolvedAccountRequest()))
+        which = resp.WhichOneof("body")
+        if which != "resolved_account_response":
+            raise GatewayError("protocol", f"expected resolved_account_response, got {which}")
+        d = _message_to_dict(resp.resolved_account_response)
+        if not d.get("account_id"):
+            return None
+        return d
+
     def load_orders(self, start_ssboe: int, end_ssboe: int) -> list[dict[str, Any]]:
         """Load order events (fills + cancels + rejects + working) over a window.
 
