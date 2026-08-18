@@ -54,15 +54,18 @@ async fn run() -> Result<(), String> {
     let password = std::env::var("RITHMIC_PASSWORD").map_err(|_| "RITHMIC_PASSWORD required")?;
     let system_name =
         std::env::var("RITHMIC_SYSTEM_NAME").unwrap_or_else(|_| "LucidTrading".into());
-    let url = std::env::var("RITHMIC_URL")
-        .unwrap_or_else(|_| "wss://rprotocol.rithmic.com:443".into());
+    let url =
+        std::env::var("RITHMIC_URL").unwrap_or_else(|_| "wss://rprotocol.rithmic.com:443".into());
     let env_name = std::env::var("RITHMIC_ENV").unwrap_or_else(|_| "Live".into());
     // rithmic-rs only parses lowercase env names ("live"/"demo"/"test").
     let env = RithmicEnv::from_str(&env_name.to_lowercase())
         .map_err(|e| format!("RITHMIC_ENV {env_name:?}: {e}"))?;
 
-    let idle_policy =
-        parse_idle_exit_sec(std::env::var("RITHMIC_GATEWAY_IDLE_EXIT_SEC").ok().as_deref())?;
+    let idle_policy = parse_idle_exit_sec(
+        std::env::var("RITHMIC_GATEWAY_IDLE_EXIT_SEC")
+            .ok()
+            .as_deref(),
+    )?;
 
     // Flock first (R10 / AGENTS.md single-login): refuse before ever
     // touching Rithmic if a direct or parent process already holds it.
@@ -112,7 +115,10 @@ async fn run() -> Result<(), String> {
     let listener = bind_unix(&path)
         .await
         .map_err(|e| format!("bind {}: {e}", path.display()))?;
-    eprintln!("rithmic-gateway listening on unix://{} (plants connecting…)", path.display());
+    eprintln!(
+        "rithmic-gateway listening on unix://{} (plants connecting…)",
+        path.display()
+    );
 
     let mut session = RithmicSession::with_plants(cfg, plants);
     if let Err(e) = session.connect().await {
@@ -285,9 +291,7 @@ async fn reconnect_loop(
             }
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
-        eprintln!(
-            "rithmic-gateway: restore still incomplete after 6 attempts; full reconnect"
-        );
+        eprintln!("rithmic-gateway: restore still incomplete after 6 attempts; full reconnect");
     }
 }
 
@@ -369,9 +373,7 @@ async fn restore_intents(
         // Order updates failure disconnects the plant — do not ensure+subscribe
         // brackets alone (would look like a partial restore success).
         if plan.order && !order_ok {
-            eprintln!(
-                "rithmic-gateway: skip bracket restore; order updates not restored"
-            );
+            eprintln!("rithmic-gateway: skip bracket restore; order updates not restored");
         } else {
             match guard.subscribe_bracket_updates().await {
                 Ok(()) => restored += 1,

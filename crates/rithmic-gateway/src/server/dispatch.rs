@@ -11,9 +11,8 @@ use rithmic_plants::session::load_orders_on;
 use rithmic_plants::PlantSet;
 
 use crate::convert::{
-    order_key, pnl_key, front_month_to_pb, history_bar_to_pb, history_tick_to_pb,
-    order_notification_to_pb, reference_data_to_pb, resolved_account_to_pb,
-    time_bar_probe_row_to_pb,
+    front_month_to_pb, history_bar_to_pb, history_tick_to_pb, order_key, order_notification_to_pb,
+    pnl_key, reference_data_to_pb, resolved_account_to_pb, time_bar_probe_row_to_pb,
 };
 use crate::pb::{self, frame::Body, Ack, ErrorResponse, Frame};
 use crate::reconnect::{ReconnectController, TimeBarIntent};
@@ -72,11 +71,7 @@ fn plant_err_frame(request_id: u64, failed_code: &str, e: rithmic_plants::Error)
 
 /// Attach this client to a shared hub topic (refcount once per client per key).
 /// Returns whether this client already had a forwarder (no new hub bump).
-async fn attach_shared_topic(
-    state: &GatewayState,
-    client: &mut ClientCtx,
-    key: &SubKey,
-) -> bool {
+async fn attach_shared_topic(state: &GatewayState, client: &mut ClientCtx, key: &SubKey) -> bool {
     let had_forwarder = client.subscribed.contains(key);
     if !had_forwarder {
         state.reconnect.add_hub_interest(key.clone()).await;
@@ -291,7 +286,12 @@ async fn prune_topic_lock(state: &GatewayState, key: &SubKey) {
 /// gates and (when a session is attached) calling through to
 /// `rithmic_plants::RithmicSession`. Subscribe/unsubscribe bodies also
 /// update this client's fan-out registration in `client`.
-pub(super) async fn dispatch(state: &GatewayState, client: &mut ClientCtx, request_id: u64, body: Body) -> Frame {
+pub(super) async fn dispatch(
+    state: &GatewayState,
+    client: &mut ClientCtx,
+    request_id: u64,
+    body: Body,
+) -> Frame {
     match body {
         Body::Subscribe(req) => {
             let key = SubKey {
@@ -529,7 +529,12 @@ pub(super) async fn dispatch(state: &GatewayState, client: &mut ClientCtx, reque
             };
             let guard = session.lock().await;
             match guard
-                .load_ticks_all(&req.symbol, &req.exchange, req.start_time_sec, req.end_time_sec)
+                .load_ticks_all(
+                    &req.symbol,
+                    &req.exchange,
+                    req.start_time_sec,
+                    req.end_time_sec,
+                )
                 .await
             {
                 Ok(ticks) => Frame {
@@ -823,7 +828,11 @@ pub(super) async fn dispatch(state: &GatewayState, client: &mut ClientCtx, reque
         }
         Body::EnsureOrder(_) => {
             if !state.gates.trading_enabled {
-                return error_frame(request_id, "trading_disabled", "ensure_order denied: parent trading disabled");
+                return error_frame(
+                    request_id,
+                    "trading_disabled",
+                    "ensure_order denied: parent trading disabled",
+                );
             }
             let Some(session) = &state.session else {
                 return no_session_frame(request_id);
@@ -836,7 +845,11 @@ pub(super) async fn dispatch(state: &GatewayState, client: &mut ClientCtx, reque
         }
         Body::PlaceOrder(req) => {
             if !state.gates.allow_place() {
-                return error_frame(request_id, "trading_disabled", "place_order denied: parent trading disabled");
+                return error_frame(
+                    request_id,
+                    "trading_disabled",
+                    "place_order denied: parent trading disabled",
+                );
             }
             let Some(session) = &state.session else {
                 return no_session_frame(request_id);
@@ -864,7 +877,11 @@ pub(super) async fn dispatch(state: &GatewayState, client: &mut ClientCtx, reque
         }
         Body::CancelOrder(req) => {
             if !state.gates.allow_place() {
-                return error_frame(request_id, "trading_disabled", "cancel_order denied: parent trading disabled");
+                return error_frame(
+                    request_id,
+                    "trading_disabled",
+                    "cancel_order denied: parent trading disabled",
+                );
             }
             let Some(session) = &state.session else {
                 return no_session_frame(request_id);
@@ -877,7 +894,11 @@ pub(super) async fn dispatch(state: &GatewayState, client: &mut ClientCtx, reque
         }
         Body::ModifyOrder(req) => {
             if !state.gates.allow_place() {
-                return error_frame(request_id, "trading_disabled", "modify_order denied: parent trading disabled");
+                return error_frame(
+                    request_id,
+                    "trading_disabled",
+                    "modify_order denied: parent trading disabled",
+                );
             }
             let Some(session) = &state.session else {
                 return no_session_frame(request_id);
@@ -902,7 +923,11 @@ pub(super) async fn dispatch(state: &GatewayState, client: &mut ClientCtx, reque
         }
         Body::CancelAllOrders(_) => {
             if !state.gates.allow_cancel_all() {
-                return error_frame(request_id, "cancel_all_denied", "cancel_all_orders denied: parent cancel_all disabled");
+                return error_frame(
+                    request_id,
+                    "cancel_all_denied",
+                    "cancel_all_orders denied: parent cancel_all disabled",
+                );
             }
             let Some(session) = &state.session else {
                 return no_session_frame(request_id);
@@ -1041,4 +1066,3 @@ pub fn rpc_sequence_with_gates(
         (out, plan)
     })
 }
-

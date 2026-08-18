@@ -131,10 +131,7 @@ fn authorize_handshake(
         return Err(("auth_failed", "auth_token rejected"));
     }
     if !state.ready.load(Ordering::SeqCst) {
-        return Err((
-            "not_ready",
-            "gateway not Ready (plants not connected)",
-        ));
+        return Err(("not_ready", "gateway not Ready (plants not connected)"));
     }
     Ok(())
 }
@@ -275,7 +272,10 @@ impl ClientCtx {
     fn wants_md(&self, key: &SubKey) -> bool {
         self.ticker.contains(key)
             || self.book.contains(key)
-            || self.time_bars.iter().any(|tb| tb.symbol == key.symbol && tb.exchange == key.exchange)
+            || self
+                .time_bars
+                .iter()
+                .any(|tb| tb.symbol == key.symbol && tb.exchange == key.exchange)
     }
 
     /// Attach this client to `key`'s fan-out topic (idempotent). The topic
@@ -397,10 +397,7 @@ impl ClientCtx {
     }
 }
 
-fn spawn_forwarder(
-    rx: broadcast::Receiver<Bytes>,
-    out_tx: mpsc::Sender<OutMsg>,
-) -> JoinHandle<()> {
+fn spawn_forwarder(rx: broadcast::Receiver<Bytes>, out_tx: mpsc::Sender<OutMsg>) -> JoinHandle<()> {
     let mut queue = crate::subscriptions::ClientQueue::from_receiver(ClientId::new(), rx);
     tokio::spawn(async move {
         loop {
@@ -689,7 +686,6 @@ mod auth_tests {
         );
     }
 }
-
 
 /// Rebroadcast a plant event to all interested fan-out subscribers, keyed by
 /// symbol/exchange (or the internal pnl/order sentinel keys). Also feeds the

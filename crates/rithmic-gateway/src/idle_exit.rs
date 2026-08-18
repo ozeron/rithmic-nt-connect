@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tokio::sync::{Mutex, Notify};
-use tokio::time::{Instant, sleep_until};
+use tokio::time::{sleep_until, Instant};
 
 /// How long the parent stays up after peer count hits zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,9 +170,18 @@ mod tests {
     #[test]
     fn parse_idle_exit_matrix() {
         assert_eq!(parse_idle_exit_sec(None).unwrap(), IdleExitPolicy::Never);
-        assert_eq!(parse_idle_exit_sec(Some("")).unwrap(), IdleExitPolicy::Never);
-        assert_eq!(parse_idle_exit_sec(Some("  ")).unwrap(), IdleExitPolicy::Never);
-        assert_eq!(parse_idle_exit_sec(Some("-1")).unwrap(), IdleExitPolicy::Never);
+        assert_eq!(
+            parse_idle_exit_sec(Some("")).unwrap(),
+            IdleExitPolicy::Never
+        );
+        assert_eq!(
+            parse_idle_exit_sec(Some("  ")).unwrap(),
+            IdleExitPolicy::Never
+        );
+        assert_eq!(
+            parse_idle_exit_sec(Some("-1")).unwrap(),
+            IdleExitPolicy::Never
+        );
         assert_eq!(
             parse_idle_exit_sec(Some("0")).unwrap(),
             IdleExitPolicy::After(Duration::ZERO)

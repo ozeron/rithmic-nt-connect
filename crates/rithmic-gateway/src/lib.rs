@@ -21,9 +21,7 @@ pub mod pb {
     include!(concat!(env!("OUT_DIR"), "/rithmic_gateway.v1.rs"));
 }
 
-pub use framing::{
-    decode_frame, encode_frame, FrameError, MAX_FRAME_LEN, Result as FrameResult,
-};
+pub use framing::{decode_frame, encode_frame, FrameError, Result as FrameResult, MAX_FRAME_LEN};
 
 /// Re-export plant façade for gateway consumers.
 pub use rithmic_plants;

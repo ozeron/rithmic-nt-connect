@@ -54,7 +54,10 @@ mod tests {
 
     #[test]
     fn parse_aliases() {
-        assert_eq!(PlantSet::parse("market_data").unwrap(), PlantSet::MARKET_DATA);
+        assert_eq!(
+            PlantSet::parse("market_data").unwrap(),
+            PlantSet::MARKET_DATA
+        );
         assert_eq!(PlantSet::parse("execution").unwrap(), PlantSet::EXECUTION);
         assert!(PlantSet::parse("orders").is_err());
     }

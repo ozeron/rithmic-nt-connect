@@ -37,22 +37,17 @@ async fn disconnected_order_methods_error_without_network() {
 
     let err = session
         .place_order(
-            "ESM6",
-            "CME",
-            "BUY",
-            "MARKET",
-            1,
-            "tag-1",
-            None,
-            None,
-            "DAY",
-            None,
-            None,
+            "ESM6", "CME", "BUY", "MARKET", 1, "tag-1", None, None, "DAY", None, None,
         )
         .await
         .unwrap_err();
     assert!(
-        matches!(err, Error::NotConnected { plant: "ticker" | "order" }),
+        matches!(
+            err,
+            Error::NotConnected {
+                plant: "ticker" | "order"
+            }
+        ),
         "unexpected place_order error: {err}"
     );
 
@@ -73,7 +68,12 @@ async fn disconnected_order_methods_error_without_network() {
         .await
         .unwrap_err();
     assert!(
-        matches!(err, Error::NotConnected { plant: "ticker" | "order" }),
+        matches!(
+            err,
+            Error::NotConnected {
+                plant: "ticker" | "order"
+            }
+        ),
         "unexpected place_bracket_order error: {err}"
     );
 
@@ -88,7 +88,12 @@ async fn disconnected_order_methods_error_without_network() {
     // session must fail on the missing ticker/order plant, not on recon.
     let err = session.load_orders(0, 0).await.unwrap_err();
     assert!(
-        matches!(err, Error::NotConnected { plant: "ticker" | "order" }),
+        matches!(
+            err,
+            Error::NotConnected {
+                plant: "ticker" | "order"
+            }
+        ),
         "unexpected load_orders error: {err}"
     );
 }

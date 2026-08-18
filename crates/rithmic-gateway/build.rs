@@ -5,5 +5,6 @@ fn main() {
         "/../../proto/rithmic_gateway/v1/session.proto"
     );
     println!("cargo:rerun-if-changed={proto_file}");
-    prost_build::compile_protos(&[proto_file], &[proto_dir]).expect("compile rithmic_gateway proto");
+    prost_build::compile_protos(&[proto_file], &[proto_dir])
+        .expect("compile rithmic_gateway proto");
 }

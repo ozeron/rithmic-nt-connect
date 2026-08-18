@@ -45,11 +45,16 @@ fn env_first(keys: &[&str]) -> Option<String> {
 fn config_from_env() -> Result<SessionConfig, Box<dyn std::error::Error>> {
     let user = env_first(&["RITHMIC_USER", "RITHMIC_USERNAME", "RHITMIC_USERNAME"])
         .ok_or("missing RITHMIC_USER")?;
-    let password = env_first(&["RITHMIC_PASSWORD", "RHITMIC_PASSWORD"])
-        .ok_or("missing RITHMIC_PASSWORD")?;
-    let mut b = SessionConfigBuilder::default().user(user).password(password);
-    if let Some(system) = env_first(&["RITHMIC_SYSTEM", "RITHMIC_SYSTEM_NAME", "RITHMIC_LIVE_SYSTEM_NAME"])
-    {
+    let password =
+        env_first(&["RITHMIC_PASSWORD", "RHITMIC_PASSWORD"]).ok_or("missing RITHMIC_PASSWORD")?;
+    let mut b = SessionConfigBuilder::default()
+        .user(user)
+        .password(password);
+    if let Some(system) = env_first(&[
+        "RITHMIC_SYSTEM",
+        "RITHMIC_SYSTEM_NAME",
+        "RITHMIC_LIVE_SYSTEM_NAME",
+    ]) {
         b = b.system_name(system);
     }
     if let Some(url) = env_first(&["RITHMIC_GATEWAY", "RITHMIC_LIVE_URL", "RITHMIC_URL"]) {
@@ -97,7 +102,10 @@ fn summarize(label: &str, start: i32, end: i32, rows: &[TimeBarProbeRow]) {
         *rp.entry(code).or_default() += 1;
     }
     println!();
-    println!("=== {label} start={start} end={end} raw={} parsed={parsed} ===", rows.len());
+    println!(
+        "=== {label} start={start} end={end} raw={} parsed={parsed} ===",
+        rows.len()
+    );
     println!("variants: {variants:?}");
     println!("rp_code:  {rp:?}");
     println!("skipped:  {skips:?}");
@@ -172,14 +180,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let t0 = SystemTime::now();
     let unix_rows = session
-        .probe_time_bars(&symbol, &exchange, TimeBarType::DailyBar, 1, unix_start, unix_end)
+        .probe_time_bars(
+            &symbol,
+            &exchange,
+            TimeBarType::DailyBar,
+            1,
+            unix_start,
+            unix_end,
+        )
         .await?;
     let unix_ms = t0.elapsed().unwrap_or_default().as_millis();
-    summarize(&format!("DailyBar period=1 unix ({unix_ms}ms)"), unix_start, unix_end, &unix_rows);
+    summarize(
+        &format!("DailyBar period=1 unix ({unix_ms}ms)"),
+        unix_start,
+        unix_end,
+        &unix_rows,
+    );
 
     let t1 = SystemTime::now();
     let ymd_rows = session
-        .probe_time_bars(&symbol, &exchange, TimeBarType::DailyBar, 1, ymd_start, ymd_end)
+        .probe_time_bars(
+            &symbol,
+            &exchange,
+            TimeBarType::DailyBar,
+            1,
+            ymd_start,
+            ymd_end,
+        )
         .await?;
     let ymd_ms = t1.elapsed().unwrap_or_default().as_millis();
     summarize(
@@ -190,13 +217,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let loaded = session
-        .load_time_bars_all(&symbol, &exchange, TimeBarType::DailyBar, 1, unix_start, unix_end)
+        .load_time_bars_all(
+            &symbol,
+            &exchange,
+            TimeBarType::DailyBar,
+            1,
+            unix_start,
+            unix_end,
+        )
         .await?;
     println!();
-    println!(
-        "load_time_bars_all unix window → {} bars",
-        loaded.len()
-    );
+    println!("load_time_bars_all unix window → {} bars", loaded.len());
     if let (Some(first), Some(last)) = (loaded.first(), loaded.last()) {
         println!(
             "  first marker={:?} ts_event_ns={:?} close={:?}",

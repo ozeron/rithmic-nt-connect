@@ -92,7 +92,10 @@ impl FanoutHub {
     }
 
     /// Subscribe a receiver to an existing key (after add_interest).
-    pub async fn subscribe_receiver(&self, key: &SubKey) -> Option<broadcast::Receiver<bytes::Bytes>> {
+    pub async fn subscribe_receiver(
+        &self,
+        key: &SubKey,
+    ) -> Option<broadcast::Receiver<bytes::Bytes>> {
         let guard = self.subs.read().await;
         guard.get(key).map(|st| st.tx.subscribe())
     }
@@ -159,11 +162,7 @@ impl ParentGates {
     }
 
     pub fn scopes(&self) -> Vec<String> {
-        let mut s = vec![
-            "md".into(),
-            "history".into(),
-            "pnl".into(),
-        ];
+        let mut s = vec!["md".into(), "history".into(), "pnl".into()];
         if self.trading_enabled {
             s.push("trade".into());
         }

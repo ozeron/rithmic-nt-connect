@@ -1,7 +1,7 @@
 //! Venue DTOs converted from rithmic-rs plant messages.
 
 use rithmic_rs::rti::messages::RithmicMessage;
-use rithmic_rs::{RithmicResponse, rithmic_to_unix_nanos};
+use rithmic_rs::{rithmic_to_unix_nanos, RithmicResponse};
 
 /// Dict-friendly plant event for Python consumers (ticker, PnL, orders).
 #[derive(Debug, Clone, PartialEq)]
@@ -343,7 +343,11 @@ fn ts_ns(ssboe: Option<i32>, usecs: Option<i32>) -> Option<u64> {
     Some(rithmic_to_unix_nanos(ssboe, usecs.unwrap_or(0)))
 }
 
-fn order_kind(source: &str, notify_type_name: Option<&str>, status: Option<&str>) -> Option<String> {
+fn order_kind(
+    source: &str,
+    notify_type_name: Option<&str>,
+    status: Option<&str>,
+) -> Option<String> {
     let name = notify_type_name?.to_ascii_uppercase();
     let kind = match (source, name.as_str()) {
         ("rithmic", "OPEN") => "accepted",
@@ -423,34 +427,32 @@ impl From<&RithmicResponse> for PlantEvent {
                 ssboe: a.ssboe,
                 usecs: a.usecs,
             }),
-            RithmicMessage::InstrumentPnLPositionUpdate(i) => Self::InstrumentPnl(InstrumentPnlDto {
-                account_id: i.account_id.clone(),
-                symbol: i.symbol.clone(),
-                exchange: i.exchange.clone(),
-                product_code: i.product_code.clone(),
-                instrument_type: i.instrument_type.clone(),
-                open_position_pnl: i.open_position_pnl.clone(),
-                closed_position_pnl: i.closed_position_pnl.clone(),
-                mtm_security: i.mtm_security.clone(),
-                open_position_quantity: i.open_position_quantity,
-                closed_position_quantity: i.closed_position_quantity,
-                net_quantity: i.net_quantity,
-                avg_open_fill_price: i.avg_open_fill_price,
-                is_snapshot: i.is_snapshot,
-                ssboe: i.ssboe,
-                usecs: i.usecs,
-            }),
+            RithmicMessage::InstrumentPnLPositionUpdate(i) => {
+                Self::InstrumentPnl(InstrumentPnlDto {
+                    account_id: i.account_id.clone(),
+                    symbol: i.symbol.clone(),
+                    exchange: i.exchange.clone(),
+                    product_code: i.product_code.clone(),
+                    instrument_type: i.instrument_type.clone(),
+                    open_position_pnl: i.open_position_pnl.clone(),
+                    closed_position_pnl: i.closed_position_pnl.clone(),
+                    mtm_security: i.mtm_security.clone(),
+                    open_position_quantity: i.open_position_quantity,
+                    closed_position_quantity: i.closed_position_quantity,
+                    net_quantity: i.net_quantity,
+                    avg_open_fill_price: i.avg_open_fill_price,
+                    is_snapshot: i.is_snapshot,
+                    ssboe: i.ssboe,
+                    usecs: i.usecs,
+                })
+            }
             RithmicMessage::RithmicOrderNotification(n) => {
                 let notify_type_name = n.notify_type.and_then(|v| {
                     rithmic_rs::rti::rithmic_order_notification::NotifyType::try_from(v)
                         .ok()
                         .map(|t| t.as_str_name().to_string())
                 });
-                let kind = order_kind(
-                    "rithmic",
-                    notify_type_name.as_deref(),
-                    n.status.as_deref(),
-                );
+                let kind = order_kind("rithmic", notify_type_name.as_deref(), n.status.as_deref());
                 Self::OrderNotification(OrderNotificationDto {
                     source: "rithmic".into(),
                     kind,
@@ -490,11 +492,7 @@ impl From<&RithmicResponse> for PlantEvent {
                         .ok()
                         .map(|t| t.as_str_name().to_string())
                 });
-                let kind = order_kind(
-                    "exchange",
-                    notify_type_name.as_deref(),
-                    n.status.as_deref(),
-                );
+                let kind = order_kind("exchange", notify_type_name.as_deref(), n.status.as_deref());
                 Self::OrderNotification(OrderNotificationDto {
                     source: "exchange".into(),
                     kind,

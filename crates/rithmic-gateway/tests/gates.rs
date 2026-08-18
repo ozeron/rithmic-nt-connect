@@ -69,7 +69,10 @@ fn place_bracket_denied_when_trading_disabled() {
 #[test]
 fn cancel_all_denied_by_default() {
     assert_error_code(
-        gate_rpc_for_test(&ParentGates::default(), Body::CancelAllOrders(CancelAllOrdersRequest {})),
+        gate_rpc_for_test(
+            &ParentGates::default(),
+            Body::CancelAllOrders(CancelAllOrdersRequest {}),
+        ),
         "cancel_all_denied",
     );
 }
@@ -77,7 +80,10 @@ fn cancel_all_denied_by_default() {
 #[test]
 fn resolved_account_errors_when_no_session() {
     assert_error_code(
-        gate_rpc_for_test(&trading_on(), Body::ResolvedAccount(ResolvedAccountRequest {})),
+        gate_rpc_for_test(
+            &trading_on(),
+            Body::ResolvedAccount(ResolvedAccountRequest {}),
+        ),
         "no_session",
     );
 }
@@ -175,7 +181,10 @@ fn load_orders_errors_when_no_session() {
         })],
     );
     assert_error_code(bodies.into_iter().next().expect("body"), "no_session");
-    assert!(!plan.order, "failed load_orders must not leave order intent");
+    assert!(
+        !plan.order,
+        "failed load_orders must not leave order intent"
+    );
 }
 
 #[test]
@@ -185,14 +194,19 @@ fn subscribe_order_errors_when_no_session() {
         vec![Body::SubscribeOrderUpdates(SubscribeOrderUpdatesRequest {})],
     );
     assert_error_code(bodies.into_iter().next().expect("body"), "no_session");
-    assert!(!plan.order && !plan.brackets, "failed subscribe must not leave intent");
+    assert!(
+        !plan.order && !plan.brackets,
+        "failed subscribe must not leave intent"
+    );
 }
 
 #[test]
 fn subscribe_bracket_errors_when_no_session() {
     let (bodies, plan) = rpc_sequence_with_gates(
         trading_on(),
-        vec![Body::SubscribeBracketUpdates(SubscribeBracketUpdatesRequest {})],
+        vec![Body::SubscribeBracketUpdates(
+            SubscribeBracketUpdatesRequest {},
+        )],
     );
     assert_error_code(bodies.into_iter().next().expect("body"), "no_session");
     assert!(

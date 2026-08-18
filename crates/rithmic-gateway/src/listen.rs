@@ -182,27 +182,27 @@ fn bind_unix_locked(path: &Path, bindlock_path: &Path) -> Result<UnixListener, L
 mod tests {
     use super::*;
 
-#[test]
-fn parses_unix_absolute() {
-    let ep = ListenEndpoint::parse("unix:///tmp/rithmic.sock").unwrap();
-    assert_eq!(ep, ListenEndpoint::Unix(PathBuf::from("/tmp/rithmic.sock")));
-}
+    #[test]
+    fn parses_unix_absolute() {
+        let ep = ListenEndpoint::parse("unix:///tmp/rithmic.sock").unwrap();
+        assert_eq!(ep, ListenEndpoint::Unix(PathBuf::from("/tmp/rithmic.sock")));
+    }
 
-#[test]
-fn default_unix_path_matches_python_fnv_fixture() {
-    // Keep in sync with tests/test_rithmic_gateway_client.py::test_default_unix_path_rust_parity
-    let path = default_unix_path(
-        "alice",
-        "LucidTrading",
-        "wss://rprotocol.rithmic.com:443",
-        "Live",
-    );
-    let name = path.file_name().unwrap().to_string_lossy();
-    assert_eq!(name, "rgw-13146466402466778522.sock");
-}
+    #[test]
+    fn default_unix_path_matches_python_fnv_fixture() {
+        // Keep in sync with tests/test_rithmic_gateway_client.py::test_default_unix_path_rust_parity
+        let path = default_unix_path(
+            "alice",
+            "LucidTrading",
+            "wss://rprotocol.rithmic.com:443",
+            "Live",
+        );
+        let name = path.file_name().unwrap().to_string_lossy();
+        assert_eq!(name, "rgw-13146466402466778522.sock");
+    }
 
-#[test]
-fn rejects_tls_until_v2() {
+    #[test]
+    fn rejects_tls_until_v2() {
         let err = ListenEndpoint::parse("tls://0.0.0.0:7600").unwrap_err();
         assert!(matches!(err, ListenError::RemoteNotImplemented(_)));
     }

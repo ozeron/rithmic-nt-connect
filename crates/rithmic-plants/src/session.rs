@@ -7,16 +7,15 @@ use std::future::Future;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::time::{Duration, Instant};
 
+use rithmic_rs::rti::request_time_bar_update;
+use rithmic_rs::SubscriptionFilter;
 use rithmic_rs::{
     ConnectStrategy, ManualOrAutoEntry, OrderSide, OrderType, RithmicAccount,
-    RithmicBracketLevelAdjustment, RithmicBracketOrder, RithmicCancelAllOrders,
-    RithmicCancelOrder, RithmicConfig, RithmicHistoryPlant, RithmicHistoryPlantHandle,
-    RithmicModifyOrder, RithmicOrder, RithmicOrderPlant, RithmicOrderPlantHandle,
-    RithmicPnlPlant, RithmicPnlPlantHandle, RithmicTickerPlant, RithmicTickerPlantHandle,
-    TimeBarType, TimeInForce,
+    RithmicBracketLevelAdjustment, RithmicBracketOrder, RithmicCancelAllOrders, RithmicCancelOrder,
+    RithmicConfig, RithmicHistoryPlant, RithmicHistoryPlantHandle, RithmicModifyOrder,
+    RithmicOrder, RithmicOrderPlant, RithmicOrderPlantHandle, RithmicPnlPlant,
+    RithmicPnlPlantHandle, RithmicTickerPlant, RithmicTickerPlantHandle, TimeBarType, TimeInForce,
 };
-use rithmic_rs::SubscriptionFilter;
-use rithmic_rs::rti::request_time_bar_update;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::broadcast::error::TryRecvError;
 
@@ -28,8 +27,8 @@ use crate::dto::{
 };
 use crate::error::{Error, Result};
 use crate::history::{
-    DEFAULT_TICK_SLICE_SECS, bar_replay_index, bar_slice_secs, dedup_bars, dedup_ticks,
-    load_sliced, parse_time_bar_type,
+    bar_replay_index, bar_slice_secs, dedup_bars, dedup_ticks, load_sliced, parse_time_bar_type,
+    DEFAULT_TICK_SLICE_SECS,
 };
 use crate::plants::PlantSet;
 
@@ -143,8 +142,7 @@ impl RithmicSession {
         self.plants.history |= extra.history;
         self.plants.pnl |= extra.pnl;
 
-        let connected =
-            self.ticker.is_some() || self.history.is_some() || self.pnl.is_some();
+        let connected = self.ticker.is_some() || self.history.is_some() || self.pnl.is_some();
         if !connected {
             return Ok(());
         }
@@ -340,9 +338,8 @@ impl RithmicSession {
             .get_front_month_contract(symbol, exchange, false)
             .await?;
         check_response_ref(&resp, "get_front_month")?;
-        FrontMonthDto::from_response(&resp).ok_or_else(|| {
-            Error::Protocol("unexpected front-month response variant".into())
-        })
+        FrontMonthDto::from_response(&resp)
+            .ok_or_else(|| Error::Protocol("unexpected front-month response variant".into()))
     }
 
     /// Subscribe to order-book summary (level aggregated).
@@ -358,11 +355,7 @@ impl RithmicSession {
     }
 
     /// Unsubscribe order-book summary (does not drop LastTrade/BBO).
-    pub async fn unsubscribe_order_book_summary(
-        &self,
-        symbol: &str,
-        exchange: &str,
-    ) -> Result<()> {
+    pub async fn unsubscribe_order_book_summary(&self, symbol: &str, exchange: &str) -> Result<()> {
         let handle = self.ticker_handle()?;
         check_response(
             handle
@@ -476,7 +469,10 @@ impl RithmicSession {
                 end_time_sec,
             )
             .await?;
-        Ok(responses.iter().map(TimeBarProbeRow::from_response).collect())
+        Ok(responses
+            .iter()
+            .map(TimeBarProbeRow::from_response)
+            .collect())
     }
 
     /// Live time-bar feed on the history plant (ack only; bars via `poll_history_event`).
@@ -539,20 +535,14 @@ impl RithmicSession {
     /// Non-blocking poll of the history-plant subscription channel (live TimeBar).
     pub fn poll_history_event(&mut self) -> Result<Option<PlantEvent>> {
         let handle = self.history_handle_mut()?;
-        map_broadcast_poll(
-            "history",
-            now_or_never(handle.subscription_receiver.recv()),
-        )
+        map_broadcast_poll("history", now_or_never(handle.subscription_receiver.recv()))
     }
 
     /// Subscribe to PnL updates and request a snapshot when account is configured.
     pub async fn subscribe_pnl(&self) -> Result<()> {
         let handle = self.pnl_handle()?;
         check_response(handle.subscribe_pnl_updates().await?, "subscribe_pnl")?;
-        check_response(
-            handle.get_pnl_position_snapshot().await?,
-            "pnl_snapshot",
-        )?;
+        check_response(handle.get_pnl_position_snapshot().await?, "pnl_snapshot")?;
         Ok(())
     }
 
@@ -768,19 +758,13 @@ impl RithmicSession {
         let Some(pnl) = self.pnl.as_mut() else {
             return Ok(None);
         };
-        map_broadcast_poll(
-            "pnl",
-            now_or_never(pnl.handle.subscription_receiver.recv()),
-        )
+        map_broadcast_poll("pnl", now_or_never(pnl.handle.subscription_receiver.recv()))
     }
 
     /// Non-blocking poll of the next order-plant subscription message.
     pub fn poll_order_event(&mut self) -> Result<Option<PlantEvent>> {
         let handle = self.order_handle_mut()?;
-        map_broadcast_poll(
-            "order",
-            now_or_never(handle.subscription_receiver.recv()),
-        )
+        map_broadcast_poll("order", now_or_never(handle.subscription_receiver.recv()))
     }
 
     /// Blocking receive of the next ticker message (async).
@@ -978,7 +962,10 @@ pub async fn place_bracket_order_on(
         builder = builder.stop(ticks);
     }
     let order = builder.build()?;
-    check_responses(&handle.place_bracket_order(order).await?, "place_bracket_order")
+    check_responses(
+        &handle.place_bracket_order(order).await?,
+        "place_bracket_order",
+    )
 }
 
 /// Adjust bracket stop ticks on an already-connected handle.
@@ -1102,9 +1089,7 @@ impl OrderDrainSource for SubscriptionFilter {
 /// "rows were lost". Callers that need a hard guarantee must treat the result
 /// as advisory (see `death_policy=trust_stop`) rather than as an authoritative
 /// venue snapshot.
-pub(crate) async fn drain_order_notifications<S>(
-    mut src: S,
-) -> Result<Vec<OrderNotificationDto>>
+pub(crate) async fn drain_order_notifications<S>(mut src: S) -> Result<Vec<OrderNotificationDto>>
 where
     S: OrderDrainSource,
 {
@@ -1144,9 +1129,7 @@ where
 /// "rows were lost". Callers that need a hard guarantee must treat the result
 /// as advisory (see `death_policy=trust_stop`) rather than as an authoritative
 /// venue snapshot.
-pub async fn load_orders_on(
-    handle: &RithmicOrderPlantHandle,
-) -> Result<Vec<OrderNotificationDto>> {
+pub async fn load_orders_on(handle: &RithmicOrderPlantHandle) -> Result<Vec<OrderNotificationDto>> {
     // A fresh receiver so the gateway event pump's own receiver is not consumed.
     let rx = handle.subscription_receiver.resubscribe();
     check_response(handle.show_orders().await?, "show_orders")?;

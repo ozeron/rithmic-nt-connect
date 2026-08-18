@@ -1,7 +1,7 @@
 //! Python bindings for the Phase 2 Rithmic session facade.
 
-use std::sync::{Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -9,7 +9,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use tokio::runtime::Runtime;
 
-use rithmic_plants::config::{DEFAULT_LUCID_URL, SessionConfig};
+use rithmic_plants::config::{SessionConfig, DEFAULT_LUCID_URL};
 use rithmic_plants::dto::{
     AccountPnlDto, BboDto, FrontMonthDto, HistoryBarDto, HistoryTickDto, InstrumentPnlDto,
     LastTradeDto, OrderBookDto, OrderNotificationDto, PlantEvent, ReferenceDataDto,
@@ -19,8 +19,8 @@ use rithmic_plants::error::Error;
 use rithmic_plants::history::parse_time_bar_type;
 use rithmic_plants::plants::PlantSet;
 use rithmic_plants::session::{
-    RithmicSession, adjust_bracket_stop_on, adjust_bracket_target_on, cancel_all_orders_on,
-    cancel_order_on, modify_order_on, place_bracket_order_on, place_order_on,
+    adjust_bracket_stop_on, adjust_bracket_target_on, cancel_all_orders_on, cancel_order_on,
+    modify_order_on, place_bracket_order_on, place_order_on, RithmicSession,
 };
 
 pyo3::create_exception!(rithmic_nt_connect, ChannelLaggedError, PyRuntimeError);
@@ -47,9 +47,7 @@ fn to_py_err(err: Error) -> PyErr {
         }
         Error::ChannelClosed { plant } => ChannelClosedError::new_err(plant),
         Error::NotConnected { plant } => NotConnectedError::new_err(plant),
-        Error::ReconciliationUnavailable(msg) => {
-            ReconciliationUnavailableError::new_err(msg)
-        }
+        Error::ReconciliationUnavailable(msg) => ReconciliationUnavailableError::new_err(msg),
         other => PyRuntimeError::new_err(other.to_string()),
     }
 }
@@ -935,12 +933,7 @@ impl PySession {
     }
 
     #[pyo3(signature = (basket_id, ticks, level=None))]
-    fn adjust_bracket_stop(
-        &self,
-        basket_id: &str,
-        ticks: i32,
-        level: Option<i32>,
-    ) -> PyResult<()> {
+    fn adjust_bracket_stop(&self, basket_id: &str, ticks: i32, level: Option<i32>) -> PyResult<()> {
         let _guard = self.begin_order_op()?;
         let handle = self.acquire_order_handle()?;
         runtime()
@@ -1093,10 +1086,19 @@ fn list_systems(url: Option<&str>) -> PyResult<Vec<String>> {
 fn _lib(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySession>()?;
     m.add_function(wrap_pyfunction!(list_systems, m)?)?;
-    m.add("ChannelLaggedError", m.py().get_type::<ChannelLaggedError>())?;
-    m.add("ChannelClosedError", m.py().get_type::<ChannelClosedError>())?;
+    m.add(
+        "ChannelLaggedError",
+        m.py().get_type::<ChannelLaggedError>(),
+    )?;
+    m.add(
+        "ChannelClosedError",
+        m.py().get_type::<ChannelClosedError>(),
+    )?;
     m.add("NotConnectedError", m.py().get_type::<NotConnectedError>())?;
-    m.add("AlreadyConnectedError", m.py().get_type::<AlreadyConnectedError>())?;
+    m.add(
+        "AlreadyConnectedError",
+        m.py().get_type::<AlreadyConnectedError>(),
+    )?;
     m.add(
         "ReconciliationUnavailableError",
         m.py().get_type::<ReconciliationUnavailableError>(),

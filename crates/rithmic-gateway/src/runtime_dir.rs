@@ -41,10 +41,7 @@ fn ensure_private_dir(dir: &Path) -> std::io::Result<PathBuf> {
     if meta.uid() != uid {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
-            format!(
-                "runtime dir {} not owned by uid {uid}",
-                dir.display()
-            ),
+            format!("runtime dir {} not owned by uid {uid}", dir.display()),
         ));
     }
     let mut perms = meta.permissions();

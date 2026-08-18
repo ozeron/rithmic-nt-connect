@@ -107,10 +107,7 @@ fn simple_hash(s: &str) -> u64 {
 
 /// FNV-1a over `user|system_name|url|canon_env` — shared by lock and unix listen paths.
 pub(crate) fn credential_key_hash(user: &str, system_name: &str, url: &str, env: &str) -> u64 {
-    simple_hash(&format!(
-        "{user}|{system_name}|{url}|{}",
-        canon_env(env)
-    ))
+    simple_hash(&format!("{user}|{system_name}|{url}|{}", canon_env(env)))
 }
 
 #[cfg(test)]

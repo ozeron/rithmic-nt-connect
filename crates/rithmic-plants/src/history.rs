@@ -81,9 +81,7 @@ pub fn yyyymmdd_to_unix_utc(ymd: i32) -> Option<i32> {
 /// wire only from callers that already speak calendar indexes).
 pub fn bar_replay_index(bar_type: TimeBarType, unix_sec: i32) -> i32 {
     match bar_type {
-        TimeBarType::DailyBar | TimeBarType::WeeklyBar => {
-            unix_to_yyyymmdd_utc(i64::from(unix_sec))
-        }
+        TimeBarType::DailyBar | TimeBarType::WeeklyBar => unix_to_yyyymmdd_utc(i64::from(unix_sec)),
         _ => unix_sec,
     }
 }
@@ -148,12 +146,12 @@ pub fn bar_dedup_key(bar: &HistoryBarDto) -> (u64, u64, u64, u64, u64, u64) {
 }
 
 /// Keep first occurrence; preserve input order.
-fn dedup_by<T, K: Eq + std::hash::Hash>(
-    items: Vec<T>,
-    key_fn: impl Fn(&T) -> K,
-) -> Vec<T> {
+fn dedup_by<T, K: Eq + std::hash::Hash>(items: Vec<T>, key_fn: impl Fn(&T) -> K) -> Vec<T> {
     let mut seen = HashSet::new();
-    items.into_iter().filter(|item| seen.insert(key_fn(item))).collect()
+    items
+        .into_iter()
+        .filter(|item| seen.insert(key_fn(item)))
+        .collect()
 }
 
 /// Keep first occurrence; preserve input order.
@@ -280,10 +278,7 @@ mod tests {
 
     #[test]
     fn adjacent_slices_share_boundary() {
-        assert_eq!(
-            window_slices(0, 1800, 900),
-            vec![(0, 900), (900, 1800)]
-        );
+        assert_eq!(window_slices(0, 1800, 900), vec![(0, 900), (900, 1800)]);
     }
 
     #[test]

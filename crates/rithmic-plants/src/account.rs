@@ -1,7 +1,7 @@
 //! Account resolution helpers (pick from account-list rows).
 
-use rithmic_rs::RithmicAccount;
 use rithmic_rs::rti::messages::RithmicMessage;
+use rithmic_rs::RithmicAccount;
 use rithmic_rs::RithmicResponse;
 
 use crate::error::{Error, Result};
@@ -122,11 +122,8 @@ mod tests {
 
     #[test]
     fn selector_match() {
-        let acct = pick_account(
-            &[row("A1", "F1", "I1"), row("A2", "F2", "I2")],
-            Some("A2"),
-        )
-        .unwrap();
+        let acct =
+            pick_account(&[row("A1", "F1", "I1"), row("A2", "F2", "I2")], Some("A2")).unwrap();
         assert_eq!(acct.account_id, "A2");
         assert_eq!(acct.fcm_id, "F2");
     }

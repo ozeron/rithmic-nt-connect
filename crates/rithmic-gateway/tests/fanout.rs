@@ -1,9 +1,7 @@
 //! Integration tests: refcounted fan-out + bounded overflow.
 
 use bytes::Bytes;
-use rithmic_gateway::subscriptions::{
-    ClientId, ClientQueue, ClientQueueError, FanoutHub, SubKey,
-};
+use rithmic_gateway::subscriptions::{ClientId, ClientQueue, ClientQueueError, FanoutHub, SubKey};
 
 #[tokio::test]
 async fn refcount_zero_to_one_needs_venue() {
