@@ -343,6 +343,23 @@ def test_payloads_to_bars_rejects_wire_bar_type_mismatch():
         )
 
 
+@pytest.mark.parametrize("bad_type", [2.5, True, "2.5", 2.0])
+def test_payloads_to_bars_rejects_non_integral_wire_bar_type(bad_type: object) -> None:
+    """A non-integral ``bar_type`` must not truncate to the requested rtype.
+
+    ``int(2.5)`` == 2 would otherwise let a mismatched timeframe masquerade as
+    the requested MINUTE type; bools are ints and must be rejected too.
+    """
+    with pytest.raises(ConvertError, match="bar type"):
+        payloads_to_bars(
+            [_raw_history_bar(bar_type=bad_type)],
+            symbol="NQU6",
+            exchange="CME",
+            bar_type=_M1_BAR_TYPE,
+            price_precision=2,
+        )
+
+
 def test_payloads_to_bars_fills_missing_symbol_and_exchange():
     raw = _raw_history_bar()
     raw.pop("symbol")

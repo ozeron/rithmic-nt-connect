@@ -118,9 +118,19 @@ def _validate_history_identity(
     if expected_rtype is not None:
         raw_rtype = payload.get("bar_type")
         if raw_rtype is not None:
-            try:
-                rtype_i = int(raw_rtype)
-            except (TypeError, ValueError):
+            # Reject anything that is not an exact integer representation:
+            # ``int(2.5)`` truncates to 2 and bool is an int, so either would
+            # let a mismatched timeframe masquerade as the requested rtype.
+            if isinstance(raw_rtype, bool):
+                rtype_i = -1
+            elif isinstance(raw_rtype, int):
+                rtype_i = raw_rtype
+            elif isinstance(raw_rtype, str):
+                try:
+                    rtype_i = int(raw_rtype)
+                except (TypeError, ValueError):
+                    rtype_i = -1
+            else:
                 rtype_i = -1
             if rtype_i != expected_rtype:
                 raise ConvertError(
