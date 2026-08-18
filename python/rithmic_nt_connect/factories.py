@@ -12,12 +12,15 @@ from nautilus_trader.cache.cache import Cache
 from nautilus_trader.common.component import LiveClock
 from nautilus_trader.common.component import MessageBus
 from nautilus_trader.config import InstrumentProviderConfig
+from nautilus_trader.config import LiveDataClientConfig
+from nautilus_trader.config import LiveExecClientConfig
 from nautilus_trader.live.factories import LiveDataClientFactory
 from nautilus_trader.live.factories import LiveExecClientFactory
 
 from rithmic_nt_connect.config import ConnectMode
 from rithmic_nt_connect.config import RithmicDataClientConfig
 from rithmic_nt_connect.config import RithmicExecClientConfig
+from rithmic_nt_connect.config import RithmicLiveExecClientConfig
 from rithmic_nt_connect.config import SessionConfig
 from rithmic_nt_connect.data import RithmicDataClient
 from rithmic_nt_connect.execution import RithmicExecutionClient
@@ -80,7 +83,7 @@ class RithmicLiveDataClientFactory(LiveDataClientFactory):
     def create(
         loop: asyncio.AbstractEventLoop,
         name: str,
-        config: RithmicDataClientConfig,
+        config: LiveDataClientConfig,
         msgbus: MessageBus,
         cache: Cache,
         clock: LiveClock,
@@ -114,7 +117,7 @@ class RithmicLiveExecClientFactory(LiveExecClientFactory):
     def create(
         loop: asyncio.AbstractEventLoop,
         name: str,
-        config: RithmicExecClientConfig,
+        config: LiveExecClientConfig,
         msgbus: MessageBus,
         cache: Cache,
         clock: LiveClock,
@@ -132,7 +135,14 @@ class RithmicLiveExecClientFactory(LiveExecClientFactory):
             cache=cache,
             clock=clock,
             instrument_provider=provider,
-            config=config,
+            # Pass the registered live config through unchanged: it carries
+            # ``enable_trading`` (the fallback only covers a bare nautilus
+            # ``LiveExecClientConfig``, which never enables trading).
+            config=(
+                config
+                if isinstance(config, (RithmicExecClientConfig, RithmicLiveExecClientConfig))
+                else RithmicExecClientConfig(session=session_cfg)
+            ),
             session=session,
             name=name,
         )

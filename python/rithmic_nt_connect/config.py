@@ -173,7 +173,8 @@ def explicit_test_env(environ: Mapping[str, str] | None = None) -> dict[str, str
     for key in ("RITHMIC_USER", "RITHMIC_PASSWORD", "RITHMIC_SYSTEM_NAME", "RITHMIC_CONNECT_MODE"):
         if not _env_first(values, key):
             raise ConfigError(f"explicit test env file is missing {key}")
-    mode = parse_connect_mode(values.get("RITHMIC_CONNECT_MODE"))
+    # RITHMIC_CONNECT_MODE is validated non-empty above, so direct indexing is safe.
+    mode = parse_connect_mode(values["RITHMIC_CONNECT_MODE"])
     if mode == ConnectMode.GATEWAY and not _env_first(values, "RITHMIC_GATEWAY"):
         # A gateway test env must name its endpoint; a direct env never uses one.
         raise ConfigError("explicit test env file is missing RITHMIC_GATEWAY")
@@ -454,7 +455,11 @@ except ImportError:  # pragma: no cover - nautilus not installed
     RithmicLiveExecClientConfig = None  # type: ignore[misc, assignment]
 else:
 
-    class RithmicLiveExecClientConfig(LiveExecClientConfig, kw_only=True):
+    # ``LiveExecClientConfig`` is a pydantic config at runtime (not frozen);
+    # pyright reads a stub declaring it frozen, so silence the false positive.
+    class RithmicLiveExecClientConfig(  # pyright: ignore[reportGeneralTypeIssues]
+        LiveExecClientConfig, kw_only=True
+    ):
         """TradingNode-facing exec config. Factory loads ``SessionConfig.from_env()``.
 
         Adds the Rithmic ``session`` + ``enable_trading`` knobs on top of the base
@@ -463,6 +468,7 @@ else:
 
         session: SessionConfig | None = None
         enable_trading: bool = False
+        soft_fail_pnl: bool = True
 
 
 @dataclass

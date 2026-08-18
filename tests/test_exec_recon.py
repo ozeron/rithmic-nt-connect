@@ -4,24 +4,36 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
 from nautilus_trader.core.uuid import UUID4
 from nautilus_trader.execution.messages import GenerateFillReports
+from nautilus_trader.execution.messages import GenerateOrderStatusReport
 from nautilus_trader.execution.messages import GenerateOrderStatusReports
 from nautilus_trader.execution.messages import GeneratePositionStatusReports
+from nautilus_trader.model.enums import LiquiditySide
 from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.enums import OrderStatus
 from nautilus_trader.model.enums import OrderType
 from nautilus_trader.model.enums import TimeInForce
 from nautilus_trader.model.enums import TriggerType
+from nautilus_trader.model.events import OrderAccepted
+from nautilus_trader.model.events import OrderFilled
+from nautilus_trader.model.events import OrderSubmitted
 from nautilus_trader.model.identifiers import AccountId
 from nautilus_trader.model.identifiers import ClientOrderId
 from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.model.identifiers import StrategyId
+from nautilus_trader.model.identifiers import TradeId
+from nautilus_trader.model.identifiers import TraderId
 from nautilus_trader.model.identifiers import VenueOrderId
+from nautilus_trader.model.objects import Currency
+from nautilus_trader.model.objects import Money
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
+from nautilus_trader.model.orders import LimitOrder
 
 from rithmic_nt_connect._order_plant import OrderPlantPolicy
 from rithmic_nt_connect._order_plant import OrderPlantState
@@ -723,6 +735,7 @@ def test_cached_stop_order_status_report_preserves_native_order_metadata() -> No
         trigger_price=Price.from_str("30203.00"),
         trigger_type=TriggerType.DEFAULT,
         is_reduce_only=True,
+        avg_px=0.0,  # resting stop: no fills yet
     )
     client = SimpleNamespace(
         _cache=SimpleNamespace(venue_order_id=lambda cid: venue_order_id),
@@ -735,6 +748,7 @@ def test_cached_stop_order_status_report_preserves_native_order_metadata() -> No
     assert report.venue_order_id == venue_order_id
     assert report.trigger_type is TriggerType.DEFAULT
     assert report.reduce_only is True
+    assert report.avg_px is None
 
 
 def test_true_reject_still_terminal_rejected():
@@ -1102,3 +1116,112 @@ def test_position_status_reports_warn_on_unloaded_nonzero_position() -> None:
     assert len(warnings) == 1
     assert "NQU6.RITHMIC" in warnings[0]
     assert "qty=2" in warnings[0]
+
+
+class _SingleOrderCache(_CacheStub):
+    """Cache that resolves one real Nautilus order for status queries."""
+
+    def __init__(self, order: object) -> None:
+        super().__init__()
+        self._only = order
+
+    def order(self, client_order_id: ClientOrderId) -> object:
+        return self._only
+
+
+def _filled_limit_order() -> LimitOrder:
+    """A real Nautilus order driven through SUBMITTED/ACCEPTED to FILLED."""
+    iid = InstrumentId.from_str("NQ.GLBX")
+    cid = ClientOrderId("O-1")
+    trader = TraderId("TRADER-1")
+    strategy = StrategyId("STRATEGY-1")
+    account = AccountId("RITHMIC-ACC1")
+    ts = 1_700_000_000_000_000_000
+    order = LimitOrder(
+        trader,
+        strategy,
+        iid,
+        cid,
+        OrderSide.BUY,
+        Quantity.from_int(2),
+        Price.from_str("21000.0"),
+        UUID4(),
+        0,
+        TimeInForce.GTC,
+    )
+    order.apply(OrderSubmitted(trader, strategy, iid, cid, account, UUID4(), ts, ts))
+    order.apply(
+        OrderAccepted(
+            trader, strategy, iid, cid, VenueOrderId("B-1"), account, UUID4(), ts, ts
+        )
+    )
+    order.apply(
+        OrderFilled(
+            trader,
+            strategy,
+            iid,
+            cid,
+            VenueOrderId("B-1"),
+            account,
+            TradeId("T1"),
+            None,  # position_id
+            OrderSide.BUY,
+            OrderType.LIMIT,
+            Quantity.from_int(2),
+            Price.from_str("21000.5"),
+            Currency.from_str("USD"),
+            Money(0, Currency.from_str("USD")),
+            LiquiditySide.NO_LIQUIDITY_SIDE,
+            UUID4(),
+            ts,
+            ts,
+        )
+    )
+    return order
+
+
+def test_cached_status_query_carries_avg_px_for_filled_order() -> None:
+    """A status query for a FILLED order must report its average fill price.
+
+    Nautilus ExecEngine warns on ``report.avg_px is None`` when reconciling a
+    filled order, so the cache-backed pull path must not drop the fill price.
+    """
+    order = _filled_limit_order()
+    client = _trading_client()
+    client.account_id = AccountId("RITHMIC-ACC1")
+    client._cache = _SingleOrderCache(order)
+
+    command = GenerateOrderStatusReport(
+        None,
+        ClientOrderId("O-1"),
+        None,
+        UUID4(),
+        1,
+    )
+    report = asyncio.run(client.generate_order_status_report(command))
+
+    assert report is not None
+    assert report.order_status == OrderStatus.FILLED
+    assert report.avg_px == Decimal("21000.5")
+
+
+def test_cached_status_query_non_stop_order_does_not_crash_on_trigger_type() -> None:
+    """Only stop orders expose ``trigger_type`` on the 1.231.x model; a limit
+    order status query must not raise and reports NO_TRIGGER."""
+    order = _filled_limit_order()
+    client = _trading_client()
+    client.account_id = AccountId("RITHMIC-ACC1")
+    client._cache = _SingleOrderCache(order)
+
+    command = GenerateOrderStatusReport(
+        None,
+        ClientOrderId("O-1"),
+        None,
+        UUID4(),
+        1,
+    )
+    report = asyncio.run(client.generate_order_status_report(command))
+
+    assert report is not None
+    assert report.trigger_type == TriggerType.NO_TRIGGER
+    assert report.avg_px == Decimal("21000.5")

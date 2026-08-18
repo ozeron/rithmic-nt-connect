@@ -228,6 +228,37 @@ class ExecHarness:
             client.generate_order_status_reports = original
         return captured
 
+    def order_status_report(self, client_order_id: ClientOrderId, timeout_secs: float = 20.0):
+        """Drive a singular ``GenerateOrderStatusReport`` and return the adapter report.
+
+        This is the exact pull path Nautilus ExecEngine uses when it queries an
+        order's status (e.g. after a fill) — the path that warned
+        ``report.avg_px was None`` for a filled order.
+        """
+        import asyncio
+
+        from nautilus_trader.core.uuid import UUID4
+        from nautilus_trader.execution.messages import GenerateOrderStatusReport
+        from rithmic_nt_connect.execution import RithmicExecutionClient
+
+        engine = self.node.kernel.exec_engine
+        orders = self.cache.orders()
+        clients = engine.get_clients_for_orders(orders) if orders else set()
+        client = next((c for c in clients if isinstance(c, RithmicExecutionClient)), None)
+        if client is None:
+            raise RuntimeError("Rithmic exec client not reachable from the engine")
+
+        loop = self.node.get_event_loop()
+        if loop is None or not loop.is_running():
+            raise RuntimeError("TradingNode event loop is not running")
+        future = asyncio.run_coroutine_threadsafe(
+            client.generate_order_status_report(
+                GenerateOrderStatusReport(None, client_order_id, None, UUID4(), 1)
+            ),
+            loop,
+        )
+        return future.result(timeout=timeout_secs)
+
     # -- assertions ------------------------------------------------------------
     def event_types(self) -> list[str]:
         return [type(evt).__name__ for evt in self.driver.events]

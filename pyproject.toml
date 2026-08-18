@@ -41,3 +41,17 @@ markers = [
     "live: real-connection e2e (tests/e2e); auto-skip without RITHMIC_TEST_DOTENV",
     "slow: takes >30s (1m EXTERNAL bar poll); deselect with -m 'not slow'",
 ]
+
+[tool.pyright]
+include = ["python"]
+pythonVersion = "3.13"
+typeCheckingMode = "standard"
+# The package lazily re-exports factory/historical helpers via PEP 562
+# ``__getattr__`` (avoids importing nautilus_trader at package import); pyright
+# cannot see those names and flags them in ``__all__``.
+reportUnsupportedDunderAll = false
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.411",
+]

@@ -393,6 +393,31 @@ class TestReconciliation:
             r.order_status == OrderStatus.CANCELED for r in post_cancel
         ), f"venue still reports the canceled stop as a working order: {post_cancel}"
 
+    def test_TC_E85_filled_order_status_query_carries_avg_px(self, live_exec):
+        """TC-E85 — a status query for a FILLED order reports its average fill price.
+
+        Nautilus ExecEngine logs ``report.avg_px was None`` when it reconciles a
+        filled order through this exact pull path (QueryOrderStatus -> client
+        -> cache-backed report), so the report must not drop the fill price.
+        """
+        live_exec.driver.initial.append(market(OrderSide.BUY))
+        live_exec.start()
+        fill = live_exec.wait_for_venue_outcome("OrderFilled", timeout=45)
+        cid = fill.client_order_id
+        order = live_exec.wait_order_status(cid, OrderStatus.FILLED, timeout=20)
+
+        report = live_exec.order_status_report(cid)
+
+        assert report is not None, f"no status report for filled order {cid}"
+        assert report.order_status == OrderStatus.FILLED
+        assert report.avg_px is not None, (
+            "filled order status report lost avg_px "
+            "(Nautilus ExecEngine warns 'report.avg_px was None')"
+        )
+        assert abs(float(report.avg_px) - float(order.avg_px)) < 0.01, (
+            f"status report avg_px {report.avg_px} != order avg_px {order.avg_px}"
+        )
+
 
 # ══════════════════════════════════════════════════════════════════════
 # Scaffolded / venue-unsupported TCs
@@ -412,7 +437,7 @@ SCAFFOLDED_TCS = [
     # Group 8: rejection handling
     "TC-E70", "TC-E71", "TC-E74", "TC-E75", "TC-E76", "TC-E77", "TC-E78",
     # Group 9: lifecycle & reconciliation
-    "TC-E80", "TC-E81", "TC-E82", "TC-E83", "TC-E85", "TC-E86", "TC-E87",
+    "TC-E80", "TC-E81", "TC-E82", "TC-E83", "TC-E86", "TC-E87",
 ]
 
 UNSUPPORTED_TCS = [

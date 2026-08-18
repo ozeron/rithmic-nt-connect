@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+class ChannelError(RuntimeError):
+    """Base for plant channel failures that require resync."""
+
+
 try:
     from rithmic_nt_connect._lib import AlreadyConnectedError
     from rithmic_nt_connect._lib import ChannelLaggedError
@@ -9,9 +13,6 @@ try:
     from rithmic_nt_connect._lib import NotConnectedError
     from rithmic_nt_connect._lib import ReconciliationUnavailableError
 except ImportError:  # pragma: no cover
-
-    class ChannelError(RuntimeError):
-        """Base for plant channel failures that require resync."""
 
     class AlreadyConnectedError(RuntimeError):
         """Session already connected (idempotent connect is safe to suppress)."""
@@ -27,11 +28,6 @@ except ImportError:  # pragma: no cover
 
     class ReconciliationUnavailableError(RuntimeError):
         """Order-history reconciliation cannot be answered authoritatively."""
-
-else:
-
-    class ChannelError(RuntimeError):
-        """Base for plant channel failures that require resync."""
 
 
 class VenueQueryUnavailable(RuntimeError):

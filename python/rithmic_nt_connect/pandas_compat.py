@@ -32,7 +32,7 @@ def patch_nautilus_pandas() -> None:
     def floor(self, freq=None, *args, **kwargs):  # type: ignore[no-untyped-def]
         if freq == "d":
             freq = "D"
-        return _floor(self, freq, *args, **kwargs)
+        return _floor(self, freq, *args, **kwargs)  # type: ignore[arg-type]
 
     pd.Timestamp.floor = floor  # type: ignore[method-assign]
     _PATCHED = True

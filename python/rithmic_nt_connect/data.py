@@ -66,8 +66,8 @@ def _reconnectable_poll_error(exc: BaseException) -> bool:
         or "channel lagged" in text
     )
 
-_F_SNAPSHOT = int(RecordFlag.F_SNAPSHOT)
-_F_LAST = int(RecordFlag.F_LAST)
+_F_SNAPSHOT = int(RecordFlag.F_SNAPSHOT.value)
+_F_LAST = int(RecordFlag.F_LAST.value)
 _F_SNAPSHOT_LAST = _F_SNAPSHOT | _F_LAST
 
 

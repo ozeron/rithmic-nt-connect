@@ -67,6 +67,7 @@ from rithmic_nt_connect._orders import slim_order_fields
 from rithmic_nt_connect._orders import trade_id_from_fill_fields
 from rithmic_nt_connect._orders import trailing_ticks_from_order
 from rithmic_nt_connect.config import RithmicExecClientConfig
+from rithmic_nt_connect.config import RithmicLiveExecClientConfig
 from rithmic_nt_connect.constants import ADAPTER_NAME
 from rithmic_nt_connect.constants import DEFAULT_ACCOUNT_CURRENCY
 from rithmic_nt_connect.constants import VENUE
@@ -130,7 +131,7 @@ async def wait_account_in_cache(
         by_venue = getattr(cache, "account_for_venue", None)
         if callable(by_venue):
             venue_account = by_venue(venue_id)
-            if venue_account is not None and str(venue_account.id) == str(account_id):
+            if venue_account is not None and str(getattr(venue_account, "id", "")) == str(account_id):
                 return
         if time.monotonic() >= deadline:
             raise RuntimeError(
@@ -156,7 +157,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         cache: Cache,
         clock: LiveClock,
         instrument_provider: RithmicInstrumentProvider,
-        config: RithmicExecClientConfig,
+        config: RithmicExecClientConfig | RithmicLiveExecClientConfig,
         session: WireSession,
         name: str | None = None,
     ) -> None:
@@ -274,8 +275,10 @@ class RithmicExecutionClient(LiveExecutionClient):
             )
         await self._await_account_registered()
 
-    async def _await_account_registered(self) -> None:
-        deadline = time.monotonic() + ACCOUNT_CACHE_TIMEOUT_S
+    async def _await_account_registered(
+        self, timeout_secs: float = ACCOUNT_CACHE_TIMEOUT_S, log_registered: bool = True
+    ) -> None:
+        deadline = time.monotonic() + timeout_secs
         while self.account_id is None and time.monotonic() < deadline:
             self._apply_resolved_account_id()
             self._seed_account_if_needed()
@@ -294,7 +297,8 @@ class RithmicExecutionClient(LiveExecutionClient):
         await wait_account_in_cache(
             self._cache, self.account_id, venue=VENUE, timeout_s=remaining
         )
-        self._log.info(f"account observable in cache {self.account_id}")
+        if log_registered:
+            self._log.info(f"account observable in cache {self.account_id}")
 
     def _apply_resolved_account_id(self) -> None:
         raw = self._account_raw()
@@ -901,8 +905,13 @@ class RithmicExecutionClient(LiveExecutionClient):
             client_order_id=order.client_order_id,
             price=order.price if order.has_price else None,
             trigger_price=order.trigger_price if order.has_trigger_price else None,
-            trigger_type=order.trigger_type,
+            # Only stop orders expose ``trigger_type`` on the 1.231.x model;
+            # plain limit/market orders must not be touched (AttributeError).
+            trigger_type=(
+                order.trigger_type if order.has_trigger_price else TriggerType.NO_TRIGGER
+            ),
             reduce_only=order.is_reduce_only,
+            avg_px=Decimal(str(order.avg_px)) if order.avg_px else None,
         )
 
     def _cache_backed_order_status_reports(
@@ -1191,13 +1200,15 @@ class RithmicExecutionClient(LiveExecutionClient):
                 return None
             ts = getattr(value, "timestamp", None)
             if callable(ts):
-                return max(0, int(ts()))
+                return max(0, int(ts()))  # type: ignore[arg-type]
             if isinstance(value, (int, float)):
                 # Nautilus passes datetime; tolerate ns-epoch ints defensively.
                 return max(0, int(value) // 1_000_000_000)
             return None
 
         end_sec = _to_sec(end) if end is not None else now_sec
+        if end_sec is None:
+            end_sec = now_sec
         start_sec = _to_sec(start)
         if start_sec is None:
             start_sec = int((now_sec // 86_400) * 86_400)  # UTC day start
@@ -1267,6 +1278,8 @@ class RithmicExecutionClient(LiveExecutionClient):
 
     def _order_type_from_event(self, fields: dict[str, Any]) -> OrderType:
         raw = fields.get("price_type")
+        if raw is None:
+            return OrderType.MARKET
         try:
             return _RITHMIC_PRICE_TYPE_TO_ORDER_TYPE.get(int(raw), OrderType.MARKET)
         except (TypeError, ValueError):
@@ -1274,6 +1287,8 @@ class RithmicExecutionClient(LiveExecutionClient):
 
     def _tif_from_event(self, fields: dict[str, Any]) -> TimeInForce:
         raw = fields.get("duration")
+        if raw is None:
+            return TimeInForce.GTC
         try:
             return _RITHMIC_DURATION_TO_TIF.get(int(raw), TimeInForce.GTC)
         except (TypeError, ValueError):
@@ -1281,6 +1296,8 @@ class RithmicExecutionClient(LiveExecutionClient):
 
     def _trigger_type_from_event(self, fields: dict[str, Any]) -> TriggerType:
         raw = fields.get("price_type")
+        if raw is None:
+            return TriggerType.NO_TRIGGER
         try:
             if int(raw) in (3, 4):  # Rithmic StopLimit / StopMarket
                 return TriggerType.DEFAULT
