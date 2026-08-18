@@ -83,6 +83,19 @@ _POSITION_SIDE = {
     "FLAT": PositionSide.FLAT,
 }
 
+# Order types that support the TRIGGERED order status (Nautilus #3812, ported
+# from upstream 2f7d3947). Market-style stops (STOP_MARKET, MARKET_IF_TOUCHED,
+# TRAILING_STOP_MARKET) execute immediately on trigger and have no intermediate
+# TRIGGERED state, so a venue TRIGGER notification for them must not emit
+# OrderTriggered (the 1.231.x model rejects it).
+_TRIGGERABLE_ORDER_TYPES = frozenset(
+    {
+        OrderType.STOP_LIMIT,
+        OrderType.TRAILING_STOP_LIMIT,
+        OrderType.LIMIT_IF_TOUCHED,
+    }
+)
+
 # Rithmic price_type enum (1=Limit, 2=Market, 3=StopLimit, 4=StopMarket) -> Nautilus.
 _RITHMIC_PRICE_TYPE_TO_ORDER_TYPE: dict[int, OrderType] = {
     1: OrderType.LIMIT,
@@ -698,9 +711,23 @@ class RithmicExecutionClient(LiveExecutionClient):
                 strategy_id, instrument_id, client_order_id, venue_order_id, ts_event
             )
         elif action.kind == "triggered":
-            self.generate_order_triggered(
-                strategy_id, instrument_id, client_order_id, venue_order_id, ts_event
-            )
+            # Producer guard (#3812 / upstream 2f7d3947): only limit-style
+            # stops have a TRIGGERED state. Market-style stops go straight to
+            # FILLED on trigger; emitting OrderTriggered for them is rejected by
+            # the Nautilus model, which would kill the order event stream.
+            if order.order_type not in _TRIGGERABLE_ORDER_TYPES:
+                self._log.debug(
+                    f"skipping OrderTriggered for {order.order_type} order "
+                    f"{client_order_id}: market-style stops have no TRIGGERED state"
+                )
+            else:
+                self.generate_order_triggered(
+                    strategy_id,
+                    instrument_id,
+                    client_order_id,
+                    venue_order_id,
+                    ts_event,
+                )
         elif action.kind == "filled":
             if action.fill_px is None or action.fill_qty is None or action.trade_id is None:
                 self._log.error(f"fill action missing fields: {slim_order_fields(fields)}")

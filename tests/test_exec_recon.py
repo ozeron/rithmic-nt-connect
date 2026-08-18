@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
+from dataclasses import dataclass
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
@@ -104,6 +105,9 @@ class _TestClient(RithmicExecutionClient):
 
 
 class _Log:
+    def debug(self, *args: object, **kwargs: object) -> None:
+        pass
+
     def warning(self, *args: object, **kwargs: object) -> None:
         pass
 
@@ -131,7 +135,9 @@ class _CacheStub:
     def __init__(self) -> None:
         self._venue_to_client: dict[str, ClientOrderId] = {}
         self._client_to_venue: dict[str, VenueOrderId] = {}
-        self._orders: dict[str, _CacheOrder] = {}
+        # Mixed marker stubs and ``_OrderStub`` doubles (matches ``order()``'s
+        # ``object | None`` return).
+        self._orders: dict[str, object] = {}
 
     def client_order_id(self, venue_order_id: VenueOrderId) -> ClientOrderId | None:
         return self._venue_to_client.get(venue_order_id.value)
@@ -448,6 +454,137 @@ def test_untracked_status_publication_failure_does_not_escape_handler() -> None:
             "kind": "canceled",
         },
     )
+
+
+# --------------------------------------------------------------------------- #
+# #3812 producer guard: TRIGGER notifications only emit OrderTriggered for
+# limit-style stops (STOP_LIMIT / TRAILING_STOP_LIMIT / LIMIT_IF_TOUCHED).
+# Market-style stops (STOP_MARKET / MARKET_IF_TOUCHED) execute straight to
+# FILLED and must never emit OrderTriggered (the 1.231.x model rejects it).
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class _OrderStub:
+    """Minimal order double: the handler only reads identity fields + type."""
+
+    client_order_id: ClientOrderId
+    strategy_id: StrategyId
+    instrument_id: InstrumentId
+    order_type: OrderType
+    side: OrderSide
+    is_closed: bool = False
+
+
+def _order(order_type: OrderType) -> _OrderStub:
+    return _OrderStub(
+        client_order_id=ClientOrderId("O-1"),
+        strategy_id=StrategyId("STRATEGY-1"),
+        instrument_id=InstrumentId.from_str("NQ.GLBX"),
+        order_type=order_type,
+        side=OrderSide.BUY,
+    )
+
+
+def _trigger_notification() -> dict[str, object]:
+    return {
+        "type": "order_notification",
+        "source": "exchange",
+        "symbol": "NQU6",
+        "kind": "triggered",
+        "notify_type_name": "TRIGGER",
+        "basket_id": "B1",
+        "user_tag": "O-1",
+        "ssboe": 1_700_000_000,
+    }
+
+
+@pytest.mark.parametrize(
+    ("order_type", "emits_triggered"),
+    [
+        (OrderType.STOP_MARKET, False),
+        (OrderType.MARKET_IF_TOUCHED, False),
+        (OrderType.STOP_LIMIT, True),
+        (OrderType.TRAILING_STOP_LIMIT, True),
+        (OrderType.LIMIT_IF_TOUCHED, True),
+    ],
+)
+def test_trigger_notification_emission_guarded_by_order_type(
+    monkeypatch: pytest.MonkeyPatch,
+    order_type: OrderType,
+    emits_triggered: bool,
+) -> None:
+    """#3812: a venue TRIGGER only emits OrderTriggered for limit-style stops.
+
+    Market-style stops go straight to FILLED on trigger; emitting
+    OrderTriggered for them is rejected by the 1.231.x model, which would kill
+    the order event stream.
+    """
+    client = _client()
+    order = _order(order_type)
+    client._cache._orders[str(order.client_order_id)] = order
+    triggered: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        client, "generate_order_triggered", lambda *args: triggered.append(args)
+    )
+
+    RithmicExecutionClient._handle_order_notification(
+        cast(RithmicExecutionClient, client), _trigger_notification()
+    )
+
+    assert bool(triggered) is emits_triggered
+    if emits_triggered:
+        assert len(triggered) == 1
+        assert triggered[0][2] == ClientOrderId("O-1")
+
+
+def test_stop_market_trigger_then_fill_still_emits_fill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A STOP_MARKET TRIGGER is skipped, and the follow-up FILL still works."""
+    client = _client()
+    order = _order(OrderType.STOP_MARKET)
+    client._cache._orders[str(order.client_order_id)] = order
+    client._seen_fill_keys = OrderedDict()
+    triggered: list[tuple[object, ...]] = []
+    filled: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        client, "generate_order_triggered", lambda *args: triggered.append(args)
+    )
+    monkeypatch.setattr(
+        client,
+        "generate_order_filled",
+        lambda *args, **kwargs: filled.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        client,
+        "_price_for_instrument",
+        lambda instrument_id, value: Price.from_str("21000.0"),
+    )
+
+    RithmicExecutionClient._handle_order_notification(
+        cast(RithmicExecutionClient, client), _trigger_notification()
+    )
+    assert triggered == []
+
+    RithmicExecutionClient._handle_order_notification(
+        cast(RithmicExecutionClient, client),
+        {
+            "type": "order_notification",
+            "source": "exchange",
+            "symbol": "NQU6",
+            "kind": "filled",
+            "notify_type_name": "FILL",
+            "basket_id": "B1",
+            "user_tag": "O-1",
+            "fill_id": "F1",
+            "fill_price": 21000.0,
+            "fill_size": 1,
+            "transaction_type": 1,
+            "ssboe": 1_700_000_000,
+        },
+    )
+    assert len(filled) == 1
 
 
 def test_status_report_publication_failure_is_non_fatal_to_fill_reconciliation() -> None:
