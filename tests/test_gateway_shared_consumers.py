@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import socket
 import struct
@@ -10,8 +11,7 @@ import time
 from pathlib import Path
 
 import pytest
-
-from rithmic_gateway.client import GatewayClient, GatewayError
+from rithmic_gateway.client import GatewayClient
 from rithmic_gateway.config import GatewayConfig
 from rithmic_gateway.framing import encode_frame
 from rithmic_gateway.v1 import session_pb2 as pb
@@ -38,7 +38,9 @@ def _send(conn: socket.socket, frame: pb.Frame) -> None:
 
 
 def _serve_shared_md_parent(sock_path: Path, *, clients: int = 2) -> threading.Thread:
-    """Mock parent: N clients Handshake→Ready; Subscribe Ack; fan-out LastTrade by symbol."""
+    """Mock parent: N clients Handshake→Ready; Subscribe Ack; fan-out
+    LastTrade by symbol.
+    """
     if sock_path.exists():
         sock_path.unlink()
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -66,7 +68,7 @@ def _serve_shared_md_parent(sock_path: Path, *, clients: int = 2) -> threading.T
                 conn.settimeout(0.5)
                 try:
                     req = _read_frame(conn)
-                except (TimeoutError, socket.timeout, ConnectionError, OSError):
+                except (TimeoutError, ConnectionError, OSError):
                     # Also push any pending fan-out periodically.
                     continue
                 which = req.WhichOneof("body")
@@ -107,10 +109,8 @@ def _serve_shared_md_parent(sock_path: Path, *, clients: int = 2) -> threading.T
                 else:
                     _send(conn, pb.Frame(request_id=req.request_id, ack=pb.Ack()))
         finally:
-            try:
+            with contextlib.suppress(OSError):
                 conn.close()
-            except OSError:
-                pass
 
     def _run() -> None:
         ready.set()

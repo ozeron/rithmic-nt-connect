@@ -18,12 +18,10 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
-
 from nautilus_trader.model.data import BarType
-
 from rithmic_nt_connect.data import payloads_to_bars
 from rithmic_nt_connect.historical import (
     load_front_month_instrument,
@@ -110,9 +108,7 @@ class TestOrderBook:
             if "permission denied" in str(exc) or "not entitled" in str(exc):
                 pytest.skip(f"L2 book not available on this account: {exc}")
             raise
-        ev = wait_for_event(
-            live_session.poll_event, "order_book", timeout_sec=20
-        )
+        ev = wait_for_event(live_session.poll_event, "order_book", timeout_sec=20)
         assert ev.get("bid_price") or ev.get("ask_price"), "bid/ask levels present"
 
 
@@ -160,7 +156,7 @@ class TestTrades:
         the test skips rather than fails when that happens.
         """
         inst, *_ = live_front_month
-        end = int(datetime.now(timezone.utc).timestamp()) - 3600
+        end = int(datetime.now(UTC).timestamp()) - 3600
         start = end - 900  # 15-minute window, 1h ago — guaranteed past
         ticks = load_trade_ticks(live_session, inst, start, end)
         if not ticks:
@@ -203,7 +199,7 @@ class TestBars:
         """
         inst, *_ = live_front_month
         bar_type = BarType.from_str(f"{inst.id.symbol}.RITHMIC-1-MINUTE-LAST-EXTERNAL")
-        end = int(datetime.now(timezone.utc).timestamp())
+        end = int(datetime.now(UTC).timestamp())
         bars = load_time_bars(live_session, inst, end - 7200, end, bar_type)
         if not bars:
             pytest.skip("history plant returned empty (LucidTrading transient)")
@@ -219,15 +215,17 @@ class TestBars:
             if i > 0:
                 assert b.ts_event >= bars[i - 1].ts_event, "ascending timestamps"
 
-    def test_TC_D42_historical_bars_close_to_open_shift(self, live_session, live_front_month):
-        """TC-D42 — raw marker is CLOSE; converted ts_event is OPEN (marker − 60s).
+    def test_TC_D42_historical_bars_close_to_open_shift(
+        self, live_session, live_front_month
+    ):
+        """TC-D42 - raw marker is CLOSE; converted ts_event is OPEN (marker - 60s).
 
         Pins the plant contract that ``ts_event_ns`` (always ``marker*1e9`` for
         intraday bars) is the close time, so the adapter's unconditional
         close→open shift is correct against the real plant. Skips on empty.
         """
         inst, symbol, exchange = live_front_month
-        end = int(datetime.now(timezone.utc).timestamp())
+        end = int(datetime.now(UTC).timestamp())
         start = end - 7200
         raw = live_session.load_time_bars(symbol, exchange, start, end, 2, 1)
         if not raw:
@@ -241,11 +239,15 @@ class TestBars:
             price_precision=int(inst.price_precision),
         )
         assert len(converted) == len(raw)
-        for i, (r, c) in enumerate(zip(raw, converted)):
-            close_ns = int(r["ts_event_ns"]) if r.get("ts_event_ns") is not None else int(r["marker"]) * 1_000_000_000
+        for i, (r, c) in enumerate(zip(raw, converted, strict=True)):
+            close_ns = (
+                int(r["ts_event_ns"])
+                if r.get("ts_event_ns") is not None
+                else int(r["marker"]) * 1_000_000_000
+            )
             assert c.ts_event == close_ns - 60_000_000_000, (
-                f"bar[{i}]: converted open != raw close − 60s "
-                f"({c.ts_event} != {close_ns} − 60s)"
+                f"bar[{i}]: converted open != raw close - 60s "
+                f"({c.ts_event} != {close_ns} - 60s)"
             )
 
 

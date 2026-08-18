@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 _PATCHED = False
 
 
@@ -24,10 +26,10 @@ def patch_nautilus_pandas() -> None:
     def utcnow(cls) -> pd.Timestamp:
         return cls.now("UTC")
 
-    # ``setattr`` keeps the monkey-patches outside the checker's reach: the
-    # shim marker and class-attribute swaps are dynamic by design.
-    setattr(utcnow, "__nautilus_shim__", True)
-    setattr(pd.Timestamp, "utcnow", classmethod(utcnow))
+    # ``cast(Any, ...)`` keeps the dynamic monkey-patches outside the checker's
+    # reach: the shim marker and class-attribute swaps are dynamic by design.
+    cast(Any, utcnow).__nautilus_shim__ = True
+    pd.Timestamp.utcnow = cast(Any, classmethod(utcnow))
 
     _floor = pd.Timestamp.floor
 

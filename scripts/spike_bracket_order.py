@@ -114,7 +114,7 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         try:
             session.disconnect()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             print(f"disconnect warning: {exc}", file=sys.stderr)
 
     if saw_reject:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import socket
 import struct
 import threading
@@ -136,7 +137,8 @@ class GatewayClient:
             self._close_sock()
             raise GatewayError(
                 "parent_unattested",
-                "listen path is up but credential flock is free — refusing impostor parent",
+                "listen path is up but credential flock is free — refusing "
+                "impostor parent",
             )
 
     def disconnect(self) -> None:
@@ -148,19 +150,21 @@ class GatewayClient:
         with self._io_lock:
             if self._sock is None:
                 return
-            try:
+            with contextlib.suppress(Exception):
                 self._rpc_unlocked(pb.Frame(disconnect=pb.DisconnectRequest()))
-            except Exception:
-                pass
             self._close_sock()
             self._pending.clear()
 
     def subscribe(self, symbol: str, exchange: str) -> None:
-        self._rpc(pb.Frame(subscribe=pb.SubscribeRequest(symbol=symbol, exchange=exchange)))
+        self._rpc(
+            pb.Frame(subscribe=pb.SubscribeRequest(symbol=symbol, exchange=exchange))
+        )
 
     def unsubscribe(self, symbol: str, exchange: str) -> None:
         self._rpc(
-            pb.Frame(unsubscribe=pb.UnsubscribeRequest(symbol=symbol, exchange=exchange))
+            pb.Frame(
+                unsubscribe=pb.UnsubscribeRequest(symbol=symbol, exchange=exchange)
+            )
         )
 
     def subscribe_order_book_summary(self, symbol: str, exchange: str) -> None:
@@ -173,7 +177,9 @@ class GatewayClient:
     def unsubscribe_order_book_summary(self, symbol: str, exchange: str) -> None:
         self._rpc(
             pb.Frame(
-                unsubscribe_book=pb.UnsubscribeBookRequest(symbol=symbol, exchange=exchange)
+                unsubscribe_book=pb.UnsubscribeBookRequest(
+                    symbol=symbol, exchange=exchange
+                )
             )
         )
 
@@ -183,12 +189,16 @@ class GatewayClient:
     def get_front_month(self, symbol: str, exchange: str) -> dict[str, Any]:
         resp = self._rpc(
             pb.Frame(
-                get_front_month=pb.GetFrontMonthRequest(symbol=symbol, exchange=exchange)
+                get_front_month=pb.GetFrontMonthRequest(
+                    symbol=symbol, exchange=exchange
+                )
             )
         )
         which = resp.WhichOneof("body")
         if which != "front_month_response":
-            raise GatewayError("protocol", f"expected front_month_response, got {which}")
+            raise GatewayError(
+                "protocol", f"expected front_month_response, got {which}"
+            )
         return _message_to_dict(resp.front_month_response)
 
     def get_reference_data(self, symbol: str, exchange: str) -> dict[str, Any]:
@@ -201,7 +211,9 @@ class GatewayClient:
         )
         which = resp.WhichOneof("body")
         if which != "reference_data_response":
-            raise GatewayError("protocol", f"expected reference_data_response, got {which}")
+            raise GatewayError(
+                "protocol", f"expected reference_data_response, got {which}"
+            )
         return _message_to_dict(resp.reference_data_response)
 
     def resolved_account(self) -> dict[str, Any] | None:
@@ -209,7 +221,9 @@ class GatewayClient:
         resp = self._rpc(pb.Frame(resolved_account=pb.ResolvedAccountRequest()))
         which = resp.WhichOneof("body")
         if which != "resolved_account_response":
-            raise GatewayError("protocol", f"expected resolved_account_response, got {which}")
+            raise GatewayError(
+                "protocol", f"expected resolved_account_response, got {which}"
+            )
         d = _message_to_dict(resp.resolved_account_response)
         if not d.get("account_id"):
             return None
@@ -229,7 +243,9 @@ class GatewayClient:
         )
         which = resp.WhichOneof("body")
         if which != "load_orders_response":
-            raise GatewayError("protocol", f"expected load_orders_response, got {which}")
+            raise GatewayError(
+                "protocol", f"expected load_orders_response, got {which}"
+            )
         return [_message_to_dict(e) for e in resp.load_orders_response.events]
 
     def load_ticks(
@@ -248,7 +264,10 @@ class GatewayClient:
         which = resp.WhichOneof("body")
         if which != "load_ticks_response":
             raise GatewayError("protocol", f"expected load_ticks_response, got {which}")
-        return [_normalize_history_tick(_message_to_dict(t)) for t in resp.load_ticks_response.ticks]
+        return [
+            _normalize_history_tick(_message_to_dict(t))
+            for t in resp.load_ticks_response.ticks
+        ]
 
     def load_time_bars(
         self,
@@ -261,7 +280,9 @@ class GatewayClient:
         *,
         rpc_timeout_sec: float | None = None,
     ) -> list[dict[str, Any]]:
-        """Single-slice history RPC (prefer :meth:`load_time_bars_range` for wide windows)."""
+        """Single-slice history RPC (prefer :meth:`load_time_bars_range` for
+        wide windows).
+        """
         resp = self._rpc(
             pb.Frame(
                 load_time_bars=pb.LoadTimeBarsRequest(
@@ -277,7 +298,9 @@ class GatewayClient:
         )
         which = resp.WhichOneof("body")
         if which != "load_time_bars_response":
-            raise GatewayError("protocol", f"expected load_time_bars_response, got {which}")
+            raise GatewayError(
+                "protocol", f"expected load_time_bars_response, got {which}"
+            )
         return [_message_to_dict(b) for b in resp.load_time_bars_response.bars]
 
     def load_time_bars_range(
@@ -309,7 +332,9 @@ class GatewayClient:
 
         step = bar_slice_secs(bar_type, period)
         timeout = (
-            self._history_rpc_timeout_sec if rpc_timeout_sec is None else float(rpc_timeout_sec)
+            self._history_rpc_timeout_sec
+            if rpc_timeout_sec is None
+            else float(rpc_timeout_sec)
         )
         slices = window_slices(int(start_ssboe), int(end_ssboe), step)
         if not slices:
@@ -353,10 +378,8 @@ class GatewayClient:
                     rpc_timeout_sec=timeout,
                 )
             finally:
-                try:
+                with contextlib.suppress(Exception):
                     peer.disconnect()
-                except Exception:
-                    pass
 
         merged_map: dict[tuple[int, int], list[dict[str, Any]]] = {}
         workers = min(max_workers, len(slices))
@@ -420,10 +443,14 @@ class GatewayClient:
         )
         which = resp.WhichOneof("body")
         if which != "probe_time_bars_response":
-            raise GatewayError("protocol", f"expected probe_time_bars_response, got {which}")
+            raise GatewayError(
+                "protocol", f"expected probe_time_bars_response, got {which}"
+            )
         return [_message_to_dict(r) for r in resp.probe_time_bars_response.rows]
 
-    def subscribe_time_bars(self, symbol: str, exchange: str, bar_type: int, period: int) -> None:
+    def subscribe_time_bars(
+        self, symbol: str, exchange: str, bar_type: int, period: int
+    ) -> None:
         self._rpc(
             pb.Frame(
                 subscribe_time_bars=pb.SubscribeTimeBarsRequest(
@@ -653,7 +680,8 @@ class GatewayClient:
                     if resp.request_id != rid:
                         raise GatewayError(
                             "protocol",
-                            f"error for request_id={resp.request_id} while waiting for {rid}: "
+                            f"error for request_id={resp.request_id} while "
+                            f"waiting for {rid}: "
                             f"{resp.error.code}: {resp.error.message}",
                         )
                     raise GatewayError(resp.error.code, resp.error.message)
@@ -662,7 +690,8 @@ class GatewayClient:
                 # Uncorrelated non-event frame — treat as protocol error.
                 raise GatewayError(
                     "protocol",
-                    f"unexpected frame {which!r} request_id={resp.request_id} while waiting for {rid}",
+                    f"unexpected frame {which!r} request_id={resp.request_id} "
+                    f"while waiting for {rid}",
                 )
         except GatewayError as exc:
             # Fatal wire errors close the fd inside _recv_exact; null self._sock
@@ -670,7 +699,7 @@ class GatewayClient:
             if exc.code in {"desync", "eof", "frame_too_large"}:
                 self._close_sock()
             raise
-        except (TimeoutError, socket.timeout) as exc:
+        except TimeoutError as exc:
             self._close_sock()
             raise GatewayError(
                 "timeout", f"RPC {rid} timed out after {effective}s"
@@ -712,14 +741,15 @@ class GatewayClient:
                     continue
                 if which == "error":
                     raise GatewayError(frame.error.code, frame.error.message)
-                # Unexpected Ack/response while polling — queue nothing, keep going if timed.
+                # Unexpected Ack/response while polling — queue nothing, keep
+                # going if timed.
                 if timeout == 0.0:
                     return None
         except GatewayError as exc:
             if exc.code in {"desync", "eof", "frame_too_large"}:
                 self._close_sock()
             raise
-        except (TimeoutError, socket.timeout, BlockingIOError):
+        except (TimeoutError, BlockingIOError):
             return None
         finally:
             if self._sock is not None:
@@ -729,10 +759,8 @@ class GatewayClient:
         sock = self._sock
         self._sock = None
         if sock is not None:
-            try:
+            with contextlib.suppress(Exception):
                 sock.close()
-            except Exception:
-                pass
 
     def _write_frame(self, frame: pb.Frame) -> None:
         assert self._sock is not None
@@ -759,12 +787,10 @@ def _recv_exact(sock: socket.socket, n: int) -> bytes:
             if not chunk:
                 raise GatewayError("eof", "gateway closed connection")
             buf.extend(chunk)
-    except (TimeoutError, socket.timeout) as exc:
+    except TimeoutError as exc:
         if buf:
-            try:
+            with contextlib.suppress(Exception):
                 sock.close()
-            except Exception:
-                pass
             raise GatewayError(
                 "desync",
                 f"timed out after {len(buf)}/{n} bytes; connection closed",

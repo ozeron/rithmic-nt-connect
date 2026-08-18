@@ -18,9 +18,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import UTC
-from datetime import datetime
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -53,12 +51,13 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
-    from rithmic_nt_connect import load_dotenv_files
-    from rithmic_nt_connect import load_front_month_instrument
-    from rithmic_nt_connect import load_time_bars
+    from rithmic_nt_connect import (
+        load_dotenv_files,
+        load_front_month_instrument,
+        load_time_bars,
+    )
     from rithmic_nt_connect.config import SessionConfig
-    from rithmic_nt_connect.data import bar_type_to_rithmic
-    from rithmic_nt_connect.data import external_bar_advertised
+    from rithmic_nt_connect.data import bar_type_to_rithmic, external_bar_advertised
     from rithmic_nt_connect.session import connect_market_data_session
 
     load_dotenv_files(ROOT / ".env")
@@ -68,14 +67,16 @@ def main() -> int:
 
     try:
         cfg = SessionConfig.from_env()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(f"SKIP (no credentials): {exc}")
         return 2
 
     specs = [part.strip().upper() for part in args.specs.split(",") if part.strip()]
     unknown = [spec for spec in specs if spec not in _SPEC_WINDOWS]
     if unknown:
-        print(f"unknown spec {unknown}; known: {sorted(_SPEC_WINDOWS)}", file=sys.stderr)
+        print(
+            f"unknown spec {unknown}; known: {sorted(_SPEC_WINDOWS)}", file=sys.stderr
+        )
         return 2
 
     print(
@@ -90,9 +91,7 @@ def main() -> int:
         end = datetime.now(UTC)
         print(f"instrument {instrument.id}")
         print()
-        print(
-            f"{'spec':<12} {'rithmic':<22} {'live':<6} {'n':>5}  first → last (UTC)"
-        )
+        print(f"{'spec':<12} {'rithmic':<22} {'live':<6} {'n':>5}  first → last (UTC)")
         for spec in specs:
             bar_type = BarType.from_str(f"{instrument.id}-{spec}-LAST-EXTERNAL")
             rtype, period = bar_type_to_rithmic(bar_type)

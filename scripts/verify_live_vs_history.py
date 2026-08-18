@@ -7,12 +7,14 @@ Exit codes:
   2 — credentials missing (CI-safe skip)
 
 Example:
-  python scripts/verify_live_vs_history.py --root NQ --seconds 12 --out artifacts/verify.json
+  python scripts/verify_live_vs_history.py --root NQ --seconds 12
+  --out artifacts/verify.json
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import sys
 from pathlib import Path
 
@@ -27,9 +29,15 @@ def main(argv: list[str] | None = None) -> int:
     from rithmic_nt_connect.verify import run_front_month_verify
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", default=None, help="Product root (default: env symbol or NQ)")
-    parser.add_argument("--exchange", default=None, help="Exchange (default: env or CME)")
-    parser.add_argument("--seconds", type=float, default=10.0, help="Live record duration")
+    parser.add_argument(
+        "--root", default=None, help="Product root (default: env symbol or NQ)"
+    )
+    parser.add_argument(
+        "--exchange", default=None, help="Exchange (default: env or CME)"
+    )
+    parser.add_argument(
+        "--seconds", type=float, default=10.0, help="Live record duration"
+    )
     parser.add_argument(
         "--min-overlap",
         type=float,
@@ -52,7 +60,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         cfg = SessionConfig.from_env()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(f"VERIFY SKIP (no credentials): {exc}")
         return 2
 
@@ -77,10 +85,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"recorded {report.recorded_live_path}")
         return 0 if report.ok else 1
     finally:
-        try:
+        with contextlib.suppress(Exception):
             session.disconnect()
-        except Exception:
-            pass
 
 
 if __name__ == "__main__":

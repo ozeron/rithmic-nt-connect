@@ -7,9 +7,10 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from rithmic_nt_connect.front_month import resolve_front_month
 from rithmic_nt_connect.session import WireSession
@@ -69,7 +70,8 @@ def _event_to_recorded(event: Mapping[str, Any], *, source: str) -> RecordedTick
         ts = int(event["ssboe"]) * 1_000_000_000 + int(usecs) * 1_000
     if price is None or size is None or ts is None:
         raise ValueError(
-            f"{source} {etype} missing trade_price/trade_size/timestamp: {dict(event)!r}"
+            f"{source} {etype} missing trade_price/trade_size/timestamp: "
+            f"{dict(event)!r}"
         )
     return RecordedTick(
         ts_event_ns=int(ts),
@@ -213,7 +215,9 @@ def compare_ticks(
     denom = max(len(live_map), 1)
     overlap_ratio = matched / denom
 
-    def _sample(keys: set[tuple[int, float]], src: dict[tuple[int, float], RecordedTick]) -> list[dict]:
+    def _sample(
+        keys: set[tuple[int, float]], src: dict[tuple[int, float], RecordedTick]
+    ) -> list[dict]:
         out = []
         for key in sorted(keys)[:5]:
             t = src[key]

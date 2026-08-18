@@ -24,6 +24,7 @@ Examples::
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -71,7 +72,9 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="force dry-run even if RITHMIC_ENABLE_TRADING is set",
     )
-    parser.add_argument("--root", default="NQ", help="root symbol for front-month resolve")
+    parser.add_argument(
+        "--root", default="NQ", help="root symbol for front-month resolve"
+    )
     parser.add_argument("--exchange", default="CME")
     parser.add_argument(
         "--price",
@@ -82,8 +85,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--side", default="BUY", choices=["BUY", "SELL"])
     args = parser.parse_args(argv)
 
-    from rithmic_nt_connect import env_truthy
-    from rithmic_nt_connect import load_dotenv_files
+    from rithmic_nt_connect import env_truthy, load_dotenv_files
     from rithmic_nt_connect.config import SessionConfig
     from rithmic_nt_connect.front_month import resolve_front_month
     from rithmic_nt_connect.session import create_session
@@ -96,7 +98,8 @@ def main(argv: list[str] | None = None) -> int:
     allow_live = bool(args.live_place) and env_trading and not args.no_live_place
     if args.live_place and not allow_live:
         print(
-            "REFUSING --live-place: set RITHMIC_ENABLE_TRADING=1 and omit --no-live-place",
+            "REFUSING --live-place: set RITHMIC_ENABLE_TRADING=1 and omit "
+            "--no-live-place",
             file=sys.stderr,
         )
         return 3
@@ -138,7 +141,8 @@ def main(argv: list[str] | None = None) -> int:
                     "ib_id": resolved.get("ib_id"),
                 }
         print(
-            f"order plant subscribed; front={front['trading_symbol']}.{front['trading_exchange']}; "
+            f"order plant subscribed; front={front['trading_symbol']}."
+            f"{front['trading_exchange']}; "
             f"mode={report['mode']}; account={report.get('resolved_account')}"
         )
 
@@ -219,7 +223,7 @@ def main(argv: list[str] | None = None) -> int:
                         "(will not cancel_all)",
                         file=sys.stderr,
                     )
-            except Exception as cancel_exc:  # noqa: BLE001
+            except Exception as cancel_exc:
                 print(f"WARN: cancel after place failed: {cancel_exc}", file=sys.stderr)
 
         report["event_count"] = len(report["events"])
@@ -235,20 +239,21 @@ def main(argv: list[str] | None = None) -> int:
                 f"placed={report['placed']} cancelled={report['cancelled']}"
             )
         else:
-            print(f"DRY-RUN OK event_count={report['event_count']} placed={report['placed']}")
+            print(
+                f"DRY-RUN OK event_count={report['event_count']} "
+                f"placed={report['placed']}"
+            )
         if args.out is not None:
             args.out.parent.mkdir(parents=True, exist_ok=True)
             args.out.write_text(json.dumps(report, indent=2) + "\n")
             print(f"wrote {args.out}")
         return 0
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1
     finally:
-        try:
+        with contextlib.suppress(Exception):
             session.disconnect()
-        except Exception:
-            pass
 
 
 if __name__ == "__main__":

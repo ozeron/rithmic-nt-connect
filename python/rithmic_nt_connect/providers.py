@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from nautilus_trader.common.providers import InstrumentProvider
@@ -27,7 +27,7 @@ def _parse_expiration_ns(raw: str) -> int:
         try:
             slice_len = 8 if fmt == "%Y%m%d" else 10
             dt = datetime.strptime(text[:slice_len], fmt)
-            return int(dt.replace(tzinfo=timezone.utc).timestamp() * 1_000_000_000)
+            return int(dt.replace(tzinfo=UTC).timestamp() * 1_000_000_000)
         except ValueError:
             continue
     raise InstrumentBuildError(f"unrecognized expiration_date: {raw!r}")
@@ -37,7 +37,9 @@ def _price_increment(tick_size: float, price_precision: int) -> Price:
     if tick_size <= 0:
         raise InstrumentBuildError(f"tick_size must be > 0, got {tick_size}")
     if price_precision < 0:
-        raise InstrumentBuildError(f"price_precision must be >= 0, got {price_precision}")
+        raise InstrumentBuildError(
+            f"price_precision must be >= 0, got {price_precision}"
+        )
     text = f"{tick_size:.{price_precision}f}".rstrip("0").rstrip(".")
     if "." not in text:
         text = f"{text}.0"
@@ -80,7 +82,9 @@ def future_from_reference(
         if value is None or value == ""
     ]
     if missing:
-        raise InstrumentBuildError(f"reference data missing required fields: {', '.join(missing)}")
+        raise InstrumentBuildError(
+            f"reference data missing required fields: {', '.join(missing)}"
+        )
 
     symbol_s = str(symbol)
     exchange_s = str(exchange)
@@ -92,7 +96,7 @@ def future_from_reference(
         # types for the numeric conversions below.
         raise InstrumentBuildError("reference data missing numeric fields")
 
-    now = int(datetime.now(timezone.utc).timestamp() * 1_000_000_000)
+    now = int(datetime.now(UTC).timestamp() * 1_000_000_000)
     # 0 = tradable for any backtest window. "now" rejects historical orders
     # ("Contract not yet active").
     act_ns = 0 if activation_ns is None else int(activation_ns)
@@ -129,7 +133,9 @@ def nautilus_venue():
 
 
 class RithmicInstrumentProvider(InstrumentProvider):
-    """Loads instruments for configured (symbol, exchange) pairs via front-month + ref-data."""
+    """Loads instruments for configured (symbol, exchange) pairs via
+    front-month + ref-data.
+    """
 
     def __init__(
         self,
@@ -147,13 +153,15 @@ class RithmicInstrumentProvider(InstrumentProvider):
             front = self._session.get_front_month(root, exchange)
             if not isinstance(front, dict):
                 raise InstrumentBuildError(
-                    f"front-month response must be a dict for {root}/{exchange}, got {type(front)!r}"
+                    f"front-month response must be a dict for {root}/{exchange}, got "
+                    f"{type(front)!r}"
                 )
             trading_symbol = front.get("trading_symbol")
             trading_exchange = front.get("trading_exchange")
             if not trading_symbol or not trading_exchange:
                 raise InstrumentBuildError(
-                    f"front-month missing trading_symbol/trading_exchange for {root}/{exchange}"
+                    f"front-month missing trading_symbol/trading_exchange for "
+                    f"{root}/{exchange}"
                 )
             get_ref = getattr(self._session, "get_reference_data", None)
             if not callable(get_ref):
@@ -161,6 +169,7 @@ class RithmicInstrumentProvider(InstrumentProvider):
             ref = get_ref(str(trading_symbol), str(trading_exchange))
             if not isinstance(ref, dict):
                 raise InstrumentBuildError(
-                    f"reference data must be a dict for {trading_symbol}/{trading_exchange}"
+                    f"reference data must be a dict for "
+                    f"{trading_symbol}/{trading_exchange}"
                 )
             self.add(future_from_reference(ref))

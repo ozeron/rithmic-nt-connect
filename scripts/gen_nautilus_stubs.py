@@ -34,6 +34,7 @@ Run from the repo root (regenerates ``stubs/`` in place):
 
 from __future__ import annotations
 
+import contextlib
 import os
 import pathlib
 import re
@@ -68,30 +69,33 @@ from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 """
 
-_FUTURES_CTOR = """    # Constructor hand-ported from futures_contract.pyx (stubgen mangles cdef names).
-    def __init__(
-        self,
-        instrument_id: InstrumentId,
-        raw_symbol: Symbol,
-        asset_class: AssetClass,
-        currency: Currency,
-        price_precision: int,
-        price_increment: Price,
-        multiplier: Quantity,
-        lot_size: Quantity,
-        underlying: str,
-        activation_ns: int,
-        expiration_ns: int,
-        ts_event: int,
-        ts_init: int,
-        margin_init: Decimal | None = None,
-        margin_maint: Decimal | None = None,
-        maker_fee: Decimal | None = None,
-        taker_fee: Decimal | None = None,
-        exchange: str | None = None,
-        tick_scheme_name: str | None = None,
-        info: dict | None = None,
-    ) -> None: ..."""
+_FUTURES_CTOR = (
+    "    # Constructor hand-ported from futures_contract.pyx "
+    "(stubgen mangles cdef names).\n"
+    "    def __init__(\n"
+    "        self,\n"
+    "        instrument_id: InstrumentId,\n"
+    "        raw_symbol: Symbol,\n"
+    "        asset_class: AssetClass,\n"
+    "        currency: Currency,\n"
+    "        price_precision: int,\n"
+    "        price_increment: Price,\n"
+    "        multiplier: Quantity,\n"
+    "        lot_size: Quantity,\n"
+    "        underlying: str,\n"
+    "        activation_ns: int,\n"
+    "        expiration_ns: int,\n"
+    "        ts_event: int,\n"
+    "        ts_init: int,\n"
+    "        margin_init: Decimal | None = None,\n"
+    "        margin_maint: Decimal | None = None,\n"
+    "        maker_fee: Decimal | None = None,\n"
+    "        taker_fee: Decimal | None = None,\n"
+    "        exchange: str | None = None,\n"
+    "        tick_scheme_name: str | None = None,\n"
+    "        info: dict | None = None,\n"
+    "    ) -> None: ..."
+)
 
 _DATA_IMPORT = "\nfrom nautilus_trader.model.identifiers import InstrumentId\n"
 _DATA_DELTAS_CTOR = (
@@ -99,91 +103,112 @@ _DATA_DELTAS_CTOR = (
     "    def __init__(self, instrument_id: InstrumentId, deltas: list) -> None: ..."
 )
 
-_BASE_PRICE_ATTRS = """    # ``price``/``trigger_price`` live on the concrete limit/stop subclasses,
-    # not the base; declared here so adapters can read them guarded by
-    # ``has_price``/``has_trigger_price``. ``trigger_type`` is deliberately
-    # absent: only stop orders expose it, and unguarded access must stay an error.
-    price: Incomplete
-    trigger_price: Incomplete
-"""
+_BASE_PRICE_ATTRS = (
+    "    # ``price``/``trigger_price`` live on the concrete limit/stop "
+    "subclasses,\n"
+    "    # not the base; declared here so adapters can read them guarded by\n"
+    "    # ``has_price``/``has_trigger_price``. ``trigger_type`` is deliberately\n"
+    "    # absent: only stop orders expose it, and unguarded access must stay an "
+    "error.\n"
+    "    price: Incomplete\n"
+    "    trigger_price: Incomplete\n"
+)
 
-_COMPONENT_CDEF_ATTRS = """    # cdef attribute surface (from component.pxd) that subclasses use directly.
-    _clock: Incomplete
-    _log: Incomplete
-    _msgbus: Incomplete
-    _loop: Incomplete
-"""
+_COMPONENT_CDEF_ATTRS = (
+    "    # cdef attribute surface (from component.pxd) that subclasses use "
+    "directly.\n"
+    "    _clock: Incomplete\n"
+    "    _log: Incomplete\n"
+    "    _msgbus: Incomplete\n"
+    "    _loop: Incomplete\n"
+)
 
 _DATA_CLIENT_IMPORT = "\nfrom nautilus_trader.cache.cache import Cache\n"
-_DATA_CLIENT_ATTRS = """    # cdef readonly Cache _cache (data/client.pxd) — adapters read it via self._cache.
-    _cache: Cache
-"""
+_DATA_CLIENT_ATTRS = (
+    "    # cdef readonly Cache _cache (data/client.pxd) — adapters read it via "
+    "self._cache.\n"
+    "    _cache: Cache\n"
+)
 
-_ACCOUNT_STATE_CTOR = """    # Hand-ported from execution/client.pxd (stubgen mangles cdef params).
-    def generate_account_state(
-        self, balances: list, margins: list, reported: bool, ts_event: int, info: dict | None = None
-    ) -> None: ...
-    _cache: Incomplete
-    def _set_account_id(self, account_id: Any) -> None: ...
-    def _send_account_state(self, account_state: Any) -> None: ...
-    def _send_order_event(self, event: Any) -> None: ...
-    def _send_mass_status_report(self, report: Any) -> None: ...
-    def _send_order_status_report(self, report: Any) -> None: ...
-    def _send_fill_report(self, report: Any) -> None: ...
-    def _send_position_status_report(self, report: Any) -> None: ..."""
+_ACCOUNT_STATE_CTOR = (
+    "    # Hand-ported from execution/client.pxd (stubgen mangles cdef params).\n"
+    "    def generate_account_state(\n"
+    "        self, balances: list, margins: list, reported: bool, ts_event: int, "
+    "info: dict | None = None\n"
+    "    ) -> None: ...\n"
+    "    _cache: Incomplete\n"
+    "    def _set_account_id(self, account_id: Any) -> None: ...\n"
+    "    def _send_account_state(self, account_state: Any) -> None: ...\n"
+    "    def _send_order_event(self, event: Any) -> None: ...\n"
+    "    def _send_mass_status_report(self, report: Any) -> None: ...\n"
+    "    def _send_order_status_report(self, report: Any) -> None: ...\n"
+    "    def _send_fill_report(self, report: Any) -> None: ...\n"
+    "    def _send_position_status_report(self, report: Any) -> None: ..."
+)
 
-_SUBMIT_ORDER_CTOR = """    # Hand-ported from execution/messages.pxd (stubgen mangles cdef params).
-    def __init__(
-        self,
-        trader_id: Any,
-        strategy_id: Any,
-        order: Any,
-        command_id: Any,
-        ts_init: int,
-        position_id: Any | None = None,
-        client_id: Any | None = None,
-        params: dict | None = None,
-        correlation_id: Any | None = None,
-    ) -> None: ..."""
+_SUBMIT_ORDER_CTOR = (
+    "    # Hand-ported from execution/messages.pxd (stubgen mangles cdef params).\n"
+    "    def __init__(\n"
+    "        self,\n"
+    "        trader_id: Any,\n"
+    "        strategy_id: Any,\n"
+    "        order: Any,\n"
+    "        command_id: Any,\n"
+    "        ts_init: int,\n"
+    "        position_id: Any | None = None,\n"
+    "        client_id: Any | None = None,\n"
+    "        params: dict | None = None,\n"
+    "        correlation_id: Any | None = None,\n"
+    "    ) -> None: ..."
+)
 
 _EXEC_RECON_CTORS = {
-    "GenerateFillReports": """    # Hand-ported recon ctor from execution/messages.pyx (stubgen mangles cdef names).
-    def __init__(
-        self,
-        instrument_id: Any,
-        venue_order_id: Any,
-        start: Any,
-        end: Any,
-        command_id: Any,
-        ts_init: int,
-        params: dict | None = None,
-        correlation_id: Any | None = None,
-    ) -> None: ...""",
-    "GenerateOrderStatusReports": """    # Hand-ported recon ctor from execution/messages.pyx (stubgen mangles cdef names).
-    def __init__(
-        self,
-        instrument_id: Any,
-        start: Any,
-        end: Any,
-        open_only: bool,
-        command_id: Any,
-        ts_init: int,
-        params: dict | None = None,
-        log_receipt_level: Any = ...,
-        correlation_id: Any | None = None,
-    ) -> None: ...""",
-    "GeneratePositionStatusReports": """    # Hand-ported recon ctor from execution/messages.pyx (stubgen mangles cdef names).
-    def __init__(
-        self,
-        instrument_id: Any,
-        start: Any,
-        end: Any,
-        command_id: Any,
-        ts_init: int,
-        params: dict | None = None,
-        log_receipt_level: Any = ...,
-        correlation_id: Any | None = None,
-    ) -> None: ...""",
+    "GenerateFillReports": (
+        "    # Hand-ported recon ctor from execution/messages.pyx "
+        "(stubgen mangles cdef names).\n"
+        "    def __init__(\n"
+        "        self,\n"
+        "        instrument_id: Any,\n"
+        "        venue_order_id: Any,\n"
+        "        start: Any,\n"
+        "        end: Any,\n"
+        "        command_id: Any,\n"
+        "        ts_init: int,\n"
+        "        params: dict | None = None,\n"
+        "        correlation_id: Any | None = None,\n"
+        "    ) -> None: ..."
+    ),
+    "GenerateOrderStatusReports": (
+        "    # Hand-ported recon ctor from execution/messages.pyx "
+        "(stubgen mangles cdef names).\n"
+        "    def __init__(\n"
+        "        self,\n"
+        "        instrument_id: Any,\n"
+        "        start: Any,\n"
+        "        end: Any,\n"
+        "        open_only: bool,\n"
+        "        command_id: Any,\n"
+        "        ts_init: int,\n"
+        "        params: dict | None = None,\n"
+        "        log_receipt_level: Any = ...,\n"
+        "        correlation_id: Any | None = None,\n"
+        "    ) -> None: ..."
+    ),
+    "GeneratePositionStatusReports": (
+        "    # Hand-ported recon ctor from execution/messages.pyx "
+        "(stubgen mangles cdef names).\n"
+        "    def __init__(\n"
+        "        self,\n"
+        "        instrument_id: Any,\n"
+        "        start: Any,\n"
+        "        end: Any,\n"
+        "        command_id: Any,\n"
+        "        ts_init: int,\n"
+        "        params: dict | None = None,\n"
+        "        log_receipt_level: Any = ...,\n"
+        "        correlation_id: Any | None = None,\n"
+        "    ) -> None: ..."
+    ),
 }
 
 _LIVE_MDC_HANDLERS = """    # cdef handler surface adapters override (data_client.pxd).
@@ -223,7 +248,7 @@ def _strip_self_imports(pkg: pathlib.Path) -> int:
     fixed = 0
     for pyi in pkg.rglob("*.pyi"):
         text = pyi.read_text()
-        classes = set(re.findall(r"^class (\w+)", text, re.M))
+        classes = set(re.findall(r"^class (\w+)", text, re.MULTILINE))
         lines = text.splitlines()
         kept = []
         for line in lines:
@@ -271,10 +296,8 @@ def _prune_unused_subpackages(pkg: pathlib.Path) -> int:
     # removed before parents; ``os.rmdir`` only succeeds on an empty dir.
     for dirpath, _, _ in os.walk(pkg, topdown=False):
         if dirpath != str(pkg):
-            try:
+            with contextlib.suppress(OSError):
                 os.rmdir(dirpath)
-            except OSError:
-                pass
     return removed
 
 
@@ -290,9 +313,12 @@ def _apply_hand_patches(pkg: pathlib.Path) -> int:
     component = pkg / "common/component.pyi"
     applied += _patch(
         component,
-        "class Component:\n    fully_qualified_name: ClassVar[method] = ...\n    __pyx_vtable__: ClassVar[PyCapsule] = ...\n",
-        "class Component:\n    fully_qualified_name: ClassVar[method] = ...\n    __pyx_vtable__: ClassVar[PyCapsule] = ...\n"
-        + _COMPONENT_CDEF_ATTRS,
+        "class Component:\n"
+        "    fully_qualified_name: ClassVar[method] = ...\n"
+        "    __pyx_vtable__: ClassVar[PyCapsule] = ...\n",
+        "class Component:\n"
+        "    fully_qualified_name: ClassVar[method] = ...\n"
+        "    __pyx_vtable__: ClassVar[PyCapsule] = ...\n" + _COMPONENT_CDEF_ATTRS,
         marker="# cdef attribute surface (from component.pxd)",
     )
 
@@ -307,8 +333,11 @@ def _apply_hand_patches(pkg: pathlib.Path) -> int:
         applied += 1
     applied += _patch(
         data_client,
-        "    is_connected: Incomplete\n    venue: Incomplete\n    def __init__(self, ClientIdclient_id",
-        "    is_connected: Incomplete\n    venue: Incomplete\n" + _DATA_CLIENT_ATTRS
+        "    is_connected: Incomplete\n"
+        "    venue: Incomplete\n"
+        "    def __init__(self, ClientIdclient_id",
+        "    is_connected: Incomplete\n    venue: Incomplete\n"
+        + _DATA_CLIENT_ATTRS
         + "    def __init__(self, ClientIdclient_id",
         marker="# cdef readonly Cache _cache",
     )
@@ -316,21 +345,30 @@ def _apply_hand_patches(pkg: pathlib.Path) -> int:
     exec_client = pkg / "execution/client.pyi"
     applied += _patch(
         exec_client,
-        "    def generate_account_state(self, listbalances, listmargins, boolreported, uint64_tts_event, dictinfo=...) -> void: ...\n",
+        "    def generate_account_state(self, listbalances, listmargins, "
+        "boolreported, uint64_tts_event, dictinfo=...) -> void: ...\n",
         _ACCOUNT_STATE_CTOR + "\n",
         marker="# Hand-ported from execution/client.pxd",
     )
     applied += _patch(
         exec_client,
         "LiquiditySideliquidity_side, uint64_tts_event, dictinfo=...) -> void: ...",
-        "LiquiditySideliquidity_side, uint64_tts_event, info: dict | None = ...) -> void: ...",
+        (
+            "LiquiditySideliquidity_side, uint64_tts_event, "
+            "info: dict | None = ...) -> "
+            "void: ..."
+        ),
         marker="info: dict | None = ...",
     )
 
     exec_msgs = pkg / "execution/messages.pyi"
     applied += _patch(
         exec_msgs,
-        "    def __init__(self, TraderIdtrader_id, StrategyIdstrategy_id, Orderorder, UUID4command_id, uint64_tts_init, PositionIdposition_id: PositionId | None = ..., ClientIdclient_id=..., dictparams: dict | None = ..., UUID4correlation_id=...) -> None: ...\n",
+        "    def __init__(self, TraderIdtrader_id, StrategyIdstrategy_id, "
+        "Orderorder, UUID4command_id, uint64_tts_init, "
+        "PositionIdposition_id: PositionId | None = ..., "
+        "ClientIdclient_id=..., dictparams: dict | None = ..., "
+        "UUID4correlation_id=...) -> None: ...\n",
         _SUBMIT_ORDER_CTOR + "\n",
         marker="# Hand-ported from execution/messages.pxd",
     )
@@ -341,7 +379,7 @@ def _apply_hand_patches(pkg: pathlib.Path) -> int:
         # Scope the replacement to the class body: the mangled ctor pattern also
         # matches on ``ExecutionReportCommand`` itself.
         start = text.index(f"class {cname}(ExecutionReportCommand):")
-        rest = text[start + 1:]
+        rest = text[start + 1 :]
         next_class = re.search(r"\nclass ", rest)
         end = len(text) if next_class is None else start + 1 + next_class.start()
         body = text[start:end]
@@ -363,7 +401,8 @@ def _apply_hand_patches(pkg: pathlib.Path) -> int:
     if "# Hand-ported handler param names (strategy.pxd)" not in text:
         text = text.replace(
             "class Strategy(Actor):\n",
-            "class Strategy(Actor):\n    # Hand-ported handler param names (strategy.pxd)\n",
+            "class Strategy(Actor):\n"
+            "    # Hand-ported handler param names (strategy.pxd)\n",
             1,
         )
         text = re.sub(
@@ -372,12 +411,17 @@ def _apply_hand_patches(pkg: pathlib.Path) -> int:
             text,
         )
         text = text.replace(
-            "    def submit_order(self, Orderorder, PositionIdposition_id=..., ClientIdclient_id=..., dictparams=...) -> void: ...\n",
-            "    def submit_order(self, order, position_id=..., client_id=..., params=...) -> void: ...\n",
+            "    def submit_order(self, Orderorder, PositionIdposition_id=..., "
+            "ClientIdclient_id=..., dictparams=...) -> void: ...\n",
+            "    def submit_order(self, order, position_id=..., client_id=..., "
+            "params=...) -> void: ...\n",
         )
         text = text.replace(
-            "    def submit_order_list(self, OrderListorder_list, PositionIdposition_id=..., ClientIdclient_id=..., dictparams=...) -> void: ...\n",
-            "    def submit_order_list(self, order_list, position_id=..., client_id=..., params=...) -> void: ...\n",
+            "    def submit_order_list(self, OrderListorder_list, "
+            "PositionIdposition_id=..., ClientIdclient_id=..., "
+            "dictparams=...) -> void: ...\n",
+            "    def submit_order_list(self, order_list, position_id=..., "
+            "client_id=..., params=...) -> void: ...\n",
         )
         strategy.write_text(text)
         applied += 1
@@ -387,16 +431,30 @@ def _apply_hand_patches(pkg: pathlib.Path) -> int:
     if "# Hand-ported handler param names (actor.pxd)" not in text:
         text = text.replace(
             "class Actor(Component):\n",
-            "class Actor(Component):\n    # Hand-ported handler param names (actor.pxd)\n",
+            "class Actor(Component):\n"
+            "    # Hand-ported handler param names (actor.pxd)\n",
             1,
         )
         for old, new in (
-            ("    def on_bar(self, Barbar) -> void: ...\n", "    def on_bar(self, bar) -> void: ...\n"),
-            ("    def on_quote_tick(self, QuoteTicktick) -> void: ...\n", "    def on_quote_tick(self, tick) -> void: ...\n"),
-            ("    def on_trade_tick(self, TradeTicktick) -> void: ...\n", "    def on_trade_tick(self, tick) -> void: ...\n"),
             (
-                "    def subscribe_quote_ticks(self, InstrumentIdinstrument_id, ClientIdclient_id=..., boolupdate_catalog=..., boolaggregate_spread_quotes=..., dictparams=...) -> void: ...\n",
-                "    def subscribe_quote_ticks(self, instrument_id, client_id=..., update_catalog=..., aggregate_spread_quotes=..., params=...) -> void: ...\n",
+                "    def on_bar(self, Barbar) -> void: ...\n",
+                "    def on_bar(self, bar) -> void: ...\n",
+            ),
+            (
+                "    def on_quote_tick(self, QuoteTicktick) -> void: ...\n",
+                "    def on_quote_tick(self, tick) -> void: ...\n",
+            ),
+            (
+                "    def on_trade_tick(self, TradeTicktick) -> void: ...\n",
+                "    def on_trade_tick(self, tick) -> void: ...\n",
+            ),
+            (
+                "    def subscribe_quote_ticks(self, InstrumentIdinstrument_id, "
+                "ClientIdclient_id=..., boolupdate_catalog=..., "
+                "boolaggregate_spread_quotes=..., dictparams=...) -> void: ...\n",
+                "    def subscribe_quote_ticks(self, instrument_id, client_id=..., "
+                "update_catalog=..., aggregate_spread_quotes=..., params=...) "
+                "-> void: ...\n",
             ),
         ):
             if old not in text:
@@ -435,7 +493,8 @@ def _apply_hand_patches(pkg: pathlib.Path) -> int:
     text = data.read_text()
     if _DATA_DELTAS_CTOR not in text:
         text = re.sub(
-            r"    def __init__\(self, InstrumentIdinstrument_id, listdeltas\) -> None: \.\.\.\n",
+            r"    def __init__\(self, InstrumentIdinstrument_id, "
+            r"listdeltas\) -> None: \.\.\.\n",
             _DATA_DELTAS_CTOR + "\n",
             text,
             count=1,

@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import pytest
-
-from rithmic_nt_connect.providers import InstrumentBuildError
-from rithmic_nt_connect.providers import _parse_expiration_ns
-from rithmic_nt_connect.providers import future_from_reference
-
+from rithmic_nt_connect.providers import (
+    InstrumentBuildError,
+    _parse_expiration_ns,
+    future_from_reference,
+)
 
 COMPLETE_REF = {
     "trading_symbol": "NQU6",

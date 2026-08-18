@@ -7,8 +7,9 @@ from these fields.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from decimal import Decimal
-from typing import Any, Mapping
+from typing import Any
 
 from rithmic_nt_connect.constants import VENUE
 
@@ -57,7 +58,9 @@ def rithmic_route_from_info(
     exchange = info.get("rithmic_exchange")
     if not symbol or not exchange:
         label = instrument_id if instrument_id is not None else "instrument"
-        raise ValueError(f"instrument {label} missing rithmic_symbol/rithmic_exchange in info")
+        raise ValueError(
+            f"instrument {label} missing rithmic_symbol/rithmic_exchange in info"
+        )
     return str(symbol), str(exchange)
 
 
@@ -267,7 +270,9 @@ def time_bar_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
     duration) — NOT here, because the wire ``period`` unit (native vs seconds)
     is not reliable.
     """
-    _require(d, "symbol", "open_price", "high_price", "low_price", "close_price", "volume")
+    _require(
+        d, "symbol", "open_price", "high_price", "low_price", "close_price", "volume"
+    )
     symbol = str(d["symbol"])
     exchange = d.get("exchange")
     ts = _ts_ns(d)

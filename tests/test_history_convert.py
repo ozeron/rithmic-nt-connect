@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import pytest
 from nautilus_trader.model.data import BarType
-
-from rithmic_nt_connect._convert import ConvertError
-from rithmic_nt_connect._convert import last_trade_to_fields
-from rithmic_nt_connect._convert import time_bar_to_fields
-from rithmic_nt_connect.data import bar_type_to_rithmic
-from rithmic_nt_connect.data import external_bar_advertised
-from rithmic_nt_connect.data import fields_to_bar
-from rithmic_nt_connect.data import payloads_to_bars
-from rithmic_nt_connect.data import payloads_to_trade_ticks
+from rithmic_nt_connect._convert import (
+    ConvertError,
+    last_trade_to_fields,
+    time_bar_to_fields,
+)
+from rithmic_nt_connect.data import (
+    bar_type_to_rithmic,
+    external_bar_advertised,
+    fields_to_bar,
+    payloads_to_bars,
+    payloads_to_trade_ticks,
+)
 
 
 def test_history_tick_requires_trade_price_and_size():
@@ -69,7 +72,7 @@ def test_time_bar_to_fields_and_bar():
     bar = fields_to_bar(fields, bar_type, ts_init=1)
     assert float(bar.close) == 100.5
     assert int(bar.volume) == 42
-    # 1-minute bar: Bar.ts_event = close (marker) − 60s = open time.
+    # 1-minute bar: Bar.ts_event = close (marker) - 60s = open time.
     assert bar.ts_event == (1_700_000_000 - 60) * 1_000_000_000
 
 
@@ -109,7 +112,7 @@ def test_live_time_bar_dict_converts():
         BarType.from_str("NQU6.RITHMIC-15-MINUTE-LAST-EXTERNAL"),
         ts_init=1,
     )
-    # 15-minute bar: Bar.ts_event = marker − 15*60s = open time.
+    # 15-minute bar: Bar.ts_event = marker - 15*60s = open time.
     assert bar.ts_event == (1_700_000_000 - 900) * 1_000_000_000
     assert float(bar.close) == 100.5
 
@@ -122,7 +125,10 @@ def test_time_bar_close_to_open_shift():
             "type": "history_bar",
             "symbol": "NQU6",
             "exchange": "CME",
-            "open_price": 1.0, "high_price": 1.0, "low_price": 1.0, "close_price": 1.0,
+            "open_price": 1.0,
+            "high_price": 1.0,
+            "low_price": 1.0,
+            "close_price": 1.0,
             "volume": 1,
             "marker": 1_700_000_000,
             "bar_type": 1,
@@ -144,7 +150,10 @@ def test_time_bar_close_to_open_shift():
             "type": "time_bar",
             "symbol": "NQU6",
             "exchange": "CME",
-            "open_price": 1.0, "high_price": 1.0, "low_price": 1.0, "close_price": 1.0,
+            "open_price": 1.0,
+            "high_price": 1.0,
+            "low_price": 1.0,
+            "close_price": 1.0,
             "volume": 1,
             "marker": 1_700_000_000,
             "bar_type": 2,
@@ -165,7 +174,10 @@ def test_time_bar_close_to_open_shift():
             "type": "time_bar",
             "symbol": "NQU6",
             "exchange": "CME",
-            "open_price": 1.0, "high_price": 1.0, "low_price": 1.0, "close_price": 1.0,
+            "open_price": 1.0,
+            "high_price": 1.0,
+            "low_price": 1.0,
+            "close_price": 1.0,
             "volume": 1,
             "marker": 1_700_000_000,
             "bar_type": 2,
@@ -184,7 +196,10 @@ def test_time_bar_close_to_open_shift():
             "type": "history_bar",
             "symbol": "NQU6",
             "exchange": "CME",
-            "open_price": 1.0, "high_price": 1.0, "low_price": 1.0, "close_price": 1.0,
+            "open_price": 1.0,
+            "high_price": 1.0,
+            "low_price": 1.0,
+            "close_price": 1.0,
             "volume": 1,
             "marker": 20_260_804,
             "ts_event_ns": 1_780_000_000 * 1_000_000_000,
@@ -201,21 +216,43 @@ def test_time_bar_close_to_open_shift():
 
 
 def test_external_bar_advertised_slice():
-    assert external_bar_advertised(BarType.from_str("NQU6.RITHMIC-1-MINUTE-LAST-EXTERNAL"))
-    assert external_bar_advertised(BarType.from_str("NQU6.RITHMIC-15-MINUTE-LAST-EXTERNAL"))
+    assert external_bar_advertised(
+        BarType.from_str("NQU6.RITHMIC-1-MINUTE-LAST-EXTERNAL")
+    )
+    assert external_bar_advertised(
+        BarType.from_str("NQU6.RITHMIC-15-MINUTE-LAST-EXTERNAL")
+    )
     assert external_bar_advertised(BarType.from_str("NQU6.RITHMIC-1-DAY-LAST-EXTERNAL"))
-    assert external_bar_advertised(BarType.from_str("NQU6.RITHMIC-1-HOUR-LAST-EXTERNAL"))
-    assert not external_bar_advertised(BarType.from_str("NQU6.RITHMIC-1-SECOND-LAST-EXTERNAL"))
-    assert not external_bar_advertised(BarType.from_str("NQU6.RITHMIC-1-SECOND-LAST-INTERNAL"))
-    assert not external_bar_advertised(BarType.from_str("NQU6.RITHMIC-5-MINUTE-LAST-EXTERNAL"))
+    assert external_bar_advertised(
+        BarType.from_str("NQU6.RITHMIC-1-HOUR-LAST-EXTERNAL")
+    )
+    assert not external_bar_advertised(
+        BarType.from_str("NQU6.RITHMIC-1-SECOND-LAST-EXTERNAL")
+    )
+    assert not external_bar_advertised(
+        BarType.from_str("NQU6.RITHMIC-1-SECOND-LAST-INTERNAL")
+    )
+    assert not external_bar_advertised(
+        BarType.from_str("NQU6.RITHMIC-5-MINUTE-LAST-EXTERNAL")
+    )
 
 
 def test_bar_type_to_rithmic_mapping():
-    assert bar_type_to_rithmic(BarType.from_str("NQU6.RITHMIC-1-MINUTE-LAST-EXTERNAL")) == (2, 1)
-    assert bar_type_to_rithmic(BarType.from_str("NQU6.RITHMIC-5-MINUTE-LAST-EXTERNAL")) == (2, 5)
-    assert bar_type_to_rithmic(BarType.from_str("NQU6.RITHMIC-1-SECOND-LAST-EXTERNAL")) == (1, 1)
-    assert bar_type_to_rithmic(BarType.from_str("NQU6.RITHMIC-1-DAY-LAST-EXTERNAL")) == (3, 1)
-    assert bar_type_to_rithmic(BarType.from_str("NQU6.RITHMIC-1-HOUR-LAST-EXTERNAL")) == (2, 60)
+    assert bar_type_to_rithmic(
+        BarType.from_str("NQU6.RITHMIC-1-MINUTE-LAST-EXTERNAL")
+    ) == (2, 1)
+    assert bar_type_to_rithmic(
+        BarType.from_str("NQU6.RITHMIC-5-MINUTE-LAST-EXTERNAL")
+    ) == (2, 5)
+    assert bar_type_to_rithmic(
+        BarType.from_str("NQU6.RITHMIC-1-SECOND-LAST-EXTERNAL")
+    ) == (1, 1)
+    assert bar_type_to_rithmic(
+        BarType.from_str("NQU6.RITHMIC-1-DAY-LAST-EXTERNAL")
+    ) == (3, 1)
+    assert bar_type_to_rithmic(
+        BarType.from_str("NQU6.RITHMIC-1-HOUR-LAST-EXTERNAL")
+    ) == (2, 60)
 
 
 def test_order_book_entitlement_error_is_explicit():
@@ -299,9 +336,7 @@ def test_time_bar_timestamp_precedence_ssboe_over_marker():
 
 
 def test_time_bar_timestamp_marker_fallback():
-    fields = time_bar_to_fields(
-        {**_minimal_bar_fields(), "marker": 1_700_000_000}
-    )
+    fields = time_bar_to_fields({**_minimal_bar_fields(), "marker": 1_700_000_000})
     assert fields["ts_event"] == 1_700_000_000 * 1_000_000_000
 
 

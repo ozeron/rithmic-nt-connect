@@ -13,11 +13,9 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from nautilus_trader.model.enums import OrderSide
-from nautilus_trader.model.enums import TimeInForce
+from nautilus_trader.model.enums import OrderSide, TimeInForce
 from nautilus_trader.model.identifiers import ClientOrderId
-from nautilus_trader.model.objects import Price
-from nautilus_trader.model.objects import Quantity
+from nautilus_trader.model.objects import Price, Quantity
 
 
 def price(instrument, base: float, delta_ticks: int) -> Price:
@@ -43,10 +41,10 @@ def relative(delta_ticks: int):
 
 
 # Named price/trigger fns used by the TC case tables.
-below = relative(-500)      # buy limit below bid (rests, no fill)
-above = relative(1)         # sell limit above ask / marketable limit
+below = relative(-500)  # buy limit below bid (rests, no fill)
+above = relative(1)  # sell limit above ask / marketable limit
 far_below = relative(-500)  # sell stop below bid (rests)
-far_above = relative(500)   # buy stop above ask (rests)
+far_above = relative(500)  # buy stop above ask (rests)
 
 
 def _cid(client_order_id: str | None) -> ClientOrderId | None:
@@ -68,9 +66,7 @@ def _quote_gated(build):
 
 def market(side: OrderSide, qty: str = "1", tif: TimeInForce = TimeInForce.GTC):
     def _spec(strat, inst, bid, ask):
-        return strat.order_factory.market(
-            inst.id, side, Quantity.from_str(qty), tif
-        )
+        return strat.order_factory.market(inst.id, side, Quantity.from_str(qty), tif)
 
     return _spec
 

@@ -20,29 +20,27 @@ Skips when no complete traded minute closes within the window (thin market).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import threading
 import time
 
 import pytest
-
-from nautilus_trader.config import LiveDataEngineConfig
-from nautilus_trader.config import LoggingConfig
-from nautilus_trader.config import TradingNodeConfig
-from nautilus_trader.model.data import Bar
-from nautilus_trader.model.data import BarType
+from nautilus_trader.config import (
+    LiveDataEngineConfig,
+    LoggingConfig,
+    TradingNodeConfig,
+)
 from nautilus_trader.live.node import TradingNode
+from nautilus_trader.model.data import Bar, BarType
 from nautilus_trader.model.identifiers import TraderId
-from nautilus_trader.trading.strategy import Strategy
-from nautilus_trader.trading.strategy import StrategyConfig
-
-from rithmic_nt_connect import ADAPTER_NAME
-from rithmic_nt_connect import RithmicLiveDataClientConfig
-from rithmic_nt_connect import RithmicLiveDataClientFactory
-from parity_helpers import NS_PER_MIN
-from parity_helpers import open_minute
-from parity_helpers import wait_for_external_bar
-
-from rithmic_nt_connect import session_config_from_explicit_test_env
+from nautilus_trader.trading.strategy import Strategy, StrategyConfig
+from parity_helpers import NS_PER_MIN, open_minute, wait_for_external_bar
+from rithmic_nt_connect import (
+    ADAPTER_NAME,
+    RithmicLiveDataClientConfig,
+    RithmicLiveDataClientFactory,
+    session_config_from_explicit_test_env,
+)
 from rithmic_nt_connect.session import connect_market_data_session
 
 pytestmark = pytest.mark.live
@@ -115,17 +113,17 @@ def _release_locks() -> None:
         for _sess in _SESSION_CACHE.values():
             _lock = getattr(_sess, "_lock", None)
             if _lock is not None:
-                try:
+                with contextlib.suppress(Exception):
                     _lock.close()
-                except Exception:
-                    pass
         _SESSION_CACHE.clear()
     except Exception:
         pass
 
 
 class TestInternalNode:
-    def test_TC_D54_internal_node_matches_external(self, front_month_instrument) -> None:
+    def test_TC_D54_internal_node_matches_external(
+        self, front_month_instrument
+    ) -> None:
         """TC-D54 — real-node INTERNAL bars equal EXTERNAL bars at the seam."""
         instrument = front_month_instrument
         test_session = session_config_from_explicit_test_env()
@@ -192,7 +190,9 @@ class TestInternalNode:
             if lock is not None:
                 lock.close()
 
-        assert external is not None, f"EXTERNAL bar exists for captured minute {minute_sec}"
+        assert external is not None, (
+            f"EXTERNAL bar exists for captured minute {minute_sec}"
+        )
 
         # Parity: INTERNAL (aggregated by Nautilus) vs EXTERNAL (venue bar).
         tick = float(instrument.price_increment.as_double())
@@ -212,7 +212,9 @@ class TestInternalNode:
         )
 
         # In-progress continuity: INTERNAL volume == live ticks from minute open.
-        minute_ticks = [t for t in strategy.ticks if open_minute(int(t.ts_event)) == minute_ns]
+        minute_ticks = [
+            t for t in strategy.ticks if open_minute(int(t.ts_event)) == minute_ns
+        ]
         tick_volume = sum(int(t.size) for t in minute_ticks)
         assert tick_volume == int(traded.volume) == int(external.volume), (
             f"minute {minute_sec}: live ticks {tick_volume} != INTERNAL "

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 # NOTE: the Rust exceptions (pyo3 ``create_exception!``) all subclass
 # PyRuntimeError directly. The hierarchy below deliberately mirrors the
 # ``errors.py`` fallback classes (``ChannelLaggedError(ChannelError)`` etc.) so
@@ -18,30 +17,23 @@ from typing import Any
 class ChannelError(RuntimeError):
     """Base for plant channel failures that require resync."""
 
-
 class AlreadyConnectedError(RuntimeError):
     """Session already connected (idempotent connect is safe to suppress)."""
-
 
 class ChannelLaggedError(ChannelError):
     """Broadcast receiver lagged; messages were skipped."""
 
-
 class ChannelClosedError(ChannelError):
     """Plant subscription channel closed."""
-
 
 class NotConnectedError(ChannelError):
     """Required plant is not connected."""
 
-
 class ReconciliationUnavailableError(RuntimeError):
     """Order-history reconciliation cannot be answered authoritatively."""
 
-
 def list_systems(url: str | None = None) -> list[str]:
     """List Rithmic systems via the gateway (template 16); does not log in."""
-
 
 class Session:
     """Rust plant session (ticker + history, PnL, and lazy order plants)."""

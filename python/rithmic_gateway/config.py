@@ -1,11 +1,13 @@
-"""Gateway client configuration (fingerprint + listen URL; never puts password on IPC)."""
+"""Gateway client configuration (fingerprint + listen URL; never puts
+password on IPC).
+"""
 
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Mapping
 
 
 class GatewayConfigError(ValueError):
@@ -30,14 +32,16 @@ def _env_first(env: Mapping[str, str], *names: str) -> str | None:
 def parse_listen_url(raw: str) -> str:
     """Return absolute unix socket path from ``unix://…`` or bare absolute path.
 
-    ``tcp://`` / ``tls://`` are reserved until v2 (see docs/references/gateway-remote.md).
+    ``tcp://`` / ``tls://`` are reserved until v2
+    (see docs/references/gateway-remote.md).
     """
     raw = raw.strip()
     if not raw:
         raise GatewayConfigError("empty gateway listen URL")
     if raw.startswith("tcp://") or raw.startswith("tls://"):
         raise GatewayConfigError(
-            f"tcp/tls listen is not implemented yet (see docs/references/gateway-remote.md): {raw}"
+            f"tcp/tls listen is not implemented yet (see "
+            f"docs/references/gateway-remote.md): {raw}"
         )
     if raw.startswith("unix://"):
         path = raw[len("unix://") :]
@@ -48,7 +52,9 @@ def parse_listen_url(raw: str) -> str:
         return path
     if raw.startswith("/"):
         return raw
-    raise GatewayConfigError(f"unsupported listen URL scheme (v1 supports unix:// only): {raw}")
+    raise GatewayConfigError(
+        f"unsupported listen URL scheme (v1 supports unix:// only): {raw}"
+    )
 
 
 def canon_env(env: str) -> str:
@@ -84,7 +90,9 @@ def runtime_base_dir() -> str:
     try:
         os.chmod(path, 0o700)
     except OSError as exc:
-        raise GatewayConfigError(f"cannot chmod 0700 runtime dir {path}: {exc}") from exc
+        raise GatewayConfigError(
+            f"cannot chmod 0700 runtime dir {path}: {exc}"
+        ) from exc
     return str(path)
 
 
@@ -112,9 +120,7 @@ def _clamp_unix_path(path: str, hash_u64: int) -> str:
     return str(short)
 
 
-def default_unix_path(
-    user: str, system_name: str, url: str, env: str = "Live"
-) -> str:
+def default_unix_path(user: str, system_name: str, url: str, env: str = "Live") -> str:
     """Match Rust ``default_unix_path`` FNV-1a under the private runtime dir."""
     base = runtime_base_dir()
     key = f"{user}|{system_name}|{url}|{canon_env(env)}"
@@ -144,7 +150,8 @@ class GatewayConfig:
     spawn_timeout_sec: float = 30.0
     #: Extra env merged into auto-spawn child (e.g. RITHMIC_PASSWORD). Never logged.
     spawn_environ: dict[str, str] | None = field(default=None, repr=False)
-    #: Require credential flock held before accepting Ready (disable only for mock-parent unit tests).
+    #: Require credential flock held before accepting Ready (disable only for
+    # mock-parent unit tests).
     attest_flock: bool = True
 
     def __post_init__(self) -> None:
@@ -153,9 +160,8 @@ class GatewayConfig:
         self.url = _require("url", self.url)
         self.env = _require("env", self.env)
         if self.listen is None or not str(self.listen).strip():
-            self.listen = (
-                f"unix://{default_unix_path(self.user, self.system_name, self.url, self.env)}"
-            )
+            listen = default_unix_path(self.user, self.system_name, self.url, self.env)
+            self.listen = f"unix://{listen}"
         else:
             # validate early
             parse_listen_url(str(self.listen))
@@ -167,12 +173,15 @@ class GatewayConfig:
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> GatewayConfig:
+        # Precedence matches SessionConfig / lake: GATEWAY before URL, SYSTEM before
+        # SYSTEM_NAME.
         env = environ if environ is not None else os.environ
-        # Precedence matches SessionConfig / lake: GATEWAY before URL, SYSTEM before SYSTEM_NAME.
         url = _env_first(env, "RITHMIC_GATEWAY", "RITHMIC_URL") or (
             "wss://rprotocol.rithmic.com:443"
         )
-        system_name = _env_first(env, "RITHMIC_SYSTEM", "RITHMIC_SYSTEM_NAME") or "LucidTrading"
+        system_name = (
+            _env_first(env, "RITHMIC_SYSTEM", "RITHMIC_SYSTEM_NAME") or "LucidTrading"
+        )
         user = _env_first(env, "RITHMIC_USER", "RITHMIC_USERNAME")
         return cls(
             user=_require("user", user),

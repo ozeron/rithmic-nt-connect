@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal, Mapping
+from typing import Any, Literal
 
-from rithmic_nt_connect._convert import ConvertError
-from rithmic_nt_connect._convert import _ts_ns
-from rithmic_nt_connect._convert import instrument_id_from_symbol
+from rithmic_nt_connect._convert import ConvertError, _ts_ns, instrument_id_from_symbol
 from rithmic_nt_connect.constants import VENUE
 
 OrderActionKind = Literal[
@@ -33,7 +32,8 @@ _ORDER_TYPE_TO_RITHMIC: dict[str, str] = {
     "STOP_LIMIT": "STOP_LIMIT",
     "MARKET_IF_TOUCHED": "MARKET_IF_TOUCHED",
     "LIMIT_IF_TOUCHED": "LIMIT_IF_TOUCHED",
-    # Nautilus trailing types → Rithmic stop + trailing_stop fields (not a separate price_type).
+    # Nautilus trailing types → Rithmic stop + trailing_stop fields (not a separate
+    # price_type).
     "TRAILING_STOP_MARKET": "STOP_MARKET",
     "TRAILING_STOP_LIMIT": "STOP_LIMIT",
 }
@@ -114,7 +114,9 @@ def trailing_ticks_from_order(order: Any) -> int | None:
         raise OrderMapError(f"trailing_offset must be >= 1 tick; got {offset!r}")
     # Reject non-integral tick offsets (e.g. Decimal("1.5")).
     if float(offset) != float(ticks):
-        raise OrderMapError(f"trailing_offset must be a whole tick count; got {offset!r}")
+        raise OrderMapError(
+            f"trailing_offset must be a whole tick count; got {offset!r}"
+        )
     return ticks
 
 
@@ -140,7 +142,9 @@ def order_notification_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
     ts = _ts_ns(d)
     kind = d.get("kind")
     if kind is None and d.get("notify_type_name") is not None:
-        kind = kind_from_notify(str(source), str(d.get("notify_type_name")), d.get("status"))
+        kind = kind_from_notify(
+            str(source), str(d.get("notify_type_name")), d.get("status")
+        )
     return {
         "type": "order_notification",
         "source": source,
@@ -281,7 +285,6 @@ def slim_order_fields(fields: Mapping[str, Any]) -> dict[str, Any]:
     return {k: fields.get(k) for k in keys if fields.get(k) is not None}
 
 
-
 def notification_action(fields: Mapping[str, Any], order: Any) -> OrderAction | None:
     """Classify a normalized notification into one emit action (or None to ignore)."""
     kind = fields.get("kind")
@@ -296,7 +299,9 @@ def notification_action(fields: Mapping[str, Any], order: Any) -> OrderAction | 
     if kind == "modify_rejected":
         return OrderAction(kind="modify_rejected", reason=str(reason or "NOT_MODIFIED"))
     if kind == "cancel_rejected":
-        return OrderAction(kind="cancel_rejected", reason=str(reason or "NOT_CANCELLED"))
+        return OrderAction(
+            kind="cancel_rejected", reason=str(reason or "NOT_CANCELLED")
+        )
     if kind == "updated":
         qty_raw = fields.get("quantity")
         qty = int(qty_raw) if qty_raw is not None else int(order.quantity)

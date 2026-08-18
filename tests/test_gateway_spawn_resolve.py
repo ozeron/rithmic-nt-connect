@@ -4,10 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
-
 from rithmic_gateway.client import GatewayClient
 from rithmic_gateway.config import GatewayConfig
 from rithmic_gateway.history_window import (
@@ -185,9 +183,7 @@ def test_resolve_gateway_bin_finds_cargo_target(
     monkeypatch.delenv("RITHMIC_GATEWAY_BIN", raising=False)
     monkeypatch.delenv("CARGO_TARGET_DIR", raising=False)
     monkeypatch.setattr("rithmic_gateway.spawn.shutil.which", lambda _n: None)
-    monkeypatch.setattr(
-        "rithmic_gateway.spawn._bin_search_starts", lambda: [tmp_path]
-    )
+    monkeypatch.setattr("rithmic_gateway.spawn._bin_search_starts", lambda: [tmp_path])
     found = resolve_gateway_bin()
     assert Path(found).resolve() == release.resolve()
 
@@ -198,9 +194,7 @@ def test_resolve_gateway_bin_missing_mentions_env(
     monkeypatch.delenv("RITHMIC_GATEWAY_BIN", raising=False)
     monkeypatch.delenv("CARGO_TARGET_DIR", raising=False)
     monkeypatch.setattr("rithmic_gateway.spawn.shutil.which", lambda _n: None)
-    monkeypatch.setattr(
-        "rithmic_gateway.spawn._bin_search_starts", lambda: [tmp_path]
-    )
+    monkeypatch.setattr("rithmic_gateway.spawn._bin_search_starts", lambda: [tmp_path])
     with pytest.raises(SpawnError, match="RITHMIC_GATEWAY_BIN"):
         resolve_gateway_bin()
 

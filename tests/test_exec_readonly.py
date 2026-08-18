@@ -6,16 +6,11 @@ import asyncio
 from decimal import Decimal
 
 import pytest
-from nautilus_trader.model.identifiers import AccountId
-from nautilus_trader.model.identifiers import Venue
-from nautilus_trader.model.objects import AccountBalance
-from nautilus_trader.model.objects import Currency
-from nautilus_trader.model.objects import Money
-
+from nautilus_trader.model.identifiers import AccountId, Venue
+from nautilus_trader.model.objects import AccountBalance, Currency, Money
 from rithmic_nt_connect._convert import account_pnl_to_fields
 from rithmic_nt_connect.constants import VENUE
-from rithmic_nt_connect.execution import RithmicExecutionClient
-from rithmic_nt_connect.execution import wait_account_in_cache
+from rithmic_nt_connect.execution import RithmicExecutionClient, wait_account_in_cache
 
 
 def test_account_pnl_fields_build_balance():
@@ -29,7 +24,7 @@ def test_account_pnl_fields_build_balance():
     fields = account_pnl_to_fields(event)
     currency = Currency.from_str(str(fields.get("currency", "USD")))
     free = Money(Decimal(str(fields["cash_on_hand"])), currency)
-    bal = AccountBalance(free, Money(Decimal("0"), currency), free)
+    bal = AccountBalance(free, Money(Decimal(0), currency), free)
     assert float(bal.free) == 1000.0
     assert AccountId(f"{VENUE}-{fields['account_id']}").value.startswith(f"{VENUE}-")
 

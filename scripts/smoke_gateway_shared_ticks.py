@@ -24,6 +24,7 @@ Example::
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import re
 import subprocess
@@ -97,10 +98,10 @@ def main(argv: list[str] | None = None) -> int:
     load_dotenv_files(ROOT / ".env")
 
     try:
-        from rithmic_nt_connect.config import SessionConfig
         from rithmic_gateway import GatewayConfig
         from rithmic_gateway.spawn import spawn_gateway
-    except Exception as exc:  # noqa: BLE001
+        from rithmic_nt_connect.config import SessionConfig
+    except Exception as exc:
         print(f"import failed: {exc}", file=sys.stderr)
         return 1
 
@@ -119,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         session_cfg = SessionConfig.from_env()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(f"SMOKE SKIP (no credentials): {exc}")
         return 2
 
@@ -150,7 +151,7 @@ def main(argv: list[str] | None = None) -> int:
         print("pre-spawning shared rithmic-gateway parent…")
         parent = spawn_gateway(gcfg, wait_socket=True)
         print(f"parent pid={parent.pid} socket={gcfg.socket_path}")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(f"SMOKE FAIL: could not spawn parent: {exc}", file=sys.stderr)
         return 1
 
@@ -226,7 +227,10 @@ def main(argv: list[str] | None = None) -> int:
         finals = [pids[-1] for pids in pid_sets]
         if len(set(finals)) != 1:
             print(
-                f"SMOKE FAIL: consumers reported different gateway_pid values: {finals}",
+                (
+                    f"SMOKE FAIL: consumers reported different gateway_pid values: "
+                    f"{finals}"
+                ),
                 file=sys.stderr,
             )
             return 1
@@ -240,7 +244,9 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         # Confirm the parent process still looks like the gateway binary.
         try:
-            cmdline = Path(f"/proc/{shared_pid}/cmdline").read_bytes().replace(b"\0", b" ")
+            cmdline = (
+                Path(f"/proc/{shared_pid}/cmdline").read_bytes().replace(b"\0", b" ")
+            )
             cmd_txt = cmdline.decode(errors="replace")
         except OSError:
             # macOS: fall back to ps
@@ -259,7 +265,10 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
         if "rithmic-gateway" not in cmd_txt:
             print(
-                f"SMOKE FAIL: pid {shared_pid} command is not rithmic-gateway: {cmd_txt!r}",
+                (
+                    f"SMOKE FAIL: pid {shared_pid} command is not rithmic-gateway: "
+                    f"{cmd_txt!r}"
+                ),
                 file=sys.stderr,
             )
             return 1
@@ -286,10 +295,8 @@ def main(argv: list[str] | None = None) -> int:
                     except subprocess.TimeoutExpired:
                         parent.kill()
         # Best-effort: remove listen sock we created for this run.
-        try:
+        with contextlib.suppress(Exception):
             Path(gcfg.socket_path).unlink(missing_ok=True)
-        except Exception:
-            pass
 
 
 if __name__ == "__main__":

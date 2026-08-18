@@ -14,8 +14,9 @@ def _load_session_lock() -> Any:
 
     The ``rithmic_gateway`` gencode is generated with protoc 5.29.6 to match
     the ``nautilus_trader[ib]==1.231.0`` pin of ``protobuf==5.29.6``, so the
-    wire client imports on that runtime (and any newer one). ``rithmic_gateway/__init__.py``
-    imports ``GatewayClient`` lazily via ``__getattr__``, so importing
+    wire client imports on that runtime (and any newer one).
+    ``rithmic_gateway/__init__.py`` imports ``GatewayClient`` lazily via
+    ``__getattr__``, so importing
     ``SessionLock`` from ``flock`` does not trigger protobuf at all.
     """
     from rithmic_gateway.flock import SessionLock
@@ -54,8 +55,12 @@ class TickerSession(Protocol):
         bar_type: int = 2,
         period: int = 1,
     ) -> list[dict[str, Any]]: ...
-    def subscribe_time_bars(self, symbol: str, exchange: str, bar_type: int, period: int) -> None: ...
-    def unsubscribe_time_bars(self, symbol: str, exchange: str, bar_type: int, period: int) -> None: ...
+    def subscribe_time_bars(
+        self, symbol: str, exchange: str, bar_type: int, period: int
+    ) -> None: ...
+    def unsubscribe_time_bars(
+        self, symbol: str, exchange: str, bar_type: int, period: int
+    ) -> None: ...
     def poll_history_event(self) -> dict[str, Any] | None: ...
     def request_plants(self, plants: str) -> None: ...
 
@@ -235,7 +240,9 @@ class _FlockedDirectSession:
         bar_type: int = 2,
         period: int = 1,
     ) -> list[dict[str, Any]]:
-        return self._inner.load_time_bars(symbol, exchange, start_ssboe, end_ssboe, bar_type, period)
+        return self._inner.load_time_bars(
+            symbol, exchange, start_ssboe, end_ssboe, bar_type, period
+        )
 
     def probe_time_bars(
         self,
@@ -246,12 +253,18 @@ class _FlockedDirectSession:
         bar_type: int = 2,
         period: int = 1,
     ) -> list[dict[str, Any]]:
-        return self._inner.probe_time_bars(symbol, exchange, start_ssboe, end_ssboe, bar_type, period)
+        return self._inner.probe_time_bars(
+            symbol, exchange, start_ssboe, end_ssboe, bar_type, period
+        )
 
-    def subscribe_time_bars(self, symbol: str, exchange: str, bar_type: int, period: int) -> None:
+    def subscribe_time_bars(
+        self, symbol: str, exchange: str, bar_type: int, period: int
+    ) -> None:
         self._inner.subscribe_time_bars(symbol, exchange, bar_type, period)
 
-    def unsubscribe_time_bars(self, symbol: str, exchange: str, bar_type: int, period: int) -> None:
+    def unsubscribe_time_bars(
+        self, symbol: str, exchange: str, bar_type: int, period: int
+    ) -> None:
         self._inner.unsubscribe_time_bars(symbol, exchange, bar_type, period)
 
     def poll_history_event(self) -> dict[str, Any] | None:
@@ -342,10 +355,14 @@ class _FlockedDirectSession:
             target_ticks,
         )
 
-    def adjust_bracket_stop(self, basket_id: str, ticks: int, level: int | None = None) -> None:
+    def adjust_bracket_stop(
+        self, basket_id: str, ticks: int, level: int | None = None
+    ) -> None:
         self._inner.adjust_bracket_stop(basket_id, ticks, level)
 
-    def adjust_bracket_target(self, basket_id: str, ticks: int, level: int | None = None) -> None:
+    def adjust_bracket_target(
+        self, basket_id: str, ticks: int, level: int | None = None
+    ) -> None:
         self._inner.adjust_bracket_target(basket_id, ticks, level)
 
     def cancel_order(self, basket_id: str) -> None:
@@ -363,7 +380,14 @@ class _FlockedDirectSession:
         trail_by_ticks: int | None = None,
     ) -> None:
         self._inner.modify_order(
-            basket_id, symbol, exchange, quantity, price_type, price, trigger_price, trail_by_ticks
+            basket_id,
+            symbol,
+            exchange,
+            quantity,
+            price_type,
+            price,
+            trigger_price,
+            trail_by_ticks,
         )
 
     def cancel_all_orders(self) -> None:
@@ -438,9 +462,9 @@ def connect_market_data_session(
 
 
 __all__ = [
-    "OrderSession",
     "PLANTS_EXECUTION",
     "PLANTS_MARKET_DATA",
+    "OrderSession",
     "PnlSession",
     "TickerSession",
     "WireSession",

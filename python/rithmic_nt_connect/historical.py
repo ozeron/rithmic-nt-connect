@@ -8,15 +8,15 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from nautilus_trader.model.data import Bar
-from nautilus_trader.model.data import BarType
-from nautilus_trader.model.data import TradeTick
+from nautilus_trader.model.data import Bar, BarType, TradeTick
 from nautilus_trader.model.instruments import FuturesContract
 
 from rithmic_nt_connect._convert import rithmic_route_from_info
-from rithmic_nt_connect.data import bar_type_to_rithmic
-from rithmic_nt_connect.data import payloads_to_bars
-from rithmic_nt_connect.data import payloads_to_trade_ticks
+from rithmic_nt_connect.data import (
+    bar_type_to_rithmic,
+    payloads_to_bars,
+    payloads_to_trade_ticks,
+)
 from rithmic_nt_connect.front_month import resolve_front_month
 from rithmic_nt_connect.pandas_compat import patch_nautilus_pandas
 from rithmic_nt_connect.providers import future_from_reference

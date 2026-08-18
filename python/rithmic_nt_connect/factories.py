@@ -4,31 +4,36 @@ from __future__ import annotations
 
 import asyncio
 
-from rithmic_nt_connect.pandas_compat import patch_nautilus_pandas
-
-patch_nautilus_pandas()
-
 from nautilus_trader.cache.cache import Cache
-from nautilus_trader.common.component import LiveClock
-from nautilus_trader.common.component import MessageBus
-from nautilus_trader.config import InstrumentProviderConfig
-from nautilus_trader.config import LiveDataClientConfig
-from nautilus_trader.config import LiveExecClientConfig
-from nautilus_trader.live.factories import LiveDataClientFactory
-from nautilus_trader.live.factories import LiveExecClientFactory
+from nautilus_trader.common.component import LiveClock, MessageBus
+from nautilus_trader.config import (
+    InstrumentProviderConfig,
+    LiveDataClientConfig,
+    LiveExecClientConfig,
+)
+from nautilus_trader.live.factories import LiveDataClientFactory, LiveExecClientFactory
 
-from rithmic_nt_connect.config import ConnectMode
-from rithmic_nt_connect.config import RithmicDataClientConfig
-from rithmic_nt_connect.config import RithmicExecClientConfig
-from rithmic_nt_connect.config import RithmicLiveExecClientConfig
-from rithmic_nt_connect.config import SessionConfig
+from rithmic_nt_connect.config import (
+    ConnectMode,
+    RithmicDataClientConfig,
+    RithmicExecClientConfig,
+    RithmicLiveExecClientConfig,
+    SessionConfig,
+)
 from rithmic_nt_connect.data import RithmicDataClient
 from rithmic_nt_connect.execution import RithmicExecutionClient
+from rithmic_nt_connect.pandas_compat import patch_nautilus_pandas
 from rithmic_nt_connect.providers import RithmicInstrumentProvider
-from rithmic_nt_connect.session import PLANTS_EXECUTION
-from rithmic_nt_connect.session import PLANTS_MARKET_DATA
-from rithmic_nt_connect.session import WireSession
-from rithmic_nt_connect.session import create_session
+from rithmic_nt_connect.session import (
+    PLANTS_EXECUTION,
+    PLANTS_MARKET_DATA,
+    WireSession,
+    create_session,
+)
+
+# The pandas shim only matters at runtime (BacktestEngine.run, INTERNAL bar
+# aggregation) — same placement as historical.py, keeping all imports at top.
+patch_nautilus_pandas()
 
 
 def _session_config_from_data(config: object) -> SessionConfig:
@@ -89,7 +94,9 @@ class RithmicLiveDataClientFactory(LiveDataClientFactory):
         clock: LiveClock,
     ) -> RithmicDataClient:
         session_cfg = _session_config_from_data(config)
-        session = _shared_session(session_cfg, _SESSION_CACHE, plants=PLANTS_MARKET_DATA)
+        session = _shared_session(
+            session_cfg, _SESSION_CACHE, plants=PLANTS_MARKET_DATA
+        )
         provider = RithmicInstrumentProvider(
             session=session,
             pairs=_pairs_from_session(session_cfg),
@@ -133,9 +140,7 @@ class RithmicLiveExecClientFactory(LiveExecClientFactory):
         # ``enable_trading`` (the fallback only covers a bare nautilus
         # ``LiveExecClientConfig``, which never enables trading).
         client_config: RithmicExecClientConfig | RithmicLiveExecClientConfig
-        if isinstance(config, RithmicLiveExecClientConfig):
-            client_config = config
-        elif isinstance(config, RithmicExecClientConfig):
+        if isinstance(config, (RithmicLiveExecClientConfig, RithmicExecClientConfig)):
             client_config = config
         else:
             client_config = RithmicExecClientConfig(session=session_cfg)

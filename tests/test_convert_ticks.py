@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-
 from rithmic_nt_connect._convert import (
     ConvertError,
     account_pnl_to_fields,
@@ -12,7 +11,6 @@ from rithmic_nt_connect._convert import (
     order_book_to_fields,
 )
 from rithmic_nt_connect.constants import VENUE
-
 
 LAST_TRADE_FIXTURE = {
     "type": "last_trade",

@@ -6,14 +6,12 @@ Plant-level dicts only — conversion to Nautilus types stays in data/execution 
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, TypeVar
+from typing import Any
 
 from rithmic_gateway import GatewayClient, GatewayConfig, GatewayError
 
-T = TypeVar("T")
 
-
-def _call(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+def _call[T](fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
     """Propagate gateway errors with ``code`` intact (timeouts must stay unknown)."""
     try:
         return fn(*args, **kwargs)
@@ -22,7 +20,9 @@ def _call(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
 
 
 class GatewayWireSession:
-    """WireSession-shaped façade over a gateway client (no in-process Rithmic plants)."""
+    """WireSession-shaped façade over a gateway client (no in-process
+    Rithmic plants).
+    """
 
     def __init__(self, client: GatewayClient) -> None:
         self._client = client
@@ -114,7 +114,9 @@ class GatewayWireSession:
             period=period,
         )
 
-    def subscribe_time_bars(self, symbol: str, exchange: str, bar_type: int, period: int) -> None:
+    def subscribe_time_bars(
+        self, symbol: str, exchange: str, bar_type: int, period: int
+    ) -> None:
         _call(self._client.subscribe_time_bars, symbol, exchange, bar_type, period)
 
     def unsubscribe_time_bars(

@@ -10,12 +10,9 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from nautilus_trader.model.enums import OrderSide
-from nautilus_trader.model.enums import TimeInForce
+from exec_harness import OrderDriver, OrderDriverConfig
+from nautilus_trader.model.enums import OrderSide, TimeInForce
 from nautilus_trader.model.identifiers import InstrumentId
-
-from exec_harness import OrderDriver
-from exec_harness import OrderDriverConfig
 from order_dsl import market
 
 
@@ -45,7 +42,9 @@ class _HarnessDriver(OrderDriver):
     ) -> None:
         pass
 
-    def submit_order(self, order, position_id=None, client_id=None, params=None) -> None:
+    def submit_order(
+        self, order, position_id=None, client_id=None, params=None
+    ) -> None:
         self.submitted.append(order)
 
     @property

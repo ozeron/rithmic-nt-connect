@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import time
 
-from nautilus_trader.model.data import Bar
-from nautilus_trader.model.data import BarType
-
+from nautilus_trader.model.data import Bar, BarType
 from rithmic_nt_connect.historical import load_time_bars
 
 NS_PER_MIN = 60_000_000_000

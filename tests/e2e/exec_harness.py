@@ -12,22 +12,22 @@ venue-conditional skip rule (market closed / permission denied / not entitled).
 
 from __future__ import annotations
 
+import contextlib
 import threading
 import time
 
 import pytest
-
-from nautilus_trader.model.identifiers import ClientOrderId
 from nautilus_trader.model.enums import OrderStatus
-from nautilus_trader.trading.strategy import Strategy
-from nautilus_trader.trading.strategy import StrategyConfig
-
+from nautilus_trader.model.identifiers import ClientOrderId
+from nautilus_trader.trading.strategy import Strategy, StrategyConfig
 
 _VENUE_CONDITIONAL_MARKERS = ("market is closed", "permission denied", "not entitled")
 
 
 def venue_conditional_reason(event) -> str | None:
-    """Reason of a venue-conditional ``OrderRejected`` (a legitimate skip), else None."""
+    """Reason of a venue-conditional ``OrderRejected`` (a legitimate skip),
+    else None.
+    """
     reason = (getattr(event, "reason", "") or "").casefold()
     for marker in _VENUE_CONDITIONAL_MARKERS:
         if marker in reason:
@@ -53,20 +53,36 @@ class OrderDriver(Strategy):
         self._got_quote = False
 
     # -- order-event recording -------------------------------------------------
-    def on_order_initialized(self, event): self.events.append(event)
-    def on_order_submitted(self, event): self.events.append(event)
+    def on_order_initialized(self, event):
+        self.events.append(event)
+
+    def on_order_submitted(self, event):
+        self.events.append(event)
+
     def on_order_accepted(self, event):
         self.events.append(event)
         cid = event.client_order_id
         order = self.cache.order(cid)
         if cid in self.cancel_on_accept and order is not None:
             self.cancel_order(order)
-    def on_order_rejected(self, event): self.events.append(event)
-    def on_order_canceled(self, event): self.events.append(event)
-    def on_order_expired(self, event): self.events.append(event)
-    def on_order_filled(self, event): self.events.append(event)
-    def on_order_cancel_rejected(self, event): self.events.append(event)
-    def on_order_modify_rejected(self, event): self.events.append(event)
+
+    def on_order_rejected(self, event):
+        self.events.append(event)
+
+    def on_order_canceled(self, event):
+        self.events.append(event)
+
+    def on_order_expired(self, event):
+        self.events.append(event)
+
+    def on_order_filled(self, event):
+        self.events.append(event)
+
+    def on_order_cancel_rejected(self, event):
+        self.events.append(event)
+
+    def on_order_modify_rejected(self, event):
+        self.events.append(event)
 
     # -- submission ------------------------------------------------------------
     def on_start(self):
@@ -103,14 +119,16 @@ class OrderDriver(Strategy):
         ):
             try:
                 self.cancel_order(order)
-            except Exception as exc:  # noqa: BLE001
-                self.log.error(f"on_stop cancel failed for {order.client_order_id}: {exc}")
+            except Exception as exc:
+                self.log.error(
+                    f"on_stop cancel failed for {order.client_order_id}: {exc}"
+                )
         for position in self.cache.positions_open(
             instrument_id=self.instrument.id, strategy_id=self.id
         ):
             try:
                 self.close_position(position)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 self.log.error(f"on_stop close failed for {position.id}: {exc}")
 
 
@@ -161,7 +179,8 @@ class ExecHarness:
         if open_orders or open_positions:
             raise RuntimeError(
                 "OrderDriver residual exposure after stop: "
-                f"{len(open_orders)} open order(s), {len(open_positions)} open position(s)"
+                f"{len(open_orders)} open order(s), {len(open_positions)} open "
+                f"position(s)"
             )
 
     def _release_session_locks(self) -> None:
@@ -172,10 +191,8 @@ class ExecHarness:
             for _sess in _SESSION_CACHE.values():
                 _lock = getattr(_sess, "_lock", None)
                 if _lock is not None:
-                    try:
+                    with contextlib.suppress(Exception):
                         _lock.close()
-                    except Exception:
-                        pass
             _SESSION_CACHE.clear()
         except Exception:
             pass
@@ -197,7 +214,9 @@ class ExecHarness:
         engine = self.node.kernel.exec_engine
         orders = self.cache.orders()
         clients = engine.get_clients_for_orders(orders) if orders else set()
-        client = next((c for c in clients if isinstance(c, RithmicExecutionClient)), None)
+        client = next(
+            (c for c in clients if isinstance(c, RithmicExecutionClient)), None
+        )
         if client is None:
             raise RuntimeError("Rithmic exec client not reachable from the engine")
 
@@ -228,7 +247,9 @@ class ExecHarness:
             client.generate_order_status_reports = original
         return captured
 
-    def order_status_report(self, client_order_id: ClientOrderId, timeout_secs: float = 20.0):
+    def order_status_report(
+        self, client_order_id: ClientOrderId, timeout_secs: float = 20.0
+    ):
         """Drive a singular ``GenerateOrderStatusReport`` and return the adapter report.
 
         This is the exact pull path Nautilus ExecEngine uses when it queries an
@@ -244,7 +265,9 @@ class ExecHarness:
         engine = self.node.kernel.exec_engine
         orders = self.cache.orders()
         clients = engine.get_clients_for_orders(orders) if orders else set()
-        client = next((c for c in clients if isinstance(c, RithmicExecutionClient)), None)
+        client = next(
+            (c for c in clients if isinstance(c, RithmicExecutionClient)), None
+        )
         if client is None:
             raise RuntimeError("Rithmic exec client not reachable from the engine")
 
@@ -305,9 +328,10 @@ class ExecHarness:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             for event in self.driver.events[after:]:
-                if client_order_id is not None and getattr(
-                    event, "client_order_id", None
-                ) != client_order_id:
+                if (
+                    client_order_id is not None
+                    and getattr(event, "client_order_id", None) != client_order_id
+                ):
                     continue
                 name = type(event).__name__
                 if name == "OrderRejected":
@@ -315,7 +339,8 @@ class ExecHarness:
                     if reason is not None:
                         pytest.skip(f"venue-conditional rejection: {reason}")
                     raise AssertionError(
-                        f"unexpected venue rejection: {getattr(event, 'reason', '') or event}"
+                        f"unexpected venue rejection: "
+                        f"{getattr(event, 'reason', '') or event}"
                     )
                 if name in outcome_names:
                     return event

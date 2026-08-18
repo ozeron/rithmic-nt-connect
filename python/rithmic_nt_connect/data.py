@@ -3,55 +3,57 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import itertools
 import time
 from collections.abc import Callable, Coroutine
 from typing import Any
 
 from nautilus_trader.cache.cache import Cache
-from nautilus_trader.common.component import LiveClock
-from nautilus_trader.common.component import MessageBus
+from nautilus_trader.common.component import LiveClock, MessageBus
 from nautilus_trader.common.enums import LogColor
-from nautilus_trader.data.messages import RequestBars
-from nautilus_trader.data.messages import RequestTradeTicks
-from nautilus_trader.data.messages import SubscribeBars
-from nautilus_trader.data.messages import SubscribeOrderBook
-from nautilus_trader.data.messages import SubscribeQuoteTicks
-from nautilus_trader.data.messages import SubscribeTradeTicks
-from nautilus_trader.data.messages import UnsubscribeBars
-from nautilus_trader.data.messages import UnsubscribeOrderBook
-from nautilus_trader.data.messages import UnsubscribeQuoteTicks
-from nautilus_trader.data.messages import UnsubscribeTradeTicks
-from nautilus_trader.live.data_client import LiveDataClient
-from nautilus_trader.live.data_client import LiveMarketDataClient
-from nautilus_trader.model.data import Bar
-from nautilus_trader.model.data import BarType
-from nautilus_trader.model.data import BookOrder
-from nautilus_trader.model.data import OrderBookDelta
-from nautilus_trader.model.data import OrderBookDeltas
-from nautilus_trader.model.data import QuoteTick
-from nautilus_trader.model.data import TradeTick
-from nautilus_trader.model.enums import AggressorSide
-from nautilus_trader.model.enums import BarAggregation
-from nautilus_trader.model.enums import BookAction
-from nautilus_trader.model.enums import OrderSide
-from nautilus_trader.model.enums import RecordFlag
-from nautilus_trader.model.identifiers import ClientId
-from nautilus_trader.model.identifiers import InstrumentId
-from nautilus_trader.model.identifiers import TradeId
-from nautilus_trader.model.identifiers import Venue
-from nautilus_trader.model.objects import Price
-from nautilus_trader.model.objects import Quantity
+from nautilus_trader.data.messages import (
+    RequestBars,
+    RequestTradeTicks,
+    SubscribeBars,
+    SubscribeOrderBook,
+    SubscribeQuoteTicks,
+    SubscribeTradeTicks,
+    UnsubscribeBars,
+    UnsubscribeOrderBook,
+    UnsubscribeQuoteTicks,
+    UnsubscribeTradeTicks,
+)
+from nautilus_trader.live.data_client import LiveDataClient, LiveMarketDataClient
+from nautilus_trader.model.data import (
+    Bar,
+    BarType,
+    BookOrder,
+    OrderBookDelta,
+    OrderBookDeltas,
+    QuoteTick,
+    TradeTick,
+)
+from nautilus_trader.model.enums import (
+    AggressorSide,
+    BarAggregation,
+    BookAction,
+    OrderSide,
+    RecordFlag,
+)
+from nautilus_trader.model.identifiers import ClientId, InstrumentId, TradeId, Venue
+from nautilus_trader.model.objects import Price, Quantity
 
-from rithmic_nt_connect._convert import ConvertError
-from rithmic_nt_connect._convert import bbo_to_fields
-from rithmic_nt_connect._convert import format_price_str
-from rithmic_nt_connect._convert import last_trade_to_fields
-from rithmic_nt_connect._convert import order_book_to_fields
-from rithmic_nt_connect._convert import time_bar_to_fields
+from rithmic_nt_connect._convert import (
+    ConvertError,
+    bbo_to_fields,
+    format_price_str,
+    last_trade_to_fields,
+    order_book_to_fields,
+    time_bar_to_fields,
+)
 from rithmic_nt_connect.config import RithmicDataClientConfig
-from rithmic_nt_connect.constants import ADAPTER_NAME
-from rithmic_nt_connect.constants import VENUE
+from rithmic_nt_connect.constants import ADAPTER_NAME, VENUE
 from rithmic_nt_connect.errors import CHANNEL_ERRORS
 from rithmic_nt_connect.providers import RithmicInstrumentProvider
 from rithmic_nt_connect.session import WireSession
@@ -68,6 +70,7 @@ def _reconnectable_poll_error(exc: BaseException) -> bool:
         or "channel closed" in text
         or "channel lagged" in text
     )
+
 
 _F_SNAPSHOT = int(RecordFlag.F_SNAPSHOT.value)
 _F_LAST = int(RecordFlag.F_LAST.value)
@@ -118,7 +121,9 @@ def _validate_history_identity(
         raise ConvertError(f"history symbol mismatch: {raw_symbol!r} != {symbol!r}")
     raw_exchange = payload.get("exchange")
     if raw_exchange is not None and str(raw_exchange) != exchange:
-        raise ConvertError(f"history exchange mismatch: {raw_exchange!r} != {exchange!r}")
+        raise ConvertError(
+            f"history exchange mismatch: {raw_exchange!r} != {exchange!r}"
+        )
     if expected_rtype is not None:
         raw_rtype = payload.get("bar_type")
         if raw_rtype is not None:
@@ -253,7 +258,9 @@ def fields_to_quote_tick(
     bid_size = int(fields["bid_size"])
     ask_size = int(fields["ask_size"])
     if bid_size < 1 or ask_size < 1:
-        raise ConvertError(f"quote sizes must be >= 1, got bid={bid_size} ask={ask_size}")
+        raise ConvertError(
+            f"quote sizes must be >= 1, got bid={bid_size} ask={ask_size}"
+        )
     return QuoteTick(
         InstrumentId.from_str(fields["instrument_id"]),
         _price(fields["bid_price"], price_precision),
@@ -366,7 +373,9 @@ async def resync_ticker_session(
     for symbol, exchange in book_subscriptions:
         await asyncio.to_thread(session.subscribe_order_book_summary, symbol, exchange)
     for symbol, exchange, rtype, period in bar_subscriptions or ():
-        await asyncio.to_thread(session.subscribe_time_bars, symbol, exchange, rtype, period)
+        await asyncio.to_thread(
+            session.subscribe_time_bars, symbol, exchange, rtype, period
+        )
 
 
 def _bar_type_duration_ns(bar_type: BarType) -> int:
@@ -419,13 +428,11 @@ def external_bar_advertised(bar_type: BarType) -> bool:
     """Live EXTERNAL subscribe is only advertised for these specs."""
     agg = bar_type.spec.aggregation
     step = int(bar_type.spec.step)
-    if agg == BarAggregation.MINUTE and step in {1, 15, 60}:
-        return True
-    if agg == BarAggregation.HOUR and step == 1:
-        return True
-    if agg == BarAggregation.DAY and step == 1:
-        return True
-    return False
+    return (
+        (agg == BarAggregation.MINUTE and step in {1, 15, 60})
+        or (agg == BarAggregation.HOUR and step == 1)
+        or (agg == BarAggregation.DAY and step == 1)
+    )
 
 
 def bar_type_to_rithmic(bar_type: BarType) -> tuple[int, int]:
@@ -565,10 +572,8 @@ class RithmicDataClient(LiveMarketDataClient, LiveDataClient):
             task = getattr(self, attr)
             if task is not None:
                 task.cancel()
-                try:
+                with contextlib.suppress(asyncio.CancelledError):
                     await task
-                except asyncio.CancelledError:
-                    pass
                 setattr(self, attr, None)
         await asyncio.to_thread(self._session.disconnect)
 
@@ -600,7 +605,7 @@ class RithmicDataClient(LiveMarketDataClient, LiveDataClient):
                 continue
             try:
                 event = await asyncio.to_thread(poll)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 if not _reconnectable_poll_error(exc):
                     self._log.exception(f"{label} poll transient error", exc)
                     await asyncio.sleep(0.1)
@@ -608,10 +613,14 @@ class RithmicDataClient(LiveMarketDataClient, LiveDataClient):
                 self._log.warning(f"{label} poll reconnect: {exc}")
                 try:
                     await self._resync_ticker_subscription()
-                    self._log.warning(f"{label} subscription resynced after channel error")
+                    self._log.warning(
+                        f"{label} subscription resynced after channel error"
+                    )
                     backoff = 0.05
-                except Exception as resync_exc:  # noqa: BLE001
-                    self._log.warning(f"{label} subscription resync failed: {resync_exc}")
+                except Exception as resync_exc:
+                    self._log.warning(
+                        f"{label} subscription resync failed: {resync_exc}"
+                    )
                     backoff = min(backoff * 2, 2.0)
                 await asyncio.sleep(backoff)
                 continue
@@ -656,7 +665,8 @@ class RithmicDataClient(LiveMarketDataClient, LiveDataClient):
             return
         if self._skip_counts:
             summary = ", ".join(
-                f"{reason}={count}" for reason, count in sorted(self._skip_counts.items())
+                f"{reason}={count}"
+                for reason, count in sorted(self._skip_counts.items())
             )
             self._log.debug(
                 f"data skip summary ({self._skip_log_interval_secs:.0f}s): {summary}"
@@ -674,7 +684,9 @@ class RithmicDataClient(LiveMarketDataClient, LiveDataClient):
                     self._count_skip("last_trade_summary")
                     return
                 fields = last_trade_to_fields(event)
-                prec = self._price_precision(InstrumentId.from_str(fields["instrument_id"]))
+                prec = self._price_precision(
+                    InstrumentId.from_str(fields["instrument_id"])
+                )
                 self._handle_data(
                     fields_to_trade_tick(fields, ts_init, price_precision=prec)
                 )
@@ -688,13 +700,17 @@ class RithmicDataClient(LiveMarketDataClient, LiveDataClient):
                 if fields is None:
                     self._count_skip("bbo_one_sided")
                     return
-                prec = self._price_precision(InstrumentId.from_str(fields["instrument_id"]))
+                prec = self._price_precision(
+                    InstrumentId.from_str(fields["instrument_id"])
+                )
                 self._handle_data(
                     fields_to_quote_tick(fields, ts_init, price_precision=prec)
                 )
             elif etype == "order_book":
                 fields = order_book_to_fields(event)
-                prec = self._price_precision(InstrumentId.from_str(fields["instrument_id"]))
+                prec = self._price_precision(
+                    InstrumentId.from_str(fields["instrument_id"])
+                )
                 self._handle_data(
                     fields_to_order_book_deltas(fields, ts_init, price_precision=prec)
                 )
@@ -711,14 +727,15 @@ class RithmicDataClient(LiveMarketDataClient, LiveDataClient):
                     )
         except ConvertError as exc:
             self._count_skip(f"{etype}: {exc}")
-        except Exception as exc:  # noqa: BLE001 — never kill the poll loop
+        except Exception as exc:
             self._log.exception(f"failed to dispatch {etype}", exc)
 
     def _route(self, instrument_id: InstrumentId) -> tuple[str, str]:
         key = str(instrument_id)
         if key not in self._instrument_routes:
             raise ValueError(
-                f"no Rithmic route for {instrument_id}; load instruments before subscribe/request"
+                f"no Rithmic route for {instrument_id}; load instruments before "
+                f"subscribe/request"
             )
         return self._instrument_routes[key]
 
@@ -755,10 +772,14 @@ class RithmicDataClient(LiveMarketDataClient, LiveDataClient):
 
     async def _subscribe_order_book_deltas(self, command: SubscribeOrderBook) -> None:
         symbol, exchange = self._route(command.instrument_id)
-        await asyncio.to_thread(self._session.subscribe_order_book_summary, symbol, exchange)
+        await asyncio.to_thread(
+            self._session.subscribe_order_book_summary, symbol, exchange
+        )
         self._book_subscriptions.add((symbol, exchange))
 
-    async def _unsubscribe_order_book_deltas(self, command: UnsubscribeOrderBook) -> None:
+    async def _unsubscribe_order_book_deltas(
+        self, command: UnsubscribeOrderBook
+    ) -> None:
         symbol, exchange = self._route(command.instrument_id)
         await asyncio.to_thread(
             self._session.unsubscribe_order_book_summary, symbol, exchange
@@ -824,8 +845,10 @@ class RithmicDataClient(LiveMarketDataClient, LiveDataClient):
                 start,
                 end,
             )
-        except Exception as exc:  # noqa: BLE001 — always complete RequestTradeTicks
-            self._log.error(f"Error requesting trade ticks for {request.instrument_id}: {exc}")
+        except Exception as exc:
+            self._log.error(
+                f"Error requesting trade ticks for {request.instrument_id}: {exc}"
+            )
             self._handle_trade_ticks(
                 request.instrument_id,
                 [],
@@ -847,9 +870,7 @@ class RithmicDataClient(LiveMarketDataClient, LiveDataClient):
                 ts_init=ts_init,
             )
         except (ConvertError, ValueError) as exc:
-            self._log.error(
-                f"Invalid history tick for {request.instrument_id}: {exc}"
-            )
+            self._log.error(f"Invalid history tick for {request.instrument_id}: {exc}")
             self._handle_trade_ticks(
                 request.instrument_id,
                 [],
@@ -916,7 +937,7 @@ class RithmicDataClient(LiveMarketDataClient, LiveDataClient):
                 rithmic_type,
                 period,
             )
-        except Exception as exc:  # noqa: BLE001 — always complete RequestBars
+        except Exception as exc:
             self._log.error(f"Error requesting bars for {bar_type}: {exc}")
             self._handle_bars(
                 bar_type,
@@ -954,7 +975,9 @@ class RithmicDataClient(LiveMarketDataClient, LiveDataClient):
         # Order: FORWARDS + session sort by ts_event_ns (NT does not re-sort).
         if request.limit:
             bars = bars[-request.limit :]
-        self._log.info(f"loaded {len(bars)} {bar_type} history bars (raw={len(bars_raw)})")
+        self._log.info(
+            f"loaded {len(bars)} {bar_type} history bars (raw={len(bars_raw)})"
+        )
         self._handle_bars(
             bar_type,
             bars,

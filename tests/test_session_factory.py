@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import pytest
-
-from rithmic_gateway.flock import SessionLock, SessionLockError
-
 from _stubs import WireSessionStub
+from rithmic_gateway.flock import SessionLock, SessionLockError
 
 
 def test_flocked_session_connect_is_idempotent() -> None:
@@ -90,14 +88,16 @@ def test_flocked_session_forwards_resolved_account() -> None:
     }
 
 
-def test_gateway_factory_does_not_share_wire_session(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_gateway_factory_does_not_share_wire_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import rithmic_nt_connect.factories as fac
     from rithmic_nt_connect.config import ConnectMode, SessionConfig
     from rithmic_nt_connect.factories import _shared_session
-    import rithmic_nt_connect.factories as fac
 
     created: list[object] = []
 
-    def _fake_create(cfg, *, plants):  # noqa: ARG001
+    def _fake_create(cfg, *, plants):
         obj = object()
         created.append(obj)
         return obj

@@ -9,7 +9,7 @@ Exit codes:
 
 from __future__ import annotations
 
-import os
+import contextlib
 import sys
 import time
 from pathlib import Path
@@ -25,21 +25,23 @@ def main() -> int:
 
     try:
         from rithmic_nt_connect.config import SessionConfig
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(f"import failed: {exc}", file=sys.stderr)
         return 1
 
     try:
         session_cfg = SessionConfig.from_env()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(f"SMOKE SKIP (no credentials): {exc}")
         return 2
 
     try:
-        from rithmic_nt_connect.session import PLANTS_EXECUTION
-        from rithmic_nt_connect.session import PLANTS_MARKET_DATA
-        from rithmic_nt_connect.session import create_rust_session
-    except Exception as exc:  # noqa: BLE001
+        from rithmic_nt_connect.session import (
+            PLANTS_EXECUTION,
+            PLANTS_MARKET_DATA,
+            create_rust_session,
+        )
+    except Exception as exc:
         print(f"SMOKE FAIL: extension unavailable: {exc}", file=sys.stderr)
         print("Build with: maturin develop --features python", file=sys.stderr)
         return 1
@@ -59,9 +61,7 @@ def main() -> int:
         front = session.get_front_month(symbol, exchange)
         print(f"front month: {front}")
         trading = (
-            front.get("trading_symbol")
-            if isinstance(front, dict)
-            else None
+            front.get("trading_symbol") if isinstance(front, dict) else None
         ) or symbol
         session.subscribe(str(trading), exchange)
         got = 0
@@ -78,7 +78,7 @@ def main() -> int:
             try:
                 session.subscribe_pnl()
                 print("subscribe_pnl OK")
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 print(f"subscribe_pnl soft-fail: {exc}")
         # AE4 Phase 1 smoke: trading not exercised here. Order APIs may exist for
         # Phase 2 but this smoke never calls them.
@@ -86,14 +86,12 @@ def main() -> int:
             print("order API present (Phase 2); smoke does not place orders")
         print("SMOKE OK")
         return 0 if got > 0 else 1
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(f"SMOKE FAIL: {exc}", file=sys.stderr)
         return 1
     finally:
-        try:
+        with contextlib.suppress(Exception):
             session.disconnect()
-        except Exception:
-            pass
 
 
 if __name__ == "__main__":

@@ -10,27 +10,23 @@ https://nautilustrader.io/docs/latest/concepts/strategies/
 
 from __future__ import annotations
 
-from datetime import timedelta
-from datetime import timezone
+from datetime import UTC, timedelta
 from zoneinfo import ZoneInfo
 
 from nautilus_trader.config import StrategyConfig
-from nautilus_trader.indicators import SimpleMovingAverage
-from nautilus_trader.indicators import VolumeWeightedAveragePrice
-from nautilus_trader.model.data import Bar
-from nautilus_trader.model.data import BarType
-from nautilus_trader.model.enums import BarAggregation
-from nautilus_trader.model.enums import OrderSide
-from nautilus_trader.model.enums import TimeInForce
-from nautilus_trader.model.events import OrderFilled
-from nautilus_trader.model.events import PositionChanged
-from nautilus_trader.model.events import PositionClosed
-from nautilus_trader.model.events import PositionOpened
+from nautilus_trader.indicators import SimpleMovingAverage, VolumeWeightedAveragePrice
+from nautilus_trader.model.data import Bar, BarType
+from nautilus_trader.model.enums import BarAggregation, OrderSide, TimeInForce
+from nautilus_trader.model.events import (
+    OrderFilled,
+    PositionChanged,
+    PositionClosed,
+    PositionOpened,
+)
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.instruments import Instrument
 from nautilus_trader.model.objects import Price
 from nautilus_trader.trading.strategy import Strategy
-
 from rithmic_nt_connect import VENUE
 
 _CHI = ZoneInfo("America/Chicago")
@@ -71,10 +67,14 @@ class NqFourBarStrategy(Strategy):
     def _note_ready(self) -> None:
         if self._sma.initialized and not self._sma_ready:
             self._sma_ready = True
-            self.log.info(f"SMA20 READY  {self._sma.value:.2f}  daily_bars={self._hist_day}")
+            self.log.info(
+                f"SMA20 READY  {self._sma.value:.2f}  daily_bars={self._hist_day}"
+            )
         if self._vwap.initialized and not self._vwap_ready:
             self._vwap_ready = True
-            self.log.info(f"VWAP READY  {self._vwap.value:.2f}  m1_bars={self._hist_m1}")
+            self.log.info(
+                f"VWAP READY  {self._vwap.value:.2f}  m1_bars={self._hist_m1}"
+            )
 
     def _ctx(self) -> str:
         need = int(self.config.sma_period)
@@ -97,7 +97,7 @@ class NqFourBarStrategy(Strategy):
             rth -= timedelta(days=1)
         while rth.weekday() >= 5:  # Sat/Sun → previous weekday RTH open
             rth -= timedelta(days=1)
-        return rth.astimezone(timezone.utc)
+        return rth.astimezone(UTC)
 
     def _ensure_indicator(self, bar_type: BarType, indicator) -> None:
         if indicator in list(self.registered_indicators):
@@ -131,7 +131,9 @@ class NqFourBarStrategy(Strategy):
                 self.stop()
                 return
             if len(instruments) > 1:
-                nq = [inst for inst in instruments if str(inst.id.symbol).startswith("NQ")]
+                nq = [
+                    inst for inst in instruments if str(inst.id.symbol).startswith("NQ")
+                ]
                 if len(nq) != 1:
                     self.log.error(
                         f"multiple {venue} instruments in cache; set "
@@ -242,7 +244,9 @@ class NqFourBarStrategy(Strategy):
         else:
             self._down = 0
             self._up = 0
-        self.log.info(f"BAR {bar.close}  down={self._down} up={self._up}  {self._ctx()}")
+        self.log.info(
+            f"BAR {bar.close}  down={self._down} up={self._up}  {self._ctx()}"
+        )
         if self._down < 4 and self._up < 4:
             return
         if self._has_working_order():
@@ -262,10 +266,14 @@ class NqFourBarStrategy(Strategy):
 
     def on_order_filled(self, event: OrderFilled) -> None:
         self.fills += 1
-        self.log.info(f"FILL  {event.order_side.name} {event.last_qty} @ {event.last_px}")
+        self.log.info(
+            f"FILL  {event.order_side.name} {event.last_qty} @ {event.last_px}"
+        )
 
     def on_position_opened(self, event: PositionOpened) -> None:
-        self.log.info(f"POS   {event.side.name} {event.quantity}  avg={event.avg_px_open}")
+        self.log.info(
+            f"POS   {event.side.name} {event.quantity}  avg={event.avg_px_open}"
+        )
 
     def on_position_changed(self, event: PositionChanged) -> None:
         self.log.info(
@@ -283,6 +291,8 @@ class NqFourBarStrategy(Strategy):
         if self._instrument is None:
             return
         if not self.portfolio.is_flat(self._instrument.id):
-            self.log.info(f"FLATTEN net={self.portfolio.net_position(self._instrument.id)}")
+            self.log.info(
+                f"FLATTEN net={self.portfolio.net_position(self._instrument.id)}"
+            )
             self.close_all_positions(self._instrument.id)
         self.cancel_all_orders(self._instrument.id)

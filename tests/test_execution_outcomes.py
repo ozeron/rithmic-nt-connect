@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from rithmic_nt_connect._orders import fill_dedup_key
-from rithmic_nt_connect._orders import slim_order_fields
-from rithmic_nt_connect._orders import trade_id_from_fill_fields
+from rithmic_nt_connect._orders import (
+    fill_dedup_key,
+    slim_order_fields,
+    trade_id_from_fill_fields,
+)
 
 
 def test_fill_dedup_key_includes_account_and_instrument():
@@ -49,7 +51,6 @@ def test_slim_order_fields_omits_noise():
 
 def test_order_side_from_notification():
     from nautilus_trader.model.enums import OrderSide
-
     from rithmic_nt_connect._orders import order_side_from_notification
 
     assert order_side_from_notification({"transaction_type": 1}) == OrderSide.BUY

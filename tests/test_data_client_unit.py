@@ -4,14 +4,17 @@ from __future__ import annotations
 
 from typing import Any
 
-from rithmic_nt_connect.data import fields_to_order_book_deltas
-from rithmic_nt_connect.data import fields_to_quote_tick
-from rithmic_nt_connect.data import fields_to_trade_tick
-from rithmic_nt_connect._convert import bbo_to_fields
-from rithmic_nt_connect._convert import last_trade_to_fields
-from rithmic_nt_connect._convert import order_book_to_fields
-
 from _stubs import WireSessionStub
+from rithmic_nt_connect._convert import (
+    bbo_to_fields,
+    last_trade_to_fields,
+    order_book_to_fields,
+)
+from rithmic_nt_connect.data import (
+    fields_to_order_book_deltas,
+    fields_to_quote_tick,
+    fields_to_trade_tick,
+)
 
 
 def test_last_trade_fields_to_trade_tick():
@@ -93,8 +96,7 @@ def test_bbo_fields_to_quote_tick():
 
 
 def test_order_book_fields_to_deltas():
-    from nautilus_trader.model.enums import BookAction
-    from nautilus_trader.model.enums import RecordFlag
+    from nautilus_trader.model.enums import BookAction, RecordFlag
 
     raw = {
         "type": "order_book",
@@ -159,7 +161,9 @@ def test_resync_ticker_session_replays_intent() -> None:
         def subscribe_order_book_summary(self, symbol: str, exchange: str) -> None:
             calls.append(("book", symbol, exchange))
 
-        def subscribe_time_bars(self, symbol: str, exchange: str, bar_type: int, period: int) -> None:
+        def subscribe_time_bars(
+            self, symbol: str, exchange: str, bar_type: int, period: int
+        ) -> None:
             calls.append(("bars", symbol, exchange, bar_type, period))
 
     asyncio.run(

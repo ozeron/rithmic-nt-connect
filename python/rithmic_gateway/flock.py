@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 from pathlib import Path
 
@@ -18,8 +19,12 @@ def lock_path(user: str, system_name: str, url: str, env: str = "Live") -> Path:
     return sock.with_suffix(".lock")
 
 
-def session_flock_held(user: str, system_name: str, url: str, env: str = "Live") -> bool:
-    """True when another live process holds the credential flock for this fingerprint."""
+def session_flock_held(
+    user: str, system_name: str, url: str, env: str = "Live"
+) -> bool:
+    """True when another live process holds the credential flock for this
+    fingerprint.
+    """
     try:
         lock = SessionLock.try_acquire(user, system_name, url, env)
     except SessionLockError:
@@ -28,7 +33,9 @@ def session_flock_held(user: str, system_name: str, url: str, env: str = "Live")
     return False
 
 
-def read_lock_pid(user: str, system_name: str, url: str, env: str = "Live") -> int | None:
+def read_lock_pid(
+    user: str, system_name: str, url: str, env: str = "Live"
+) -> int | None:
     """PID written into the credential lock file, if present and parseable."""
     path = lock_path(user, system_name, url, env)
     try:
@@ -82,7 +89,5 @@ class SessionLock:
             self._fd = -1
 
     def __del__(self) -> None:
-        try:
+        with contextlib.suppress(Exception):
             self.close()
-        except Exception:
-            pass

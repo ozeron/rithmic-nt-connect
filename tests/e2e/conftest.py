@@ -11,21 +11,19 @@ systems are refused by the adapter before any connection.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
-from typing import Iterator
 
 import pytest
-
-from rithmic_nt_connect.config import env_truthy
-from rithmic_nt_connect.config import system_kind
+from rithmic_nt_connect.config import env_truthy, system_kind
 
 if TYPE_CHECKING:
     from rithmic_nt_connect.session import WireSession
 
 
 @contextmanager
-def _connected_data_session() -> Iterator["WireSession"]:
+def _connected_data_session() -> Iterator[WireSession]:
     """Connect a market-data session; release its credential flock on exit
     (``disconnect()`` does not release it). A failed disconnect keeps the flock
     and fails teardown (one-session rule).
@@ -55,7 +53,9 @@ def _test_env() -> dict[str, str] | None:
 
 @pytest.fixture(scope="session")
 def test_env() -> dict[str, str] | None:
-    """Explicit test env values, or ``None`` when ``RITHMIC_TEST_DOTENV`` is unavailable."""
+    """Explicit test env values, or ``None`` when ``RITHMIC_TEST_DOTENV``
+    is unavailable.
+    """
     return _test_env()
 
 
@@ -95,14 +95,15 @@ def require_test_plant(test_env) -> str:
         )
     if kind != "test":
         raise RuntimeError(
-            f"REFUSING exec live test: RITHMIC_SYSTEM_NAME={test_env['RITHMIC_SYSTEM_NAME']!r} "
+            f"REFUSING exec live test: "
+            f"RITHMIC_SYSTEM_NAME={test_env['RITHMIC_SYSTEM_NAME']!r} "
             "is not recognized as a test/demo plant."
         )
     return test_env["RITHMIC_SYSTEM_NAME"]
 
 
 @pytest.fixture(scope="function")
-def live_session(credentials_available: bool) -> Iterator["WireSession"]:
+def live_session(credentials_available: bool) -> Iterator[WireSession]:
     """Return a connected *market data only* session (no PnL/order plants).
 
     Skipped if credentials are not available.

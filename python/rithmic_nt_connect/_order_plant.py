@@ -25,7 +25,8 @@ class OrderPlantPolicy:
         return self.state is OrderPlantState.LIVE
 
     def allow_cancel(self) -> bool:
-        # Cancels remain available during resync (risk-reducing); blocked only when down.
+        # Cancels remain available during resync (risk-reducing); blocked only when
+        # down.
         return self.state in {OrderPlantState.LIVE, OrderPlantState.RESYNCING}
 
     def load_orders_available(self) -> bool:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import socket
 import struct
@@ -11,7 +12,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
 from rithmic_gateway.client import GatewayClient, GatewayError
 from rithmic_gateway.config import (
     GatewayConfig,
@@ -21,13 +21,13 @@ from rithmic_gateway.config import (
 )
 from rithmic_gateway.framing import encode_frame
 from rithmic_gateway.spawn import (
-    assert_no_password_in_argv,
+    SpawnError,
     _bundled_bin,
+    assert_no_password_in_argv,
     curated_env,
     resolve_gateway_bin,
     spawn_argv,
     spawn_gateway,
-    SpawnError,
 )
 from rithmic_gateway.v1 import session_pb2 as pb
 
@@ -205,9 +205,7 @@ def test_resolve_bin_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.delenv("RITHMIC_GATEWAY_BIN", raising=False)
     monkeypatch.delenv("CARGO_TARGET_DIR", raising=False)
     monkeypatch.setenv("PATH", str(tmp_path))
-    monkeypatch.setattr(
-        "rithmic_gateway.spawn._bin_search_starts", lambda: [tmp_path]
-    )
+    monkeypatch.setattr("rithmic_gateway.spawn._bin_search_starts", lambda: [tmp_path])
     with pytest.raises(SpawnError, match="RITHMIC_GATEWAY_BIN"):
         resolve_gateway_bin(None)
 
@@ -268,7 +266,9 @@ def _bundled_bin_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return bin_dir
 
 
-def test_bundled_bin_requires_executable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_bundled_bin_requires_executable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """_bundled_bin() returns None unless the bundled binary is executable."""
     binary = _bundled_bin_dir(tmp_path, monkeypatch) / "rithmic-gateway"
     binary.write_text("#!/bin/sh\n")
@@ -324,10 +324,12 @@ def test_spawn_happy_path_requires_flock_not_just_listen(
         def kill(self) -> None:
             pass
 
-        def wait(self, timeout: float | None = None) -> int:  # noqa: ARG002
+        def wait(self, timeout: float | None = None) -> int:
             return 0
 
-    monkeypatch.setattr("rithmic_gateway.spawn.subprocess.Popen", lambda *_a, **_k: _Proc())
+    monkeypatch.setattr(
+        "rithmic_gateway.spawn.subprocess.Popen", lambda *_a, **_k: _Proc()
+    )
     cfg = GatewayConfig(
         user="u-impostor",
         system_name="LucidTrading",
@@ -369,7 +371,9 @@ def test_client_handshake_auth_failed() -> None:
             (n,) = struct.unpack("!I", header)
             _ = conn.recv(n)
             err = pb.Frame(
-                error=pb.ErrorResponse(code="auth_failed", message="auth_token rejected")
+                error=pb.ErrorResponse(
+                    code="auth_failed", message="auth_token rejected"
+                )
             )
             conn.sendall(encode_frame(err.SerializeToString()))
         server.close()
@@ -409,7 +413,11 @@ def test_load_ticks_adds_trade_price_aliases() -> None:
             (n,) = struct.unpack("!I", header)
             _ = conn.recv(n)  # handshake
             conn.sendall(
-                encode_frame(pb.Frame(ready=pb.Ready(scopes=["md", "history"])).SerializeToString())
+                encode_frame(
+                    pb.Frame(
+                        ready=pb.Ready(scopes=["md", "history"])
+                    ).SerializeToString()
+                )
             )
             header = conn.recv(4)
             (n,) = struct.unpack("!I", header)
@@ -452,7 +460,9 @@ def test_load_ticks_adds_trade_price_aliases() -> None:
             sock.unlink()
 
 
-def _serve_ready(sock_path: Path, *, trading: bool = False, cancel_all: bool = False) -> None:
+def _serve_ready(
+    sock_path: Path, *, trading: bool = False, cancel_all: bool = False
+) -> None:
     """One-shot mock parent: Handshake → Ready, then gate place/cancel_all."""
     if sock_path.exists():
         sock_path.unlink()
@@ -590,7 +600,11 @@ def _serve_event_then_ack(sock_path: Path) -> None:
             conn.sendall(
                 encode_frame(
                     pb.Frame(
-                        ready=pb.Ready(scopes=["md"], trading_enabled=False, cancel_all_enabled=False)
+                        ready=pb.Ready(
+                            scopes=["md"],
+                            trading_enabled=False,
+                            cancel_all_enabled=False,
+                        )
                     ).SerializeToString()
                 )
             )
@@ -604,7 +618,9 @@ def _serve_event_then_ack(sock_path: Path) -> None:
             evt = pb.Frame(
                 request_id=0,
                 event=pb.Event(
-                    last_trade=pb.LastTrade(symbol="NQ", exchange="CME", trade_price=1.0)
+                    last_trade=pb.LastTrade(
+                        symbol="NQ", exchange="CME", trade_price=1.0
+                    )
                 ),
             )
             conn.sendall(encode_frame(evt.SerializeToString()))
@@ -616,7 +632,9 @@ def _serve_event_then_ack(sock_path: Path) -> None:
 
 
 def test_default_unix_path_rust_parity() -> None:
-    """Must match crates/rithmic-gateway listen::tests::default_unix_path_matches_python_fnv_fixture."""
+    """Must match
+    crates/rithmic-gateway listen::tests::default_unix_path_matches_python_fnv_fixture.
+    """
     path = default_unix_path(
         "alice", "LucidTrading", "wss://rprotocol.rithmic.com:443", "Live"
     )
@@ -637,7 +655,7 @@ def test_auth_token_omitted_from_repr() -> None:
         url="wss://example",
         auth_token="super-secret-token",
         auto_spawn=False,
-            attest_flock=False,
+        attest_flock=False,
         listen="unix:///tmp/rgw-repr.sock",
     )
     text = repr(cfg)
@@ -695,7 +713,9 @@ def _serve_multi_event_wrong_error_then_ack(sock_path: Path) -> None:
                 encode_frame(
                     pb.Frame(
                         ready=pb.Ready(
-                            scopes=["md"], trading_enabled=False, cancel_all_enabled=False
+                            scopes=["md"],
+                            trading_enabled=False,
+                            cancel_all_enabled=False,
                         )
                     ).SerializeToString()
                 )
@@ -809,7 +829,9 @@ def _serve_push_typed_events(sock_path: Path) -> None:
                 encode_frame(
                     pb.Frame(
                         ready=pb.Ready(
-                            scopes=["md"], trading_enabled=False, cancel_all_enabled=False
+                            scopes=["md"],
+                            trading_enabled=False,
+                            cancel_all_enabled=False,
                         )
                     ).SerializeToString()
                 )
@@ -831,10 +853,8 @@ def _serve_push_typed_events(sock_path: Path) -> None:
             ):
                 conn.sendall(encode_frame(frame_bytes))
             # Keep connection open briefly for polls.
-            try:
+            with contextlib.suppress(Exception):
                 conn.recv(1)
-            except Exception:
-                pass
         server.close()
 
     threading.Thread(target=_run, daemon=True).start()
@@ -866,7 +886,6 @@ def test_poll_routes_md_pnl_order_history() -> None:
     finally:
         if sock.exists():
             sock.unlink()
-
 
 
 def test_order_book_event_always_has_side_keys() -> None:
@@ -913,7 +932,9 @@ def test_desync_nulls_sock_for_next_rpc() -> None:
                 encode_frame(
                     pb.Frame(
                         ready=pb.Ready(
-                            scopes=["md"], trading_enabled=False, cancel_all_enabled=False
+                            scopes=["md"],
+                            trading_enabled=False,
+                            cancel_all_enabled=False,
                         )
                     ).SerializeToString()
                 )
@@ -925,10 +946,8 @@ def test_desync_nulls_sock_for_next_rpc() -> None:
             conn.recv(n)
             conn.sendall(struct.pack("!I", 100))  # claim 100 bytes
             conn.sendall(b"\x00\x01")  # only 2 bytes — then stall until client closes
-            try:
+            with contextlib.suppress(Exception):
                 conn.recv(1)
-            except Exception:
-                pass
         server.close()
 
     threading.Thread(target=_run, daemon=True).start()

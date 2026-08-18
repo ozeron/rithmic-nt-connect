@@ -32,7 +32,7 @@ def main() -> int:
     try:
         from rithmic_nt_connect.constants import DEFAULT_GATEWAY_URL
         from rithmic_nt_connect.systems import list_systems
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(f"import failed: {exc}", file=sys.stderr)
         print("Build with: maturin develop --features python", file=sys.stderr)
         return 1
@@ -41,7 +41,7 @@ def main() -> int:
     print(f"Connecting to {url} ...")
     try:
         names = list_systems(url)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1
     print("Available systems:")

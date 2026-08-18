@@ -6,10 +6,13 @@ import importlib
 import os
 
 import pytest
-
-from rithmic_nt_connect import ConfigError, ConnectMode, SessionConfig, VENUE
+from rithmic_nt_connect import VENUE, ConfigError, ConnectMode, SessionConfig
 from rithmic_nt_connect.config import RithmicDataClientConfig, RithmicExecClientConfig
-from rithmic_nt_connect.constants import DEFAULT_APP_NAME, DEFAULT_GATEWAY_URL, DEFAULT_SYSTEM_NAME
+from rithmic_nt_connect.constants import (
+    DEFAULT_APP_NAME,
+    DEFAULT_GATEWAY_URL,
+    DEFAULT_SYSTEM_NAME,
+)
 
 
 def test_my046_env_maps_to_lucid_live() -> None:
@@ -94,14 +97,18 @@ def test_missing_credentials_clear_error_no_password_echo() -> None:
 
 def test_empty_user_rejected_without_echoing_password() -> None:
     with pytest.raises(ConfigError) as exc:
-        SessionConfig(user="", password="top-secret-password", connect_mode=ConnectMode.DIRECT)
+        SessionConfig(
+            user="", password="top-secret-password", connect_mode=ConnectMode.DIRECT
+        )
     msg = str(exc.value)
     assert "user" in msg
     assert "top-secret-password" not in msg
 
 
 def test_repr_redacts_password() -> None:
-    cfg = SessionConfig(user="u", password="top-secret-password", connect_mode=ConnectMode.DIRECT)
+    cfg = SessionConfig(
+        user="u", password="top-secret-password", connect_mode=ConnectMode.DIRECT
+    )
     text = repr(cfg)
     assert "top-secret-password" not in text
     assert "***" in text
@@ -109,7 +116,9 @@ def test_repr_redacts_password() -> None:
 
 
 def test_to_dict_redacts_by_default() -> None:
-    cfg = SessionConfig(user="u", password="top-secret-password", connect_mode=ConnectMode.DIRECT)
+    cfg = SessionConfig(
+        user="u", password="top-secret-password", connect_mode=ConnectMode.DIRECT
+    )
     assert cfg.to_dict()["password"] == "***"
     assert cfg.to_dict(redact=False)["password"] == "top-secret-password"
     assert cfg.to_dict()["connect_mode"] == "direct"
@@ -144,8 +153,7 @@ def test_env_truthy() -> None:
 
 
 def test_load_dotenv_setdefault(tmp_path, monkeypatch) -> None:
-    from rithmic_nt_connect.config import load_dotenv
-    from rithmic_nt_connect.config import load_dotenv_files
+    from rithmic_nt_connect.config import load_dotenv, load_dotenv_files
 
     env_file = tmp_path / ".env"
     env_file.write_text("RITHMIC_USER=alice\n# comment\nRITHMIC_PASSWORD='s3cret'\n")
@@ -165,7 +173,9 @@ def test_load_dotenv_setdefault(tmp_path, monkeypatch) -> None:
     assert os.environ["RITHMIC_SYMBOL"] == "NQ"
 
 
-def test_explicit_test_env_requires_source_and_never_uses_root_env(tmp_path, monkeypatch) -> None:
+def test_explicit_test_env_requires_source_and_never_uses_root_env(
+    tmp_path, monkeypatch
+) -> None:
     from rithmic_nt_connect.config import ConfigError, explicit_test_env
 
     monkeypatch.delenv("RITHMIC_TEST_DOTENV", raising=False)
@@ -188,10 +198,14 @@ def test_explicit_test_env_requires_source_and_never_uses_root_env(tmp_path, mon
     assert values["RITHMIC_USER"] != os.environ["RITHMIC_USER"]
     from rithmic_nt_connect.config import SessionConfig
 
-    assert "test-password" not in repr(SessionConfig.from_env(values, prefer_lucid=False))
+    assert "test-password" not in repr(
+        SessionConfig.from_env(values, prefer_lucid=False)
+    )
 
 
-def test_explicit_test_env_gateway_required_only_for_gateway_mode(tmp_path, monkeypatch) -> None:
+def test_explicit_test_env_gateway_required_only_for_gateway_mode(
+    tmp_path, monkeypatch
+) -> None:
     from rithmic_nt_connect.config import ConfigError, explicit_test_env
 
     env_file = tmp_path / "direct.env"
@@ -243,7 +257,6 @@ def test_package_imports_without_network() -> None:
 
 def test_live_data_client_config_is_nautilus_config() -> None:
     from nautilus_trader.config import LiveDataClientConfig
-
     from rithmic_nt_connect.config import RithmicLiveDataClientConfig
 
     cfg = RithmicLiveDataClientConfig()

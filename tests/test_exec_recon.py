@@ -6,42 +6,41 @@ import asyncio
 from collections import OrderedDict
 from decimal import Decimal
 from types import SimpleNamespace
-from typing import Any
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from nautilus_trader.core.uuid import UUID4
-from nautilus_trader.execution.messages import GenerateFillReports
-from nautilus_trader.execution.messages import GenerateOrderStatusReport
-from nautilus_trader.execution.messages import GenerateOrderStatusReports
-from nautilus_trader.execution.messages import GeneratePositionStatusReports
-from nautilus_trader.model.enums import LiquiditySide
-from nautilus_trader.model.enums import OrderSide
-from nautilus_trader.model.enums import OrderStatus
-from nautilus_trader.model.enums import OrderType
-from nautilus_trader.model.enums import TimeInForce
-from nautilus_trader.model.enums import TriggerType
-from nautilus_trader.model.events import OrderAccepted
-from nautilus_trader.model.events import OrderFilled
-from nautilus_trader.model.events import OrderSubmitted
-from nautilus_trader.model.identifiers import AccountId
-from nautilus_trader.model.identifiers import ClientOrderId
-from nautilus_trader.model.identifiers import InstrumentId
-from nautilus_trader.model.identifiers import StrategyId
-from nautilus_trader.model.identifiers import TradeId
-from nautilus_trader.model.identifiers import TraderId
-from nautilus_trader.model.identifiers import VenueOrderId
-from nautilus_trader.model.objects import Currency
-from nautilus_trader.model.objects import Money
-from nautilus_trader.model.objects import Price
-from nautilus_trader.model.objects import Quantity
-from nautilus_trader.model.orders import LimitOrder
-from nautilus_trader.model.orders import Order
-
-from rithmic_nt_connect._order_plant import OrderPlantPolicy
-from rithmic_nt_connect._order_plant import OrderPlantState
-from rithmic_nt_connect.errors import ReconciliationUnavailableError
-from rithmic_nt_connect.errors import VenueQueryUnavailable
+from nautilus_trader.execution.messages import (
+    GenerateFillReports,
+    GenerateOrderStatusReport,
+    GenerateOrderStatusReports,
+    GeneratePositionStatusReports,
+)
+from nautilus_trader.model.enums import (
+    LiquiditySide,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    TimeInForce,
+    TriggerType,
+)
+from nautilus_trader.model.events import OrderAccepted, OrderFilled, OrderSubmitted
+from nautilus_trader.model.identifiers import (
+    AccountId,
+    ClientOrderId,
+    InstrumentId,
+    StrategyId,
+    TradeId,
+    TraderId,
+    VenueOrderId,
+)
+from nautilus_trader.model.objects import Currency, Money, Price, Quantity
+from nautilus_trader.model.orders import LimitOrder, Order
+from rithmic_nt_connect._order_plant import OrderPlantPolicy, OrderPlantState
+from rithmic_nt_connect.errors import (
+    ReconciliationUnavailableError,
+    VenueQueryUnavailable,
+)
 from rithmic_nt_connect.execution import RithmicExecutionClient
 from rithmic_nt_connect.session import WireSession
 
@@ -80,7 +79,9 @@ class _TestClient(RithmicExecutionClient):
 
     @property
     def _clock(self) -> SimpleNamespace:
-        return cast(SimpleNamespace, object.__getattribute__(self, "_TestClient__clock"))
+        return cast(
+            SimpleNamespace, object.__getattribute__(self, "_TestClient__clock")
+        )
 
     @_clock.setter
     def _clock(self, value: SimpleNamespace) -> None:
@@ -96,7 +97,9 @@ class _TestClient(RithmicExecutionClient):
 
     @property
     def account_id(self) -> AccountId | None:
-        return cast(AccountId | None, object.__getattribute__(self, "_TestClient__account_id"))
+        return cast(
+            AccountId | None, object.__getattribute__(self, "_TestClient__account_id")
+        )
 
     @account_id.setter
     def account_id(self, value: AccountId | None) -> None:
@@ -179,7 +182,9 @@ def _fill_event(*, fill_id: str = "F1", basket: str = "B1") -> dict[str, object]
     }
 
 
-def _status_event(*, kind: str, status: str, ts_event: int | None = None) -> dict[str, object]:
+def _status_event(
+    *, kind: str, status: str, ts_event: int | None = None
+) -> dict[str, object]:
     raw: dict[str, object] = {
         "type": "order_notification",
         "source": "rithmic",
@@ -329,7 +334,9 @@ def test_untracked_status_suppresses_unchanged_re_push() -> None:
         _send_order_status_report=published.append,
         _seed_account_if_needed=lambda account_raw: None,
     )
-    status = SimpleNamespace(venue_order_id="B-EXT", order_status="OPEN", filled_qty="1", avg_px="100.5")
+    status = SimpleNamespace(
+        venue_order_id="B-EXT", order_status="OPEN", filled_qty="1", avg_px="100.5"
+    )
     client._order_status_report_from_fields = lambda event, ts: status
     client._untracked_status_keys = {}
     fields = {
@@ -450,11 +457,17 @@ def test_untracked_status_publication_failure_does_not_escape_handler() -> None:
     )
 
 
-def test_status_report_publication_failure_is_non_fatal_to_fill_reconciliation() -> None:
+def test_status_report_publication_failure_is_non_fatal_to_fill_reconciliation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client = _trading_client(_LoadOrdersSession([_fill_event()]))
-    setattr(client, "_fill_report_from_fields", lambda fields, ts_event: object())
-    setattr(client, "_order_status_report_from_fields", lambda fields, ts_event: object())
-    setattr(
+    monkeypatch.setattr(
+        client, "_fill_report_from_fields", lambda fields, ts_event: object()
+    )
+    monkeypatch.setattr(
+        client, "_order_status_report_from_fields", lambda fields, ts_event: object()
+    )
+    monkeypatch.setattr(
         client,
         "_send_order_status_report",
         lambda report: (_ for _ in ()).throw(RuntimeError("stale report")),
@@ -465,32 +478,51 @@ def test_status_report_publication_failure_is_non_fatal_to_fill_reconciliation()
     assert reports == []
 
 
-def test_fill_reconciliation_skips_fill_without_status_prerequisite() -> None:
+def test_fill_reconciliation_skips_fill_without_status_prerequisite(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A fill whose status prerequisite cannot be built must not be emitted.
 
     Regression for the Macroscope review: a fill with valid fill fields but
-    malformed status fields was appended even though ``_order_status_report_from_fields``
-    returned ``None``, so Nautilus received a fill with no order prerequisite.
+    malformed status fields was appended even though
+    ``_order_status_report_from_fields`` returned ``None``, so Nautilus
+    received a fill with no order prerequisite.
     """
     client = _trading_client(_LoadOrdersSession([_fill_event()]))
-    setattr(client, "_fill_report_from_fields", lambda fields, ts_event: object())
-    setattr(client, "_order_status_report_from_fields", lambda fields, ts_event: None)
-    setattr(client, "_send_order_status_report", lambda report: None)
+    monkeypatch.setattr(
+        client, "_fill_report_from_fields", lambda fields, ts_event: object()
+    )
+    monkeypatch.setattr(
+        client, "_order_status_report_from_fields", lambda fields, ts_event: None
+    )
+    monkeypatch.setattr(client, "_send_order_status_report", lambda report: None)
 
     reports = asyncio.run(client.generate_fill_reports(_fill_cmd()))
 
     assert reports == []
 
 
-def test_replayed_fill_publishes_status_before_fill_and_is_idempotent() -> None:
+def test_replayed_fill_publishes_status_before_fill_and_is_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A recovered fill must have an order prerequisite and replay once only."""
     client = _trading_client(_LoadOrdersSession([_fill_event(fill_id="REPLAY-1")]))
     status_report = object()
     fill_report = object()
     published: list[tuple[str, object]] = []
-    setattr(client, "_order_status_report_from_fields", lambda fields, ts_event: status_report)
-    setattr(client, "_fill_report_from_fields", lambda fields, ts_event: fill_report)
-    setattr(client, "_send_order_status_report", lambda report: published.append(("status", report)))
+    monkeypatch.setattr(
+        client,
+        "_order_status_report_from_fields",
+        lambda fields, ts_event: status_report,
+    )
+    monkeypatch.setattr(
+        client, "_fill_report_from_fields", lambda fields, ts_event: fill_report
+    )
+    monkeypatch.setattr(
+        client,
+        "_send_order_status_report",
+        lambda report: published.append(("status", report)),
+    )
 
     first = asyncio.run(client.generate_fill_reports(_fill_cmd()))
     second = asyncio.run(client.generate_fill_reports(_fill_cmd()))
@@ -667,7 +699,9 @@ def _stop_recon_event() -> dict[str, object]:
     }
 
 
-def test_generate_order_status_reports_preserves_stop_trigger_type() -> None:
+def test_generate_order_status_reports_preserves_stop_trigger_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Full recon drain: a resting stop's status report must keep
     ``TriggerType.DEFAULT`` and the native ``trigger_price``.
 
@@ -678,8 +712,8 @@ def test_generate_order_status_reports_preserves_stop_trigger_type() -> None:
     """
     client = _trading_client(_LoadOrdersSession([_stop_recon_event()]))
     client.account_id = "RITHMIC-ACC1"
-    setattr(client, "_seed_account_if_needed", lambda account_raw: None)
-    setattr(client, "_client_order_id_for_tag", lambda tag: None)
+    monkeypatch.setattr(client, "_seed_account_if_needed", lambda account_raw: None)
+    monkeypatch.setattr(client, "_client_order_id_for_tag", lambda tag: None)
 
     reports = asyncio.run(client.generate_order_status_reports(_status_cmd()))
 
@@ -696,7 +730,10 @@ def test_unknown_outcome_closes_order_gate_without_rejection() -> None:
     client._order_plant_latched = False
     client._mark_order_plant_failed("submit", RuntimeError("timeout after send"))
     assert client._order_plant.state is OrderPlantState.DISCONNECTED
-    assert client._order_status_from_event({"kind": "unknown", "status": "UNKNOWN"}) is not OrderStatus.REJECTED
+    assert (
+        client._order_status_from_event({"kind": "unknown", "status": "UNKNOWN"})
+        is not OrderStatus.REJECTED
+    )
 
 
 def test_order_plant_failure_latches_across_resync() -> None:
@@ -786,7 +823,12 @@ def test_cached_stop_order_status_report_preserves_native_order_metadata() -> No
 
 def test_true_reject_still_terminal_rejected():
     client = _client()
-    fields = {"kind": "rejected", "status": "REJECTED", "quantity": 1, "total_fill_size": 0}
+    fields = {
+        "kind": "rejected",
+        "status": "REJECTED",
+        "quantity": 1,
+        "total_fill_size": 0,
+    }
     assert client._order_status_from_event(fields) == OrderStatus.REJECTED
 
 
@@ -814,7 +856,6 @@ def test_recon_window_clamps_inverted_bounds():
 # --------------------------------------------------------------------------- #
 
 
-
 def test_resolve_unknown_external_tag_without_basket_is_none():
     client = _client()
     # An external (untracked) notification must NOT resolve to a synthetic
@@ -826,7 +867,10 @@ def test_resolve_unknown_external_tag_falls_back_to_basket_cache():
     client = _client()
     coid = ClientOrderId("C1")
     client._cache._venue_to_client["B1"] = coid
-    assert client._resolve_client_order_id({"user_tag": "EXT-1", "basket_id": "B1"}) == coid
+    assert (
+        client._resolve_client_order_id({"user_tag": "EXT-1", "basket_id": "B1"})
+        == coid
+    )
 
 
 def test_resolve_known_tag_maps_to_client_order():
@@ -867,12 +911,12 @@ def test_resolve_prefers_venue_basket_over_colliding_tag():
     # different venue order; the basket (venue identity) must win so an external
     # order is not misattributed to our tracked order.
     client = _client()
-    coid = ClientOrderId("C1")
     other = ClientOrderId("C2")
     client._cache._orders["C1"] = _CacheOrder(closed=False)
     client._cache._venue_to_client["B-EXT"] = other
     assert (
-        client._resolve_client_order_id({"user_tag": "C1", "basket_id": "B-EXT"}) == other
+        client._resolve_client_order_id({"user_tag": "C1", "basket_id": "B-EXT"})
+        == other
     )
 
 
@@ -882,16 +926,22 @@ def test_resolve_tag_when_basket_not_yet_bound():
     client = _client()
     coid = ClientOrderId("C1")
     client._cache._orders["C1"] = _CacheOrder(closed=False)
-    assert client._resolve_client_order_id({"user_tag": "C1", "basket_id": "B1"}) == coid
+    assert (
+        client._resolve_client_order_id({"user_tag": "C1", "basket_id": "B1"}) == coid
+    )
 
 
-def test_publish_account_nonnumeric_balance_does_not_seed(monkeypatch: pytest.MonkeyPatch):
+def test_publish_account_nonnumeric_balance_does_not_seed(
+    monkeypatch: pytest.MonkeyPatch,
+):
     client = _client()
     client._account_seeded = False
     calls: list[tuple[str, object]] = []
 
     monkeypatch.setattr(
-        RithmicExecutionClient, "_set_account_id", lambda self, aid: calls.append(("set", aid))
+        RithmicExecutionClient,
+        "_set_account_id",
+        lambda self, aid: calls.append(("set", aid)),
     )
     monkeypatch.setattr(
         RithmicExecutionClient,
@@ -905,13 +955,17 @@ def test_publish_account_nonnumeric_balance_does_not_seed(monkeypatch: pytest.Mo
     assert ("seed", "ACC1") not in calls
 
 
-def test_publish_account_nonfinite_balance_does_not_seed(monkeypatch: pytest.MonkeyPatch):
+def test_publish_account_nonfinite_balance_does_not_seed(
+    monkeypatch: pytest.MonkeyPatch,
+):
     client = _client()
     client._account_seeded = False
     calls: list[tuple[str, object]] = []
 
     monkeypatch.setattr(
-        RithmicExecutionClient, "_set_account_id", lambda self, aid: calls.append(("set", aid))
+        RithmicExecutionClient,
+        "_set_account_id",
+        lambda self, aid: calls.append(("set", aid)),
     )
     monkeypatch.setattr(
         RithmicExecutionClient,
@@ -970,7 +1024,9 @@ def test_load_orders_events_returns_empty_recon():
 
 
 def _fill_reports_client(
-    events: list[dict[str, object]], report: object | None = None
+    monkeypatch: pytest.MonkeyPatch,
+    events: list[dict[str, object]],
+    report: object | None = None,
 ) -> RithmicExecutionClient:
     """Client whose fill/status conversion is stubbed to return ``report``/a status.
 
@@ -980,36 +1036,44 @@ def _fill_reports_client(
     if report is None:
         report = object()
     client = _trading_client(_LoadOrdersSession(events))
-    setattr(client, "_fill_report_from_fields", lambda fields, ts_event: report)
-    setattr(
+    monkeypatch.setattr(
+        client, "_fill_report_from_fields", lambda fields, ts_event: report
+    )
+    monkeypatch.setattr(
         client,
         "_order_status_report_from_fields",
         lambda fields, ts_event: SimpleNamespace(venue_order_id="V-EXT"),
     )
-    setattr(client, "_send_order_status_report", lambda status_report: None)
+    monkeypatch.setattr(client, "_send_order_status_report", lambda status_report: None)
     return client
 
 
-def test_generate_fill_reports_suppresses_fill_seen_live():
-    client = _fill_reports_client([_fill_event(fill_id="F1")])
+def test_generate_fill_reports_suppresses_fill_seen_live(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    client = _fill_reports_client(monkeypatch, [_fill_event(fill_id="F1")])
     # The live path already marked this fill.
     client._mark_fill_key("ACC1|NQU6.RITHMIC|F1")
     reports = asyncio.run(client.generate_fill_reports(_fill_cmd()))
     assert reports == []
 
 
-def test_generate_fill_reports_emits_and_marks_unseen_fill():
+def test_generate_fill_reports_emits_and_marks_unseen_fill(
+    monkeypatch: pytest.MonkeyPatch,
+):
     report = object()
-    client = _fill_reports_client([_fill_event(fill_id="F1")], report)
+    client = _fill_reports_client(monkeypatch, [_fill_event(fill_id="F1")], report)
     reports = asyncio.run(client.generate_fill_reports(_fill_cmd()))
     assert reports == [report]
     assert client._fill_key_seen("ACC1|NQU6.RITHMIC|F1")
 
 
-def test_generate_fill_reports_dedups_fill_without_venue_id():
+def test_generate_fill_reports_dedups_fill_without_venue_id(
+    monkeypatch: pytest.MonkeyPatch,
+):
     raw = _fill_event(fill_id="")
     report = object()
-    client = _fill_reports_client([raw, raw], report)
+    client = _fill_reports_client(monkeypatch, [raw, raw], report)
     reports = asyncio.run(client.generate_fill_reports(_fill_cmd()))
     assert reports == [report]
 
@@ -1019,7 +1083,9 @@ def test_generate_fill_reports_dedups_fill_without_venue_id():
 # --------------------------------------------------------------------------- #
 
 
-def test_order_status_reports_last_row_wins_on_equal_ts():
+def test_order_status_reports_last_row_wins_on_equal_ts(
+    monkeypatch: pytest.MonkeyPatch,
+):
     client = _trading_client(
         _LoadOrdersSession(
             [
@@ -1028,10 +1094,12 @@ def test_order_status_reports_last_row_wins_on_equal_ts():
             ]
         )
     )
-    setattr(
-        client, "_matches_instrument", lambda fields, instrument_id, venue_order_id: True
+    monkeypatch.setattr(
+        client,
+        "_matches_instrument",
+        lambda fields, instrument_id, venue_order_id: True,
     )
-    setattr(
+    monkeypatch.setattr(
         client,
         "_order_status_report_from_fields",
         lambda fields, ts_event: SimpleNamespace(order_status=fields["kind"]),
@@ -1072,11 +1140,13 @@ def test_status_reports_raises_when_trading_source_unavailable():
         asyncio.run(client.generate_order_status_reports(_status_cmd()))
 
 
-def test_status_reports_cache_backed_for_read_only():
+def test_status_reports_cache_backed_for_read_only(monkeypatch: pytest.MonkeyPatch):
     # A read-only client legitimately reports only its locally cached orders
     # (never claims venue authority); it must not raise.
     client = _trading_client(enable_trading=False)
-    setattr(client, "_cache_backed_order_status_reports", lambda cmd: ["cached"])
+    monkeypatch.setattr(
+        client, "_cache_backed_order_status_reports", lambda cmd: ["cached"]
+    )
     reports = asyncio.run(client.generate_order_status_reports(_status_cmd()))
     assert reports == ["cached"]
 
@@ -1089,7 +1159,9 @@ def test_load_orders_events_does_not_retry_unavailable_error():
     class _CountingSession:
         def load_orders(self, start: int, end: int) -> list[dict[str, object]]:
             calls["n"] += 1
-            raise ReconciliationUnavailableError("order-history reconciliation unavailable")
+            raise ReconciliationUnavailableError(
+                "order-history reconciliation unavailable"
+            )
 
     client = _trading_client(session=_CountingSession())
     with pytest.raises(ReconciliationUnavailableError, match="unavailable"):
@@ -1116,15 +1188,17 @@ def _position_cmd() -> GeneratePositionStatusReports:
     )
 
 
-def test_position_status_reports_skip_unloaded_instruments() -> None:
+def test_position_status_reports_skip_unloaded_instruments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client = _client()
     client._positions = {
         "MNQU6.RITHMIC": {"instrument_id": "MNQU6.RITHMIC", "quantity": 0},
         "NQU6.RITHMIC": {"instrument_id": "NQU6.RITHMIC", "quantity": 0},
     }
-    setattr(client, "_cache", _InstrumentCache({"MNQU6.RITHMIC"}))
+    monkeypatch.setattr(client, "_cache", _InstrumentCache({"MNQU6.RITHMIC"}))
     emitted: list[str] = []
-    setattr(
+    monkeypatch.setattr(
         client,
         "_position_report_from_fields",
         lambda fields, ts_init: (
@@ -1137,18 +1211,22 @@ def test_position_status_reports_skip_unloaded_instruments() -> None:
     assert emitted == ["MNQU6.RITHMIC"]
 
 
-def test_position_status_reports_warn_on_unloaded_nonzero_position() -> None:
+def test_position_status_reports_warn_on_unloaded_nonzero_position(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client = _client()
     client._positions = {
         "NQU6.RITHMIC": {"instrument_id": "NQU6.RITHMIC", "quantity": 2},
     }
-    setattr(client, "_cache", _InstrumentCache(set()))
+    monkeypatch.setattr(client, "_cache", _InstrumentCache(set()))
     warnings: list[str] = []
-    setattr(
-        client, "_log", SimpleNamespace(warning=lambda msg, *a, **k: warnings.append(str(msg)))
+    monkeypatch.setattr(
+        client,
+        "_log",
+        SimpleNamespace(warning=lambda msg, *a, **k: warnings.append(str(msg))),
     )
     emitted: list[str] = []
-    setattr(
+    monkeypatch.setattr(
         client,
         "_position_report_from_fields",
         lambda fields, ts_init: (
@@ -1226,7 +1304,9 @@ def _filled_limit_order() -> LimitOrder:
     return order
 
 
-def test_cached_status_query_carries_avg_px_for_filled_order() -> None:
+def test_cached_status_query_carries_avg_px_for_filled_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A status query for a FILLED order must report its average fill price.
 
     Nautilus ExecEngine warns on ``report.avg_px is None`` when reconciling a
@@ -1235,7 +1315,7 @@ def test_cached_status_query_carries_avg_px_for_filled_order() -> None:
     order = _filled_limit_order()
     client = _trading_client()
     client.account_id = AccountId("RITHMIC-ACC1")
-    client._cache = _SingleOrderCache(order)
+    monkeypatch.setattr(client, "_cache", _SingleOrderCache(order))
 
     command = GenerateOrderStatusReport(
         None,
@@ -1251,13 +1331,15 @@ def test_cached_status_query_carries_avg_px_for_filled_order() -> None:
     assert report.avg_px == Decimal("21000.5")
 
 
-def test_cached_status_query_non_stop_order_does_not_crash_on_trigger_type() -> None:
+def test_cached_status_query_non_stop_order_does_not_crash_on_trigger_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Only stop orders expose ``trigger_type`` on the 1.231.x model; a limit
     order status query must not raise and reports NO_TRIGGER."""
     order = _filled_limit_order()
     client = _trading_client()
     client.account_id = AccountId("RITHMIC-ACC1")
-    client._cache = _SingleOrderCache(order)
+    monkeypatch.setattr(client, "_cache", _SingleOrderCache(order))
 
     command = GenerateOrderStatusReport(
         None,

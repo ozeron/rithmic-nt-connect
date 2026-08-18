@@ -25,7 +25,7 @@ import time
 import uuid
 
 import pytest
-
+from exec_harness import ExecHarness, OrderDriver, OrderDriverConfig
 from nautilus_trader.config import (
     LiveDataEngineConfig,
     LiveExecEngineConfig,
@@ -34,11 +34,19 @@ from nautilus_trader.config import (
     TradingNodeConfig,
 )
 from nautilus_trader.live.node import TradingNode
-from nautilus_trader.model.enums import OrderSide
-from nautilus_trader.model.enums import OrderStatus
-from nautilus_trader.model.enums import TimeInForce
+from nautilus_trader.model.enums import OrderSide, OrderStatus, TimeInForce
 from nautilus_trader.model.identifiers import ClientOrderId, TraderId
-
+from order_dsl import (
+    above,
+    below,
+    far_above,
+    far_below,
+    limit,
+    market,
+    relative,
+    stop_limit,
+    stop_market,
+)
 from rithmic_nt_connect import (
     ADAPTER_NAME,
     VENUE,
@@ -48,9 +56,6 @@ from rithmic_nt_connect import (
     RithmicLiveExecClientFactory,
     session_config_from_explicit_test_env,
 )
-
-from order_dsl import above, below, far_above, far_below, limit, market, relative, stop_limit, stop_market
-from exec_harness import ExecHarness, OrderDriver, OrderDriverConfig
 
 
 @pytest.fixture
@@ -62,7 +67,9 @@ def live_exec(exec_front_month_instrument):
     test_session = session_config_from_explicit_test_env()
     instrument = exec_front_month_instrument
 
-    driver = OrderDriver(OrderDriverConfig(instrument_id=str(instrument.id)), instrument)
+    driver = OrderDriver(
+        OrderDriverConfig(instrument_id=str(instrument.id)), instrument
+    )
     # A prior test disposed its loop; give the next node a fresh one so it does
     # not bind to a closed loop ("Event loop is closed").
     asyncio.set_event_loop(asyncio.new_event_loop())
@@ -82,7 +89,9 @@ def live_exec(exec_front_month_instrument):
                 open_check_open_only=True,
             ),
             risk_engine=LiveRiskEngineConfig(bypass=True),
-            data_clients={ADAPTER_NAME: RithmicLiveDataClientConfig(session=test_session)},
+            data_clients={
+                ADAPTER_NAME: RithmicLiveDataClientConfig(session=test_session)
+            },
             exec_clients={
                 VENUE: RithmicLiveExecClientConfig(
                     session=test_session, enable_trading=True
@@ -187,22 +196,76 @@ class TestLimitOrders:
     @pytest.mark.parametrize(
         ("side", "price_fn", "tif", "cid", "expected", "expect_no_fill"),
         [
-            _tc("TC-E10", OrderSide.BUY, below, TimeInForce.GTC, "L10", OrderStatus.ACCEPTED, True),
-            _tc("TC-E11", OrderSide.SELL, above, TimeInForce.GTC, "L11", OrderStatus.ACCEPTED, True),
-            _tc("TC-E13", OrderSide.BUY, above, TimeInForce.IOC, "L13", OrderStatus.FILLED, False),
-            _tc("TC-E14", OrderSide.BUY, below, TimeInForce.IOC, "L14", OrderStatus.CANCELED, False),
-            _tc("TC-E15", OrderSide.BUY, above, TimeInForce.FOK, "L15", OrderStatus.FILLED, False),
-            _tc("TC-E16", OrderSide.BUY, below, TimeInForce.FOK, "L16", OrderStatus.CANCELED, False),
-            _tc("TC-E19", OrderSide.BUY, below, TimeInForce.DAY, "L19", OrderStatus.ACCEPTED, True),
+            _tc(
+                "TC-E10",
+                OrderSide.BUY,
+                below,
+                TimeInForce.GTC,
+                "L10",
+                OrderStatus.ACCEPTED,
+                True,
+            ),
+            _tc(
+                "TC-E11",
+                OrderSide.SELL,
+                above,
+                TimeInForce.GTC,
+                "L11",
+                OrderStatus.ACCEPTED,
+                True,
+            ),
+            _tc(
+                "TC-E13",
+                OrderSide.BUY,
+                above,
+                TimeInForce.IOC,
+                "L13",
+                OrderStatus.FILLED,
+                False,
+            ),
+            _tc(
+                "TC-E14",
+                OrderSide.BUY,
+                below,
+                TimeInForce.IOC,
+                "L14",
+                OrderStatus.CANCELED,
+                False,
+            ),
+            _tc(
+                "TC-E15",
+                OrderSide.BUY,
+                above,
+                TimeInForce.FOK,
+                "L15",
+                OrderStatus.FILLED,
+                False,
+            ),
+            _tc(
+                "TC-E16",
+                OrderSide.BUY,
+                below,
+                TimeInForce.FOK,
+                "L16",
+                OrderStatus.CANCELED,
+                False,
+            ),
+            _tc(
+                "TC-E19",
+                OrderSide.BUY,
+                below,
+                TimeInForce.DAY,
+                "L19",
+                OrderStatus.ACCEPTED,
+                True,
+            ),
         ],
     )
     def test_TC_ElX_limit_order(
         self, live_exec, side, price_fn, tif, cid, expected, expect_no_fill
     ):
         cid = _unique(cid)
-        live_exec.driver.initial.append(
-            limit(side, price_fn, tif, client_order_id=cid)
-        )
+        live_exec.driver.initial.append(limit(side, price_fn, tif, client_order_id=cid))
         live_exec.start()
         # Terminal-event wait; venue-conditional rejections skip, others fail.
         live_exec.wait_for_venue_outcome(
@@ -260,7 +323,9 @@ class TestStopConditionalOrders:
         live_exec.wait_for_venue_outcome(
             "OrderAccepted", timeout=40, client_order_id=ClientOrderId(cid)
         )
-        live_exec.wait_order_status(ClientOrderId(cid), OrderStatus.CANCELED, timeout=20)
+        live_exec.wait_order_status(
+            ClientOrderId(cid), OrderStatus.CANCELED, timeout=20
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -294,8 +359,12 @@ class TestOrderCancellation:
             limit(OrderSide.SELL, above, TimeInForce.GTC, client_order_id=cid_b.value)
         )
         live_exec.start()
-        live_exec.wait_for_venue_outcome("OrderAccepted", timeout=40, client_order_id=cid_a)
-        live_exec.wait_for_venue_outcome("OrderAccepted", timeout=40, client_order_id=cid_b)
+        live_exec.wait_for_venue_outcome(
+            "OrderAccepted", timeout=40, client_order_id=cid_a
+        )
+        live_exec.wait_for_venue_outcome(
+            "OrderAccepted", timeout=40, client_order_id=cid_b
+        )
 
         # on_stop cancels each resting order individually (never plant-wide).
         live_exec.stop_and_wait()
@@ -359,13 +428,17 @@ class TestReconciliation:
         )
         live_exec.start()
         # Accept or venue-conditional rejection (e.g. market closed) — the latter skips.
-        live_exec.wait_for_venue_outcome("OrderAccepted", timeout=45, client_order_id=cid)
+        live_exec.wait_for_venue_outcome(
+            "OrderAccepted", timeout=45, client_order_id=cid
+        )
         order = live_exec.cache.order(cid)
         assert order is not None, "stop order missing from cache after accept"
 
         reports = live_exec.check_orders_consistency(timeout_secs=20.0)
 
-        stop_reports = [r for r in reports if getattr(r, "client_order_id", None) == cid]
+        stop_reports = [
+            r for r in reports if getattr(r, "client_order_id", None) == cid
+        ]
         assert stop_reports, "reconciliation emitted no report for the resting stop"
         report = stop_reports[0]
         assert report.trigger_type.name == "DEFAULT", (
@@ -429,15 +502,38 @@ class TestReconciliation:
 
 SCAFFOLDED_TCS = [
     # Group 4: order modification
-    "TC-E30", "TC-E31", "TC-E32", "TC-E33", "TC-E34", "TC-E35", "TC-E36",
+    "TC-E30",
+    "TC-E31",
+    "TC-E32",
+    "TC-E33",
+    "TC-E34",
+    "TC-E35",
+    "TC-E36",
     # Group 6: bracket orders
-    "TC-E50", "TC-E51", "TC-E52", "TC-E53",
+    "TC-E50",
+    "TC-E51",
+    "TC-E52",
+    "TC-E53",
     # Group 7: order flags
-    "TC-E60", "TC-E61", "TC-E62", "TC-E63",
+    "TC-E60",
+    "TC-E61",
+    "TC-E62",
+    "TC-E63",
     # Group 8: rejection handling
-    "TC-E70", "TC-E71", "TC-E74", "TC-E75", "TC-E76", "TC-E77", "TC-E78",
+    "TC-E70",
+    "TC-E71",
+    "TC-E74",
+    "TC-E75",
+    "TC-E76",
+    "TC-E77",
+    "TC-E78",
     # Group 9: lifecycle & reconciliation
-    "TC-E80", "TC-E81", "TC-E82", "TC-E83", "TC-E86", "TC-E87",
+    "TC-E80",
+    "TC-E81",
+    "TC-E82",
+    "TC-E83",
+    "TC-E86",
+    "TC-E87",
 ]
 
 UNSUPPORTED_TCS = [
@@ -448,13 +544,21 @@ UNSUPPORTED_TCS = [
     ("TC-E25", "Rithmic MIT wire mapping is not verified; fail closed"),
     ("TC-E26", "Rithmic LIT wire mapping is not verified; fail closed"),
     ("TC-E27", "Rithmic LIT wire mapping is not verified; fail closed"),
-    ("TC-E41", "plant-wide cancel_all — live-testing would cancel unrelated orders; unit/fake-plant boundary only"),
+    (
+        "TC-E41",
+        (
+            "plant-wide cancel_all — live-testing would cancel unrelated orders; "
+            "unit/fake-plant boundary only"
+        ),
+    ),
     ("TC-E43", "Rithmic has no batch-cancel API"),
 ]
 
 
 @pytest.mark.live
-@pytest.mark.skip(reason="scaffold not implemented — see nautilus-exec-testing-matrix.md")
+@pytest.mark.skip(
+    reason="scaffold not implemented — see nautilus-exec-testing-matrix.md"
+)
 @pytest.mark.parametrize("tc", SCAFFOLDED_TCS)
 def test_scaffolded_tc(tc: str) -> None:
     raise AssertionError(f"{tc} should be collection-skipped")

@@ -40,32 +40,36 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    from rithmic_nt_connect import env_truthy
-    from rithmic_nt_connect import load_dotenv_files
+    from rithmic_nt_connect import env_truthy, load_dotenv_files
 
     load_dotenv_files(ROOT / ".env")
     if env_truthy(os.environ.get("RITHMIC_ENABLE_TRADING")):
-        print("refusing to run: unset RITHMIC_ENABLE_TRADING (this example is sandbox-only)")
+        print(
+            "refusing to run: unset RITHMIC_ENABLE_TRADING (this example is "
+            "sandbox-only)"
+        )
         return 2
 
     import asyncio
 
     from nautilus_trader.adapters.sandbox.config import SandboxExecutionClientConfig
     from nautilus_trader.adapters.sandbox.factory import SandboxLiveExecClientFactory
-    from nautilus_trader.config import LiveDataEngineConfig
-    from nautilus_trader.config import LiveExecEngineConfig
-    from nautilus_trader.config import LiveRiskEngineConfig
-    from nautilus_trader.config import LoggingConfig
-    from nautilus_trader.config import TradingNodeConfig
+    from nautilus_trader.config import (
+        LiveDataEngineConfig,
+        LiveExecEngineConfig,
+        LiveRiskEngineConfig,
+        LoggingConfig,
+        TradingNodeConfig,
+    )
     from nautilus_trader.live.node import TradingNode
     from nautilus_trader.model.identifiers import TraderId
-
-    from nq_four_bar import NqFourBarConfig
-    from nq_four_bar import NqFourBarStrategy
-    from rithmic_nt_connect import ADAPTER_NAME
-    from rithmic_nt_connect import RithmicLiveDataClientConfig
-    from rithmic_nt_connect import RithmicLiveDataClientFactory
-    from rithmic_nt_connect import VENUE
+    from nq_four_bar import NqFourBarConfig, NqFourBarStrategy
+    from rithmic_nt_connect import (
+        ADAPTER_NAME,
+        VENUE,
+        RithmicLiveDataClientConfig,
+        RithmicLiveDataClientFactory,
+    )
 
     node = TradingNode(
         config=TradingNodeConfig(
@@ -128,11 +132,16 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 exc = runner.exception()
                 if exc is not None:
-                    print(f"ERROR: TradingNode.run_async() failed: {exc}", file=sys.stderr)
+                    print(
+                        f"ERROR: TradingNode.run_async() failed: {exc}", file=sys.stderr
+                    )
                     traceback.print_exception(exc, file=sys.stderr)
                     raise exc
                 print(
-                    "warning: TradingNode.run_async() returned before --seconds elapsed",
+                    (
+                        "warning: TradingNode.run_async() returned before --seconds "
+                        "elapsed"
+                    ),
                     file=sys.stderr,
                 )
 

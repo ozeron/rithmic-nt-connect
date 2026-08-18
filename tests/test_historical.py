@@ -2,17 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
-
-from rithmic_nt_connect.data import payloads_to_trade_ticks
-from rithmic_nt_connect.historical import load_front_month_instrument
-from rithmic_nt_connect.historical import load_trade_ticks
-from rithmic_nt_connect.providers import future_from_reference
-
 from _stubs import WireSessionStub
-
+from rithmic_nt_connect.data import payloads_to_trade_ticks
+from rithmic_nt_connect.historical import load_front_month_instrument, load_trade_ticks
+from rithmic_nt_connect.providers import future_from_reference
 
 COMPLETE_REF = {
     "trading_symbol": "NQU6",
@@ -42,7 +38,9 @@ class _FakeSession(WireSessionStub):
     def get_reference_data(self, symbol: str, exchange: str) -> dict:
         return dict(COMPLETE_REF)
 
-    def load_ticks(self, symbol: str, exchange: str, start_ssboe: int, end_ssboe: int) -> list[dict]:
+    def load_ticks(
+        self, symbol: str, exchange: str, start_ssboe: int, end_ssboe: int
+    ) -> list[dict]:
         _ = (symbol, exchange, start_ssboe, end_ssboe)
         return list(self.ticks)
 
@@ -91,8 +89,8 @@ def test_load_trade_ticks_uses_session_window() -> None:
         }
     ]
     instrument = future_from_reference(COMPLETE_REF)
-    start = datetime.fromtimestamp(1_700_000_000, tz=timezone.utc)
-    end = datetime.fromtimestamp(1_700_000_010, tz=timezone.utc)
+    start = datetime.fromtimestamp(1_700_000_000, tz=UTC)
+    end = datetime.fromtimestamp(1_700_000_010, tz=UTC)
     ticks = load_trade_ticks(session, instrument, start, end)
     assert len(ticks) == 1
     assert float(ticks[0].price) == 21000.25

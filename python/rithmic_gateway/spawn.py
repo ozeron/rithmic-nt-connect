@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import socket
 import subprocess
 import threading
 import time
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Mapping, Sequence
 
 from rithmic_gateway.config import GatewayConfig, GatewayConfigError, parse_listen_url
 
@@ -62,7 +63,9 @@ def _bin_search_starts() -> list[Path]:
 
 
 def _cargo_target_candidates(start: Path) -> list[Path]:
-    """Look for ``target/{release,debug}/rithmic-gateway[.exe]`` under ``start`` ancestors."""
+    """Look for ``target/{release,debug}/rithmic-gateway[.exe]`` under
+    ``start`` ancestors.
+    """
     out: list[Path] = []
     cargo_target = os.environ.get("CARGO_TARGET_DIR")
     if cargo_target:
@@ -96,7 +99,9 @@ def _bundled_bin() -> str | None:
 
 
 def _resolve_user_bin(raw: str, label: str) -> str | None:
-    """Resolve a user-supplied binary path or ``None`` when unset; ``SpawnError`` if missing."""
+    """Resolve a user-supplied binary path or ``None`` when unset;
+    ``SpawnError`` if missing.
+    """
     if not raw:
         return None
     path = Path(raw).expanduser()
@@ -106,9 +111,11 @@ def _resolve_user_bin(raw: str, label: str) -> str | None:
 
 
 def resolve_gateway_bin(explicit: str | None = None) -> str:
-    """Resolve ``rithmic-gateway`` from explicit path, env, bundled, PATH, or cargo targets.
+    """Resolve ``rithmic-gateway`` from explicit path, env, bundled, PATH, or
+    cargo targets.
 
-    Does not run ``cargo build`` — set ``RITHMIC_GATEWAY_BIN`` or build the binary first.
+    Does not run ``cargo build`` — set ``RITHMIC_GATEWAY_BIN`` or build the
+    binary first.
     Search order: explicit → ``RITHMIC_GATEWAY_BIN`` → bundled ``rithmic_gateway/bin`` →
     ``PATH`` → cwd then package ``target/{release,debug}`` (and ``CARGO_TARGET_DIR``).
     """
@@ -254,7 +261,9 @@ def spawn_gateway(
         while time.monotonic() < deadline:
             # Socket alone is not proof — require the credential flock too.
             if _listening() and _session_flock_held():
-                threading.Thread(target=_drain_stderr, name="gw-stderr", daemon=True).start()
+                threading.Thread(
+                    target=_drain_stderr, name="gw-stderr", daemon=True
+                ).start()
                 return proc
             if proc.poll() is not None:
                 if _listening() and _session_flock_held():
@@ -263,7 +272,8 @@ def spawn_gateway(
                 if proc.stderr is not None:
                     err = proc.stderr.read() or b""
                 raise SpawnError(
-                    f"gateway exited early (code={proc.returncode}): {err.decode(errors='replace')}"
+                    f"gateway exited early (code={proc.returncode}): "
+                    f"{err.decode(errors='replace')}"
                 )
             time.sleep(0.05)
         # Reap the orphan so it cannot keep the flock / bind later.
@@ -273,10 +283,8 @@ def spawn_gateway(
             proc.wait(timeout=2.0)
         except subprocess.TimeoutExpired:
             proc.kill()
-            try:
+            with contextlib.suppress(subprocess.TimeoutExpired):
                 proc.wait(timeout=2.0)
-            except subprocess.TimeoutExpired:
-                pass
         raise SpawnError(f"timed out waiting for gateway socket {sock}")
     threading.Thread(target=_drain_stderr, name="gw-stderr", daemon=True).start()
     return proc

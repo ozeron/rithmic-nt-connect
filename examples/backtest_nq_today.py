@@ -17,9 +17,10 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import contextlib
 import re
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -28,7 +29,6 @@ from zoneinfo import ZoneInfo
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "python"))
 
-UTC = timezone.utc
 CHI = ZoneInfo("America/Chicago")
 
 
@@ -49,7 +49,9 @@ def _parse_until(raw: str, day: datetime) -> datetime:
         second = int(match.group(3) or 0)
         if hour > 23 or minute > 59 or second > 59:
             raise ValueError(f"invalid --until clock {raw!r}")
-        return day.astimezone(UTC).replace(hour=hour, minute=minute, second=second, microsecond=0)
+        return day.astimezone(UTC).replace(
+            hour=hour, minute=minute, second=second, microsecond=0
+        )
     if text.endswith("Z"):
         text = text[:-1] + "+00:00"
     try:
@@ -69,11 +71,17 @@ def _history_session():
     return connect_market_data_session()
 
 
-def _window(now: datetime, rth: bool, until: datetime | None) -> tuple[datetime, datetime, str]:
+def _window(
+    now: datetime, rth: bool, until: datetime | None
+) -> tuple[datetime, datetime, str]:
     chi_now = now.astimezone(CHI)
     if rth:
-        rth_start = chi_now.replace(hour=8, minute=30, second=0, microsecond=0).astimezone(UTC)
-        rth_end = chi_now.replace(hour=15, minute=15, second=0, microsecond=0).astimezone(UTC)
+        rth_start = chi_now.replace(
+            hour=8, minute=30, second=0, microsecond=0
+        ).astimezone(UTC)
+        rth_end = chi_now.replace(
+            hour=15, minute=15, second=0, microsecond=0
+        ).astimezone(UTC)
         start = rth_start
         end = min(now, rth_end)
         if until is not None:
@@ -86,9 +94,9 @@ def _window(now: datetime, rth: bool, until: datetime | None) -> tuple[datetime,
                 f"{rth_start.isoformat()} UTC (08:30 CT)"
             )
         if end >= rth_end:
-            span = (
-                f"complete RTH {hours:.2f}h "
-                f"(08:30–15:15 CT = {rth_start.strftime('%H:%M')}–{rth_end.strftime('%H:%M')} UTC)"
+            span = f"complete RTH {hours:.2f}h "(
+                f"(08:30-15:15 CT = "
+                f"{rth_start.strftime('%H:%M')}-{rth_end.strftime('%H:%M')} UTC)"
             )
         else:
             remain = (rth_end - end).total_seconds() / 3600.0
@@ -103,20 +111,27 @@ def _window(now: datetime, rth: bool, until: datetime | None) -> tuple[datetime,
     if until is not None:
         end = min(end, until)
     hours = (end - start).total_seconds() / 3600.0
-    span = f"partial UTC calendar day {hours:.2f}h of 24h (00:00 UTC → end; not a full day)"
+    span = (
+        f"partial UTC calendar day {hours:.2f}h of 24h "
+        "(00:00 UTC → end; not a full day)"
+    )
     return start, end, span
 
 
 def _fingerprint(engine: Any, venue: Any, ticks: list[Any]) -> dict[str, Any]:
     fills = engine.trader.generate_order_fills_report()
     acct = engine.trader.generate_account_report(venue)
-    n_fills = 0 if fills is None or getattr(fills, "empty", True) else int(len(fills))
+    n_fills = 0 if fills is None or getattr(fills, "empty", True) else len(fills)
     cash = None
     if acct is not None and not getattr(acct, "empty", True):
         cash = str(acct.iloc[-1]["total"])
     fill_sig: tuple[Any, ...] = ()
     if n_fills:
-        cols = [c for c in ("ts_last", "side", "order_side", "last_px", "last_qty") if c in fills.columns]
+        cols = [
+            c
+            for c in ("ts_last", "side", "order_side", "last_px", "last_qty")
+            if c in fills.columns
+        ]
         fill_sig = tuple(fills[cols].astype(str).itertuples(index=False, name=None))
     return {
         "ticks": len(ticks),
@@ -145,7 +160,7 @@ Pin --until (or wait until RTH is closed) to reload the same tape.
     parser.add_argument(
         "--rth",
         action="store_true",
-        help="only CME RTH (08:30–15:15 CT), printed and clamped in UTC",
+        help="only CME RTH (08:30-15:15 CT), printed and clamped in UTC",
     )
     parser.add_argument(
         "--until",
@@ -164,23 +179,18 @@ Pin --until (or wait until RTH is closed) to reload the same tape.
     load_dotenv_files(ROOT / ".env")
 
     from nautilus_trader.backtest.engine import BacktestEngine
-    from nautilus_trader.config import BacktestEngineConfig
-    from nautilus_trader.config import LoggingConfig
+    from nautilus_trader.config import BacktestEngineConfig, LoggingConfig
     from nautilus_trader.model.data import BarType
-    from nautilus_trader.model.enums import AccountType
-    from nautilus_trader.model.enums import BookType
-    from nautilus_trader.model.enums import OmsType
-    from nautilus_trader.model.identifiers import TraderId
-    from nautilus_trader.model.identifiers import Venue
-    from nautilus_trader.model.objects import Currency
-    from nautilus_trader.model.objects import Money
-
-    from nq_four_bar import NqFourBarConfig
-    from nq_four_bar import NqFourBarStrategy
+    from nautilus_trader.model.enums import AccountType, BookType, OmsType
+    from nautilus_trader.model.identifiers import TraderId, Venue
+    from nautilus_trader.model.objects import Currency, Money
+    from nq_four_bar import NqFourBarConfig, NqFourBarStrategy
     from rithmic_nt_connect import VENUE
-    from rithmic_nt_connect.historical import load_front_month_instrument
-    from rithmic_nt_connect.historical import load_time_bars
-    from rithmic_nt_connect.historical import load_trade_ticks
+    from rithmic_nt_connect.historical import (
+        load_front_month_instrument,
+        load_time_bars,
+        load_trade_ticks,
+    )
 
     now = datetime.now(UTC)
     try:
@@ -194,16 +204,16 @@ Pin --until (or wait until RTH is closed) to reload the same tape.
         print(exc, file=sys.stderr)
         return 2
     if end <= start:
-        print(f"empty window {start.isoformat()} → {end.isoformat()} UTC", file=sys.stderr)
+        print(
+            f"empty window {start.isoformat()} → {end.isoformat()} UTC", file=sys.stderr
+        )
         return 2
     print(f"requested UTC {start.isoformat()} → {end.isoformat()}  {span}")
 
     session = _history_session()
     try:
         instrument = load_front_month_instrument(session, args.root, args.exchange)
-        print(
-            f"loading ticks {instrument.id}  {start.isoformat()} → {end.isoformat()}"
-        )
+        print(f"loading ticks {instrument.id}  {start.isoformat()} → {end.isoformat()}")
         try:
             ticks = load_trade_ticks(session, instrument, start, end)
         except Exception as exc:
@@ -215,7 +225,9 @@ Pin --until (or wait until RTH is closed) to reload the same tape.
         try:
             daily_from = start - timedelta(days=40)
             print(f"loading daily bars {daily_from.date()} → {end.date()} UTC")
-            daily_bars = load_time_bars(session, instrument, daily_from, end, daily_type)
+            daily_bars = load_time_bars(
+                session, instrument, daily_from, end, daily_type
+            )
         except Exception as exc:
             print(f"history bars failed (SMA will be cold): {exc}", file=sys.stderr)
         print(f"lookback  daily={len(daily_bars)}  (VWAP from INTERNAL 1m on ticks)")
@@ -234,8 +246,10 @@ Pin --until (or wait until RTH is closed) to reload the same tape.
         )
         return 2
     print(
-        f"ticks={len(ticks)}  "
-        f"first={_utc_from_ns(ticks[0].ts_event)} last={_utc_from_ns(ticks[-1].ts_event)}"
+        f"ticks={len(ticks)}  "(
+            f"first={_utc_from_ns(ticks[0].ts_event)} "
+            f"last={_utc_from_ns(ticks[-1].ts_event)}"
+        )
     )
 
     def run_once(*, log_strategy: bool) -> tuple[Any, dict[str, Any]]:
@@ -245,7 +259,9 @@ Pin --until (or wait until RTH is closed) to reload the same tape.
                 logging=LoggingConfig(
                     log_level="WARNING",
                     print_config=False,
-                    log_component_levels={"NqFourBar-001": "INFO"} if log_strategy else {},
+                    log_component_levels={"NqFourBar-001": "INFO"}
+                    if log_strategy
+                    else {},
                 ),
             )
         )
@@ -255,7 +271,7 @@ Pin --until (or wait until RTH is closed) to reload the same tape.
             account_type=AccountType.MARGIN,
             starting_balances=[Money.from_str("100000 USD")],
             base_currency=Currency.from_str("USD"),
-            default_leverage=Decimal("20"),
+            default_leverage=Decimal(20),
             book_type=BookType.L1_MBP,
             trade_execution=True,
             bar_execution=True,
@@ -268,7 +284,7 @@ Pin --until (or wait until RTH is closed) to reload the same tape.
         engine.run()
         return engine, _fingerprint(engine, Venue(VENUE), ticks)
 
-    engine, result = run_once(log_strategy=True)
+    _, result = run_once(log_strategy=True)
     if args.check:
         _, again = run_once(log_strategy=False)
         same = (
@@ -285,12 +301,10 @@ Pin --until (or wait until RTH is closed) to reload the same tape.
             print("same ticks produced different fills/cash", file=sys.stderr)
             return 3
 
-    start_cash = Decimal("100000")
+    start_cash = Decimal(100000)
     end_cash = None
-    try:
+    with contextlib.suppress(Exception):
         end_cash = Decimal(str(result["cash"]).split()[0])
-    except Exception:
-        pass
     pnl = None if end_cash is None else end_cash - start_cash
     pnl_s = "n/a" if pnl is None else f"{pnl:+.2f} USD"
     print(

@@ -21,16 +21,11 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
-
 from nautilus_trader.model.data import BarType
-
-from parity_helpers import NS_PER_MIN
-from parity_helpers import open_minute
-from parity_helpers import wait_for_external_bar
-
+from parity_helpers import NS_PER_MIN, open_minute, wait_for_external_bar
 from rithmic_nt_connect._convert import last_trade_to_fields
 from rithmic_nt_connect.historical import load_time_bars
 
@@ -78,7 +73,9 @@ class TestInternalBars:
             assert max(prices) >= min(prices), "coherent OHLC range"
             assert volume >= len(ordered), "volume is summed trade size"
 
-    def test_TC_D51_external_vs_tick_replay_volume(self, live_session, live_front_month):
+    def test_TC_D51_external_vs_tick_replay_volume(
+        self, live_session, live_front_month
+    ):
         """TC-D51 — the history tick replay is a lossy subset of EXTERNAL bars.
 
         The tick replay and EXTERNAL bar replay agree on *minute alignment*
@@ -89,7 +86,7 @@ class TestInternalBars:
         warmup basis; warmup must use EXTERNAL bars (which MY043 does).
         """
         inst, symbol, exchange = live_front_month
-        end = int(datetime.now(timezone.utc).timestamp())
+        end = int(datetime.now(UTC).timestamp())
         start = end - 1800  # last 30 minutes
         bar_type = BarType.from_str(f"{inst.id.symbol}.RITHMIC-1-MINUTE-LAST-EXTERNAL")
 
@@ -116,7 +113,8 @@ class TestInternalBars:
             # Lossy-subset invariant: the tick replay may drop trades, so it
             # must never exceed the authoritative EXTERNAL bar volume.
             assert tick_volume <= bar_volume, (
-                f"minute {minute}: tick volume {tick_volume} exceeds EXTERNAL volume {bar_volume}"
+                f"minute {minute}: tick volume {tick_volume} exceeds EXTERNAL volume "
+                f"{bar_volume}"
             )
             compared += 1
 
@@ -180,7 +178,8 @@ class TestInternalBars:
         )
         if bar is None:
             pytest.fail(
-                f"EXTERNAL bar for minute {candidate_sec} unavailable after retries (venue lag?)"
+                f"EXTERNAL bar for minute {candidate_sec} unavailable after retries "
+                f"(venue lag?)"
             )
 
         tick = float(inst.price_increment.as_double())
@@ -192,27 +191,32 @@ class TestInternalBars:
         # agree on open/high/low/close within one tick. VWAP uses H/L/C, so the
         # price-side of the basis is proven too, not just volume.
         assert abs(float(bar.open) - first_px) <= tick + 1e-9, (
-            f"minute {candidate_sec}: EXTERNAL open {float(bar.open)} != first live price {first_px}"
+            f"minute {candidate_sec}: EXTERNAL open {float(bar.open)} != first live "
+            f"price {first_px}"
         )
         assert abs(float(bar.high) - high_px) <= tick + 1e-9, (
-            f"minute {candidate_sec}: EXTERNAL high {float(bar.high)} != live high {high_px}"
+            f"minute {candidate_sec}: EXTERNAL high {float(bar.high)} != live high "
+            f"{high_px}"
         )
         assert abs(float(bar.low) - low_px) <= tick + 1e-9, (
-            f"minute {candidate_sec}: EXTERNAL low {float(bar.low)} != live low {low_px}"
+            f"minute {candidate_sec}: EXTERNAL low {float(bar.low)} != live low "
+            f"{low_px}"
         )
         assert abs(float(bar.close) - last_px) <= tick + 1e-9, (
             f"minute {candidate_sec}: EXTERNAL close {float(bar.close)} != "
             f"last live price {last_px}"
         )
 
-    def test_TC_D52_external_cutover_no_partial_minute(self, live_session, live_front_month):
+    def test_TC_D52_external_cutover_no_partial_minute(
+        self, live_session, live_front_month
+    ):
         """TC-D52 — EXTERNAL lookback ending at ``now`` returns complete bars only.
 
         The last bar's close must be strictly in the past, never the in-progress
         minute. Otherwise the warmup would poison the current bucket (GAP-6).
         """
         inst, *_ = live_front_month
-        end = int(datetime.now(timezone.utc).timestamp())
+        end = int(datetime.now(UTC).timestamp())
         start = end - 600  # last 10 minutes
         bar_type = BarType.from_str(f"{inst.id.symbol}.RITHMIC-1-MINUTE-LAST-EXTERNAL")
 
@@ -222,7 +226,8 @@ class TestInternalBars:
 
         last = bars[-1]
         last_close_ns = int(last.ts_event) + NS_PER_MIN  # open + 60s == close
-        now_ns = int(datetime.now(timezone.utc).timestamp()) * 1_000_000_000
+        now_ns = int(datetime.now(UTC).timestamp()) * 1_000_000_000
         assert last_close_ns <= now_ns, (
-            f"cutover returned an in-progress/partial minute: close={last_close_ns} now={now_ns}"
+            f"cutover returned an in-progress/partial minute: close={last_close_ns} "
+            f"now={now_ns}"
         )

@@ -8,10 +8,11 @@ production R|Protocol URL. Passwords are never included in ``repr`` or error tex
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Mapping, MutableMapping, NamedTuple
+from typing import Any, NamedTuple
 
 from rithmic_nt_connect.constants import (
     DEFAULT_APP_NAME,
@@ -126,7 +127,9 @@ def load_dotenv_files(
     *paths: str | Path,
     extra_env_var: str = "RITHMIC_CONNECT_DOTENV",
 ) -> None:
-    """Load each path, then optional extra paths from ``extra_env_var`` (``os.pathsep``)."""
+    """Load each path, then optional extra paths from ``extra_env_var``
+    (``os.pathsep``).
+    """
     for path in paths:
         load_dotenv(path)
     extra = os.environ.get(extra_env_var, "")
@@ -168,9 +171,16 @@ def explicit_test_env(environ: Mapping[str, str] | None = None) -> dict[str, str
     source_env = environ if environ is not None else os.environ
     source = _env_first(source_env, "RITHMIC_TEST_DOTENV")
     if source is None:
-        raise ConfigError("missing RITHMIC_TEST_DOTENV; live tests require an explicit test env file")
+        raise ConfigError(
+            "missing RITHMIC_TEST_DOTENV; live tests require an explicit test env file"
+        )
     values = _dotenv_values(source)
-    for key in ("RITHMIC_USER", "RITHMIC_PASSWORD", "RITHMIC_SYSTEM_NAME", "RITHMIC_CONNECT_MODE"):
+    for key in (
+        "RITHMIC_USER",
+        "RITHMIC_PASSWORD",
+        "RITHMIC_SYSTEM_NAME",
+        "RITHMIC_CONNECT_MODE",
+    ):
         if not _env_first(values, key):
             raise ConfigError(f"explicit test env file is missing {key}")
     # RITHMIC_CONNECT_MODE is validated non-empty above, so direct indexing is safe.
@@ -230,9 +240,18 @@ _ENV_SOURCES = (
         env="Live",
         user_keys=("RITHMIC_USER", "RHITMIC_USERNAME", "RITHMIC_USERNAME"),
         password_keys=("RITHMIC_PASSWORD", "RHITMIC_PASSWORD"),
-        system_keys=("RITHMIC_SYSTEM", "RITHMIC_SYSTEM_NAME", "RITHMIC_LIVE_SYSTEM_NAME"),
+        system_keys=(
+            "RITHMIC_SYSTEM",
+            "RITHMIC_SYSTEM_NAME",
+            "RITHMIC_LIVE_SYSTEM_NAME",
+        ),
         url_keys=("RITHMIC_GATEWAY", "RITHMIC_LIVE_URL"),
-        account_keys=("RITHMIC_ACCOUNT_ID", "ACCOUNT_ID", "RITHMIC_LIVE_ACCOUNT_ID", "RHITMIC_ACCOUNT_ID"),
+        account_keys=(
+            "RITHMIC_ACCOUNT_ID",
+            "ACCOUNT_ID",
+            "RITHMIC_LIVE_ACCOUNT_ID",
+            "RHITMIC_ACCOUNT_ID",
+        ),
         fcm_keys=("RITHMIC_FCM_ID", "FCM_ID", "RITHMIC_LIVE_FCM_ID"),
         ib_keys=("RITHMIC_IB_ID", "IB_ID", "RITHMIC_LIVE_IB_ID"),
         symbol_keys=("RITHMIC_SYMBOL", "SYMBOL", "TEST_SYMBOL"),
@@ -317,7 +336,8 @@ class SessionConfig:
         return (
             "SessionConfig("
             f"user={self.user!r}, password='***', system_name={self.system_name!r}, "
-            f"url={self.url!r}, env={self.env!r}, connect_mode={self.connect_mode.value!r}, "
+            f"url={self.url!r}, env={self.env!r}, "
+            f"connect_mode={self.connect_mode.value!r}, "
             f"app_name={self.app_name!r}, app_version={self.app_version!r}, "
             f"account_id={self.account_id!r})"
         )
@@ -429,7 +449,9 @@ class RithmicDataClientConfig:
         )
 
     @classmethod
-    def from_env(cls, environ: Mapping[str, str] | None = None) -> RithmicDataClientConfig:
+    def from_env(
+        cls, environ: Mapping[str, str] | None = None
+    ) -> RithmicDataClientConfig:
         session = SessionConfig.from_env(environ)
         instrument_ids: list[str] = []
         if session.symbol and session.exchange:
@@ -439,29 +461,36 @@ class RithmicDataClientConfig:
 
 try:
     from nautilus_trader.config import LiveDataClientConfig
+
     _LIVE_DATA_CONFIG_BASE: Any = LiveDataClientConfig
 except ImportError:  # pragma: no cover - nautilus not installed
     _LIVE_DATA_CONFIG_BASE = None
 
 if _LIVE_DATA_CONFIG_BASE is not None:
 
-    class RithmicLiveDataClientConfig(_LIVE_DATA_CONFIG_BASE, frozen=True, kw_only=True):
-        """TradingNode-facing data config. Factory loads ``SessionConfig.from_env()``."""
+    class RithmicLiveDataClientConfig(
+        _LIVE_DATA_CONFIG_BASE, frozen=True, kw_only=True
+    ):
+        """TradingNode-facing data config. Factory loads
+        ``SessionConfig.from_env()``.
+        """
 
         session: SessionConfig | None = None
 
 
 try:
     from nautilus_trader.config import LiveExecClientConfig
+
     _LIVE_EXEC_CONFIG_BASE: Any = LiveExecClientConfig
 except ImportError:  # pragma: no cover - nautilus not installed
     _LIVE_EXEC_CONFIG_BASE = None
 
 if _LIVE_EXEC_CONFIG_BASE is not None:
-
     # msgspec ``frozen=True`` (inherited from ``NautilusConfig``); stated here so
     # the class is self-describing and checkers don't flag the subclass.
-    class RithmicLiveExecClientConfig(_LIVE_EXEC_CONFIG_BASE, kw_only=True, frozen=True):
+    class RithmicLiveExecClientConfig(
+        _LIVE_EXEC_CONFIG_BASE, kw_only=True, frozen=True
+    ):
         """TradingNode-facing exec config. Factory loads ``SessionConfig.from_env()``.
 
         Adds the Rithmic ``session`` + ``enable_trading`` knobs on top of the base
@@ -507,7 +536,9 @@ class RithmicExecClientConfig:
         )
 
     @classmethod
-    def from_env(cls, environ: Mapping[str, str] | None = None) -> RithmicExecClientConfig:
+    def from_env(
+        cls, environ: Mapping[str, str] | None = None
+    ) -> RithmicExecClientConfig:
         env = environ if environ is not None else os.environ
         raw = _env_first(env, "RITHMIC_ENABLE_TRADING", "ENABLE_TRADING")
         enable = env_truthy(raw)

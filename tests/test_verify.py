@@ -5,13 +5,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from rithmic_nt_connect.front_month import FrontMonthError
-from rithmic_nt_connect.front_month import resolve_front_month
-from rithmic_nt_connect.verify import RecordedTick
-from rithmic_nt_connect.verify import compare_ticks
-from rithmic_nt_connect.verify import run_front_month_verify
-
 from _stubs import WireSessionStub
+from rithmic_nt_connect.front_month import FrontMonthError, resolve_front_month
+from rithmic_nt_connect.verify import (
+    RecordedTick,
+    compare_ticks,
+    run_front_month_verify,
+)
 
 
 class FakeSession(WireSessionStub):
@@ -90,7 +90,9 @@ def test_resolve_front_month_missing_symbol():
 
     try:
         resolve_front_month(Bad(), "NQ", "CME")
-        assert False
+        raise AssertionError(
+            "resolve_front_month should reject a session without get_front_month"
+        )
     except FrontMonthError:
         pass
 

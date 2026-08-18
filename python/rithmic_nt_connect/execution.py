@@ -3,77 +3,93 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from collections import OrderedDict
+from collections.abc import Callable
 from decimal import Decimal
-from typing import Any, Callable
+from typing import Any
 
 from nautilus_trader.cache.cache import Cache
-from nautilus_trader.common.component import LiveClock
-from nautilus_trader.common.component import MessageBus
+from nautilus_trader.common.component import LiveClock, MessageBus
 from nautilus_trader.core.uuid import UUID4
-from nautilus_trader.execution.messages import CancelAllOrders
-from nautilus_trader.execution.messages import CancelOrder
-from nautilus_trader.execution.messages import GenerateFillReports
-from nautilus_trader.execution.messages import GenerateOrderStatusReport
-from nautilus_trader.execution.messages import GenerateOrderStatusReports
-from nautilus_trader.execution.messages import GeneratePositionStatusReports
-from nautilus_trader.execution.messages import ModifyOrder
-from nautilus_trader.execution.messages import SubmitOrder
-from nautilus_trader.execution.messages import SubmitOrderList
-from nautilus_trader.execution.reports import FillReport
-from nautilus_trader.execution.reports import OrderStatusReport
-from nautilus_trader.execution.reports import PositionStatusReport
+from nautilus_trader.execution.messages import (
+    CancelAllOrders,
+    CancelOrder,
+    GenerateFillReports,
+    GenerateOrderStatusReport,
+    GenerateOrderStatusReports,
+    GeneratePositionStatusReports,
+    ModifyOrder,
+    SubmitOrder,
+    SubmitOrderList,
+)
+from nautilus_trader.execution.reports import (
+    FillReport,
+    OrderStatusReport,
+    PositionStatusReport,
+)
 from nautilus_trader.live.execution_client import LiveExecutionClient
-from nautilus_trader.model.enums import AccountType
-from nautilus_trader.model.enums import LiquiditySide
-from nautilus_trader.model.enums import OmsType
-from nautilus_trader.model.enums import OrderSide
-from nautilus_trader.model.enums import OrderStatus
-from nautilus_trader.model.enums import OrderType
-from nautilus_trader.model.enums import PositionSide
-from nautilus_trader.model.enums import TimeInForce
-from nautilus_trader.model.enums import TriggerType
-from nautilus_trader.model.identifiers import AccountId
-from nautilus_trader.model.identifiers import ClientId
-from nautilus_trader.model.identifiers import ClientOrderId
-from nautilus_trader.model.identifiers import InstrumentId
-from nautilus_trader.model.identifiers import TradeId
-from nautilus_trader.model.identifiers import Venue
-from nautilus_trader.model.identifiers import VenueOrderId
-from nautilus_trader.model.objects import AccountBalance
-from nautilus_trader.model.objects import Currency
-from nautilus_trader.model.objects import Money
-from nautilus_trader.model.objects import Price
-from nautilus_trader.model.objects import Quantity
+from nautilus_trader.model.enums import (
+    AccountType,
+    LiquiditySide,
+    OmsType,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    PositionSide,
+    TimeInForce,
+    TriggerType,
+)
+from nautilus_trader.model.identifiers import (
+    AccountId,
+    ClientId,
+    ClientOrderId,
+    InstrumentId,
+    TradeId,
+    Venue,
+    VenueOrderId,
+)
+from nautilus_trader.model.objects import (
+    AccountBalance,
+    Currency,
+    Money,
+    Price,
+    Quantity,
+)
 from nautilus_trader.model.orders import Order
 
-from rithmic_nt_connect._convert import account_pnl_to_fields
-from rithmic_nt_connect._convert import format_price_str
-from rithmic_nt_connect._convert import instrument_pnl_to_fields
-from rithmic_nt_connect._convert import rithmic_route_from_info
-from rithmic_nt_connect._order_plant import OrderPlantPolicy
-from rithmic_nt_connect._order_plant import OrderPlantState
-from rithmic_nt_connect._orders import OrderMapError
-from rithmic_nt_connect._orders import DEFAULT_TRAIL_BY_PRICE_ID
-from rithmic_nt_connect._orders import fill_dedup_key
-from rithmic_nt_connect._orders import nautilus_order_type_to_rithmic
-from rithmic_nt_connect._orders import nautilus_side_to_rithmic
-from rithmic_nt_connect._orders import nautilus_tif_to_rithmic
-from rithmic_nt_connect._orders import notification_action
-from rithmic_nt_connect._orders import order_notification_to_fields
-from rithmic_nt_connect._orders import order_side_from_notification
-from rithmic_nt_connect._orders import slim_order_fields
-from rithmic_nt_connect._orders import trade_id_from_fill_fields
-from rithmic_nt_connect._orders import trailing_ticks_from_order
-from rithmic_nt_connect.config import RithmicExecClientConfig
-from rithmic_nt_connect.config import RithmicLiveExecClientConfig
-from rithmic_nt_connect.constants import ADAPTER_NAME
-from rithmic_nt_connect.constants import DEFAULT_ACCOUNT_CURRENCY
-from rithmic_nt_connect.constants import VENUE
-from rithmic_nt_connect.errors import CHANNEL_ERRORS
-from rithmic_nt_connect.errors import ReconciliationUnavailableError
-from rithmic_nt_connect.errors import VenueQueryUnavailable
+from rithmic_nt_connect._convert import (
+    account_pnl_to_fields,
+    format_price_str,
+    instrument_pnl_to_fields,
+    rithmic_route_from_info,
+)
+from rithmic_nt_connect._order_plant import OrderPlantPolicy, OrderPlantState
+from rithmic_nt_connect._orders import (
+    DEFAULT_TRAIL_BY_PRICE_ID,
+    OrderMapError,
+    fill_dedup_key,
+    nautilus_order_type_to_rithmic,
+    nautilus_side_to_rithmic,
+    nautilus_tif_to_rithmic,
+    notification_action,
+    order_notification_to_fields,
+    order_side_from_notification,
+    slim_order_fields,
+    trade_id_from_fill_fields,
+    trailing_ticks_from_order,
+)
+from rithmic_nt_connect.config import (
+    RithmicExecClientConfig,
+    RithmicLiveExecClientConfig,
+)
+from rithmic_nt_connect.constants import ADAPTER_NAME, DEFAULT_ACCOUNT_CURRENCY, VENUE
+from rithmic_nt_connect.errors import (
+    CHANNEL_ERRORS,
+    ReconciliationUnavailableError,
+    VenueQueryUnavailable,
+)
 from rithmic_nt_connect.providers import RithmicInstrumentProvider
 from rithmic_nt_connect.session import WireSession
 
@@ -100,7 +116,12 @@ _RITHMIC_DURATION_TO_TIF: dict[int, TimeInForce] = {
 }
 
 _TERMINAL_ORDER_STATUSES = frozenset(
-    {OrderStatus.FILLED, OrderStatus.CANCELED, OrderStatus.REJECTED, OrderStatus.EXPIRED}
+    {
+        OrderStatus.FILLED,
+        OrderStatus.CANCELED,
+        OrderStatus.REJECTED,
+        OrderStatus.EXPIRED,
+    }
 )
 
 
@@ -131,7 +152,9 @@ async def wait_account_in_cache(
         by_venue = getattr(cache, "account_for_venue", None)
         if callable(by_venue):
             venue_account = by_venue(venue_id)
-            if venue_account is not None and str(getattr(venue_account, "id", "")) == str(account_id):
+            if venue_account is not None and str(
+                getattr(venue_account, "id", "")
+            ) == str(account_id):
                 return
         if time.monotonic() >= deadline:
             raise RuntimeError(
@@ -184,7 +207,8 @@ class RithmicExecutionClient(LiveExecutionClient):
         # is no parallel tag dictionary to keep in sync. user_tag ==
         # client_order_id.value for orders this client placed, so tracked-ness is
         # decided by whether the order is present in the cache.
-        # Venue-stable fill ids; retained across reconnect so snapshot replays stay idempotent.
+        # Venue-stable fill ids; retained across reconnect so snapshot replays
+        # stay idempotent.
         self._seen_fill_keys: OrderedDict[str, None] = OrderedDict()
         # Last published untracked-status key per venue order, so Rithmic's
         # frequent re-pushes of unchanged order state do not re-emit status
@@ -238,7 +262,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                 ),
                 log_msg="rithmic_pnl_poll",
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             if self._config_local.soft_fail_pnl:
                 self._log.warning(f"PnL/account path soft-failed: {exc}")
             else:
@@ -253,8 +277,10 @@ class RithmicExecutionClient(LiveExecutionClient):
                 self._order_plant.state = OrderPlantState.DISCONNECTED
                 try:
                     await asyncio.to_thread(self._session.disconnect_order_plant)
-                except Exception as teardown_exc:  # noqa: BLE001
-                    self._log.warning(f"order plant teardown after subscribe fail: {teardown_exc}")
+                except Exception as teardown_exc:
+                    self._log.warning(
+                        f"order plant teardown after subscribe fail: {teardown_exc}"
+                    )
                 raise
             self._order_plant.state = OrderPlantState.LIVE
             # A full reconnect re-subscribes the order plant and the engine
@@ -291,7 +317,9 @@ class RithmicExecutionClient(LiveExecutionClient):
                     "no Rithmic account id after connect — "
                     "set RITHMIC_ACCOUNT_ID or wait for plant resolve"
                 )
-            self._log.warning("no Rithmic account id; exec connected without AccountState")
+            self._log.warning(
+                "no Rithmic account id; exec connected without AccountState"
+            )
             return
         remaining = max(0.5, deadline - time.monotonic())
         await wait_account_in_cache(
@@ -318,7 +346,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         if self.account_id is not None:
             value = str(self.account_id)
             prefix = f"{VENUE}-"
-            return value[len(prefix) :] if value.startswith(prefix) else value
+            return value.removeprefix(prefix)
         return None
 
     def _seed_account_if_needed(self, account_raw: str | None = None) -> None:
@@ -335,7 +363,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         if self._account_seeded:
             return
         usd = Currency.from_str(DEFAULT_ACCOUNT_CURRENCY)
-        zero = Money(Decimal("0"), usd)
+        zero = Money(Decimal(0), usd)
         self.generate_account_state(
             balances=[AccountBalance(zero, zero, zero)],
             margins=[],
@@ -343,9 +371,11 @@ class RithmicExecutionClient(LiveExecutionClient):
             ts_event=self._clock.timestamp_ns(),
             info={"rithmic_account_id": raw, "seeded": "true"},
         )
-        self._last_account_state_key = (str(self.account_id), str(usd), Decimal("0"))
+        self._last_account_state_key = (str(self.account_id), str(usd), Decimal(0))
         self._account_seeded = True
-        self._log.info(f"seeded account {self.account_id} currency={DEFAULT_ACCOUNT_CURRENCY}")
+        self._log.info(
+            f"seeded account {self.account_id} currency={DEFAULT_ACCOUNT_CURRENCY}"
+        )
 
     async def _resync_order_subscription(self) -> None:
         self._order_plant.state = OrderPlantState.RESYNCING
@@ -372,7 +402,7 @@ class RithmicExecutionClient(LiveExecutionClient):
             return await asyncio.to_thread(poll_fn)
         except CHANNEL_ERRORS:
             raise
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._log.warning(f"poll transient error: {exc}")
             await asyncio.sleep(0.1)
             return None
@@ -389,15 +419,17 @@ class RithmicExecutionClient(LiveExecutionClient):
         while True:
             try:
                 event = await self._poll_session_event(poll_fn)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 self._log.error(f"{name} poll channel error: {exc}")
                 if name == "order":
                     self._order_plant.state = OrderPlantState.RESYNCING
                 try:
                     await on_resync()
-                    self._log.warning(f"{name} subscription resynced after channel error")
+                    self._log.warning(
+                        f"{name} subscription resynced after channel error"
+                    )
                     backoff = 0.05
-                except Exception as resync_exc:  # noqa: BLE001
+                except Exception as resync_exc:
                     self._log.error(f"{name} subscription resync failed: {resync_exc}")
                     if name == "order":
                         self._order_plant.state = OrderPlantState.DISCONNECTED
@@ -409,7 +441,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                 continue
             try:
                 on_event(event)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 self._log.exception(f"{name} event handler error (suppressed)", exc)
                 if name == "order":
                     # A handler failure can leave venue and cache state divergent.
@@ -433,7 +465,7 @@ class RithmicExecutionClient(LiveExecutionClient):
             return
         try:
             fields = order_notification_to_fields(event)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._log.error(f"invalid order_notification: {exc}")
             self._order_plant.state = OrderPlantState.DISCONNECTED
             raise
@@ -445,20 +477,18 @@ class RithmicExecutionClient(LiveExecutionClient):
             task = getattr(self, task_attr)
             if task is not None:
                 task.cancel()
-                try:
+                with contextlib.suppress(asyncio.CancelledError):
                     await task
-                except asyncio.CancelledError:
-                    pass
                 setattr(self, task_attr, None)
         try:
             await asyncio.to_thread(self._session.disconnect)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._log.warning(f"disconnect warning: {exc}")
 
     def _publish_account(self, event: dict[str, Any]) -> None:
         try:
             fields = account_pnl_to_fields(event)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._log.error(f"invalid account_pnl: {exc}")
             return
         # Validate the full payload BEFORE mutating any state (account id, seed).
@@ -472,7 +502,7 @@ class RithmicExecutionClient(LiveExecutionClient):
             return
         try:
             free_dec = Decimal(str(free_raw))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._log.error(f"account_pnl balance not numeric ({free_raw!r}): {exc}")
             return
         if not free_dec.is_finite():
@@ -485,7 +515,7 @@ class RithmicExecutionClient(LiveExecutionClient):
             self._set_account_id(account_id)
         self._seed_account_if_needed(str(fields["account_id"]))
         free = Money(free_dec, currency)
-        locked = Money(Decimal("0"), currency)
+        locked = Money(Decimal(0), currency)
         total = free
         balances = [AccountBalance(total, locked, free)]
         # Rithmic streams account PnL on a short interval even when the
@@ -506,7 +536,7 @@ class RithmicExecutionClient(LiveExecutionClient):
     def _cache_position(self, event: dict[str, Any]) -> None:
         try:
             fields = instrument_pnl_to_fields(event)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._log.error(f"invalid instrument_pnl: {exc}")
             return
         self._positions[str(fields["instrument_id"])] = fields
@@ -564,7 +594,8 @@ class RithmicExecutionClient(LiveExecutionClient):
         self._order_plant_latched = True
         self._order_plant.state = OrderPlantState.DISCONNECTED
         self._log.error(
-            f"{action} transport outcome unknown; order plant latched disconnected: {exc}"
+            f"{action} transport outcome unknown; order plant latched "
+            f"disconnected: {exc}"
         )
 
     def _resolve_client_order_id(self, fields: dict[str, Any]) -> ClientOrderId | None:
@@ -612,7 +643,9 @@ class RithmicExecutionClient(LiveExecutionClient):
             if cached is not None:
                 return cached.value
         tag = fields.get("user_tag")
-        return str(tag or (client_order_id.value if client_order_id is not None else ""))
+        return str(
+            tag or (client_order_id.value if client_order_id is not None else "")
+        )
 
     def _handle_order_notification(self, fields: dict[str, Any]) -> None:
         account_hint = fields.get("account_id")
@@ -646,7 +679,11 @@ class RithmicExecutionClient(LiveExecutionClient):
             )
         elif action.kind == "rejected":
             self.generate_order_rejected(
-                strategy_id, instrument_id, client_order_id, str(action.reason), ts_event
+                strategy_id,
+                instrument_id,
+                client_order_id,
+                str(action.reason),
+                ts_event,
             )
         elif action.kind == "modify_rejected":
             self.generate_order_modify_rejected(
@@ -702,8 +739,14 @@ class RithmicExecutionClient(LiveExecutionClient):
                 strategy_id, instrument_id, client_order_id, venue_order_id, ts_event
             )
         elif action.kind == "filled":
-            if action.fill_px is None or action.fill_qty is None or action.trade_id is None:
-                self._log.error(f"fill action missing fields: {slim_order_fields(fields)}")
+            if (
+                action.fill_px is None
+                or action.fill_qty is None
+                or action.trade_id is None
+            ):
+                self._log.error(
+                    f"fill action missing fields: {slim_order_fields(fields)}"
+                )
                 return
             dedup = fill_dedup_key(fields, ts_event=ts_event)
             if self._fill_key_seen(dedup):
@@ -716,7 +759,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                     f"fill suppressed (bad px/qty): {exc}; {slim_order_fields(fields)}"
                 )
                 return
-            commission = Money(Decimal("0"), Currency.from_str("USD"))
+            commission = Money(Decimal(0), Currency.from_str("USD"))
             self.generate_order_filled(
                 strategy_id,
                 instrument_id,
@@ -746,8 +789,10 @@ class RithmicExecutionClient(LiveExecutionClient):
         if not basket or not (instrument_raw or symbol):
             return None
         try:
-            instrument_id = InstrumentId.from_str(str(instrument_raw or f"{symbol}.{VENUE}"))
-        except Exception:  # noqa: BLE001
+            instrument_id = InstrumentId.from_str(
+                str(instrument_raw or f"{symbol}.{VENUE}")
+            )
+        except Exception:
             return None
         account_raw = fields.get("account_id")
         if account_raw:
@@ -772,7 +817,7 @@ class RithmicExecutionClient(LiveExecutionClient):
             order_side=side,
             last_qty=last_qty,
             last_px=last_px,
-            commission=Money(Decimal("0"), Currency.from_str("USD")),
+            commission=Money(Decimal(0), Currency.from_str("USD")),
             liquidity_side=LiquiditySide.NO_LIQUIDITY_SIDE,
             report_id=UUID4(),
             ts_event=ts_event,
@@ -788,7 +833,8 @@ class RithmicExecutionClient(LiveExecutionClient):
         instrument_raw = fields.get("instrument_id")
         if not basket or not (instrument_raw or symbol):
             self._log.warning(
-                f"untracked order notification missing identity: {slim_order_fields(fields)}"
+                f"untracked order notification missing identity: "
+                f"{slim_order_fields(fields)}"
             )
             return
         account_raw = fields.get("account_id")
@@ -796,7 +842,8 @@ class RithmicExecutionClient(LiveExecutionClient):
             self._seed_account_if_needed(str(account_raw))
         if self.account_id is None:
             self._log.warning(
-                f"untracked order notification missing account: {slim_order_fields(fields)}"
+                f"untracked order notification missing account: "
+                f"{slim_order_fields(fields)}"
             )
             return
 
@@ -815,9 +862,10 @@ class RithmicExecutionClient(LiveExecutionClient):
                 str(getattr(status_report, "filled_qty", "")),
                 str(getattr(status_report, "avg_px", "")),
             )
-            if self._untracked_status_keys.get(
-                str(status_report.venue_order_id)
-            ) == status_key:
+            if (
+                self._untracked_status_keys.get(str(status_report.venue_order_id))
+                == status_key
+            ):
                 status_report = None
             elif not RithmicExecutionClient._publish_order_status_report(
                 self,
@@ -827,12 +875,18 @@ class RithmicExecutionClient(LiveExecutionClient):
                 # Record only on success so a later re-push can retry.
                 return
             else:
-                if len(self._untracked_status_keys) >= RithmicExecutionClient._MAX_SEEN_FILL_KEYS:
+                if (
+                    len(self._untracked_status_keys)
+                    >= RithmicExecutionClient._MAX_SEEN_FILL_KEYS
+                ):
                     self._untracked_status_keys.clear()
-                self._untracked_status_keys[str(status_report.venue_order_id)] = status_key
+                self._untracked_status_keys[str(status_report.venue_order_id)] = (
+                    status_key
+                )
         else:
             self._log.warning(
-                f"untracked order status could not be built: {slim_order_fields(fields)}"
+                f"untracked order status could not be built: "
+                f"{slim_order_fields(fields)}"
             )
 
         if fields.get("kind") != "filled":
@@ -865,7 +919,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         """
         try:
             self._send_order_status_report(report)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._log.exception(
                 f"{context}: status report publication failed; skipping stale report",
                 exc,
@@ -919,9 +973,13 @@ class RithmicExecutionClient(LiveExecutionClient):
         ts_init = self._clock.timestamp_ns()
         reports: list[OrderStatusReport] = []
         orders = (
-            self._cache.orders_open(venue=self.venue, instrument_id=command.instrument_id)
+            self._cache.orders_open(
+                venue=self.venue, instrument_id=command.instrument_id
+            )
             if command.open_only
-            else self._cache.orders(venue=self.venue, instrument_id=command.instrument_id)
+            else self._cache.orders(
+                venue=self.venue, instrument_id=command.instrument_id
+            )
         )
         for order in orders:
             report = self._order_status_report_for(order, ts_init)
@@ -982,7 +1040,9 @@ class RithmicExecutionClient(LiveExecutionClient):
         price = float(order.price) if order.has_price else None
         trigger = float(order.trigger_price) if order.has_trigger_price else None
         qty = int(order.quantity)
-        trail_by_price_id = DEFAULT_TRAIL_BY_PRICE_ID if trail_by_ticks is not None else None
+        trail_by_price_id = (
+            DEFAULT_TRAIL_BY_PRICE_ID if trail_by_ticks is not None else None
+        )
 
         self.generate_order_submitted(
             order.strategy_id,
@@ -1005,7 +1065,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                 trail_by_ticks,
                 trail_by_price_id,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._mark_order_plant_failed("place_order", exc)
 
     async def _submit_order_list(self, command: SubmitOrderList) -> None:
@@ -1098,12 +1158,20 @@ class RithmicExecutionClient(LiveExecutionClient):
                 self._clock.timestamp_ns(),
             )
             return
-        qty = int(command.quantity) if command.quantity is not None else int(order.quantity)
-        price = float(command.price) if command.price is not None else (
-            float(order.price) if order.has_price else None
+        qty = (
+            int(command.quantity)
+            if command.quantity is not None
+            else int(order.quantity)
         )
-        trigger = float(command.trigger_price) if command.trigger_price is not None else (
-            float(order.trigger_price) if order.has_trigger_price else None
+        price = (
+            float(command.price)
+            if command.price is not None
+            else (float(order.price) if order.has_price else None)
+        )
+        trigger = (
+            float(command.trigger_price)
+            if command.trigger_price is not None
+            else (float(order.trigger_price) if order.has_trigger_price else None)
         )
         try:
             await asyncio.to_thread(
@@ -1117,7 +1185,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                 trigger,
                 trail_by_ticks,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._mark_order_plant_failed("modify_order", exc)
 
     async def _cancel_order(self, command: CancelOrder) -> None:
@@ -1161,7 +1229,7 @@ class RithmicExecutionClient(LiveExecutionClient):
             return
         try:
             await asyncio.to_thread(self._session.cancel_order, venue_id)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._mark_order_plant_failed("cancel_order", exc)
 
     async def _cancel_all_orders(self, command: CancelAllOrders) -> None:
@@ -1174,14 +1242,18 @@ class RithmicExecutionClient(LiveExecutionClient):
             return
         try:
             await asyncio.to_thread(self._session.cancel_all_orders)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._mark_order_plant_failed("cancel_all_orders", exc)
 
     async def generate_order_status_report(
         self,
         command: GenerateOrderStatusReport,
     ) -> OrderStatusReport | None:
-        order = self._cache.order(command.client_order_id) if command.client_order_id else None
+        order = (
+            self._cache.order(command.client_order_id)
+            if command.client_order_id
+            else None
+        )
         if order is None and command.venue_order_id is not None:
             mapped = self._cache.client_order_id(command.venue_order_id)
             if mapped is not None:
@@ -1228,7 +1300,9 @@ class RithmicExecutionClient(LiveExecutionClient):
             return True
         return getattr(exc, "code", None) == "reconciliation_unavailable"
 
-    async def _load_orders_events(self, start_sec: int, end_sec: int) -> list[dict[str, Any]]:
+    async def _load_orders_events(
+        self, start_sec: int, end_sec: int
+    ) -> list[dict[str, Any]]:
         # The gateway performs a bounded silence-window drain of the current
         # working orders (`show_orders`). An empty result means "no working
         # orders after the drain" and is a valid best-effort answer, not an
@@ -1239,7 +1313,9 @@ class RithmicExecutionClient(LiveExecutionClient):
         last_exc: Exception | None = None
         for attempt in range(attempts):
             try:
-                return await asyncio.to_thread(self._session.load_orders, start_sec, end_sec)
+                return await asyncio.to_thread(
+                    self._session.load_orders, start_sec, end_sec
+                )
             except Exception as exc:
                 if self._is_recon_unavailable(exc):
                     raise
@@ -1253,7 +1329,8 @@ class RithmicExecutionClient(LiveExecutionClient):
                     backoff = min(backoff * 2, 1.0)
                 continue
         raise RuntimeError(
-            f"load_orders recon failed after {attempts} attempts ({start_sec}..{end_sec})"
+            f"load_orders recon failed after {attempts} attempts "
+            f"({start_sec}..{end_sec})"
         ) from last_exc
 
     def _matches_instrument(
@@ -1263,7 +1340,10 @@ class RithmicExecutionClient(LiveExecutionClient):
         venue_order_id: Any | None,
     ) -> bool:
         if venue_order_id is not None:
-            return bool(fields.get("basket_id")) and str(fields["basket_id"]) == venue_order_id.value
+            return (
+                bool(fields.get("basket_id"))
+                and str(fields["basket_id"]) == venue_order_id.value
+            )
         if instrument_id is None:
             return True
         event_inst = str(fields.get("instrument_id") or "")
@@ -1272,7 +1352,9 @@ class RithmicExecutionClient(LiveExecutionClient):
             return True
         root = want.split(".")[0]
         ev_root = event_inst.split(".")[0]
-        return bool(root and ev_root and (ev_root.startswith(root) or root.startswith(ev_root)))
+        return bool(
+            root and ev_root and (ev_root.startswith(root) or root.startswith(ev_root))
+        )
 
     def _order_type_from_event(self, fields: dict[str, Any]) -> OrderType:
         raw = fields.get("price_type")
@@ -1352,8 +1434,10 @@ class RithmicExecutionClient(LiveExecutionClient):
         if not basket or not (instrument_raw or symbol):
             return None
         try:
-            instrument_id = InstrumentId.from_str(str(instrument_raw or f"{symbol}.{VENUE}"))
-        except Exception:  # noqa: BLE001
+            instrument_id = InstrumentId.from_str(
+                str(instrument_raw or f"{symbol}.{VENUE}")
+            )
+        except Exception:
             return None
         account_raw = fields.get("account_id")
         if account_raw:
@@ -1366,7 +1450,9 @@ class RithmicExecutionClient(LiveExecutionClient):
             filled = Quantity.from_int(max(0, int(fields.get("total_fill_size") or 0)))
             price = _price(fields["price"]) if fields.get("price") is not None else None
             trigger = (
-                _price(fields["trigger_price"]) if fields.get("trigger_price") is not None else None
+                _price(fields["trigger_price"])
+                if fields.get("trigger_price") is not None
+                else None
             )
             avg = fields.get("avg_fill_price")
             avg_px = Decimal(str(avg)) if avg is not None else None
@@ -1426,7 +1512,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         for raw in events:
             try:
                 fields = order_notification_to_fields(raw)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 continue
             basket = fields.get("basket_id")
             if not basket:
@@ -1434,7 +1520,9 @@ class RithmicExecutionClient(LiveExecutionClient):
             # GenerateOrderStatusReports carries no venue_order_id (only
             # GenerateFillReports does); treat it as absent for filtering.
             venue_order_id = getattr(command, "venue_order_id", None)
-            if (command.instrument_id is not None or venue_order_id is not None) and not (
+            if (
+                command.instrument_id is not None or venue_order_id is not None
+            ) and not (
                 self._matches_instrument(fields, command.instrument_id, venue_order_id)
             ):
                 continue
@@ -1450,7 +1538,9 @@ class RithmicExecutionClient(LiveExecutionClient):
                 latest[key] = (ts_event, report)
         reports = [report for _, report in latest.values()]
         if command.open_only:
-            reports = [r for r in reports if r.order_status not in _TERMINAL_ORDER_STATUSES]
+            reports = [
+                r for r in reports if r.order_status not in _TERMINAL_ORDER_STATUSES
+            ]
         return reports
 
     async def generate_fill_reports(
@@ -1467,7 +1557,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         for raw in events:
             try:
                 fields = order_notification_to_fields(raw)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 continue
             if fields.get("kind") != "filled":
                 continue

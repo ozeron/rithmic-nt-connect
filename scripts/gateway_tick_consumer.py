@@ -13,6 +13,7 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import sys
 import time
@@ -62,16 +63,16 @@ def main(argv: list[str] | None = None) -> int:
     os.environ.setdefault("RITHMIC_CONNECT_MODE", "gateway")
 
     try:
-        from rithmic_nt_connect.config import SessionConfig
         from rithmic_gateway import GatewayClient, GatewayConfig
         from rithmic_gateway.flock import SessionLock, SessionLockError
-    except Exception as exc:  # noqa: BLE001
+        from rithmic_nt_connect.config import SessionConfig
+    except Exception as exc:
         print(f"[{label}] import failed: {exc}", file=sys.stderr)
         return 1
 
     try:
         session_cfg = SessionConfig.from_env()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(f"[{label}] SKIP (no credentials): {exc}")
         return 2
 
@@ -102,7 +103,9 @@ def main(argv: list[str] | None = None) -> int:
 
         # Prove another process owns the flock (this consumer must not hold it).
         try:
-            stolen = SessionLock.try_acquire(gcfg.user, gcfg.system_name, gcfg.url, gcfg.env)
+            stolen = SessionLock.try_acquire(
+                gcfg.user, gcfg.system_name, gcfg.url, gcfg.env
+            )
             stolen.close()
             print(
                 f"[{label}] FAIL: credential flock was free after connect "
@@ -128,9 +131,7 @@ def main(argv: list[str] | None = None) -> int:
             if sym and sym != trading and not sym.startswith(args.symbol):
                 continue
             got += 1
-            print(
-                f"[{label}] tick#{got} type={ev.get('type')} symbol={sym or trading}"
-            )
+            print(f"[{label}] tick#{got} type={ev.get('type')} symbol={sym or trading}")
 
         pid = _gateway_pid(gcfg)
         print(f"[{label}] events_received={got} gateway_pid={pid}")
@@ -142,14 +143,12 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(f"[{label}] OK")
         return 0
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(f"[{label}] FAIL: {exc}", file=sys.stderr)
         return 1
     finally:
-        try:
+        with contextlib.suppress(Exception):
             client.disconnect()
-        except Exception:
-            pass
 
 
 if __name__ == "__main__":

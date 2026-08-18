@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 from rithmic_nt_connect.session import WireSession
 
@@ -35,7 +36,9 @@ def resolve_front_month(
         raise FrontMonthError(f"unexpected front-month payload type: {type(raw)!r}")
     trading_symbol = raw.get("trading_symbol")
     if not trading_symbol:
-        raise FrontMonthError(f"front-month response missing trading_symbol for {root}/{exchange}")
+        raise FrontMonthError(
+            f"front-month response missing trading_symbol for {root}/{exchange}"
+        )
     trading_exchange = raw.get("trading_exchange")
     if not trading_exchange:
         raise FrontMonthError(

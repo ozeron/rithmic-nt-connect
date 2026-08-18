@@ -95,7 +95,10 @@ session = connect_market_data_session()
 instrument = load_front_month_instrument(session, "NQ", "CME")
 ticks = load_trade_ticks(session, instrument, start, end)
 daily = load_time_bars(
-    session, instrument, start, end,
+    session,
+    instrument,
+    start,
+    end,
     BarType.from_str(f"{instrument.id}-1-DAY-LAST-EXTERNAL"),
 )
 ```

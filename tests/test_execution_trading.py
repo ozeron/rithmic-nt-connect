@@ -6,17 +6,14 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from nautilus_trader.model.enums import OrderSide
-from nautilus_trader.model.identifiers import ClientOrderId
-from nautilus_trader.model.identifiers import InstrumentId
-from nautilus_trader.model.identifiers import StrategyId
-from nautilus_trader.model.objects import Price
-from nautilus_trader.model.objects import Quantity
-
-from rithmic_nt_connect._order_plant import OrderPlantPolicy
-from rithmic_nt_connect._order_plant import OrderPlantState
-from rithmic_nt_connect._orders import OrderAction
-from rithmic_nt_connect._orders import notification_action
-from rithmic_nt_connect._orders import order_notification_to_fields
+from nautilus_trader.model.identifiers import ClientOrderId, InstrumentId, StrategyId
+from nautilus_trader.model.objects import Price, Quantity
+from rithmic_nt_connect._order_plant import OrderPlantPolicy, OrderPlantState
+from rithmic_nt_connect._orders import (
+    OrderAction,
+    notification_action,
+    order_notification_to_fields,
+)
 
 
 def _action(fields: dict[str, object], order: SimpleNamespace) -> OrderAction:

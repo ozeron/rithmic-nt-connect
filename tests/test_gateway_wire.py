@@ -6,9 +6,11 @@ import inspect
 from typing import Any
 
 import pytest
-
 from rithmic_nt_connect.config import ConfigError, ConnectMode, SessionConfig
-from rithmic_nt_connect.gateway_wire import GatewayWireSession, gateway_config_from_session
+from rithmic_nt_connect.gateway_wire import (
+    GatewayWireSession,
+    gateway_config_from_session,
+)
 from rithmic_nt_connect.session import create_session
 
 
@@ -91,4 +93,6 @@ def test_create_session_gateway_returns_adapter_without_pyo3() -> None:
         "adjust_bracket_target",
         "resolved_account",
     ):
-        assert hasattr(session, name), f"gateway wire missing {name} (direct/gateway parity)"
+        assert hasattr(session, name), (
+            f"gateway wire missing {name} (direct/gateway parity)"
+        )
