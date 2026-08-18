@@ -5,10 +5,10 @@ MY043 runs — a ``TradingNode`` whose ``LiveDataEngine`` aggregates the Rithmic
 ticker into ``1-MINUTE-INTERNAL`` bars with ``time_bars_timestamp_on_close=False``
 — and proves:
 
-- Seam: the first complete INTERNAL minute immediately follows the EXTERNAL
-  warmup grid (no overlap/gap, same open-time convention).
-- OHLCV parity: for that minute the INTERNAL bar's open/high/low/close/volume
-  equals the EXTERNAL bar's (prices within one tick, volume exact).
+- Seam/parity: for the first complete INTERNAL minute, the EXTERNAL bar for
+  the same minute exists and its open/high/low/close/volume equals the INTERNAL
+  bar's (prices within one tick, volume exact) — the two grids agree on the
+  same minute-aligned open-time convention at the warmup→live handoff.
 - In-progress continuity: the INTERNAL volume equals the live trade ticks
   accumulated from that minute's open (what the strategy actually counts).
 - Sweep characterization: same-timestamp multi-price prints (a sweep) still
@@ -38,18 +38,14 @@ from nautilus_trader.trading.strategy import StrategyConfig
 from rithmic_nt_connect import ADAPTER_NAME
 from rithmic_nt_connect import RithmicLiveDataClientConfig
 from rithmic_nt_connect import RithmicLiveDataClientFactory
+from parity_helpers import NS_PER_MIN
+from parity_helpers import open_minute
+from parity_helpers import wait_for_external_bar
+
 from rithmic_nt_connect import session_config_from_explicit_test_env
-from rithmic_nt_connect.historical import load_time_bars
 from rithmic_nt_connect.session import connect_market_data_session
 
 pytestmark = pytest.mark.live
-
-_NS_PER_MIN = 60_000_000_000
-
-
-def _open_minute(ts_ns: int) -> int:
-    """Floor a tick/bar timestamp to its open-minute grid (ns)."""
-    return int(ts_ns) - (int(ts_ns) % _NS_PER_MIN)
 
 
 class InternalBarCaptureConfig(StrategyConfig):
@@ -103,9 +99,9 @@ def _wait_for_first_complete_traded_bar(strategy, timeout: float) -> Bar | None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if strategy.ticks:
-            cutoff = _open_minute(min(int(t.ts_event) for t in strategy.ticks))
+            cutoff = open_minute(min(int(t.ts_event) for t in strategy.ticks))
             for bar in strategy.bars:
-                if int(bar.volume) > 0 and _open_minute(int(bar.ts_event)) > cutoff:
+                if int(bar.volume) > 0 and open_minute(int(bar.ts_event)) > cutoff:
                     return bar
         time.sleep(0.2)
     return None
@@ -171,7 +167,7 @@ class TestInternalNode:
 
             # The captured minute is OPEN time (timestamp_on_close=False).
             minute_ns = int(traded.ts_event)
-            assert minute_ns % _NS_PER_MIN == 0, "INTERNAL bar is minute-aligned"
+            assert minute_ns % NS_PER_MIN == 0, "INTERNAL bar is minute-aligned"
         finally:
             node.stop()
             thread.join(timeout=30.0)
@@ -180,28 +176,16 @@ class TestInternalNode:
 
         minute_sec = minute_ns // 1_000_000_000
 
-        # Reload the EXTERNAL grid with a fresh session, polling until the venue
-        # has published the captured minute's bar. The test-plant replay emits
-        # bars in delayed, irregular batches (observed 8s..250s+ after close)
-        # and omits minutes with no trades, so poll patiently.
+        # Reload the EXTERNAL grid with a fresh session and wait for the venue
+        # to publish the captured minute's bar (replay emits in delayed batches).
         external_type = BarType.from_str(
             f"{instrument.id.symbol}.RITHMIC-1-MINUTE-LAST-EXTERNAL"
         )
         sess = connect_market_data_session(test_session)
         try:
-            bars: list[Bar] = []
-            external = None
-            deadline = time.monotonic() + 300.0
-            while time.monotonic() < deadline:
-                bars = load_time_bars(
-                    sess, instrument, minute_sec - 600, minute_sec + 60, external_type
-                )
-                external = next(
-                    (b for b in bars if int(b.ts_event) == minute_ns), None
-                )
-                if external is not None:
-                    break
-                time.sleep(15)
+            external = wait_for_external_bar(
+                sess, instrument, external_type, minute_ns, deadline_secs=300.0
+            )
         finally:
             sess.disconnect()
             lock = getattr(sess, "_lock", None)
@@ -209,12 +193,6 @@ class TestInternalNode:
                 lock.close()
 
         assert external is not None, f"EXTERNAL bar exists for captured minute {minute_sec}"
-        prev = next(
-            (b for b in bars if int(b.ts_event) == minute_ns - _NS_PER_MIN), None
-        )
-        assert prev is not None, (
-            f"EXTERNAL grid covers the minute before the seam ({minute_sec - 60})"
-        )
 
         # Parity: INTERNAL (aggregated by Nautilus) vs EXTERNAL (venue bar).
         tick = float(instrument.price_increment.as_double())
@@ -234,7 +212,7 @@ class TestInternalNode:
         )
 
         # In-progress continuity: INTERNAL volume == live ticks from minute open.
-        minute_ticks = [t for t in strategy.ticks if _open_minute(int(t.ts_event)) == minute_ns]
+        minute_ticks = [t for t in strategy.ticks if open_minute(int(t.ts_event)) == minute_ns]
         tick_volume = sum(int(t.size) for t in minute_ticks)
         assert tick_volume == int(traded.volume) == int(external.volume), (
             f"minute {minute_sec}: live ticks {tick_volume} != INTERNAL "

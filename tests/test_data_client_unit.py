@@ -26,12 +26,11 @@ def test_last_trade_fields_to_trade_tick():
     assert float(tick.price) == 20000.25
 
 
-def test_trade_tick_ids_distinguish_sweep_and_dedupe_duplicates() -> None:
-    """Same-ts multi-price prints keep distinct ids; identical prints dedupe.
+def test_trade_tick_ids_unique_per_message() -> None:
+    """Every received print gets a distinct trade id.
 
-    Rithmic has no venue trade id, so the synthesized id must tell a
-    same-timestamp sweep (5 price levels, one nanosecond) apart while treating
-    an identical re-push as the same print.
+    Rithmic has no venue trade id and identical fields can be a genuine second
+    print, so even identical (ts, price, size, aggressor) must not collapse.
     """
     base = {
         "type": "last_trade",
@@ -42,13 +41,14 @@ def test_trade_tick_ids_distinguish_sweep_and_dedupe_duplicates() -> None:
     }
     sweep_a = dict(base, trade_price=20000.25, trade_size=1)
     sweep_b = dict(base, trade_price=20000.0, trade_size=1)
+    identical = dict(base, trade_price=20000.25, trade_size=1)
 
-    a = fields_to_trade_tick(last_trade_to_fields(sweep_a), ts_init=1)
-    b = fields_to_trade_tick(last_trade_to_fields(sweep_b), ts_init=1)
-    dup = fields_to_trade_tick(last_trade_to_fields(sweep_a), ts_init=1)
+    ids = {
+        fields_to_trade_tick(last_trade_to_fields(raw), ts_init=1).trade_id
+        for raw in (sweep_a, sweep_b, identical)
+    }
 
-    assert a.trade_id != b.trade_id, "same-ts sweep legs must not share a trade id"
-    assert a.trade_id == dup.trade_id, "identical re-push is the same venue print"
+    assert len(ids) == 3, "every received message has a distinct trade id"
 
 
 def test_trade_tick_uses_instrument_price_precision() -> None:

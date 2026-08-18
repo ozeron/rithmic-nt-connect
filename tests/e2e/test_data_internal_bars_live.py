@@ -27,17 +27,14 @@ import pytest
 
 from nautilus_trader.model.data import BarType
 
+from parity_helpers import NS_PER_MIN
+from parity_helpers import open_minute
+from parity_helpers import wait_for_external_bar
+
 from rithmic_nt_connect._convert import last_trade_to_fields
 from rithmic_nt_connect.historical import load_time_bars
 
 pytestmark = pytest.mark.live
-
-_NS_PER_MIN = 60_000_000_000
-
-
-def _open_minute(ts_ns: int) -> int:
-    """Floor a tick/bar timestamp to its open-minute grid (ns)."""
-    return int(ts_ns) - (int(ts_ns) % _NS_PER_MIN)
 
 
 class TestInternalBars:
@@ -69,11 +66,11 @@ class TestInternalBars:
 
         buckets: dict[int, list[dict]] = defaultdict(list)
         for f in fields:
-            buckets[_open_minute(int(f["ts_event"]))].append(f)
+            buckets[open_minute(int(f["ts_event"]))].append(f)
 
         assert buckets, "at least one minute bucket"
         for key, rows in buckets.items():
-            assert key % _NS_PER_MIN == 0, "bucket key is minute-aligned"
+            assert key % NS_PER_MIN == 0, "bucket key is minute-aligned"
             ordered = sorted(rows, key=lambda r: int(r["ts_event"]))
             prices = [float(r["price"]) for r in ordered]
             volume = sum(float(r["size"]) for r in ordered)
@@ -101,13 +98,13 @@ class TestInternalBars:
         if not bars or not raw_ticks:
             pytest.skip("history plant returned empty for parity window")
 
-        bars_by_minute = {_open_minute(int(b.ts_event)): b for b in bars}
+        bars_by_minute = {open_minute(int(b.ts_event)): b for b in bars}
         tick_volume_by_minute: dict[int, float] = defaultdict(float)
         for t in raw_ticks:
             ts_ns = int(t.get("ts_event_ns") or 0)
             if not ts_ns or t.get("volume") is None:
                 continue
-            tick_volume_by_minute[_open_minute(ts_ns)] += float(t["volume"])
+            tick_volume_by_minute[open_minute(ts_ns)] += float(t["volume"])
 
         compared = 0
         for minute, bar in sorted(bars_by_minute.items()):
@@ -158,18 +155,17 @@ class TestInternalBars:
 
         traded_minutes = sorted(
             {
-                _open_minute(int(f["ts_event"]))
+                open_minute(int(f["ts_event"]))
                 for f in fields
-                if _open_minute(int(f["ts_event"])) >= first_full_sec * 1_000_000_000
+                if open_minute(int(f["ts_event"])) >= first_full_sec * 1_000_000_000
             }
         )
         if not traded_minutes:
             pytest.skip("no trades in any fully-observed minute (thin market)")
 
         candidate_ns = traded_minutes[0]
-        rows = [f for f in fields if _open_minute(int(f["ts_event"])) == candidate_ns]
+        rows = [f for f in fields if open_minute(int(f["ts_event"])) == candidate_ns]
         candidate_sec = candidate_ns // 1_000_000_000
-        close_sec = candidate_sec + 60
 
         ordered = sorted(rows, key=lambda r: int(r["ts_event"]))
         tick_volume = sum(float(r["size"]) for r in rows)
@@ -179,16 +175,9 @@ class TestInternalBars:
         low_px = min(float(r["price"]) for r in ordered)
 
         bar_type = BarType.from_str(f"{inst.id.symbol}.RITHMIC-1-MINUTE-LAST-EXTERNAL")
-        bar = None
-        for _ in range(6):
-            bars = load_time_bars(live_session, inst, candidate_sec, close_sec, bar_type)
-            bar = next(
-                (b for b in bars if _open_minute(int(b.ts_event)) == candidate_ns),
-                None,
-            )
-            if bar is not None:
-                break
-            time.sleep(5)
+        bar = wait_for_external_bar(
+            live_session, inst, bar_type, candidate_ns, deadline_secs=300.0
+        )
         if bar is None:
             pytest.fail(
                 f"EXTERNAL bar for minute {candidate_sec} unavailable after retries (venue lag?)"
@@ -232,7 +221,7 @@ class TestInternalBars:
             pytest.skip("history plant returned empty for cutover window")
 
         last = bars[-1]
-        last_close_ns = int(last.ts_event) + _NS_PER_MIN  # open + 60s == close
+        last_close_ns = int(last.ts_event) + NS_PER_MIN  # open + 60s == close
         now_ns = int(datetime.now(timezone.utc).timestamp()) * 1_000_000_000
         assert last_close_ns <= now_ns, (
             f"cutover returned an in-progress/partial minute: close={last_close_ns} now={now_ns}"
