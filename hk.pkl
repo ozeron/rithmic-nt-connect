@@ -1,0 +1,52 @@
+amends "package://github.com/jdx/hk/releases/download/v1.55.0/hk@1.55.0#/Config.pkl"
+import "package://github.com/jdx/hk/releases/download/v1.55.0/hk@1.55.0#/Builtins.pkl"
+
+// ruff/ty run via `uv run` (they live in the venv). The exclude mirrors
+// [tool.ruff]: hk passes explicit paths, so ruff's own exclude is bypassed.
+local ruff_globs = List("**/*.py", "**/*.pyi")
+local ruff_exclude = List(
+    "stubs/**",
+    "wheel-data/**",
+    "python/rithmic_gateway/v1/session_pb2.py",
+)
+
+local linters = new Mapping<String, Step> {
+    ["ruff-format"] {
+        glob = ruff_globs
+        exclude = ruff_exclude
+        check = "uv run ruff format --check {{files}}"
+        fix = "uv run ruff format {{files}}"
+    }
+    ["ruff"] {
+        glob = ruff_globs
+        exclude = ruff_exclude
+        check = "uv run ruff check {{files}}"
+        fix = "uv run ruff check --fix {{files}}"
+    }
+    ["cargo-fmt"] = (Builtins.cargo_fmt) {
+        check = "cargo fmt --check -- {{files}}"
+        fix = "cargo fmt -- {{files}}"
+    }
+}
+
+hooks {
+    // Fix and re-stage staged files before committing.
+    ["pre-commit"] {
+        fix = true
+        stash = "git"
+        steps = linters
+    }
+    ["fix"] {
+        fix = true
+        steps = linters
+    }
+    // Project-wide gate mirroring CI (ty is run whole-project, not per-file).
+    ["check"] {
+        steps {
+            ...linters
+            ["ty"] {
+                check = "uv run ty check python/rithmic_nt_connect tests"
+            }
+        }
+    }
+}
