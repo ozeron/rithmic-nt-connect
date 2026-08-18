@@ -11,6 +11,8 @@ from rithmic_nt_connect._convert import time_bar_to_fields
 from rithmic_nt_connect.data import bar_type_to_rithmic
 from rithmic_nt_connect.data import external_bar_advertised
 from rithmic_nt_connect.data import fields_to_bar
+from rithmic_nt_connect.data import payloads_to_bars
+from rithmic_nt_connect.data import payloads_to_trade_ticks
 
 
 def test_history_tick_requires_trade_price_and_size():
@@ -236,3 +238,172 @@ def test_malformed_history_raises_convert_error():
 def test_malformed_bar_raises_convert_error():
     with pytest.raises(ConvertError):
         time_bar_to_fields({"symbol": "NQ", "open_price": 1.0})
+
+
+def _raw_history_bar(**overrides: object) -> dict:
+    raw: dict = {
+        "type": "history_bar",
+        "symbol": "NQU6",
+        "exchange": "CME",
+        "open_price": 100.0,
+        "high_price": 101.0,
+        "low_price": 99.5,
+        "close_price": 100.5,
+        "volume": 42,
+        "marker": 1_700_000_000,
+        "bar_type": 2,  # Rithmic MINUTE rtype
+        "period": "1",
+    }
+    raw.update(overrides)
+    return raw
+
+
+_M1_BAR_TYPE = BarType.from_str("NQU6.RITHMIC-1-MINUTE-LAST-EXTERNAL")
+
+
+def _minimal_bar_fields() -> dict:
+    return {
+        "symbol": "NQU6",
+        "exchange": "CME",
+        "open_price": 1.0,
+        "high_price": 1.0,
+        "low_price": 1.0,
+        "close_price": 1.0,
+        "volume": 1,
+    }
+
+
+def test_time_bar_timestamp_precedence_ts_event_ns_wins():
+    fields = time_bar_to_fields(
+        {
+            **_minimal_bar_fields(),
+            "ts_event_ns": 1_700_000_000_000_000_000,
+            "ssboe": 1_600_000_000,
+            "usecs": 500,
+            "marker": 1_500_000_000,
+        }
+    )
+    assert fields["ts_event"] == 1_700_000_000_000_000_000
+
+
+def test_time_bar_timestamp_precedence_ssboe_over_marker():
+    fields = time_bar_to_fields(
+        {
+            **_minimal_bar_fields(),
+            "ssboe": 1_700_000_000,
+            "usecs": 500,
+            "marker": 1_600_000_000,
+        }
+    )
+    assert fields["ts_event"] == 1_700_000_000 * 1_000_000_000 + 500 * 1_000
+
+
+def test_time_bar_timestamp_marker_fallback():
+    fields = time_bar_to_fields(
+        {**_minimal_bar_fields(), "marker": 1_700_000_000}
+    )
+    assert fields["ts_event"] == 1_700_000_000 * 1_000_000_000
+
+
+def test_time_bar_timestamp_requires_some_source():
+    with pytest.raises(ConvertError):
+        time_bar_to_fields(_minimal_bar_fields())
+
+
+def test_payloads_to_bars_rejects_wire_symbol_mismatch():
+    with pytest.raises(ConvertError, match="symbol"):
+        payloads_to_bars(
+            [_raw_history_bar(symbol="ESU6")],
+            symbol="NQU6",
+            exchange="CME",
+            bar_type=_M1_BAR_TYPE,
+            price_precision=2,
+        )
+
+
+def test_payloads_to_bars_rejects_wire_exchange_mismatch():
+    with pytest.raises(ConvertError, match="exchange"):
+        payloads_to_bars(
+            [_raw_history_bar(exchange="CBOT")],
+            symbol="NQU6",
+            exchange="CME",
+            bar_type=_M1_BAR_TYPE,
+            price_precision=2,
+        )
+
+
+def test_payloads_to_bars_rejects_wire_bar_type_mismatch():
+    with pytest.raises(ConvertError, match="bar type"):
+        payloads_to_bars(
+            [_raw_history_bar(bar_type=3)],  # DAILY rtype ≠ MINUTE
+            symbol="NQU6",
+            exchange="CME",
+            bar_type=_M1_BAR_TYPE,
+            price_precision=2,
+        )
+
+
+def test_payloads_to_bars_fills_missing_symbol_and_exchange():
+    raw = _raw_history_bar()
+    raw.pop("symbol")
+    raw.pop("exchange")
+    bars = payloads_to_bars(
+        [raw],
+        symbol="NQU6",
+        exchange="CME",
+        bar_type=_M1_BAR_TYPE,
+        price_precision=2,
+    )
+    assert len(bars) == 1
+    assert str(bars[0].bar_type.instrument_id) == "NQU6.RITHMIC"
+
+
+def test_payloads_to_bars_does_not_validate_wire_period():
+    # The wire ``period`` unit (native vs seconds) is documented unreliable;
+    # identity validation must not reject on it.
+    bars = payloads_to_bars(
+        [_raw_history_bar(period="60")],
+        symbol="NQU6",
+        exchange="CME",
+        bar_type=_M1_BAR_TYPE,
+        price_precision=2,
+    )
+    assert len(bars) == 1
+
+
+def test_payloads_to_trade_ticks_rejects_wire_symbol_mismatch():
+    with pytest.raises(ConvertError, match="symbol"):
+        payloads_to_trade_ticks(
+            [
+                {
+                    "type": "history_tick",
+                    "symbol": "ESU6",
+                    "exchange": "CME",
+                    "trade_price": 100.5,
+                    "trade_size": 1,
+                    "ssboe": 1_700_000_000,
+                    "usecs": 0,
+                }
+            ],
+            symbol="NQU6",
+            exchange="CME",
+            price_precision=2,
+        )
+
+
+def test_payloads_to_trade_ticks_fills_missing_symbol_and_exchange():
+    raw = {
+        "type": "history_tick",
+        "trade_price": 100.5,
+        "trade_size": 1,
+        "ssboe": 1_700_000_000,
+        "usecs": 0,
+    }
+    ticks = payloads_to_trade_ticks(
+        [raw],
+        symbol="NQU6",
+        exchange="CME",
+        price_precision=2,
+    )
+    assert len(ticks) == 1
+    assert str(ticks[0].instrument_id) == "NQU6.RITHMIC"
