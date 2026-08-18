@@ -95,6 +95,49 @@ def _price(value: float, precision: int | None = None) -> Price:
     return Price.from_str(f"{float(value):.{int(precision)}f}")
 
 
+def _validate_history_identity(
+    payload: dict[str, Any],
+    *,
+    symbol: str,
+    exchange: str,
+    expected_rtype: int | None = None,
+) -> None:
+    """Reject a venue payload relabeled from a different symbol/exchange/bar type.
+
+    The wire ``period`` field is deliberately not validated — its unit (native
+    vs seconds) is not reliable. A mismatched symbol/exchange/rtype means the
+    plant returned data for a different contract or timeframe; silently labeling
+    it with the requested ``BarType`` would corrupt the tape.
+    """
+    raw_symbol = payload.get("symbol")
+    if raw_symbol is not None and str(raw_symbol) != symbol:
+        raise ConvertError(f"history symbol mismatch: {raw_symbol!r} != {symbol!r}")
+    raw_exchange = payload.get("exchange")
+    if raw_exchange is not None and str(raw_exchange) != exchange:
+        raise ConvertError(f"history exchange mismatch: {raw_exchange!r} != {exchange!r}")
+    if expected_rtype is not None:
+        raw_rtype = payload.get("bar_type")
+        if raw_rtype is not None:
+            # Reject anything that is not an exact integer representation:
+            # ``int(2.5)`` truncates to 2 and bool is an int, so either would
+            # let a mismatched timeframe masquerade as the requested rtype.
+            if isinstance(raw_rtype, bool):
+                rtype_i = -1
+            elif isinstance(raw_rtype, int):
+                rtype_i = raw_rtype
+            elif isinstance(raw_rtype, str):
+                try:
+                    rtype_i = int(raw_rtype)
+                except (TypeError, ValueError):
+                    rtype_i = -1
+            else:
+                rtype_i = -1
+            if rtype_i != expected_rtype:
+                raise ConvertError(
+                    f"history bar type mismatch: {raw_rtype!r} != {expected_rtype}"
+                )
+
+
 def payloads_to_trade_ticks(
     raw_ticks: list[dict[str, Any]],
     *,
@@ -107,6 +150,7 @@ def payloads_to_trade_ticks(
     ticks: list[TradeTick] = []
     for raw in raw_ticks:
         payload = dict(raw)
+        _validate_history_identity(payload, symbol=symbol, exchange=exchange)
         if payload.get("symbol") is None:
             payload["symbol"] = symbol
         if payload.get("exchange") is None:
@@ -135,8 +179,15 @@ def payloads_to_bars(
 ) -> list[Bar]:
     """Convert venue history/live dicts to ``Bar`` (one convert boundary)."""
     bars: list[Bar] = []
+    expected_rtype = bar_type_to_rithmic(bar_type)[0]
     for raw in raw_bars:
         payload = dict(raw)
+        _validate_history_identity(
+            payload,
+            symbol=symbol,
+            exchange=exchange,
+            expected_rtype=expected_rtype,
+        )
         if payload.get("symbol") is None:
             payload["symbol"] = symbol
         if payload.get("exchange") is None:

@@ -24,6 +24,7 @@ import pytest
 
 from nautilus_trader.model.data import BarType
 
+from rithmic_nt_connect.data import payloads_to_bars
 from rithmic_nt_connect.historical import (
     load_front_month_instrument,
     load_time_bars,
@@ -193,9 +194,12 @@ class TestBars:
         assert int(ev["volume"]) >= 0, "valid volume"
 
     def test_TC_D41_request_historical_bars(self, live_session, live_front_month):
-        """TC-D41 — request historical bars — valid OHLCV, ascending timestamps.
+        """TC-D41 — request historical bars — OHLCV, ascending, minute-grid open time.
 
-        Skips when the history plant transiently returns empty (LucidTrading).
+        The venue ``marker`` is the bar CLOSE time; ``fields_to_bar`` shifts it
+        back by the bar duration. A 1m bar's ``ts_event`` must therefore land on
+        the minute grid (``ts_event % 60s == 0``). Skips when the history plant
+        transiently returns empty (LucidTrading).
         """
         inst, *_ = live_front_month
         bar_type = BarType.from_str(f"{inst.id.symbol}.RITHMIC-1-MINUTE-LAST-EXTERNAL")
@@ -207,8 +211,42 @@ class TestBars:
             assert b.high.as_double() >= b.low.as_double(), f"bar[{i}]: high >= low"
             assert b.high.as_double() >= b.open.as_double(), f"bar[{i}]: high >= open"
             assert b.high.as_double() >= b.close.as_double(), f"bar[{i}]: high >= close"
+            assert int(b.volume) >= 0, f"bar[{i}]: non-negative volume"
+            assert b.ts_event % 60_000_000_000 == 0, (
+                f"bar[{i}]: open time not minute-aligned after close→open shift: "
+                f"{b.ts_event}"
+            )
             if i > 0:
                 assert b.ts_event >= bars[i - 1].ts_event, "ascending timestamps"
+
+    def test_TC_D42_historical_bars_close_to_open_shift(self, live_session, live_front_month):
+        """TC-D42 — raw marker is CLOSE; converted ts_event is OPEN (marker − 60s).
+
+        Pins the plant contract that ``ts_event_ns`` (always ``marker*1e9`` for
+        intraday bars) is the close time, so the adapter's unconditional
+        close→open shift is correct against the real plant. Skips on empty.
+        """
+        inst, symbol, exchange = live_front_month
+        end = int(datetime.now(timezone.utc).timestamp())
+        start = end - 7200
+        raw = live_session.load_time_bars(symbol, exchange, start, end, 2, 1)
+        if not raw:
+            pytest.skip("history plant returned empty (LucidTrading transient)")
+        bar_type = BarType.from_str(f"{inst.id.symbol}.RITHMIC-1-MINUTE-LAST-EXTERNAL")
+        converted = payloads_to_bars(
+            list(raw),
+            symbol=symbol,
+            exchange=exchange,
+            bar_type=bar_type,
+            price_precision=int(inst.price_precision),
+        )
+        assert len(converted) == len(raw)
+        for i, (r, c) in enumerate(zip(raw, converted)):
+            close_ns = int(r["ts_event_ns"]) if r.get("ts_event_ns") is not None else int(r["marker"]) * 1_000_000_000
+            assert c.ts_event == close_ns - 60_000_000_000, (
+                f"bar[{i}]: converted open != raw close − 60s "
+                f"({c.ts_event} != {close_ns} − 60s)"
+            )
 
 
 # ══════════════════════════════════════════════════════════════════════
