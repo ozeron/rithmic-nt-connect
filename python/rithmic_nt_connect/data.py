@@ -206,6 +206,21 @@ def payloads_to_bars(
     return bars
 
 
+def _trade_id(fields: dict[str, Any]) -> TradeId:
+    """Synthesize a trade id from the venue-available identity.
+
+    Rithmic's LastTrade carries no venue trade id, so derive one from the
+    fields that distinguish one print from another. The same
+    (ts_event, price, size, aggressor) is the same venue print: a duplicate
+    push dedupes to one id, while a same-timestamp sweep (multiple price
+    levels in one nanosecond) keeps distinct ids.
+    """
+    return TradeId(
+        f"{int(fields['ts_event'])}-{fields['price']}-{int(fields['size'])}-"
+        f"{fields.get('aggressor')}"
+    )
+
+
 def fields_to_trade_tick(
     fields: dict[str, Any],
     ts_init: int,
@@ -220,7 +235,7 @@ def fields_to_trade_tick(
         _price(fields["price"], price_precision),
         Quantity.from_int(size),
         _aggressor(fields.get("aggressor")),
-        TradeId(str(fields["ts_event"])),
+        _trade_id(fields),
         int(fields["ts_event"]),
         ts_init,
     )

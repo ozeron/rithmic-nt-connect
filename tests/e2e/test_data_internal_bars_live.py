@@ -171,8 +171,12 @@ class TestInternalBars:
         candidate_sec = candidate_ns // 1_000_000_000
         close_sec = candidate_sec + 60
 
+        ordered = sorted(rows, key=lambda r: int(r["ts_event"]))
         tick_volume = sum(float(r["size"]) for r in rows)
-        last_px = float(sorted(rows, key=lambda r: int(r["ts_event"]))[-1]["price"])
+        first_px = float(ordered[0]["price"])
+        last_px = float(ordered[-1]["price"])
+        high_px = max(float(r["price"]) for r in ordered)
+        low_px = min(float(r["price"]) for r in ordered)
 
         bar_type = BarType.from_str(f"{inst.id.symbol}.RITHMIC-1-MINUTE-LAST-EXTERNAL")
         bar = None
@@ -194,6 +198,18 @@ class TestInternalBars:
         assert int(bar.volume) == tick_volume, (
             f"minute {candidate_sec}: live trade_size sum {tick_volume} != "
             f"EXTERNAL volume {int(bar.volume)}"
+        )
+        # Full OHLC parity (GAP-4): the venue bar built from the same ticks must
+        # agree on open/high/low/close within one tick. VWAP uses H/L/C, so the
+        # price-side of the basis is proven too, not just volume.
+        assert abs(float(bar.open) - first_px) <= tick + 1e-9, (
+            f"minute {candidate_sec}: EXTERNAL open {float(bar.open)} != first live price {first_px}"
+        )
+        assert abs(float(bar.high) - high_px) <= tick + 1e-9, (
+            f"minute {candidate_sec}: EXTERNAL high {float(bar.high)} != live high {high_px}"
+        )
+        assert abs(float(bar.low) - low_px) <= tick + 1e-9, (
+            f"minute {candidate_sec}: EXTERNAL low {float(bar.low)} != live low {low_px}"
         )
         assert abs(float(bar.close) - last_px) <= tick + 1e-9, (
             f"minute {candidate_sec}: EXTERNAL close {float(bar.close)} != "
