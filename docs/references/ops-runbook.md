@@ -8,6 +8,28 @@
 6. Live smoke: `uv run python scripts/smoke_lucid_nq.py` (exits `2` if credentials missing — CI-safe).
 7. Shared gateway (two consumers, one parent): `uv run python scripts/smoke_gateway_shared_ticks.py --seconds 25` (NQ + MNQ; exits `2` if no creds).
 
+## Test-account integration tests
+
+Live pytest suites must not load the repository-root `.env`. Supply an explicit,
+local test-account file through `RITHMIC_TEST_DOTENV`; the adapter rejects missing
+sources and production/LucidTrading systems before connecting.
+
+```bash
+RITHMIC_TEST_DOTENV=/secure/local/rithmic-test.env \
+uv run pytest tests/e2e/test_data_client_live.py -v
+
+RITHMIC_TEST_DOTENV=/secure/local/rithmic-test.env \
+RITHMIC_ENABLE_TRADING=1 \
+uv run pytest tests/e2e/test_exec_client_live.py -v
+```
+
+The test file must contain the test credentials and `RITHMIC_SYSTEM_NAME` naming
+a test/demo system, plus `RITHMIC_CONNECT_MODE` (`direct` or `gateway`).
+`RITHMIC_GATEWAY` is required only for `gateway` mode. Keep the file outside
+the repository and never print or commit it. Run only when no other
+process owns the same Rithmic login; a second direct/gateway session is refused
+by the credential flock.
+
 ## Building a self-contained wheel
 
 The wheel carries the adapter, the `rithmic_gateway` pure-Python client, **and** the
@@ -105,11 +127,13 @@ drain looks identical). The exec generators (`generate_order_status_reports` /
 (honest: not a venue snapshot).
 
 **Consumer requirement (important):** because an empty best-effort drain can
-look like "no orders", a trading consumer must run with
-`death_policy=trust_stop` (or otherwise not cancel on empty recon). Nautilus'
-default `death_policy=TRACKED` would reconcile an empty result as "no working
-orders" and **cancel tracked open orders**. The adapter does not enforce this;
-the node operator is responsible for it.
+look like "no orders", a trading consumer must run with `open_check_open_only=True`
+(the 1.231.x knob; `death_policy=trust_stop` was removed in this line) so a cached
+open order missing from an empty recon is logged as advisory instead of being
+**canceled**. With `open_check_open_only=False` the engine would reconcile an
+empty result as "no working orders" and cancel tracked open orders. The adapter
+does not enforce this; the node operator is responsible for it (the exec e2e
+fixture pins it explicitly).
 
 TODO (live proof): validate against a non-empty, permissioned Lucid account that
 the `show_orders` drain actually returns the venue's working orders (not zero).

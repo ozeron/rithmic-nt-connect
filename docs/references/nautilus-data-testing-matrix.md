@@ -8,13 +8,13 @@ against our adapter's implementation.
 
 Legend: `[x]` verified live · `[~]` wired/unit-tested only · `[ ]` missing · `N/A` out of scope
 
-**Runnable suite:** `tests/test_data_client_live.py` (live, credentials-gated) +
+**Runnable suite:** `tests/e2e/test_data_client_live.py` (live, credentials-gated) +
 unit suites (`test_convert_ticks.py`, `test_history_convert.py`, `test_depth_convert.py`).
 
 ```bash
 uv run pytest tests/ -m "not live"          # unit only (CI-safe, 2s)
-uv run pytest tests/test_data_client_live.py -v -m "not slow"   # fast live sweep
-uv run pytest tests/test_data_client_live.py -v                 # full live incl. 1m bar poll
+uv run pytest tests/e2e/test_data_client_live.py -v -m "not slow"   # fast live sweep
+uv run pytest tests/e2e/test_data_client_live.py -v                 # full live incl. 1m bar poll
 ```
 
 Last run **2026-08-14**: unit 137 passed; live 5 passed, 3 skipped

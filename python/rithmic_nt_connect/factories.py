@@ -119,10 +119,11 @@ class RithmicLiveExecClientFactory(LiveExecClientFactory):
         cache: Cache,
         clock: LiveClock,
     ) -> RithmicExecutionClient:
-        session = _shared_session(config.session, _SESSION_CACHE, plants=PLANTS_EXECUTION)
+        session_cfg = _session_config_from_data(config)
+        session = _shared_session(session_cfg, _SESSION_CACHE, plants=PLANTS_EXECUTION)
         provider = RithmicInstrumentProvider(
             session=session,
-            pairs=_pairs_from_session(config.session),
+            pairs=_pairs_from_session(session_cfg),
             config=InstrumentProviderConfig(load_all=True),
         )
         return RithmicExecutionClient(
