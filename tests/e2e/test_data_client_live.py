@@ -9,9 +9,9 @@ Markers:
   - ``slow``  : polls for a 1m EXTERNAL bar (up to 65s); deselect with ``-m "not slow"``
 
 Usage:
-  uv run pytest tests/test_data_client_live.py -v                # full sweep
-  uv run pytest tests/test_data_client_live.py -v -m "not slow"  # fast subset
-  uv run pytest tests/test_data_client_live.py -v -k D30         # single TC
+  uv run pytest tests/e2e/test_data_client_live.py -v                # full sweep
+  uv run pytest tests/e2e/test_data_client_live.py -v -m "not slow"  # fast subset
+  uv run pytest tests/e2e/test_data_client_live.py -v -k D30         # single TC
 """
 
 from __future__ import annotations
@@ -30,6 +30,10 @@ from rithmic_nt_connect.historical import (
     load_trade_ticks,
 )
 from rithmic_nt_connect.providers import RithmicInstrumentProvider
+
+# Whole suite is live (needs credentials + network); the `slow` bar test is
+# marked separately on its method.
+pytestmark = pytest.mark.live
 
 # 1m bars can take up to 60s to arrive after subscribe.
 _BAR_POLL_TIMEOUT_SEC = 65
@@ -57,7 +61,6 @@ def wait_for_event(
 # ══════════════════════════════════════════════════════════════════════
 
 
-@pytest.mark.live
 class TestInstruments:
     """TC-D01, D03 — instrument loading."""
 
@@ -75,7 +78,7 @@ class TestInstruments:
             assert inst.multiplier.as_double() > 0, f"{inst.id}: valid multiplier"
 
     def test_TC_D03_load_specific_instrument(self, live_session):
-        """Load a single NQ front month by ID — valid fields."""
+        """TC-D03 — load a single NQ front month by ID — valid fields."""
         inst = load_front_month_instrument(live_session, "NQ", "CME")
         assert str(inst.id).endswith(".RITHMIC"), f"instrument_id: {inst.id}"
         assert inst.price_precision >= 1
@@ -91,7 +94,6 @@ class TestInstruments:
 # ══════════════════════════════════════════════════════════════════════
 
 
-@pytest.mark.live
 class TestOrderBook:
     """TC-D10 — L2 book subscribe (D14 managed-book lives in unit suite)."""
 
@@ -118,7 +120,6 @@ class TestOrderBook:
 # ══════════════════════════════════════════════════════════════════════
 
 
-@pytest.mark.live
 class TestQuotes:
     """TC-D20 — live BBO subscribe."""
 
@@ -138,7 +139,6 @@ class TestQuotes:
 # ══════════════════════════════════════════════════════════════════════
 
 
-@pytest.mark.live
 class TestTrades:
     """TC-D30, D31 — live trades subscribe + historical trades request."""
 
@@ -152,7 +152,7 @@ class TestTrades:
         assert ev.get("aggressor") in (1, 2, None), "valid aggressor"
 
     def test_TC_D31_request_historical_trades(self, live_session, live_front_month):
-        """Request historical trade ticks — valid timestamps, prices, sizes.
+        """TC-D31 — request historical trade ticks — valid timestamps, prices, sizes.
 
         Uses a window ending 1 hour ago (not "now") to avoid the live-indexing
         boundary. The LucidTrading history plant can transiently return empty;
@@ -175,7 +175,6 @@ class TestTrades:
 # ══════════════════════════════════════════════════════════════════════
 
 
-@pytest.mark.live
 class TestBars:
     """TC-D40, D41 — live bar subscribe + historical bars request."""
 
@@ -194,7 +193,7 @@ class TestBars:
         assert int(ev["volume"]) >= 0, "valid volume"
 
     def test_TC_D41_request_historical_bars(self, live_session, live_front_month):
-        """Request historical bars — valid OHLCV, ascending timestamps.
+        """TC-D41 — request historical bars — valid OHLCV, ascending timestamps.
 
         Skips when the history plant transiently returns empty (LucidTrading).
         """
@@ -217,7 +216,6 @@ class TestBars:
 # ══════════════════════════════════════════════════════════════════════
 
 
-@pytest.mark.live
 class TestLifecycle:
     """TC-D70 — subscribe then unsubscribe, clean teardown."""
 

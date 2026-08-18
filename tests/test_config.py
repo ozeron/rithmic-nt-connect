@@ -164,6 +164,71 @@ def test_load_dotenv_setdefault(tmp_path, monkeypatch) -> None:
     assert os.environ["RITHMIC_SYMBOL"] == "NQ"
 
 
+def test_explicit_test_env_requires_source_and_never_uses_root_env(tmp_path, monkeypatch) -> None:
+    from rithmic_nt_connect.config import ConfigError, explicit_test_env
+
+    monkeypatch.delenv("RITHMIC_TEST_DOTENV", raising=False)
+    monkeypatch.setenv("RITHMIC_USER", "production-user")
+    with pytest.raises(ConfigError, match="RITHMIC_TEST_DOTENV"):
+        explicit_test_env()
+
+    env_file = tmp_path / "rithmic-test.env"
+    env_file.write_text(
+        "RITHMIC_USER=test-user\n"
+        "RITHMIC_PASSWORD=test-password\n"
+        "RITHMIC_SYSTEM_NAME=Rithmic Test\n"
+        "RITHMIC_GATEWAY=wss://test.example\n"
+        "RITHMIC_CONNECT_MODE=direct\n"
+    )
+    monkeypatch.setenv("RITHMIC_TEST_DOTENV", str(env_file))
+    values = explicit_test_env()
+    assert values["RITHMIC_USER"] == "test-user"
+    assert values["RITHMIC_SYSTEM_NAME"] == "Rithmic Test"
+    assert values["RITHMIC_USER"] != os.environ["RITHMIC_USER"]
+    from rithmic_nt_connect.config import SessionConfig
+
+    assert "test-password" not in repr(SessionConfig.from_env(values, prefer_lucid=False))
+
+
+def test_explicit_test_env_gateway_required_only_for_gateway_mode(tmp_path, monkeypatch) -> None:
+    from rithmic_nt_connect.config import ConfigError, explicit_test_env
+
+    env_file = tmp_path / "direct.env"
+    env_file.write_text(
+        "RITHMIC_USER=u\nRITHMIC_PASSWORD=p\n"
+        "RITHMIC_SYSTEM_NAME=Rithmic Test\n"
+        "RITHMIC_CONNECT_MODE=direct\n"
+    )
+    monkeypatch.setenv("RITHMIC_TEST_DOTENV", str(env_file))
+    values = explicit_test_env()
+    assert values["RITHMIC_CONNECT_MODE"] == "direct"
+    assert "RITHMIC_GATEWAY" not in values
+
+    gateway_file = tmp_path / "gateway.env"
+    gateway_file.write_text(
+        "RITHMIC_USER=u\nRITHMIC_PASSWORD=p\n"
+        "RITHMIC_SYSTEM_NAME=Rithmic Test\n"
+        "RITHMIC_CONNECT_MODE=gateway\n"
+    )
+    monkeypatch.setenv("RITHMIC_TEST_DOTENV", str(gateway_file))
+    with pytest.raises(ConfigError, match="RITHMIC_GATEWAY"):
+        explicit_test_env()
+
+
+def test_explicit_test_env_rejects_production_system(tmp_path, monkeypatch) -> None:
+    from rithmic_nt_connect.config import ConfigError, explicit_test_env
+
+    env_file = tmp_path / "production.env"
+    env_file.write_text(
+        "RITHMIC_USER=u\nRITHMIC_PASSWORD=p\n"
+        "RITHMIC_SYSTEM_NAME=LucidTrading\n"
+        "RITHMIC_GATEWAY=wss://prod.example\nRITHMIC_CONNECT_MODE=direct\n"
+    )
+    monkeypatch.setenv("RITHMIC_TEST_DOTENV", str(env_file))
+    with pytest.raises(ConfigError, match="production"):
+        explicit_test_env()
+
+
 def test_package_imports_without_network() -> None:
     import rithmic_nt_connect
 

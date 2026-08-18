@@ -125,6 +125,65 @@ def load_dotenv_files(
             load_dotenv(Path(part))
 
 
+# Shared by ``explicit_test_env`` and the live e2e exec suite guard
+# (tests/e2e/test_exec_client_live.py) so the two cannot drift.
+TEST_SYSTEM_MARKERS = ("TEST", "DEMO", "SANDBOX", "SIM", "PAPER")
+PRODUCTION_SYSTEM_MARKERS = ("LUCID", "PRODUCTION", "RITHMIC 01", "RITHMIC 02")
+
+
+def _dotenv_values(path: str | Path) -> dict[str, str]:
+    """Read a dotenv file without mutating the process environment."""
+    file_path = Path(path).expanduser()
+    if not file_path.is_file():
+        raise ConfigError(f"explicit test env file does not exist: {file_path}")
+    values: dict[str, str] = {}
+    for raw in file_path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip().strip("'").strip('"')
+    return values
+
+
+def explicit_test_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Return an isolated test environment from ``RITHMIC_TEST_DOTENV``.
+
+    Live tests must opt into this source explicitly. The repository-root
+    ``.env`` is deliberately never consulted here. Trading enablement may be
+    supplied by the command environment, but credentials and endpoint identity
+    must come from the explicit file.
+    """
+    source_env = environ if environ is not None else os.environ
+    source = _env_first(source_env, "RITHMIC_TEST_DOTENV")
+    if source is None:
+        raise ConfigError("missing RITHMIC_TEST_DOTENV; live tests require an explicit test env file")
+    values = _dotenv_values(source)
+    for key in ("RITHMIC_USER", "RITHMIC_PASSWORD", "RITHMIC_SYSTEM_NAME", "RITHMIC_CONNECT_MODE"):
+        if not _env_first(values, key):
+            raise ConfigError(f"explicit test env file is missing {key}")
+    mode = parse_connect_mode(values.get("RITHMIC_CONNECT_MODE"))
+    if mode == ConnectMode.GATEWAY and not _env_first(values, "RITHMIC_GATEWAY"):
+        # A gateway test env must name its endpoint; a direct env never uses one.
+        raise ConfigError("explicit test env file is missing RITHMIC_GATEWAY")
+    system = values["RITHMIC_SYSTEM_NAME"].upper()
+    if any(marker in system for marker in PRODUCTION_SYSTEM_MARKERS):
+        raise ConfigError("explicit test env resolves to a production Rithmic system")
+    if not any(marker in system for marker in TEST_SYSTEM_MARKERS):
+        raise ConfigError("explicit test env system is not recognized as test/demo")
+    if _env_first(source_env, "RITHMIC_ENABLE_TRADING") is not None:
+        values["RITHMIC_ENABLE_TRADING"] = str(source_env["RITHMIC_ENABLE_TRADING"])
+    values["RITHMIC_TEST_DOTENV"] = str(Path(source).expanduser())
+    return values
+
+
+def session_config_from_explicit_test_env(
+    environ: Mapping[str, str] | None = None,
+) -> SessionConfig:
+    """Build a session only from the explicit test env source."""
+    return SessionConfig.from_env(explicit_test_env(environ), prefer_lucid=False)
+
+
 def _redact_secrets(data: MutableMapping[str, Any]) -> dict[str, Any]:
     out = dict(data)
     if "password" in out and out["password"] is not None:
@@ -377,6 +436,25 @@ else:
 
     class RithmicLiveDataClientConfig(LiveDataClientConfig, frozen=True, kw_only=True):
         """TradingNode-facing data config. Factory loads ``SessionConfig.from_env()``."""
+
+        session: SessionConfig | None = None
+
+
+try:
+    from nautilus_trader.config import LiveExecClientConfig
+except ImportError:  # pragma: no cover - nautilus not installed
+    RithmicLiveExecClientConfig = None  # type: ignore[misc, assignment]
+else:
+
+    class RithmicLiveExecClientConfig(LiveExecClientConfig, kw_only=True):
+        """TradingNode-facing exec config. Factory loads ``SessionConfig.from_env()``.
+
+        Adds the Rithmic ``session`` + ``enable_trading`` knobs on top of the base
+        ``LiveExecClientConfig`` so the client can be registered on a ``TradingNode``.
+        """
+
+        session: SessionConfig | None = None
+        enable_trading: bool = False
 
 
 @dataclass

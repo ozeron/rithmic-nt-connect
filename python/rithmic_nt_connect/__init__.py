@@ -9,7 +9,10 @@ from rithmic_nt_connect.config import ConnectMode
 from rithmic_nt_connect.config import RithmicDataClientConfig
 from rithmic_nt_connect.config import RithmicExecClientConfig
 from rithmic_nt_connect.config import RithmicLiveDataClientConfig
+from rithmic_nt_connect.config import RithmicLiveExecClientConfig
 from rithmic_nt_connect.config import SessionConfig
+from rithmic_nt_connect.config import explicit_test_env
+from rithmic_nt_connect.config import session_config_from_explicit_test_env
 from rithmic_nt_connect.config import env_truthy
 from rithmic_nt_connect.config import load_dotenv
 from rithmic_nt_connect.config import load_dotenv_files
@@ -34,6 +37,9 @@ __all__ = [
     "RithmicExecClientConfig",
     "RithmicLiveDataClientConfig",
     "RithmicLiveDataClientFactory",
+    "RithmicLiveExecClientConfig",
+    "explicit_test_env",
+    "session_config_from_explicit_test_env",
     "RithmicLiveExecClientFactory",
     "VerifyReport",
     "connect_market_data_session",

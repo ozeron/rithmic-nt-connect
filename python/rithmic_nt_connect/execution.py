@@ -33,6 +33,7 @@ from nautilus_trader.model.enums import OrderStatus
 from nautilus_trader.model.enums import OrderType
 from nautilus_trader.model.enums import PositionSide
 from nautilus_trader.model.enums import TimeInForce
+from nautilus_trader.model.enums import TriggerType
 from nautilus_trader.model.identifiers import AccountId
 from nautilus_trader.model.identifiers import ClientId
 from nautilus_trader.model.identifiers import ClientOrderId
@@ -184,8 +185,15 @@ class RithmicExecutionClient(LiveExecutionClient):
         # decided by whether the order is present in the cache.
         # Venue-stable fill ids; retained across reconnect so snapshot replays stay idempotent.
         self._seen_fill_keys: OrderedDict[str, None] = OrderedDict()
+        # Last published untracked-status key per venue order, so Rithmic's
+        # frequent re-pushes of unchanged order state do not re-emit status
+        # reports for external orders.
+        self._untracked_status_keys: dict[str, tuple[object, ...]] = {}
         self._order_plant = OrderPlantPolicy(OrderPlantState.DISCONNECTED)
         self._account_seeded = False
+        # PnL is streamed frequently; avoid publishing identical AccountState
+        # events (and making Nautilus Portfolio log each one).
+        self._last_account_state_key: tuple[str, str, Decimal] | None = None
 
     _MAX_SEEN_FILL_KEYS = 10_000
 
@@ -323,6 +331,7 @@ class RithmicExecutionClient(LiveExecutionClient):
             ts_event=self._clock.timestamp_ns(),
             info={"rithmic_account_id": raw, "seeded": "true"},
         )
+        self._last_account_state_key = (str(self.account_id), str(usd), Decimal("0"))
         self._account_seeded = True
         self._log.info(f"seeded account {self.account_id} currency={DEFAULT_ACCOUNT_CURRENCY}")
 
@@ -383,7 +392,16 @@ class RithmicExecutionClient(LiveExecutionClient):
             try:
                 on_event(event)
             except Exception as exc:  # noqa: BLE001
-                self._log.error(f"{name} event handler error (suppressed): {exc}")
+                self._log.exception(f"{name} event handler error (suppressed)", exc)
+                if name == "order":
+                    # A handler failure can leave venue and cache state divergent.
+                    # Stop the order stream and fail closed instead of continuing
+                    # to accept commands against stale execution state.
+                    self._order_plant.state = OrderPlantState.DISCONNECTED
+                    self._log.error(
+                        "order event handler failed; order plant marked disconnected"
+                    )
+                    break
 
     def _dispatch_pnl_event(self, event: dict[str, Any]) -> None:
         etype = event.get("type")
@@ -399,7 +417,8 @@ class RithmicExecutionClient(LiveExecutionClient):
             fields = order_notification_to_fields(event)
         except Exception as exc:  # noqa: BLE001
             self._log.error(f"invalid order_notification: {exc}")
-            return
+            self._order_plant.state = OrderPlantState.DISCONNECTED
+            raise
         self._handle_order_notification(fields)
 
     async def _disconnect(self) -> None:
@@ -451,6 +470,12 @@ class RithmicExecutionClient(LiveExecutionClient):
         locked = Money(Decimal("0"), currency)
         total = free
         balances = [AccountBalance(total, locked, free)]
+        # Rithmic streams account PnL on a short interval even when the
+        # account state is unchanged. Nautilus assigns a new event id to every
+        # generated state, so suppress identical states at the adapter boundary.
+        state_key = (str(account_id), str(currency), free_dec)
+        if state_key == getattr(self, "_last_account_state_key", None):
+            return
         self.generate_account_state(
             balances=balances,
             margins=[],
@@ -458,6 +483,7 @@ class RithmicExecutionClient(LiveExecutionClient):
             ts_event=self._clock.timestamp_ns(),
             info={"rithmic_account_id": fields["account_id"]},
         )
+        self._last_account_state_key = state_key
 
     def _cache_position(self, event: dict[str, Any]) -> None:
         try:
@@ -515,6 +541,13 @@ class RithmicExecutionClient(LiveExecutionClient):
     def _log_trading_disabled(self, action: str) -> None:
         self._log.error(f"Rithmic exec client trading disabled: {action}")
 
+    def _mark_order_plant_failed(self, action: str, exc: BaseException) -> None:
+        """Block further commands after an operation has an unknown venue outcome."""
+        self._order_plant.state = OrderPlantState.DISCONNECTED
+        self._log.error(
+            f"{action} transport outcome unknown; order plant marked disconnected: {exc}"
+        )
+
     def _resolve_client_order_id(self, fields: dict[str, Any]) -> ClientOrderId | None:
         """Resolve a notification to a tracked order, or None (external).
 
@@ -538,7 +571,7 @@ class RithmicExecutionClient(LiveExecutionClient):
             # happens to reuse that tag must NOT be attributed to the old order
             # (it would inherit its strategy/instrument/side and never reach the
             # untracked path).
-            if cached_order is not None and not cached_order.is_closed():
+            if cached_order is not None and not cached_order.is_closed:
                 return ClientOrderId(str(tag))
         return None
 
@@ -728,32 +761,57 @@ class RithmicExecutionClient(LiveExecutionClient):
         )
 
     def _handle_untracked_notification(self, fields: dict[str, Any]) -> None:
-        """External fills only when wire has basket, instrument, side, px, qty."""
+        """Report external venue activity without assigning it to a strategy order."""
         ts_event = fields.get("ts_event")
         ts_event = int(ts_event) if ts_event is not None else self._clock.timestamp_ns()
-        kind = fields.get("kind")
         basket = fields.get("basket_id")
         symbol = fields.get("symbol")
         instrument_raw = fields.get("instrument_id")
-        if kind != "filled" or not basket or not (instrument_raw or symbol):
-            self._log.error(
-                f"untracked order notification suppressed: {slim_order_fields(fields)}"
-            )
-            return
-        try:
-            instrument_id = InstrumentId.from_str(str(instrument_raw or f"{symbol}.{VENUE}"))
-        except Exception:  # noqa: BLE001
-            self._log.error(
-                f"untracked order notification suppressed (bad instrument): {slim_order_fields(fields)}"
+        if not basket or not (instrument_raw or symbol):
+            self._log.warning(
+                f"untracked order notification missing identity: {slim_order_fields(fields)}"
             )
             return
         account_raw = fields.get("account_id")
         if account_raw:
             self._seed_account_if_needed(str(account_raw))
         if self.account_id is None:
-            self._log.error(
-                f"untracked order notification suppressed (no account): {slim_order_fields(fields)}"
+            self._log.warning(
+                f"untracked order notification missing account: {slim_order_fields(fields)}"
             )
+            return
+
+        status_report = self._order_status_report_from_fields(fields, ts_event)
+        if status_report is not None:
+            # Rithmic re-pushes order state frequently; skip an unchanged
+            # re-push of an external order (fills below are deduped separately).
+            status_key = (
+                str(status_report.venue_order_id),
+                str(getattr(status_report, "order_status", "")),
+                str(getattr(status_report, "filled_qty", "")),
+                str(getattr(status_report, "avg_px", "")),
+            )
+            if self._untracked_status_keys.get(
+                str(status_report.venue_order_id)
+            ) == status_key:
+                status_report = None
+            elif not RithmicExecutionClient._publish_order_status_report(
+                self,
+                status_report,
+                context="untracked notification",
+            ):
+                # Record only on success so a later re-push can retry.
+                return
+            else:
+                if len(self._untracked_status_keys) >= RithmicExecutionClient._MAX_SEEN_FILL_KEYS:
+                    self._untracked_status_keys.clear()
+                self._untracked_status_keys[str(status_report.venue_order_id)] = status_key
+        else:
+            self._log.warning(
+                f"untracked order status could not be built: {slim_order_fields(fields)}"
+            )
+
+        if fields.get("kind") != "filled":
             return
 
         dedup = fill_dedup_key(fields, ts_event=ts_event)
@@ -767,6 +825,29 @@ class RithmicExecutionClient(LiveExecutionClient):
             return
         self._send_fill_report(report)
         self._mark_fill_key(dedup)
+
+    def _publish_order_status_report(
+        self,
+        report: OrderStatusReport,
+        *,
+        context: str,
+    ) -> bool:
+        """Publish a status report without killing the order event stream.
+
+        Returns ``False`` on publication failure. Callers that need the status
+        as a reconciliation prerequisite (fills) treat ``False`` as
+        "cannot reconcile, skip this row" — a venue fill is suppressed rather
+        than published without an order prerequisite (fail-closed, logged).
+        """
+        try:
+            self._send_order_status_report(report)
+        except Exception as exc:  # noqa: BLE001
+            self._log.exception(
+                f"{context}: status report publication failed; skipping stale report",
+                exc,
+            )
+            return False
+        return True
 
     def _order_status_report_for(
         self,
@@ -798,6 +879,8 @@ class RithmicExecutionClient(LiveExecutionClient):
             client_order_id=order.client_order_id,
             price=order.price if order.has_price else None,
             trigger_price=order.trigger_price if order.has_trigger_price else None,
+            trigger_type=order.trigger_type,
+            reduce_only=order.is_reduce_only,
         )
 
     def _cache_backed_order_status_reports(
@@ -894,9 +977,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                 trail_by_price_id,
             )
         except Exception as exc:  # noqa: BLE001
-            self._log.warning(
-                f"place_order transport unknown (order left in flight): {exc}"
-            )
+            self._mark_order_plant_failed("place_order", exc)
 
     async def _submit_order_list(self, command: SubmitOrderList) -> None:
         # NOTE: this loops independent legs — NOT a Rithmic plant bracket.
@@ -1008,9 +1089,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                 trail_by_ticks,
             )
         except Exception as exc:  # noqa: BLE001
-            self._log.warning(
-                f"modify_order transport unknown (order left in flight): {exc}"
-            )
+            self._mark_order_plant_failed("modify_order", exc)
 
     async def _cancel_order(self, command: CancelOrder) -> None:
         if not self.enable_trading:
@@ -1054,9 +1133,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         try:
             await asyncio.to_thread(self._session.cancel_order, venue_id)
         except Exception as exc:  # noqa: BLE001
-            self._log.warning(
-                f"cancel_order transport unknown (order left in flight): {exc}"
-            )
+            self._mark_order_plant_failed("cancel_order", exc)
 
     async def _cancel_all_orders(self, command: CancelAllOrders) -> None:
         _ = command
@@ -1069,7 +1146,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         try:
             await asyncio.to_thread(self._session.cancel_all_orders)
         except Exception as exc:  # noqa: BLE001
-            self._log.error(f"cancel_all_orders failed: {exc}")
+            self._mark_order_plant_failed("cancel_all_orders", exc)
 
     async def generate_order_status_report(
         self,
@@ -1180,6 +1257,15 @@ class RithmicExecutionClient(LiveExecutionClient):
         except (TypeError, ValueError):
             return TimeInForce.GTC
 
+    def _trigger_type_from_event(self, fields: dict[str, Any]) -> TriggerType:
+        raw = fields.get("price_type")
+        try:
+            if int(raw) in (3, 4):  # Rithmic StopLimit / StopMarket
+                return TriggerType.DEFAULT
+        except (TypeError, ValueError):
+            pass
+        return TriggerType.NO_TRIGGER
+
     def _order_status_from_event(self, fields: dict[str, Any]) -> OrderStatus:
         kind = fields.get("kind")
         status_u = str(fields.get("status") or "").upper()
@@ -1267,6 +1353,7 @@ class RithmicExecutionClient(LiveExecutionClient):
             client_order_id=self._client_order_id_for_tag(fields.get("user_tag")),
             price=price,
             trigger_price=trigger,
+            trigger_type=self._trigger_type_from_event(fields),
             avg_px=avg_px,
         )
 
@@ -1287,14 +1374,16 @@ class RithmicExecutionClient(LiveExecutionClient):
         events = await self._load_orders_events(start_sec, end_sec)
         if not events:
             # Best-effort drain returned nothing. This is advisory, not proof the
-            # venue is empty: a quiet or lossy channel looks identical. Under
-            # Nautilus' default death_policy=TRACKED an empty recon would cancel
-            # tracked open orders, so the operator must run with trust_stop.
+            # venue is empty: a quiet or lossy channel looks identical. With
+            # Nautilus' open-order consistency check, a cached order missing from
+            # an empty drain is canceled only when open_check_open_only=False, so
+            # the operator must keep open_check_open_only=True (the 1.231.x
+            # replacement for the removed death_policy=trust_stop) to stay safe.
             self._log.warning(
                 "order recon returned no working orders from the best-effort "
-                "drain; advisory, not an authoritative venue-empty. Set "
-                "death_policy=trust_stop (or equivalent) so Nautilus does not "
-                "cancel tracked open orders on an empty recon."
+                "drain; advisory, not an authoritative venue-empty. Keep "
+                "open_check_open_only=True so Nautilus does not cancel tracked "
+                "open orders on an empty recon."
             )
         latest: dict[str, tuple[int, OrderStatusReport]] = {}
         for raw in events:
@@ -1358,6 +1447,18 @@ class RithmicExecutionClient(LiveExecutionClient):
                 continue
             report = self._fill_report_from_fields(fields, ts_event)
             if report is not None:
+                # Nautilus cannot reconcile a fill without an order prerequisite.
+                # Reconciliation can discover a fill after the live order event
+                # was missed, so publish a venue status first; this may create a
+                # synthetic external order when no cached strategy order exists.
+                status = self._order_status_report_from_fields(fields, ts_event)
+                if status is not None:
+                    if not RithmicExecutionClient._publish_order_status_report(
+                        self,
+                        status,
+                        context="fill reconciliation prerequisite",
+                    ):
+                        continue
                 reports.append(report)
                 self._mark_fill_key(dedup)
         return reports
