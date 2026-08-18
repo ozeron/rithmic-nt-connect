@@ -1,0 +1,19 @@
+from nautilus_trader.core.nautilus_pyo3 import CashAccount as CashAccount, MarginAccount as MarginAccount, OrderSide as OrderSide, Position as Position, Price as Price, Quantity as Quantity
+from nautilus_trader.test_kit.rust.events_pyo3 import TestEventsProviderPyo3 as TestEventsProviderPyo3
+from nautilus_trader.test_kit.rust.identifiers_pyo3 import TestIdProviderPyo3 as TestIdProviderPyo3
+from nautilus_trader.test_kit.rust.instruments_pyo3 import TestInstrumentProviderPyo3 as TestInstrumentProviderPyo3
+from nautilus_trader.test_kit.rust.orders_pyo3 import TestOrderProviderPyo3 as TestOrderProviderPyo3
+
+class TestAccountingProviderPyo3:
+    @staticmethod
+    def margin_account() -> MarginAccount: ...
+    @staticmethod
+    def cash_account() -> CashAccount: ...
+    @staticmethod
+    def cash_account_million_usd() -> CashAccount: ...
+    @staticmethod
+    def cash_account_multi() -> CashAccount: ...
+    @staticmethod
+    def long_position() -> Position: ...
+    @staticmethod
+    def short_position() -> Position: ...

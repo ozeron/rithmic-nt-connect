@@ -129,20 +129,23 @@ class RithmicLiveExecClientFactory(LiveExecClientFactory):
             pairs=_pairs_from_session(session_cfg),
             config=InstrumentProviderConfig(load_all=True),
         )
+        # Pass the registered live config through unchanged: it carries
+        # ``enable_trading`` (the fallback only covers a bare nautilus
+        # ``LiveExecClientConfig``, which never enables trading).
+        client_config: RithmicExecClientConfig | RithmicLiveExecClientConfig
+        if isinstance(config, RithmicLiveExecClientConfig):
+            client_config = config
+        elif isinstance(config, RithmicExecClientConfig):
+            client_config = config
+        else:
+            client_config = RithmicExecClientConfig(session=session_cfg)
         return RithmicExecutionClient(
             loop=loop,
             msgbus=msgbus,
             cache=cache,
             clock=clock,
             instrument_provider=provider,
-            # Pass the registered live config through unchanged: it carries
-            # ``enable_trading`` (the fallback only covers a bare nautilus
-            # ``LiveExecClientConfig``, which never enables trading).
-            config=(
-                config
-                if isinstance(config, (RithmicExecClientConfig, RithmicLiveExecClientConfig))
-                else RithmicExecClientConfig(session=session_cfg)
-            ),
+            config=client_config,
             session=session,
             name=name,
         )

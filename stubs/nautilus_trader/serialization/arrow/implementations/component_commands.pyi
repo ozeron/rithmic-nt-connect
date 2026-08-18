@@ -1,0 +1,6 @@
+import pyarrow as pa
+from nautilus_trader.common.messages import ShutdownSystem as ShutdownSystem
+from nautilus_trader.serialization.arrow.schema import NAUTILUS_ARROW_SCHEMA as NAUTILUS_ARROW_SCHEMA
+
+def serialize(command: ShutdownSystem) -> pa.RecordBatch: ...
+def deserialize(cls): ...

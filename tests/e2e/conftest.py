@@ -102,7 +102,7 @@ def require_test_plant(test_env) -> str:
 
 
 @pytest.fixture(scope="function")
-def live_session(credentials_available: bool) -> "WireSession":
+def live_session(credentials_available: bool) -> Iterator["WireSession"]:
     """Return a connected *market data only* session (no PnL/order plants).
 
     Skipped if credentials are not available.

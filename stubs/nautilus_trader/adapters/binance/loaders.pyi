@@ -1,0 +1,13 @@
+import pandas as pd
+from nautilus_trader.model.enums import RecordFlag as RecordFlag
+from os import PathLike
+
+class BinanceOrderBookDeltaDataLoader:
+    @classmethod
+    def load(cls, file_path: PathLike[str] | str, nrows: int | None = None) -> pd.DataFrame: ...
+    @classmethod
+    def map_actions(cls, row: pd.Series) -> str: ...
+    @classmethod
+    def map_sides(cls, side: str) -> str: ...
+    @classmethod
+    def map_flags(cls, row: pd.Series) -> int: ...

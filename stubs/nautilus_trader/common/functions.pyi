@@ -1,0 +1,6 @@
+import asyncio
+import pandas as pd
+from nautilus_trader.core.datetime import format_iso8601 as format_iso8601
+
+def get_event_loop() -> asyncio.AbstractEventLoop: ...
+def format_utc_timerange(start: pd.Timestamp | None, end: pd.Timestamp | None) -> str: ...

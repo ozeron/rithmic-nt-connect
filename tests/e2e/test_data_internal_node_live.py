@@ -48,7 +48,7 @@ from rithmic_nt_connect.session import connect_market_data_session
 pytestmark = pytest.mark.live
 
 
-class InternalBarCaptureConfig(StrategyConfig):
+class InternalBarCaptureConfig(StrategyConfig, frozen=True):
     instrument_id: str
 
 

@@ -7,9 +7,12 @@ class ChannelError(RuntimeError):
 
 
 try:
+    # Native classes when the extension is built, else the fallbacks below. The
+    # ``_lib.pyi`` mirrors the fallback hierarchy (see that file's note) so the
+    # two branches stay structurally identical to the checker.
     from rithmic_nt_connect._lib import AlreadyConnectedError
-    from rithmic_nt_connect._lib import ChannelLaggedError
     from rithmic_nt_connect._lib import ChannelClosedError
+    from rithmic_nt_connect._lib import ChannelLaggedError
     from rithmic_nt_connect._lib import NotConnectedError
     from rithmic_nt_connect._lib import ReconciliationUnavailableError
 except ImportError:  # pragma: no cover

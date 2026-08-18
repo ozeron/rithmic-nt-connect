@@ -1,0 +1,13 @@
+from nautilus_trader.common.providers import InstrumentProvider as InstrumentProvider
+from nautilus_trader.config import InstrumentProviderConfig as InstrumentProviderConfig
+from nautilus_trader.core import nautilus_pyo3 as nautilus_pyo3
+from nautilus_trader.core.nautilus_pyo3 import KrakenProductType as KrakenProductType
+from nautilus_trader.model.instruments import instruments_from_pyo3 as instruments_from_pyo3
+from typing import Any
+
+class KrakenInstrumentProvider(InstrumentProvider):
+    def __init__(self, http_client_spot: nautilus_pyo3.KrakenSpotHttpClient | None = None, http_client_futures: nautilus_pyo3.KrakenFuturesHttpClient | None = None, product_types: list[KrakenProductType] | None = None, config: InstrumentProviderConfig | None = None) -> None: ...
+    @property
+    def product_types(self) -> list[KrakenProductType]: ...
+    def instruments_pyo3(self) -> list[Any]: ...
+    async def load_all_async(self, filters: dict | None = None) -> None: ...

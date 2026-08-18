@@ -1,0 +1,9 @@
+import pyarrow as pa
+from nautilus_trader.model.events import PositionChanged as PositionChanged, PositionClosed as PositionClosed, PositionEvent as PositionEvent, PositionOpened as PositionOpened
+from nautilus_trader.model.objects import Money as Money
+
+def try_float(x): ...
+def serialize(event: PositionEvent): ...
+def deserialize(cls): ...
+
+SCHEMAS: dict[PositionEvent, pa.Schema]

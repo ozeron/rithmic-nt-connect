@@ -11,6 +11,8 @@ from rithmic_nt_connect.historical import load_front_month_instrument
 from rithmic_nt_connect.historical import load_trade_ticks
 from rithmic_nt_connect.providers import future_from_reference
 
+from _stubs import WireSessionStub
+
 
 COMPLETE_REF = {
     "trading_symbol": "NQU6",
@@ -26,22 +28,22 @@ COMPLETE_REF = {
 }
 
 
-class _FakeSession:
+class _FakeSession(WireSessionStub):
     def __init__(self) -> None:
         self.ticks: list[dict] = []
 
-    def get_front_month(self, root: str, exchange: str) -> dict:
+    def get_front_month(self, symbol: str, exchange: str) -> dict:
         return {
             "trading_symbol": "NQU6",
             "trading_exchange": exchange,
-            "symbol": root,
+            "symbol": symbol,
         }
 
     def get_reference_data(self, symbol: str, exchange: str) -> dict:
         return dict(COMPLETE_REF)
 
-    def load_ticks(self, symbol: str, exchange: str, start: int, end: int) -> list[dict]:
-        _ = (symbol, exchange, start, end)
+    def load_ticks(self, symbol: str, exchange: str, start_ssboe: int, end_ssboe: int) -> list[dict]:
+        _ = (symbol, exchange, start_ssboe, end_ssboe)
         return list(self.ticks)
 
 
@@ -97,8 +99,8 @@ def test_load_trade_ticks_uses_session_window() -> None:
 
 
 def test_load_front_month_rejects_bad_ref() -> None:
-    class Bad:
-        def get_front_month(self, root, exchange):
+    class Bad(WireSessionStub):
+        def get_front_month(self, symbol, exchange):
             return {"trading_symbol": "NQU6", "trading_exchange": "CME"}
 
         def get_reference_data(self, symbol, exchange):

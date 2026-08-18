@@ -78,6 +78,7 @@ def test_last_trade_fixture_to_trade_fields() -> None:
 
 def test_bbo_fixture_to_quote_fields() -> None:
     fields = bbo_to_fields(BBO_FIXTURE)
+    assert fields is not None
     assert fields["instrument_id"] == f"NQU6.{VENUE}"
     assert fields["bid_price"] == 21012.0
     assert fields["ask_price"] == 21012.25

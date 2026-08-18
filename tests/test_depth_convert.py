@@ -39,7 +39,9 @@ def test_order_book_fields_to_nautilus_deltas() -> None:
     # CLEAR + 5 ADD
     assert len(deltas.deltas) == 6
     assert str(deltas.instrument_id) == f"NQU6.{VENUE}"
-    assert int(deltas.deltas[-1].flags) == int(RecordFlag.F_SNAPSHOT | RecordFlag.F_LAST)
+    assert int(deltas.deltas[-1].flags) == int(
+        RecordFlag.F_SNAPSHOT.value | RecordFlag.F_LAST.value
+    )
 
 
 def test_depth_entitlement_style_empty_book_is_explicit() -> None:

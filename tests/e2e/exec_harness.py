@@ -35,7 +35,7 @@ def venue_conditional_reason(event) -> str | None:
     return None
 
 
-class OrderDriverConfig(StrategyConfig):
+class OrderDriverConfig(StrategyConfig, frozen=True):
     instrument_id: str
 
 

@@ -1200,7 +1200,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                 return None
             ts = getattr(value, "timestamp", None)
             if callable(ts):
-                return max(0, int(ts()))  # type: ignore[arg-type]
+                return max(0, int(ts()))
             if isinstance(value, (int, float)):
                 # Nautilus passes datetime; tolerate ns-epoch ints defensively.
                 return max(0, int(value) // 1_000_000_000)

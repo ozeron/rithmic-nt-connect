@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from rithmic_nt_connect.data import fields_to_order_book_deltas
 from rithmic_nt_connect.data import fields_to_quote_tick
 from rithmic_nt_connect.data import fields_to_trade_tick
 from rithmic_nt_connect._convert import bbo_to_fields
 from rithmic_nt_connect._convert import last_trade_to_fields
 from rithmic_nt_connect._convert import order_book_to_fields
+
+from _stubs import WireSessionStub
 
 
 def test_last_trade_fields_to_trade_tick():
@@ -82,6 +86,7 @@ def test_bbo_fields_to_quote_tick():
         "usecs": 0,
     }
     fields = bbo_to_fields(raw)
+    assert fields is not None
     tick = fields_to_quote_tick(fields, ts_init=1)
     assert float(tick.bid_price) == 1.0
     assert float(tick.ask_price) == 2.0
@@ -107,14 +112,16 @@ def test_order_book_fields_to_deltas():
     # CLEAR + 2 ADD levels
     assert len(deltas.deltas) == 3
     assert deltas.deltas[0].action == BookAction.CLEAR
-    assert int(deltas.deltas[0].flags) == int(RecordFlag.F_SNAPSHOT)
-    assert int(deltas.deltas[-1].flags) == int(RecordFlag.F_SNAPSHOT | RecordFlag.F_LAST)
+    assert int(deltas.deltas[0].flags) == int(RecordFlag.F_SNAPSHOT.value)
+    assert int(deltas.deltas[-1].flags) == int(
+        RecordFlag.F_SNAPSHOT.value | RecordFlag.F_LAST.value
+    )
 
 
 def test_subscribe_contract_is_callable_on_mock_session():
     calls: list[tuple[str, str]] = []
 
-    class Sess:
+    class Sess(WireSessionStub):
         def subscribe(self, symbol: str, exchange: str) -> None:
             calls.append((symbol, exchange))
 
@@ -137,9 +144,9 @@ def test_resync_ticker_session_replays_intent() -> None:
 
     from rithmic_nt_connect.data import resync_ticker_session
 
-    calls: list[tuple[str, ...]] = []
+    calls: list[tuple[Any, ...]] = []
 
-    class Sess:
+    class Sess(WireSessionStub):
         def disconnect(self) -> None:
             calls.append(("disconnect",))
 
@@ -157,7 +164,7 @@ def test_resync_ticker_session_replays_intent() -> None:
 
     asyncio.run(
         resync_ticker_session(
-            Sess(),  # type: ignore[arg-type]
+            Sess(),
             {("NQU6", "CME")},
             {("NQU6", "CME")},
             {("NQU6", "CME", 2, 15)},

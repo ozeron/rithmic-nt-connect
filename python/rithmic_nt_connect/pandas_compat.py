@@ -21,18 +21,23 @@ def patch_nautilus_pandas() -> None:
         _PATCHED = True
         return
 
-    def utcnow(cls) -> pd.Timestamp:  # type: ignore[no-untyped-def]
+    def utcnow(cls) -> pd.Timestamp:
         return cls.now("UTC")
 
-    utcnow.__nautilus_shim__ = True  # type: ignore[attr-defined]
-    pd.Timestamp.utcnow = classmethod(utcnow)  # type: ignore[method-assign, assignment]
+    # ``setattr`` keeps the monkey-patches outside the checker's reach: the
+    # shim marker and class-attribute swaps are dynamic by design.
+    setattr(utcnow, "__nautilus_shim__", True)
+    setattr(pd.Timestamp, "utcnow", classmethod(utcnow))
 
     _floor = pd.Timestamp.floor
 
-    def floor(self, freq=None, *args, **kwargs):  # type: ignore[no-untyped-def]
+    def floor(self, freq: str | None = None, *args, **kwargs) -> pd.Timestamp:
+        # pandas 3 requires the uppercase unit; None (the old default) maps to
+        # the base's own default of ``"D"`` so the forwarded call always has one.
+        freq = freq or "D"
         if freq == "d":
             freq = "D"
-        return _floor(self, freq, *args, **kwargs)  # type: ignore[arg-type]
+        return _floor(self, freq, *args, **kwargs)
 
-    pd.Timestamp.floor = floor  # type: ignore[method-assign]
+    pd.Timestamp.floor = floor
     _PATCHED = True

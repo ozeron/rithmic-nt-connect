@@ -8,6 +8,7 @@ import struct
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -84,7 +85,7 @@ def test_spawn_injects_idle_exit_sec_default(
         def terminate(self) -> None:
             pass
 
-    def _popen(*_a, **kwargs):  # type: ignore[no-untyped-def]
+    def _popen(*_a: object, **kwargs: Any) -> _Proc:
         captured.update(kwargs.get("env") or {})
         return _Proc()
 
@@ -129,7 +130,7 @@ def test_spawn_preserves_explicit_idle_exit_sec(
         def terminate(self) -> None:
             pass
 
-    def _popen(*_a, **kwargs):  # type: ignore[no-untyped-def]
+    def _popen(*_a: object, **kwargs: Any) -> _Proc:
         captured.update(kwargs.get("env") or {})
         return _Proc()
 
@@ -174,7 +175,7 @@ def test_spawn_preserves_zero_idle_exit_sec(
         def terminate(self) -> None:
             pass
 
-    def _popen(*_a, **kwargs):  # type: ignore[no-untyped-def]
+    def _popen(*_a: object, **kwargs: Any) -> _Proc:
         captured.update(kwargs.get("env") or {})
         return _Proc()
 

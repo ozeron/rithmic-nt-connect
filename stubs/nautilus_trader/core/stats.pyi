@@ -1,0 +1,11 @@
+import _cython_3_2_9
+
+__pyx_capi__: dict
+__test__: dict
+basis_points_as_percentage: _cython_3_2_9.cython_function_or_method
+fast_mad: _cython_3_2_9.cython_function_or_method
+fast_mad_with_mean: _cython_3_2_9.cython_function_or_method
+fast_mean: _cython_3_2_9.cython_function_or_method
+fast_mean_iterated: _cython_3_2_9.cython_function_or_method
+fast_std: _cython_3_2_9.cython_function_or_method
+fast_std_with_mean: _cython_3_2_9.cython_function_or_method
