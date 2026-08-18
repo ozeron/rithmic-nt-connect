@@ -190,6 +190,11 @@ class RithmicExecutionClient(LiveExecutionClient):
         # reports for external orders.
         self._untracked_status_keys: dict[str, tuple[object, ...]] = {}
         self._order_plant = OrderPlantPolicy(OrderPlantState.DISCONNECTED)
+        # Latched by ``_mark_order_plant_failed``: a transport resync must not
+        # restore the plant to LIVE while an operation's venue outcome is still
+        # unknown (re-enabling commands could duplicate/conflict with it).
+        # Cleared only on a full ``_connect`` (engine reconciliation runs then).
+        self._order_plant_latched = False
         self._account_seeded = False
         # PnL is streamed frequently; avoid publishing identical AccountState
         # events (and making Nautilus Portfolio log each one).
@@ -251,6 +256,11 @@ class RithmicExecutionClient(LiveExecutionClient):
                     self._log.warning(f"order plant teardown after subscribe fail: {teardown_exc}")
                 raise
             self._order_plant.state = OrderPlantState.LIVE
+            # A full reconnect re-subscribes the order plant and the engine
+            # runs reconciliation, so any earlier unknown venue outcome is now
+            # resolvable — clear the latch (a mid-session transport resync does
+            # not, see ``_resync_order_subscription``).
+            self._order_plant_latched = False
             self._apply_resolved_account_id()
             self._seed_account_if_needed()
             self._order_poll_task = self.create_task(
@@ -339,7 +349,13 @@ class RithmicExecutionClient(LiveExecutionClient):
         self._order_plant.state = OrderPlantState.RESYNCING
         await asyncio.to_thread(self._session.disconnect_order_plant)
         await asyncio.to_thread(self._session.subscribe_order_updates)
-        self._order_plant.state = OrderPlantState.LIVE
+        # A latched failure (unknown venue outcome) must survive the resync:
+        # the channel recovered, but the original operation was never resolved,
+        # so commands stay blocked until explicit recovery/reconciliation.
+        if self._order_plant_latched:
+            self._order_plant.state = OrderPlantState.DISCONNECTED
+        else:
+            self._order_plant.state = OrderPlantState.LIVE
 
     async def _resync_pnl_subscription(self) -> None:
         await asyncio.to_thread(self._session.disconnect_pnl_plant)
@@ -543,9 +559,10 @@ class RithmicExecutionClient(LiveExecutionClient):
 
     def _mark_order_plant_failed(self, action: str, exc: BaseException) -> None:
         """Block further commands after an operation has an unknown venue outcome."""
+        self._order_plant_latched = True
         self._order_plant.state = OrderPlantState.DISCONNECTED
         self._log.error(
-            f"{action} transport outcome unknown; order plant marked disconnected: {exc}"
+            f"{action} transport outcome unknown; order plant latched disconnected: {exc}"
         )
 
     def _resolve_client_order_id(self, fields: dict[str, Any]) -> ClientOrderId | None:
@@ -785,9 +802,14 @@ class RithmicExecutionClient(LiveExecutionClient):
         if status_report is not None:
             # Rithmic re-pushes order state frequently; skip an unchanged
             # re-push of an external order (fills below are deduped separately).
+            # Include the mutable order terms — an ACCEPTED re-push that changes
+            # quantity/price/trigger must update Nautilus, not be discarded.
             status_key = (
                 str(status_report.venue_order_id),
                 str(getattr(status_report, "order_status", "")),
+                str(getattr(status_report, "quantity", "")),
+                str(getattr(status_report, "price", "")),
+                str(getattr(status_report, "trigger_price", "")),
                 str(getattr(status_report, "filled_qty", "")),
                 str(getattr(status_report, "avg_px", "")),
             )
@@ -1452,13 +1474,21 @@ class RithmicExecutionClient(LiveExecutionClient):
                 # was missed, so publish a venue status first; this may create a
                 # synthetic external order when no cached strategy order exists.
                 status = self._order_status_report_from_fields(fields, ts_event)
-                if status is not None:
-                    if not RithmicExecutionClient._publish_order_status_report(
-                        self,
-                        status,
-                        context="fill reconciliation prerequisite",
-                    ):
-                        continue
+                if status is None:
+                    # No order-status prerequisite could be built (status-only
+                    # fields malformed) — skip the fill rather than emit it
+                    # without the order Nautilus needs to reconcile it against.
+                    self._log.warning(
+                        "fill reconciliation skipped: no order status prerequisite "
+                        f"for {slim_order_fields(fields)}"
+                    )
+                    continue
+                if not RithmicExecutionClient._publish_order_status_report(
+                    self,
+                    status,
+                    context="fill reconciliation prerequisite",
+                ):
+                    continue
                 reports.append(report)
                 self._mark_fill_key(dedup)
         return reports

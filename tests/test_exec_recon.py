@@ -336,6 +336,65 @@ def test_untracked_status_suppresses_unchanged_re_push() -> None:
     assert len(published) == 2
 
 
+def test_untracked_status_re_push_with_changed_terms_reports() -> None:
+    """An external re-push that mutates order terms must not be deduped away.
+
+    Regression for the Macroscope review: the dedup key only covered status +
+    fill data, so an ACCEPTED re-push that changed quantity/price/trigger was
+    discarded and Nautilus kept stale terms.
+    """
+    published: list[object] = []
+    client = SimpleNamespace(
+        account_id="RITHMIC-ACC1",
+        _clock=SimpleNamespace(timestamp_ns=lambda: 2),
+        _log=_Log(),
+        _send_order_status_report=published.append,
+        _seed_account_if_needed=lambda account_raw: None,
+        _untracked_status_keys={},
+    )
+    status = SimpleNamespace(
+        venue_order_id="B-EXT",
+        order_status="OPEN",
+        quantity="1",
+        price="100.0",
+        trigger_price="",
+        filled_qty="0",
+        avg_px="",
+    )
+    client._order_status_report_from_fields = lambda event, ts: status  # type: ignore[attr-defined]
+    fields = {
+        "basket_id": "B-EXT",
+        "symbol": "MNQU6",
+        "account_id": "ACC1",
+        "status": "OPEN",
+        "kind": "accepted",
+        "price_type": 1,
+        "duration": 1,
+        "quantity": 1,
+        "total_fill_size": 0,
+        "transaction_type": 1,
+    }
+
+    RithmicExecutionClient._handle_untracked_notification(client, fields)
+    RithmicExecutionClient._handle_untracked_notification(client, fields)
+    assert len(published) == 1
+
+    # Same status + fill data, but the order quantity changed: must re-publish.
+    changed = SimpleNamespace(
+        venue_order_id="B-EXT",
+        order_status="OPEN",
+        quantity="2",
+        price="100.0",
+        trigger_price="",
+        filled_qty="0",
+        avg_px="",
+    )
+    client._order_status_report_from_fields = lambda event, ts: changed  # type: ignore[attr-defined]
+    RithmicExecutionClient._handle_untracked_notification(client, fields)
+
+    assert len(published) == 2
+
+
 def test_untracked_status_publication_failure_does_not_escape_handler() -> None:
     client = SimpleNamespace(
         account_id="RITHMIC-ACC1",
@@ -369,6 +428,23 @@ def test_status_report_publication_failure_is_non_fatal_to_fill_reconciliation()
     client._send_order_status_report = lambda report: (_ for _ in ()).throw(
         RuntimeError("stale report")
     )
+
+    reports = asyncio.run(client.generate_fill_reports(_fill_cmd()))
+
+    assert reports == []
+
+
+def test_fill_reconciliation_skips_fill_without_status_prerequisite() -> None:
+    """A fill whose status prerequisite cannot be built must not be emitted.
+
+    Regression for the Macroscope review: a fill with valid fill fields but
+    malformed status fields was appended even though ``_order_status_report_from_fields``
+    returned ``None``, so Nautilus received a fill with no order prerequisite.
+    """
+    client = _trading_client(_LoadOrdersSession([_fill_event()]))
+    client._fill_report_from_fields = lambda fields, ts_event: object()  # type: ignore[method-assign]
+    client._order_status_report_from_fields = lambda fields, ts_event: None  # type: ignore[method-assign]
+    client._send_order_status_report = lambda report: None
 
     reports = asyncio.run(client.generate_fill_reports(_fill_cmd()))
 
@@ -580,9 +656,50 @@ def test_generate_order_status_reports_preserves_stop_trigger_type() -> None:
 def test_unknown_outcome_closes_order_gate_without_rejection() -> None:
     client = _client()
     client._order_plant = OrderPlantPolicy(OrderPlantState.LIVE)
+    client._order_plant_latched = False
     client._mark_order_plant_failed("submit", RuntimeError("timeout after send"))
     assert client._order_plant.state is OrderPlantState.DISCONNECTED
     assert client._order_status_from_event({"kind": "unknown", "status": "UNKNOWN"}) is not OrderStatus.REJECTED
+
+
+def test_order_plant_failure_latches_across_resync() -> None:
+    """A transport resync must not re-enable commands after an unknown outcome.
+
+    Regression for the Macroscope review: ``_mark_order_plant_failed`` blocks
+    commands, but a later channel error ran ``_resync_order_subscription``,
+    which restored the plant to ``LIVE`` without resolving the original
+    unknown-outcome operation.
+    """
+    client = _client()
+    client._order_plant = OrderPlantPolicy(OrderPlantState.LIVE)
+    client._order_plant_latched = False
+    client._session = SimpleNamespace(
+        disconnect_order_plant=lambda: None,
+        subscribe_order_updates=lambda: None,
+    )
+
+    client._mark_order_plant_failed("submit", RuntimeError("timeout after send"))
+    assert client._order_plant.state is OrderPlantState.DISCONNECTED
+
+    asyncio.run(client._resync_order_subscription())
+
+    assert client._order_plant.state is OrderPlantState.DISCONNECTED
+    assert not client._order_plant.allow_submit()
+
+
+def test_resync_without_latch_restores_live() -> None:
+    """A plain channel-error resync (no unknown outcome) still recovers to LIVE."""
+    client = _client()
+    client._order_plant = OrderPlantPolicy(OrderPlantState.LIVE)
+    client._order_plant_latched = False
+    client._session = SimpleNamespace(
+        disconnect_order_plant=lambda: None,
+        subscribe_order_updates=lambda: None,
+    )
+
+    asyncio.run(client._resync_order_subscription())
+
+    assert client._order_plant.state is OrderPlantState.LIVE
 
 
 def test_cached_stop_order_status_report_preserves_native_order_metadata() -> None:
@@ -807,12 +924,19 @@ def test_load_orders_events_returns_empty_recon():
 def _fill_reports_client(
     events: list[dict[str, object]], report: object | None = None
 ) -> RithmicExecutionClient:
-    """Client whose fill/status conversion is stubbed to return ``report``/None."""
+    """Client whose fill/status conversion is stubbed to return ``report``/a status.
+
+    The status stub is a valid prerequisite so the fill paths under test are
+    reached; the ``status is None`` (no-prerequisite) case has its own test.
+    """
     if report is None:
         report = object()
     client = _trading_client(_LoadOrdersSession(events))
     client._fill_report_from_fields = lambda fields, ts_event: report  # type: ignore[method-assign]
-    client._order_status_report_from_fields = lambda fields, ts_event: None  # type: ignore[method-assign]
+    client._order_status_report_from_fields = (  # type: ignore[method-assign]
+        lambda fields, ts_event: SimpleNamespace(venue_order_id="V-EXT")
+    )
+    client._send_order_status_report = lambda status_report: None  # type: ignore[method-assign]
     return client
 
 
