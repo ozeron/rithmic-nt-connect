@@ -167,9 +167,9 @@ def _report_client(
 
 def _drain_row_result(status: object) -> SimpleNamespace:
     """Boundary-result double: the handler paths under test consume only
-    ``permissive_report`` from ``_drain_row_from_fields``; a ``None`` status
-    means the row cannot build a report."""
-    return SimpleNamespace(permissive_report=status)
+    ``report`` from ``_drain_row_from_fields``; a ``None`` status means the
+    row cannot build a report."""
+    return SimpleNamespace(report=status)
 
 
 def _fill_cmd() -> GenerateFillReports:

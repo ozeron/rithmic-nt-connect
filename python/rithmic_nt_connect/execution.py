@@ -192,36 +192,78 @@ class _PollStreamFailed(Exception):
     """
 
 
+# Canonical notification kinds that describe a real order state (see
+# ``kind_from_notify`` in ``_orders.py``) — the strict trust boundary for
+# binding a venue id from a drain row.
+_RECOGNIZABLE_KINDS = frozenset(
+    {
+        "accepted",
+        "updated",
+        "canceled",
+        "filled",
+        "rejected",
+        "modify_rejected",
+        "cancel_rejected",
+        "expired",
+        "triggered",
+    }
+)
+
+_STATUS_MARKERS = ("OPEN", "WORKING", "CANCEL", "REJECT", "EXPIRED")
+
+
+def _row_is_trustworthy(fields: dict[str, Any]) -> bool:
+    """A drain row binds a venue id only when its closed-set execution terms
+    are real: side present, ``price_type``/``duration`` present and mappable,
+    and a recognizable order state. Never fabricates terms (a row with
+    missing/unknown closed-set values is advisory-only).
+    """
+    if order_side_from_notification(fields) is None:
+        return False
+    price_type = fields.get("price_type")
+    duration = fields.get("duration")
+    if price_type is None or duration is None:
+        return False
+    try:
+        if (
+            int(price_type) not in _RITHMIC_PRICE_TYPE_TO_ORDER_TYPE
+            or int(duration) not in _RITHMIC_DURATION_TO_TIF
+        ):
+            return False
+    except (TypeError, ValueError, OverflowError):
+        return False
+    kind = fields.get("kind")
+    status_u = str(fields.get("status") or "").upper()
+    return kind in _RECOGNIZABLE_KINDS or any(
+        marker in status_u for marker in _STATUS_MARKERS
+    )
+
+
 class _DrainRowResult:
     """Tagged result of the drain-row interpretation boundary
     (``RithmicExecutionClient._drain_row_from_fields``).
 
-    One boundary decides, for any working-orders drain row, whether it passes
-    the strict trust boundary safe for binding a venue id (``bindable``) and
-    what to publish: the strict report, or the permissive advisory fallback
-    (``permissive_report``) for rows whose closed-set terms are incomplete.
-    ``fields``/``ts_event`` let callers re-read the winning row (freshness
-    check, venue-id bind). No caller re-implements the interpretation.
+    One boundary decides, for any working-orders drain row, what to publish
+    (``report`` — the advisory ``OrderStatusReport``) and whether the row is
+    trustworthy enough to bind a venue id from it (``bindable``, strict
+    closed-set terms — never fabricated). ``fields``/``ts_event`` let callers
+    re-read the winning row (freshness check, venue-id bind). No caller
+    re-implements the interpretation.
     """
 
-    __slots__ = ("fields", "permissive_report", "strict_report", "ts_event")
+    __slots__ = ("bindable", "fields", "report", "ts_event")
 
     def __init__(
         self,
         fields: dict[str, Any],
         ts_event: int,
-        strict_report: OrderStatusReport | None,
-        permissive_report: OrderStatusReport | None,
+        report: OrderStatusReport | None,
+        bindable: bool,
     ) -> None:
         self.fields = fields
         self.ts_event = ts_event
-        self.strict_report = strict_report
-        self.permissive_report = permissive_report
-
-    @property
-    def bindable(self) -> bool:
-        """The row passes strict validation: safe to bind a venue id from it."""
-        return self.strict_report is not None
+        self.report = report
+        self.bindable = bindable
 
 
 class RithmicExecutionClient(LiveExecutionClient):
@@ -511,19 +553,16 @@ class RithmicExecutionClient(LiveExecutionClient):
     ) -> _DrainRowResult:
         """One interpretation boundary for a working-orders drain row.
 
-        Builds the strict report (no fabricated closed-set execution terms —
-        the trust boundary for binding a venue id) and the permissive report
-        (advisory publish fallback for rows whose terms are incomplete but
-        otherwise usable). Every drain/recon caller consumes this; no caller
-        re-implements "usable".
+        Builds a single advisory ``OrderStatusReport`` (permissive: unknown
+        closed-set terms fall back to ``BUY``/``MARKET``/``GTC``/``ACCEPTED``
+        so one malformed row cannot abort a whole recon) and decides
+        ``bindable`` separately — a row binds a venue id only when its
+        closed-set execution terms are real (``_row_is_trustworthy``). Every
+        drain/recon caller consumes this; no caller re-implements "usable".
         """
-        strict_report = self._order_status_report_from_fields(
-            fields, ts_event, strict=True
-        )
-        permissive_report = strict_report or self._order_status_report_from_fields(
-            fields, ts_event
-        )
-        return _DrainRowResult(fields, ts_event, strict_report, permissive_report)
+        report = self._order_status_report_from_fields(fields, ts_event)
+        bindable = report is not None and _row_is_trustworthy(fields)
+        return _DrainRowResult(fields, ts_event, report, bindable)
 
     def _apply_drain_rows(self, events: list[dict[str, Any]]) -> None:
         """Apply a working-orders drain to the local cache before re-arming.
@@ -558,7 +597,7 @@ class RithmicExecutionClient(LiveExecutionClient):
             # checks would skip fail-closed recovery. One boundary decides
             # usability (permissive publish) vs bindability (strict trust).
             row = self._drain_row_from_fields(fields, ts_event)
-            report = row.permissive_report
+            report = row.report
             if report is None:
                 continue
             client_order_id = self._resolve_client_order_id(fields)
@@ -1163,7 +1202,7 @@ class RithmicExecutionClient(LiveExecutionClient):
             )
             return
 
-        status_report = self._drain_row_from_fields(fields, ts_event).permissive_report
+        status_report = self._drain_row_from_fields(fields, ts_event).report
         if status_report is not None:
             # Rithmic re-pushes order state frequently; skip an unchanged
             # re-push of an external order (fills below are deduped separately).
@@ -1609,9 +1648,9 @@ class RithmicExecutionClient(LiveExecutionClient):
         the meantime: re-read the cache first and prefer that newer state over
         a stale drain row (never regress a live terminal/bound order). The
         venue id is bound only after a row builds a report under strict
-        validation (``_order_status_report_from_fields(strict=True)``) — a
-        malformed row, or one whose closed-set terms would be fabricated, must
-        not disable recovery or bind a venue id from fabricated terms. When
+        validation (``_row_is_trustworthy``) — a malformed row, or one whose
+        closed-set terms would be fabricated, must not disable recovery or
+        bind a venue id from fabricated terms. When
         several matching rows are strict-usable, the newest wins (same
         (ts_event, arrival) policy as the bulk status path) and the venue id is
         bound exactly once from that row.
@@ -1660,7 +1699,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         if best is None:
             return None
         self._bind_venue_id(order.client_order_id, str(best.fields["basket_id"]))
-        return best.strict_report
+        return best.report
 
     def _recon_window_sec(self, start: Any, end: Any) -> tuple[int, int]:
         now_sec = int(time.time())
@@ -1824,17 +1863,14 @@ class RithmicExecutionClient(LiveExecutionClient):
         self,
         fields: dict[str, Any],
         ts_event: int,
-        *,
-        strict: bool = False,
     ) -> OrderStatusReport | None:
-        """Build an ``OrderStatusReport`` from normalized wire fields.
+        """Build an advisory ``OrderStatusReport`` from normalized wire fields.
 
-        The best-effort drain is deliberately permissive: unknown closed-set
-        fields fall back to ``BUY``/``MARKET``/``GTC``/``ACCEPTED`` so one
-        malformed row cannot abort the whole recon. ``strict=True`` (the
-        in-flight recovery drain) never fabricates closed-set execution terms:
-        side, ``price_type``, ``duration``, and a recognisable status must all
-        be present and mappable, or the row is unusable.
+        Deliberately permissive: unknown closed-set fields fall back to
+        ``BUY``/``MARKET``/``GTC``/``ACCEPTED`` so one malformed row cannot
+        abort the whole recon. Whether a row is trustworthy enough to bind a
+        venue id is decided separately by ``_row_is_trustworthy`` (the drain
+        boundary), not here.
         """
         basket = fields.get("basket_id")
         instrument_raw = fields.get("instrument_id")
@@ -1870,39 +1906,6 @@ class RithmicExecutionClient(LiveExecutionClient):
             order_type = self._order_type_from_event(fields)
             tif = self._tif_from_event(fields)
             status = self._order_status_from_event(fields)
-            if strict:
-                # Never fabricate closed-set execution terms for recovery: the
-                # permissive defaults (side -> BUY, price_type -> MARKET,
-                # duration -> GTC, status -> ACCEPTED) must not bind a venue
-                # id from a row the adapter cannot actually trust.
-                if side is None:
-                    return None
-                price_type = fields.get("price_type")
-                duration = fields.get("duration")
-                kind = fields.get("kind")
-                status_u = str(fields.get("status") or "").upper()
-                recognizable = kind in (
-                    "accepted",
-                    "updated",
-                    "canceled",
-                    "filled",
-                    "rejected",
-                    "modify_rejected",
-                    "cancel_rejected",
-                    "expired",
-                    "triggered",
-                ) or any(
-                    marker in status_u
-                    for marker in ("OPEN", "WORKING", "CANCEL", "REJECT", "EXPIRED")
-                )
-                if (
-                    price_type is None
-                    or duration is None
-                    or int(price_type) not in _RITHMIC_PRICE_TYPE_TO_ORDER_TYPE
-                    or int(duration) not in _RITHMIC_DURATION_TO_TIF
-                    or not recognizable
-                ):
-                    return None
             return OrderStatusReport(
                 account_id=self.account_id,
                 instrument_id=instrument_id,
@@ -1975,7 +1978,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                 continue
             ts_event = int(fields.get("ts_event") or 0)
             row = self._drain_row_from_fields(fields, ts_event)
-            report = row.permissive_report
+            report = row.report
             if report is None:
                 continue
             key = str(basket)
@@ -2026,7 +2029,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                 # Reconciliation can discover a fill after the live order event
                 # was missed, so publish a venue status first; this may create a
                 # synthetic external order when no cached strategy order exists.
-                status = self._drain_row_from_fields(fields, ts_event).permissive_report
+                status = self._drain_row_from_fields(fields, ts_event).report
                 if status is None:
                     # No order-status prerequisite could be built (status-only
                     # fields malformed) — skip the fill rather than emit it

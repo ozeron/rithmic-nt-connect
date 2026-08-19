@@ -759,35 +759,32 @@ def test_drain_row_boundary_bindable_is_one_decision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Root-cause item 2: the drain-row interpretation is ONE boundary
-    (``_drain_row_from_fields``). For any row: ``bindable`` (strict, safe to
-    bind a venue id) is decided exactly here, the strict report is the
-    permissive report when the row is fully usable, and the permissive
-    fallback exists only for advisory publish — callers never re-interpret
-    the row."""
+    (``_drain_row_from_fields``). For any row: ``bindable`` (safe to bind a
+    venue id — real closed-set terms, never fabricated) is decided exactly
+    here, and the advisory report is published regardless of bindability —
+    callers never re-interpret the row."""
     client = _trading_client()
 
-    # Fully usable row: strict == permissive report, bindable.
+    # Fully usable row: bindable, report published.
     row = client._drain_row_from_fields(_working_order_row(tag="O-1", basket="B1"), 1)
     assert row.bindable
-    assert row.strict_report is row.permissive_report
-    assert row.permissive_report is not None
+    assert row.report is not None
 
     # Terms-missing row (no price_type/duration): advisory publish fallback,
-    # but NOT bindable — the permissive fallback fabricates MARKET/GTC.
+    # but NOT bindable — the report fabricates MARKET/GTC defaults.
     no_terms = _working_order_row(tag="O-1", basket="B1")
     del no_terms["price_type"]
     del no_terms["duration"]
     row = client._drain_row_from_fields(no_terms, 1)
     assert not row.bindable
-    assert row.strict_report is None
-    assert row.permissive_report is not None
+    assert row.report is not None
 
     # Malformed row (no order terms): nothing usable or bindable.
     malformed = _working_order_row(tag="O-1", basket="B1")
     malformed["quantity"] = 0
     row = client._drain_row_from_fields(malformed, 1)
     assert not row.bindable
-    assert row.strict_report is None and row.permissive_report is None
+    assert row.report is None
 
 
 def test_strict_drain_row_triggered_binds_and_reports_triggered(
@@ -810,8 +807,8 @@ def test_strict_drain_row_triggered_binds_and_reports_triggered(
     )
     row = client._drain_row_from_fields(stop_limit, 1)
     assert row.bindable
-    assert row.strict_report is not None
-    assert row.strict_report.order_status is OrderStatus.TRIGGERED
+    assert row.report is not None
+    assert row.report.order_status is OrderStatus.TRIGGERED
     # Market-style stop (price_type=4): no TRIGGERED state, stays working.
     stop_market = _working_order_row(tag="O-2", basket="B2")
     stop_market.update(
@@ -824,8 +821,8 @@ def test_strict_drain_row_triggered_binds_and_reports_triggered(
     )
     row = client._drain_row_from_fields(stop_market, 1)
     assert row.bindable
-    assert row.strict_report is not None
-    assert row.strict_report.order_status is OrderStatus.ACCEPTED
+    assert row.report is not None
+    assert row.report.order_status is OrderStatus.ACCEPTED
 
 
 def test_reconnect_ream_drain_publish_failure_fails_barrier(
