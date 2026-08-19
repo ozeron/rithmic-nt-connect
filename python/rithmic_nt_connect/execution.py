@@ -2054,11 +2054,14 @@ class RithmicExecutionClient(LiveExecutionClient):
                 # Reconciliation can discover a fill after the live order event
                 # was missed, so publish a venue status first; this may create a
                 # synthetic external order when no cached strategy order exists.
-                # The iterator guarantees the prerequisite row built a report.
-                status = row.report
+                # Rebuild the status with the corrected ``ts_event`` (the
+                # iterator's 0-default would publish an epoch-dated
+                # prerequisite for a row without a venue timestamp — the
+                # status must share the fill's clock-fallback timestamp).
+                status = self._drain_row_from_fields(fields, ts_event).report
                 if status is None:
-                    # Unreachable (the iterator skips unusable rows); narrows
-                    # the type for the checker.
+                    # Unreachable (the iterator already built a report for this
+                    # row); narrows the type for the checker.
                     continue
                 if not RithmicExecutionClient._publish_order_status_report(
                     self,

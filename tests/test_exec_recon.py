@@ -18,6 +18,7 @@ from nautilus_trader.execution.messages import (
     GenerateOrderStatusReports,
     GeneratePositionStatusReports,
 )
+from nautilus_trader.execution.reports import OrderStatusReport
 from nautilus_trader.model.enums import (
     LiquiditySide,
     OrderSide,
@@ -1189,6 +1190,36 @@ def test_generate_fill_reports_dedups_fill_without_venue_id(
     client = _fill_reports_client(monkeypatch, [raw, raw], report)
     reports = asyncio.run(client.generate_fill_reports(_fill_cmd()))
     assert reports == [report]
+
+
+def test_fill_prerequisite_shares_clock_ts_when_row_has_no_ts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Macroscope (12:52Z): a filled row without a venue timestamp must
+    publish its order-status prerequisite with the SAME clock-fallback
+    timestamp as the fill — an epoch-dated (0) prerequisite could be treated
+    as stale and fail to establish the fill's order prerequisite."""
+    raw = _fill_event(fill_id="NO-TS")
+    del raw["ssboe"]
+    del raw["usecs"]
+    client = _trading_client(_LoadOrdersSession([raw]))
+    client.account_id = AccountId("RITHMIC-ACC1")
+    monkeypatch.setattr(client, "_seed_account_if_needed", lambda *a, **k: None)
+    monkeypatch.setattr(
+        client,
+        "_price_for_instrument",
+        lambda instrument_id, value: Price.from_str("21000.0"),
+    )
+    published: list[OrderStatusReport] = []
+    monkeypatch.setattr(client, "_send_order_status_report", published.append)
+
+    reports = asyncio.run(client.generate_fill_reports(_fill_cmd()))
+
+    assert len(reports) == 1
+    assert len(published) == 1
+    # Both the status prerequisite and the fill use the clock fallback (2).
+    assert published[0].ts_last == 2
+    assert reports[0].ts_event == 2
 
 
 # --------------------------------------------------------------------------- #
