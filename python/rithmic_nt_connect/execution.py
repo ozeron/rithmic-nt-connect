@@ -69,6 +69,7 @@ from rithmic_nt_connect._order_plant import OrderPlantPolicy, OrderPlantState
 from rithmic_nt_connect._orders import (
     DEFAULT_TRAIL_BY_PRICE_ID,
     OrderMapError,
+    enum_int,
     fill_dedup_key,
     nautilus_order_type_to_rithmic,
     nautilus_side_to_rithmic,
@@ -219,27 +220,17 @@ def _row_is_trustworthy(fields: dict[str, Any]) -> bool:
     """
     if order_side_from_notification(fields) is None:
         return False
-    price_type = fields.get("price_type")
-    duration = fields.get("duration")
-    if price_type is None or duration is None:
-        return False
-    try:
-        if (
-            # bool is an int subclass: ``int(True) == 1`` would map malformed
-            # boolean values to LIMIT/DAY — reject them before coercion. A
-            # non-integral numeric (``1.5``) truncates to a valid enum the
-            # same way — reject any value whose int coercion differs from
-            # itself (integral strings like ``"1"`` pass: ``int(str)`` is
-            # exact or raises).
-            isinstance(price_type, bool)
-            or isinstance(duration, bool)
-            or (not isinstance(price_type, str) and int(price_type) != price_type)
-            or (not isinstance(duration, str) and int(duration) != duration)
-            or int(price_type) not in _RITHMIC_PRICE_TYPE_TO_ORDER_TYPE
-            or int(duration) not in _RITHMIC_DURATION_TO_TIF
-        ):
-            return False
-    except (TypeError, ValueError, OverflowError):
+    # The closed-set values are exact integers or None (``enum_int`` at the
+    # convert boundary; the same whitelist defends raw fields here too, so a
+    # bool/non-integral value can never coerce into a valid enum).
+    price_type = enum_int(fields.get("price_type"))
+    duration = enum_int(fields.get("duration"))
+    if (
+        price_type is None
+        or duration is None
+        or price_type not in _RITHMIC_PRICE_TYPE_TO_ORDER_TYPE
+        or duration not in _RITHMIC_DURATION_TO_TIF
+    ):
         return False
     kind = fields.get("kind")
     status_u = str(fields.get("status") or "").upper()
@@ -1204,18 +1195,21 @@ class RithmicExecutionClient(LiveExecutionClient):
             last_px = self._price_for_instrument(instrument_id, fill_px)
         except (TypeError, ValueError, OverflowError):
             return None
+        # Same event-time fallback policy as the status builder: never report
+        # a fill at epoch 0 when the venue sent no timestamp.
+        report_ts = ts_event or self._clock.timestamp_ns()
         return FillReport(
             account_id=self.account_id,
             instrument_id=instrument_id,
             venue_order_id=VenueOrderId(str(basket)),
-            trade_id=TradeId(trade_id_from_fill_fields(fields, ts_event)),
+            trade_id=TradeId(trade_id_from_fill_fields(fields, report_ts)),
             order_side=side,
             last_qty=last_qty,
             last_px=last_px,
             commission=Money(Decimal(0), Currency.from_str("USD")),
             liquidity_side=LiquiditySide.NO_LIQUIDITY_SIDE,
             report_id=UUID4(),
-            ts_event=ts_event,
+            ts_event=report_ts,
             ts_init=self._clock.timestamp_ns(),
         )
 
@@ -1938,6 +1932,11 @@ class RithmicExecutionClient(LiveExecutionClient):
             order_type = self._order_type_from_event(fields)
             tif = self._tif_from_event(fields)
             status = self._order_status_from_event(fields)
+            # Event-time fallback, owned HERE: the ordering ``ts_event`` is the
+            # iterator's 0-default when the venue sent no timestamp — a report
+            # published with epoch 0 could be treated as stale (e.g. a fill's
+            # order prerequisite). One policy for every report consumer.
+            report_ts = ts_event or self._clock.timestamp_ns()
             return OrderStatusReport(
                 account_id=self.account_id,
                 instrument_id=instrument_id,
@@ -1949,8 +1948,8 @@ class RithmicExecutionClient(LiveExecutionClient):
                 quantity=qty,
                 filled_qty=filled,
                 report_id=UUID4(),
-                ts_accepted=ts_event,
-                ts_last=ts_event,
+                ts_accepted=report_ts,
+                ts_last=report_ts,
                 ts_init=self._clock.timestamp_ns(),
                 client_order_id=self._client_order_id_for_tag(fields.get("user_tag")),
                 price=price,

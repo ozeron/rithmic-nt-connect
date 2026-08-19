@@ -173,8 +173,14 @@ def order_notification_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
         "avg_fill_price": sentinel_none(d.get("avg_fill_price")),
         "fill_price": sentinel_none(d.get("fill_price")),
         "transaction_type": d.get("transaction_type"),
-        "price_type": d.get("price_type"),
-        "duration": d.get("duration"),
+        # Single convert boundary for closed-set enums: a value survives only
+        # when it IS the exact integer (bools and non-integral numerics are
+        # coercion traps — ``int(True) == 1``, ``int(1.5) == 1`` — and become
+        # ``None`` here so no downstream builder can fabricate a LIMIT/DAY
+        # from garbage). Membership in the known enum maps is decided later
+        # (the trust boundary), not here.
+        "price_type": enum_int(d.get("price_type")),
+        "duration": enum_int(d.get("duration")),
         "fill_id": d.get("fill_id"),
         "text": d.get("text"),
         "report_text": d.get("report_text"),
@@ -224,6 +230,32 @@ def kind_from_notify(
             return "cancel_rejected"
         return None
     return None
+
+
+def enum_int(value: Any) -> int | None:
+    """Exact closed-set coercion: the integer only when the input IS that
+    integer.
+
+    ``bool`` is an ``int`` subclass (``int(True) == 1``) and non-integral
+    numerics truncate (``int(1.5) == 1``) — both would fabricate a valid enum
+    from garbage, so they become ``None``. Integral strings (``"1"``) and
+    integral floats (``1.0``) coerce exactly and are accepted; anything else
+    (``None``, non-numeric, non-integral) becomes ``None``.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+    try:
+        coerced = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if coerced != value:
+        return None
+    return coerced
 
 
 def sentinel_none(value: Any) -> Any:

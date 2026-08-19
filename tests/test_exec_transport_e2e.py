@@ -988,6 +988,30 @@ def test_drain_row_boundary_bindable_implies_real_terms_property() -> None:
                 assert result.report is not None, f"{key}={value!r}"
 
 
+def test_convert_boundary_never_emits_coerced_closed_set_values() -> None:
+    """Root cause (round 3): the closed-set coercion is a WHITELIST at the
+    convert boundary — for any raw ``price_type``/``duration`` input, the
+    normalized value is an exact int or ``None``, never a coercible-but-
+    malformed value (bool, non-integral). Downstream cannot fabricate a
+    LIMIT/DAY from garbage."""
+    base = _working_order_row(tag="O-1", basket="B1")
+    values = (True, False, 1.5, 2.9, 1.0, "1", "1.5", 99, 0, -1, None, "x", 3)
+    for value in values:
+        for key in ("price_type", "duration"):
+            raw = dict(base)
+            raw[key] = value
+            normalized = order_notification_to_fields(raw)[key]
+            if normalized is None:
+                continue
+            # Exact int, never a coerced bool/float/string-of-garbage.
+            assert type(normalized) is int, f"{key}={value!r} -> {normalized!r}"
+    # Coercion traps never survive the boundary.
+    for value in (True, False, 1.5, 2.9, "1.5", "x"):
+        raw = dict(base)
+        raw["price_type"] = value
+        assert order_notification_to_fields(raw)["price_type"] is None, value
+
+
 def test_strict_drain_row_triggered_binds_and_reports_triggered(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
