@@ -192,14 +192,33 @@ hardening, Oracle 2nd + 3rd passes, Macroscope review):
 The barrier runs on **every** trading (re)connect — not only when a prior
 operation latched the plant — because the disconnect window can hide
 venue-side accepts/fills/terminal outcomes and position changes even when
-nothing was latched. Either failure keeps the plant `DISCONNECTED` (submit/
-modify blocked) until a later successful connect. The order poll loop keeps
-running during the barrier, so notifications are never dropped. The barrier
-clears the latch **only if the plant is still `CONNECTING` and the poll task is
-alive** when the drain finishes — so a *newer* anomaly during the drain (an
-overfill latch, a handler break, a resync failure, or a mid-drain resync, all
-of which leave `CONNECTING`) survives it. A reconnect re-arm can never
-re-enable trading over a dead/broken order stream.
+nothing was latched. A failed barrier leaves the plant `LATCHED` (recon
+pending — submit/modify blocked) until a later successful connect. The order
+poll loop keeps running during the barrier, so notifications are never
+dropped. The barrier clears the latch **only if the plant is still
+`CONNECTING` and the poll task is alive** when the drain finishes — so a
+*newer* anomaly during the drain (an overfill latch, a handler break, a resync
+failure, or a mid-drain resync, all of which leave `CONNECTING`) survives it.
+A reconnect re-arm can never re-enable trading over a dead/broken order
+stream.
+
+The plant lifecycle is an explicit state machine (`OrderPlantPolicy`; the
+transition table in `tests/test_order_plant.py` is the executable spec):
+`DISCONNECTED` (down / never armed), `CONNECTING` (barrier in progress),
+`LIVE` (armed), `RESYNCING` (mid-session transport resync — cancels stay
+available), `LATCHED` (blocked pending a recon cycle). Execution code never
+assigns the state directly — every transition goes through the policy, and
+`rearm` is the **only** arming transition. Two consequences operators should
+know:
+
+- A mid-session transport resync never clears a latch: `LATCHED` stays
+  `LATCHED` through `resync_start`/`resync_complete`/`resync_failed`. The only
+  way out of `LATCHED` is a successful re-arm barrier.
+- A plant that is `DISCONNECTED` (e.g. after a failed resync) cannot re-arm
+  via a later resync — `resync_start` from `DISCONNECTED` stays down. Only a
+  full reconnect (drain + PnL gate) arms the plant. (This closes a hole the
+  old code had: a resync failure followed by a channel-error resync could
+  return to `LIVE` without re-observing venue state.)
 
 **Operational consequences:**
 

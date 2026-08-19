@@ -183,6 +183,42 @@ def _price(value: float | Decimal | str, precision: int | None = None) -> Price:
     return Price.from_str(f"{float(value):.{int(precision)}f}")
 
 
+class _DrainRowResult:
+    """Tagged result of the drain-row interpretation boundary
+    (``RithmicExecutionClient._drain_row_from_fields``).
+
+    One boundary decides, for any working-orders drain row, whether it can
+    publish an advisory report (``usable``) and whether it passes the strict
+    trust boundary safe for binding a venue id (``bindable``). No caller
+    re-implements "usable"; the permissive report is the advisory publish
+    fallback for rows whose closed-set terms are incomplete.
+    """
+
+    __slots__ = ("fields", "permissive_report", "strict_report", "ts_event")
+
+    def __init__(
+        self,
+        fields: dict[str, Any],
+        ts_event: int,
+        strict_report: OrderStatusReport | None,
+        permissive_report: OrderStatusReport | None,
+    ) -> None:
+        self.fields = fields
+        self.ts_event = ts_event
+        self.strict_report = strict_report
+        self.permissive_report = permissive_report
+
+    @property
+    def usable(self) -> bool:
+        """A report can be built for this row (advisory publish)."""
+        return self.permissive_report is not None
+
+    @property
+    def bindable(self) -> bool:
+        """The row passes strict validation: safe to bind a venue id from it."""
+        return self.strict_report is not None
+
+
 class RithmicExecutionClient(LiveExecutionClient):
     """Rithmic execution client (PnL always; order plant when ``enable_trading``)."""
 
@@ -228,11 +264,6 @@ class RithmicExecutionClient(LiveExecutionClient):
         # reports for external orders.
         self._untracked_status_keys: dict[str, tuple[object, ...]] = {}
         self._order_plant = OrderPlantPolicy(OrderPlantState.DISCONNECTED)
-        # Latched by ``_mark_order_plant_failed``: a transport resync must not
-        # restore the plant to LIVE while an operation's venue outcome is still
-        # unknown (re-enabling commands could duplicate/conflict with it).
-        # Cleared only on a full ``_connect`` (engine reconciliation runs then).
-        self._order_plant_latched = False
         # Fresh per-connect activity gate: the PnL/account stream delivered at
         # least one parseable account/position snapshot since (re)connect. This
         # proves stream activity, not position completeness; the re-arm barrier
@@ -299,11 +330,11 @@ class RithmicExecutionClient(LiveExecutionClient):
         self._seed_account_if_needed()
 
         if self.enable_trading:
-            self._order_plant.state = OrderPlantState.CONNECTING
+            self._order_plant.begin_connect()
             try:
                 await asyncio.to_thread(self._session.subscribe_order_updates)
             except Exception:
-                self._order_plant.state = OrderPlantState.DISCONNECTED
+                self._order_plant.disconnect()
                 try:
                     await asyncio.to_thread(self._session.disconnect_order_plant)
                 except Exception as teardown_exc:
@@ -329,36 +360,31 @@ class RithmicExecutionClient(LiveExecutionClient):
             # disconnect window can hide venue-side accepts/fills/terminal
             # outcomes and position changes even when nothing was latched. The
             # adapter owns readiness; the engine's reconciliation is repair,
-            # not readiness. A mid-session transport resync does not clear the
-            # latch (see ``_resync_order_subscription``).
+            # not readiness. ``rearm`` (owned by the plant machine) is the only
+            # arming transition: it succeeds only while the plant is still
+            # ``CONNECTING`` and the poll task is alive, so a newer latch, a
+            # stream failure, a mid-drain resync, or a dead poll task all
+            # leave the plant un-armed. A mid-session transport resync never
+            # clears a latch (see ``_resync_order_subscription``).
             try:
                 await self._rearm_after_reconnect()
             except Exception as exc:
-                self._order_plant.state = OrderPlantState.DISCONNECTED
+                self._order_plant.latch(
+                    f"reconnect re-arm failed (drain/PnL gate): {exc}"
+                )
                 self._log.error(
                     f"reconnect re-arm failed; order plant stays un-armed: {exc}"
                 )
             else:
-                if self._order_plant.state is not OrderPlantState.CONNECTING or (
-                    self._order_poll_task is not None and self._order_poll_task.done()
-                ):
-                    # The order poll loop kept running during the drain
-                    # (never-drop). Any anomaly in that window leaves
-                    # ``CONNECTING``: a newer latch or a stream failure
-                    # (handler break / resync failure) sets DISCONNECTED, a
-                    # mid-drain resync ends DISCONNECTED while latched, and
-                    # a dead poll task cannot deliver. The re-arm must not
-                    # clear a latch or re-arm a dead/broken stream it did
-                    # not observe.
-                    self._order_plant.state = OrderPlantState.DISCONNECTED
+                poll_alive = self._order_poll_task is None or not (
+                    self._order_poll_task.done()
+                )
+                if not self._order_plant.rearm(poll_alive=poll_alive):
                     self._log.error(
                         "reconnect re-arm finished but the order plant was "
                         "re-latched or its stream failed during the drain; "
                         "staying un-armed"
                     )
-                else:
-                    self._order_plant_latched = False
-                    self._order_plant.state = OrderPlantState.LIVE
         await self._await_account_registered()
 
     async def _await_account_registered(
@@ -438,16 +464,13 @@ class RithmicExecutionClient(LiveExecutionClient):
         )
 
     async def _resync_order_subscription(self) -> None:
-        self._order_plant.state = OrderPlantState.RESYNCING
+        # ``resync_start`` (poll loop) / ``resync_complete`` are owned by the
+        # plant machine: a latched failure (unknown venue outcome) survives the
+        # resync — the channel recovered, but the original operation was never
+        # resolved, so commands stay blocked until a successful re-arm.
         await asyncio.to_thread(self._session.disconnect_order_plant)
         await asyncio.to_thread(self._session.subscribe_order_updates)
-        # A latched failure (unknown venue outcome) must survive the resync:
-        # the channel recovered, but the original operation was never resolved,
-        # so commands stay blocked until explicit recovery/reconciliation.
-        if self._order_plant_latched:
-            self._order_plant.state = OrderPlantState.DISCONNECTED
-        else:
-            self._order_plant.state = OrderPlantState.LIVE
+        self._order_plant.resync_complete()
 
     async def _resync_pnl_subscription(self) -> None:
         await asyncio.to_thread(self._session.disconnect_pnl_plant)
@@ -471,6 +494,25 @@ class RithmicExecutionClient(LiveExecutionClient):
             await self._await_pnl_snapshot()
         self._apply_resolved_account_id()
         self._seed_account_if_needed()
+
+    def _drain_row_from_fields(
+        self, fields: dict[str, Any], ts_event: int
+    ) -> _DrainRowResult:
+        """One interpretation boundary for a working-orders drain row.
+
+        Builds the strict report (no fabricated closed-set execution terms —
+        the trust boundary for binding a venue id) and the permissive report
+        (advisory publish fallback for rows whose terms are incomplete but
+        otherwise usable). Every drain/recon caller consumes this; no caller
+        re-implements "usable".
+        """
+        strict_report = self._order_status_report_from_fields(
+            fields, ts_event, strict=True
+        )
+        permissive_report = strict_report or self._order_status_report_from_fields(
+            fields, ts_event
+        )
+        return _DrainRowResult(fields, ts_event, strict_report, permissive_report)
 
     def _apply_drain_rows(self, events: list[dict[str, Any]]) -> None:
         """Apply a working-orders drain to the local cache before re-arming.
@@ -499,26 +541,19 @@ class RithmicExecutionClient(LiveExecutionClient):
                 latest[key] = (ts_event, fields)
         for ts_event, fields in latest.values():
             basket = str(fields["basket_id"])
-            # Build the venue report FIRST: a row that cannot build a report
-            # must not bind a venue id — binding would mark a stale local
-            # order "venue-resolved" and later status checks would skip
-            # fail-closed recovery (build-then-bind, same as
-            # ``_resolve_inflight_by_tag``). The strict report (no fabricated
-            # closed-set execution terms) is the trust boundary for binding;
-            # the permissive report is the advisory publish fallback for rows
-            # whose terms are incomplete but otherwise usable.
-            strict_report = self._order_status_report_from_fields(
-                fields, ts_event, strict=True
-            )
-            report = strict_report or self._order_status_report_from_fields(
-                fields, ts_event
-            )
+            # Build the venue report FIRST (build-then-bind): a row that
+            # cannot build a report must not bind a venue id — binding would
+            # mark a stale local order "venue-resolved" and later status
+            # checks would skip fail-closed recovery. One boundary decides
+            # usability (permissive publish) vs bindability (strict trust).
+            row = self._drain_row_from_fields(fields, ts_event)
+            report = row.permissive_report
             if report is None:
                 continue
             client_order_id = self._resolve_client_order_id(fields)
             if (
                 client_order_id is not None
-                and strict_report is not None
+                and row.bindable
                 and self._cache.order(client_order_id) is not None
                 and self._cache.venue_order_id(client_order_id) is None
             ):
@@ -577,7 +612,7 @@ class RithmicExecutionClient(LiveExecutionClient):
             except Exception as exc:
                 self._log.error(f"{name} poll channel error: {exc}")
                 if name == "order":
-                    self._order_plant.state = OrderPlantState.RESYNCING
+                    self._order_plant.resync_start()
                 try:
                     await on_resync()
                     self._log.warning(
@@ -587,10 +622,11 @@ class RithmicExecutionClient(LiveExecutionClient):
                 except Exception as resync_exc:
                     self._log.error(f"{name} subscription resync failed: {resync_exc}")
                     if name == "order":
-                        # A failed resync is a dead stream: DISCONNECTED so the
-                        # reconnect re-arm barrier (keyed on plant state) can
-                        # never clear a latch over it.
-                        self._order_plant.state = OrderPlantState.DISCONNECTED
+                        # A failed resync is a dead stream: the plant machine
+                        # moves to DISCONNECTED (or stays LATCHED), so a
+                        # concurrent reconnect re-arm barrier can never clear a
+                        # latch over it, and a later resync cannot re-arm it.
+                        self._order_plant.resync_failed()
                     backoff = min(backoff * 2, 2.0)
                 await asyncio.sleep(backoff)
                 continue
@@ -628,12 +664,12 @@ class RithmicExecutionClient(LiveExecutionClient):
             fields = order_notification_to_fields(event)
         except Exception as exc:
             self._log.error(f"invalid order_notification: {exc}")
-            self._order_plant.state = OrderPlantState.DISCONNECTED
+            self._order_plant.disconnect()
             raise
         self._handle_order_notification(fields)
 
     async def _disconnect(self) -> None:
-        self._order_plant.state = OrderPlantState.DISCONNECTED
+        self._order_plant.disconnect()
         for task_attr in ("_order_poll_task", "_poll_task"):
             task = getattr(self, task_attr)
             if task is not None:
@@ -762,15 +798,15 @@ class RithmicExecutionClient(LiveExecutionClient):
     def _latch_order_plant(self, action: str, reason: str) -> None:
         """Block further commands after an anomaly that needs a recon cycle.
 
-        The latch is cleared only by a full ``_connect`` whose bounded re-arm
-        drain succeeds (``_rearm_after_reconnect``); a mid-session transport
-        resync does not clear it (``_resync_order_subscription``). The plant
-        leaves ``CONNECTING`` (DISCONNECTED), which is the token the re-arm
-        barrier uses to detect an anomaly raised while its drain was running.
+        ``LATCHED`` is a plant state (owned by ``OrderPlantPolicy``), not a
+        parallel flag: it is cleared only by a successful re-arm (``rearm``);
+        a mid-session transport resync never clears it (``resync_complete``
+        leaves LATCHED untouched). Leaving ``CONNECTING`` is the token the
+        re-arm barrier uses to detect an anomaly raised while its drain was
+        running.
         """
-        self._order_plant_latched = True
-        self._order_plant.state = OrderPlantState.DISCONNECTED
-        self._log.error(f"{action}; order plant latched disconnected: {reason}")
+        self._order_plant.latch(reason)
+        self._log.error(f"{action}; order plant latched: {reason}")
 
     def _mark_order_plant_failed(self, action: str, exc: BaseException) -> None:
         """Block further commands after an operation has an unknown venue outcome."""
@@ -1068,7 +1104,7 @@ class RithmicExecutionClient(LiveExecutionClient):
             )
             return
 
-        status_report = self._order_status_report_from_fields(fields, ts_event)
+        status_report = self._drain_row_from_fields(fields, ts_event).permissive_report
         if status_report is not None:
             # Rithmic re-pushes order state frequently; skip an unchanged
             # re-push of an external order (fills below are deduped separately).
@@ -1542,21 +1578,19 @@ class RithmicExecutionClient(LiveExecutionClient):
             basket = fields.get("basket_id")
             if not basket:
                 continue
-            # Build the venue report FIRST (strict: no fabricated closed-set
-            # terms); bind the venue id only once the row proves usable.
-            # ts_event comes from the venue row (receipt time only when
-            # genuinely absent); ts_init stays the adapter clock.
+            # One boundary (build-then-bind): bind only from a strict-usable
+            # row (no fabricated closed-set terms). ts_event comes from the
+            # venue row (receipt time only when genuinely absent); ts_init
+            # stays the adapter clock.
             ts_event = fields.get("ts_event")
             ts_event = (
                 int(ts_event) if ts_event is not None else self._clock.timestamp_ns()
             )
-            report = self._order_status_report_from_fields(
-                fields, ts_event, strict=True
-            )
-            if report is None:
+            row = self._drain_row_from_fields(fields, ts_event)
+            if not row.bindable:
                 continue
             self._bind_venue_id(order.client_order_id, str(basket))
-            return report
+            return row.strict_report
         return None
 
     def _recon_window_sec(self, start: Any, end: Any) -> tuple[int, int]:
@@ -1863,7 +1897,8 @@ class RithmicExecutionClient(LiveExecutionClient):
             ):
                 continue
             ts_event = int(fields.get("ts_event") or 0)
-            report = self._order_status_report_from_fields(fields, ts_event)
+            row = self._drain_row_from_fields(fields, ts_event)
+            report = row.permissive_report
             if report is None:
                 continue
             key = str(basket)
@@ -1914,7 +1949,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                 # Reconciliation can discover a fill after the live order event
                 # was missed, so publish a venue status first; this may create a
                 # synthetic external order when no cached strategy order exists.
-                status = self._order_status_report_from_fields(fields, ts_event)
+                status = self._drain_row_from_fields(fields, ts_event).permissive_report
                 if status is None:
                     # No order-status prerequisite could be built (status-only
                     # fields malformed) — skip the fill rather than emit it

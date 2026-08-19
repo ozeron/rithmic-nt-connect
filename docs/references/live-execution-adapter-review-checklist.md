@@ -205,7 +205,7 @@ References: #4440 and #4228.
 - [ ] Reconnect restores authentication, subscriptions, and required account or
       instrument context—not only the socket.
 - [x] Reconnect resyncs working orders and positions before trading is re-armed.
-      (bounded working-orders drain **and** a fresh account/position PnL observation — an activity gate set only after successful processing — gate the re-arm; the barrier clears the latch only if the plant stayed `CONNECTING` and the poll task is alive, so a newer latch or a failed/dead order stream survives it: `test_reconnect_ream_requires_successful_drain`, `test_reconnect_ream_requires_pnl_snapshot`, `test_reconnect_ream_requires_plant_stayed_connecting`, `test_pnl_marker_only_after_successful_account_processing`)
+      (bounded working-orders drain **and** a fresh account/position PnL observation — an activity gate set only after successful processing — gate the re-arm; the plant lifecycle is an explicit state machine (`OrderPlantPolicy`: `LATCHED` a real state, owned transitions, `rearm` the only arming transition, a `DISCONNECTED` plant cannot re-arm via resync — transition table in `tests/test_order_plant.py`): `test_reconnect_ream_requires_successful_drain`, `test_reconnect_ream_requires_pnl_snapshot`, `test_reconnect_ream_requires_plant_stayed_connecting`, `test_pnl_marker_only_after_successful_account_processing`, `test_down_plant_cannot_rearm_via_resync`, `test_latch_survives_mid_session_resync`)
 - [ ] Resubscription intent is restored after gateway reconnect.
 - [ ] Reconnect does not replay old events as new fills without deduplication.
 - [ ] Silent reconnect loops emit health/error diagnostics and have bounded retry

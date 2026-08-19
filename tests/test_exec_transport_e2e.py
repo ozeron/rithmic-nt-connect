@@ -76,7 +76,6 @@ def _trading_client(
     session: WireSessionStub | None = None,
     *,
     enable_trading: bool = True,
-    latched: bool = False,
     plant_state: OrderPlantState = OrderPlantState.LIVE,
 ) -> _TestClient:
     client = _client()
@@ -84,7 +83,6 @@ def _trading_client(
         Any, SimpleNamespace(enable_trading=enable_trading, soft_fail_pnl=False)
     )
     client._order_plant = OrderPlantPolicy(plant_state)
-    client._order_plant_latched = latched
     client._pnl_snapshot_observed = asyncio.Event()
     client._session = cast(WireSession, session or FaultInjectingSession())
     client._seen_fill_keys = OrderedDict()
@@ -299,7 +297,7 @@ def test_unresolved_inflight_query_raises_not_none(
     ``VenueQueryUnavailable`` unconditionally (never ``None``, which the engine
     could treat as known) and never emits a fabricated reject/cancel."""
     client = _trading_client(
-        FaultInjectingSession(), latched=True, plant_state=OrderPlantState.DISCONNECTED
+        FaultInjectingSession(), plant_state=OrderPlantState.LATCHED
     )
     order = _inflight_order()
     client._cache._orders[str(order.client_order_id)] = order
@@ -501,9 +499,7 @@ def _connect_client(
     *,
     stub_snapshot_wait: bool = True,
 ) -> _TestClient:
-    client = _trading_client(
-        session, latched=True, plant_state=OrderPlantState.DISCONNECTED
-    )
+    client = _trading_client(session, plant_state=OrderPlantState.LATCHED)
     monkeypatch.setattr(client, "_apply_resolved_account_id", lambda: None)
     monkeypatch.setattr(client, "_seed_account_if_needed", lambda *a, **k: None)
 
@@ -534,8 +530,9 @@ def test_reconnect_ream_requires_successful_drain(
 
     asyncio.run(client._connect())
 
-    assert client._order_plant_latched, "latch must survive a failed re-arm"
-    assert client._order_plant.state is OrderPlantState.DISCONNECTED
+    # A failed re-arm leaves the plant LATCHED (recon pending): blocked.
+    assert client._order_plant.latched, "latch must survive a failed re-arm"
+    assert client._order_plant.state is OrderPlantState.LATCHED
     assert not client._order_plant.allow_submit()
     assert "load_orders" in session.calls
 
@@ -543,7 +540,7 @@ def test_reconnect_ream_requires_successful_drain(
     session.fail_load_orders = False
     asyncio.run(client._connect())
 
-    assert not client._order_plant_latched
+    assert not client._order_plant.latched
     assert client._order_plant.state is OrderPlantState.LIVE
     assert client._order_plant.allow_submit()
 
@@ -555,12 +552,12 @@ def test_unlatched_reconnect_still_runs_rearm_barrier(
     re-subscribe alone — the drain must succeed (and PnL be re-observed)
     before trading is re-armed on every connect."""
     session = _ConnectSession(fail_load_orders=True)
-    client = _connect_client(session, monkeypatch)
-    client._order_plant_latched = False  # ordinary disconnect, nothing latched
+    client = _connect_client(session, monkeypatch)  # starts LIVE: un-latched
 
     asyncio.run(client._connect())
 
-    assert client._order_plant.state is OrderPlantState.DISCONNECTED
+    # A failed drain leaves the plant LATCHED (recon pending): blocked.
+    assert client._order_plant.state is OrderPlantState.LATCHED
     assert not client._order_plant.allow_submit()
 
     # Venue heals: the next (still un-latched) connect re-arms.
@@ -586,8 +583,8 @@ def test_reconnect_ream_requires_pnl_snapshot(
 
     asyncio.run(client._connect())
 
-    assert client._order_plant_latched
-    assert client._order_plant.state is OrderPlantState.DISCONNECTED
+    assert client._order_plant.latched
+    assert client._order_plant.state is OrderPlantState.LATCHED
     assert not client._order_plant.allow_submit()
 
 
@@ -611,15 +608,20 @@ def test_reconnect_ream_requires_plant_stayed_connecting(
             else:
                 # A stream failure without a new latch (resync failure /
                 # handler break) also leaves CONNECTING.
-                _client._order_plant.state = OrderPlantState.DISCONNECTED
+                _client._order_plant.disconnect()
 
         session.on_load_orders = _anomaly_during_drain
 
         asyncio.run(client._connect())
 
-        assert client._order_plant_latched
-        assert client._order_plant.state is OrderPlantState.DISCONNECTED
+        # Either anomaly during the drain leaves the plant un-armed: the
+        # re-arm must not clear a latch over state it did not observe.
         assert not client._order_plant.allow_submit()
+        if anomaly == "latch":
+            assert client._order_plant.latched
+            assert client._order_plant.state is OrderPlantState.LATCHED
+        else:
+            assert client._order_plant.state is OrderPlantState.DISCONNECTED
 
 
 def test_reconnect_ream_applies_drain_rows(
@@ -693,6 +695,39 @@ def test_reconnect_ream_drain_binds_only_usable_rows(
     }
 
 
+def test_drain_row_boundary_usable_bindable_are_one_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Root-cause item 2: the drain-row interpretation is ONE boundary
+    (``_drain_row_from_fields``). For any row: ``bindable`` (strict) implies
+    ``usable`` (permissive), and a row is usable iff a permissive report
+    builds — callers never re-interpret the row."""
+    client = _trading_client()
+
+    # Fully usable row: strict == permissive report.
+    row = client._drain_row_from_fields(_working_order_row(tag="O-1", basket="B1"), 1)
+    assert row.usable and row.bindable
+    assert row.strict_report is row.permissive_report
+    assert row.permissive_report is not None
+
+    # Terms-missing row (no price_type/duration): advisory (usable) but not
+    # bindable — the permissive fallback fabricates MARKET/GTC for publish.
+    no_terms = _working_order_row(tag="O-1", basket="B1")
+    del no_terms["price_type"]
+    del no_terms["duration"]
+    row = client._drain_row_from_fields(no_terms, 1)
+    assert row.usable and not row.bindable
+    assert row.strict_report is None
+    assert row.permissive_report is not None
+
+    # Malformed row (no order terms): neither usable nor bindable.
+    malformed = _working_order_row(tag="O-1", basket="B1")
+    malformed["quantity"] = 0
+    row = client._drain_row_from_fields(malformed, 1)
+    assert not row.usable and not row.bindable
+    assert row.strict_report is None and row.permissive_report is None
+
+
 def test_pnl_marker_only_after_successful_account_processing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -761,8 +796,8 @@ def test_tracked_overfill_emits_latches_and_logs(
 
     assert len(filled) == 1, "the real venue fill must never be dropped"
     assert filled[0][8] == Quantity.from_int(2), "the emitted qty must not be capped"
-    assert client._order_plant_latched
-    assert client._order_plant.state is OrderPlantState.DISCONNECTED
+    assert client._order_plant.latched
+    assert client._order_plant.state is OrderPlantState.LATCHED
     assert any("overfill" in message for message in log.messages)
 
 
@@ -900,8 +935,8 @@ def test_sentinel_fill_price_suppressed_not_crashed(
     # P1 #4: an unpriceable definitive fill latches the plant (exposure may
     # be incomplete) — the dedup key is not consumed, so a later priced replay
     # of the same fill id can still recover.
-    assert client._order_plant_latched
-    assert client._order_plant.state is OrderPlantState.DISCONNECTED
+    assert client._order_plant.latched
+    assert client._order_plant.state is OrderPlantState.LATCHED
 
 
 def test_sentinel_untracked_fill_report_is_none() -> None:
@@ -944,8 +979,8 @@ def test_fault_inject_submit_unknown_latches_and_recovers_without_duplicate(
 
     assert len(submitted) == 1, "local submit is emitted before the send"
     assert rejected == [], "a transport cut must not fabricate a venue reject"
-    assert client._order_plant_latched
-    assert client._order_plant.state is OrderPlantState.DISCONNECTED
+    assert client._order_plant.latched
+    assert client._order_plant.state is OrderPlantState.LATCHED
     assert not client._order_plant.allow_submit()
 
     # Heal + reconnect: the bounded drain returns the working order, re-arms
@@ -954,7 +989,7 @@ def test_fault_inject_submit_unknown_latches_and_recovers_without_duplicate(
     client = _connect_client(session, monkeypatch)
     asyncio.run(client._connect())
 
-    assert not client._order_plant_latched
+    assert not client._order_plant.latched
     assert client._order_plant.state is OrderPlantState.LIVE
     reports = asyncio.run(client.generate_order_status_reports(_status_cmd()))
     assert [r.venue_order_id for r in reports] == [VenueOrderId("B1")]
@@ -1079,9 +1114,7 @@ def test_latched_submit_recovered_via_status_reports() -> None:
     """B7: even while latched, the batch status query drains the venue and
     reports the working order by its user_tag (the recovery path)."""
     session = FaultInjectingSession(working_orders=[_working_order_row()])
-    client = _trading_client(
-        session, latched=True, plant_state=OrderPlantState.DISCONNECTED
-    )
+    client = _trading_client(session, plant_state=OrderPlantState.LATCHED)
 
     reports = asyncio.run(client.generate_order_status_reports(_status_cmd()))
 

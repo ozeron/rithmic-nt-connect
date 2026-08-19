@@ -165,6 +165,18 @@ def _report_client(
     )
 
 
+def _drain_row_result(status: object) -> SimpleNamespace:
+    """Boundary-result double: handlers consume ``permissive_report`` /
+    ``usable`` / ``bindable`` from ``_drain_row_from_fields``; a ``None``
+    status means the row is unusable."""
+    return SimpleNamespace(
+        strict_report=status,
+        permissive_report=status,
+        usable=status is not None,
+        bindable=status is not None,
+    )
+
+
 def _fill_cmd() -> GenerateFillReports:
     return GenerateFillReports(
         instrument_id=None,
@@ -206,10 +218,10 @@ def test_order_handler_failure_stops_order_poll_and_fails_closed() -> None:
     )
     asyncio.run(awaitable)
 
-    # The dead stream is fail-closed: DISCONNECTED and latched so a concurrent
+    # The dead stream is fail-closed: LATCHED (recon required) so a concurrent
     # reconnect re-arm barrier (keyed on plant state) cannot clear it.
-    assert client._order_plant.state is OrderPlantState.DISCONNECTED
-    assert client._order_plant_latched
+    assert client._order_plant.state is OrderPlantState.LATCHED
+    assert client._order_plant.latched
 
 
 def test_untracked_order_reports_status_without_strategy_ownership() -> None:
@@ -223,7 +235,9 @@ def test_untracked_order_reports_status_without_strategy_ownership() -> None:
         _untracked_status_keys={},
     )
     status_report = SimpleNamespace(venue_order_id="B-EXTERNAL", client_order_id=None)
-    client._order_status_report_from_fields = lambda event, ts: status_report
+    client._drain_row_from_fields = lambda fields, ts_event: _drain_row_result(
+        status_report
+    )
     fields = {
         "basket_id": "B-EXTERNAL",
         "symbol": "MNQU6",
@@ -257,7 +271,7 @@ def test_untracked_status_suppresses_unchanged_re_push() -> None:
     status = SimpleNamespace(
         venue_order_id="B-EXT", order_status="OPEN", filled_qty="1", avg_px="100.5"
     )
-    client._order_status_report_from_fields = lambda event, ts: status
+    client._drain_row_from_fields = lambda fields, ts_event: _drain_row_result(status)
     client._untracked_status_keys = {}
     fields = {
         "basket_id": "B-EXT",
@@ -281,7 +295,7 @@ def test_untracked_status_suppresses_unchanged_re_push() -> None:
     changed = SimpleNamespace(
         venue_order_id="B-EXT", order_status="FILLED", filled_qty="1", avg_px="100.5"
     )
-    client._order_status_report_from_fields = lambda event, ts: changed
+    client._drain_row_from_fields = lambda fields, ts_event: _drain_row_result(changed)
     RithmicExecutionClient._handle_untracked_notification(
         cast(RithmicExecutionClient, client), fields
     )
@@ -314,7 +328,7 @@ def test_untracked_status_re_push_with_changed_terms_reports() -> None:
         filled_qty="0",
         avg_px="",
     )
-    client._order_status_report_from_fields = lambda event, ts: status
+    client._drain_row_from_fields = lambda fields, ts_event: _drain_row_result(status)
     fields = {
         "basket_id": "B-EXT",
         "symbol": "MNQU6",
@@ -343,7 +357,7 @@ def test_untracked_status_re_push_with_changed_terms_reports() -> None:
         filled_qty="0",
         avg_px="",
     )
-    client._order_status_report_from_fields = lambda event, ts: changed
+    client._drain_row_from_fields = lambda fields, ts_event: _drain_row_result(changed)
     RithmicExecutionClient._handle_untracked_notification(
         cast(RithmicExecutionClient, client), fields
     )
@@ -363,7 +377,9 @@ def test_untracked_status_publication_failure_does_not_escape_handler() -> None:
         _untracked_status_keys={},
     )
     status_report = SimpleNamespace(venue_order_id="B-EXTERNAL", client_order_id=None)
-    client._order_status_report_from_fields = lambda event, ts: status_report
+    client._drain_row_from_fields = lambda fields, ts_event: _drain_row_result(
+        status_report
+    )
 
     RithmicExecutionClient._handle_untracked_notification(
         cast(RithmicExecutionClient, client),
@@ -517,7 +533,9 @@ def test_status_report_publication_failure_is_non_fatal_to_fill_reconciliation(
         client, "_fill_report_from_fields", lambda fields, ts_event: object()
     )
     monkeypatch.setattr(
-        client, "_order_status_report_from_fields", lambda fields, ts_event: object()
+        client,
+        "_drain_row_from_fields",
+        lambda fields, ts_event: _drain_row_result(object()),
     )
     monkeypatch.setattr(
         client,
@@ -545,7 +563,9 @@ def test_fill_reconciliation_skips_fill_without_status_prerequisite(
         client, "_fill_report_from_fields", lambda fields, ts_event: object()
     )
     monkeypatch.setattr(
-        client, "_order_status_report_from_fields", lambda fields, ts_event: None
+        client,
+        "_drain_row_from_fields",
+        lambda fields, ts_event: _drain_row_result(None),
     )
     monkeypatch.setattr(client, "_send_order_status_report", lambda report: None)
 
@@ -564,8 +584,8 @@ def test_replayed_fill_publishes_status_before_fill_and_is_idempotent(
     published: list[tuple[str, object]] = []
     monkeypatch.setattr(
         client,
-        "_order_status_report_from_fields",
-        lambda fields, ts_event: status_report,
+        "_drain_row_from_fields",
+        lambda fields, ts_event: _drain_row_result(status_report),
     )
     monkeypatch.setattr(
         client, "_fill_report_from_fields", lambda fields, ts_event: fill_report
@@ -779,9 +799,9 @@ def test_generate_order_status_reports_preserves_stop_trigger_type(
 def test_unknown_outcome_closes_order_gate_without_rejection() -> None:
     client = _client()
     client._order_plant = OrderPlantPolicy(OrderPlantState.LIVE)
-    client._order_plant_latched = False
     client._mark_order_plant_failed("submit", RuntimeError("timeout after send"))
-    assert client._order_plant.state is OrderPlantState.DISCONNECTED
+    assert client._order_plant.state is OrderPlantState.LATCHED
+    assert client._order_plant.latched
     assert (
         client._order_status_from_event({"kind": "unknown", "status": "UNKNOWN"})
         is not OrderStatus.REJECTED
@@ -798,7 +818,6 @@ def test_order_plant_failure_latches_across_resync() -> None:
     """
     client = _client()
     client._order_plant = OrderPlantPolicy(OrderPlantState.LIVE)
-    client._order_plant_latched = False
     client._session = cast(
         WireSession,
         SimpleNamespace(
@@ -808,11 +827,13 @@ def test_order_plant_failure_latches_across_resync() -> None:
     )
 
     client._mark_order_plant_failed("submit", RuntimeError("timeout after send"))
-    assert client._order_plant.state is OrderPlantState.DISCONNECTED
+    assert client._order_plant.state is OrderPlantState.LATCHED
+    assert client._order_plant.latched
 
     asyncio.run(client._resync_order_subscription())
 
-    assert client._order_plant.state is OrderPlantState.DISCONNECTED
+    assert client._order_plant.state is OrderPlantState.LATCHED
+    assert client._order_plant.latched
     assert not client._order_plant.allow_submit()
 
 
@@ -820,7 +841,6 @@ def test_resync_without_latch_restores_live() -> None:
     """A plain channel-error resync (no unknown outcome) still recovers to LIVE."""
     client = _client()
     client._order_plant = OrderPlantPolicy(OrderPlantState.LIVE)
-    client._order_plant_latched = False
     client._session = cast(
         WireSession,
         SimpleNamespace(
@@ -1094,8 +1114,10 @@ def _fill_reports_client(
     )
     monkeypatch.setattr(
         client,
-        "_order_status_report_from_fields",
-        lambda fields, ts_event: SimpleNamespace(venue_order_id="V-EXT"),
+        "_drain_row_from_fields",
+        lambda fields, ts_event: _drain_row_result(
+            SimpleNamespace(venue_order_id="V-EXT")
+        ),
     )
     monkeypatch.setattr(client, "_send_order_status_report", lambda status_report: None)
     return client
@@ -1154,8 +1176,10 @@ def test_order_status_reports_last_row_wins_on_equal_ts(
     )
     monkeypatch.setattr(
         client,
-        "_order_status_report_from_fields",
-        lambda fields, ts_event: SimpleNamespace(order_status=fields["kind"]),
+        "_drain_row_from_fields",
+        lambda fields, ts_event: _drain_row_result(
+            SimpleNamespace(order_status=fields["kind"])
+        ),
     )
     reports = asyncio.run(client.generate_order_status_reports(_status_cmd()))
     assert [r.order_status for r in reports] == ["canceled"]
