@@ -50,6 +50,9 @@ uv run pytest -q
 # Live LucidTrading smoke (close MotiveWave first)
 cp .env.example .env   # fill credentials
 uv run python scripts/smoke_lucid_nq.py
+
+# Live test-account e2e (uses this repo's .env; refuses production systems)
+RITHMIC_TEST_DOTENV=.env uv run pytest tests/e2e -v
 ```
 
 Register on a `TradingNode`:
