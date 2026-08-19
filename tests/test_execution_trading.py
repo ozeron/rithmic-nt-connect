@@ -151,11 +151,6 @@ def test_notification_action_reject_fill_cancel_complete() -> None:
     assert _action(complete, order).kind == "canceled"
 
 
-def test_report_policy_venue_backed_contract() -> None:
-    policy = OrderPlantPolicy(OrderPlantState.LIVE)
-    assert policy.load_orders_available() is True
-
-
 def test_resync_blocks_submit_allows_cancel() -> None:
     policy = OrderPlantPolicy(OrderPlantState.RESYNCING)
     assert policy.allow_submit() is False

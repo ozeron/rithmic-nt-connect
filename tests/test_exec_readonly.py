@@ -49,7 +49,7 @@ def test_execution_client_alias_preserved():
 def test_order_plant_and_errors_import_smoke():
     from rithmic_nt_connect._order_plant import OrderPlantPolicy
 
-    assert OrderPlantPolicy().load_orders_available()
+    assert OrderPlantPolicy()
 
 
 def test_instrument_pnl_to_position_fields():

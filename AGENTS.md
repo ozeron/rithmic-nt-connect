@@ -114,6 +114,8 @@ uv run pytest -q
 Live (creds in `.env`, MotiveWave closed):
 
 ```bash
+# Live test-account e2e (uses the repo .env; refuses production systems)
+RITHMIC_TEST_DOTENV=.env uv run pytest tests/e2e -v
 python scripts/smoke_lucid_nq.py
 python scripts/smoke_gateway_shared_ticks.py --seconds 25
 python examples/live_nq_intraday_sandbox.py --seconds 90

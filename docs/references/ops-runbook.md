@@ -140,4 +140,121 @@ the `show_orders` drain actually returns the venue's working orders (not zero).
 A provably-complete retrieval path (e.g. per-basket `show_order_history_detail`
 with exhaustive enumeration) would remove the best-effort caveat.
 
+## Engine in-flight checker fabricates a terminal UNKNOWN reject (operator knob)
+
+Nautilus 1.231.x's `ExecutionEngine._check_inflight_orders` re-queries an order
+that is still `SUBMITTED`/`PENDING_UPDATE`/`PENDING_CANCEL` after
+`inflight_check_threshold_ms` (default 5s), up to `inflight_check_retries`
+(default 5), then `_resolve_inflight_order` synthesizes
+`OrderRejected(reason="UNKNOWN")` (SUBMITTED) or `OrderCanceled` (PENDING_*).
+
+This happens **regardless of what the adapter does**: the engine increments
+`_recon_check_retries` per *issued* `QueryOrder` (the query runs in a task, so
+an adapter exception is swallowed), so the adapter cannot stop the synthesis by
+raising or returning `None`. The adapter's only lever is to resolve the order
+out of `SUBMITTED` first — it does so with a bounded per-`user_tag`
+`load_orders` drain in `generate_order_status_report` — and to fail closed
+(`VenueQueryUnavailable`) whenever the drain cannot resolve the order (the
+query itself is not gated on plant state: a latched plant still attempts the
+drain, which is the recovery path).
+
+**Operator requirement for live trading:** the terminal UNKNOWN synthesis is
+exactly the fabricated state the adapter forbids, and the only reliable way to
+prevent it when the venue genuinely does not know the order is to disable the
+engine checker — set `inflight_check_interval_ms=0` on the
+`LiveExecEngineConfig` (via `TradingNodeConfig.exec_engine`; 1.231.x does not
+define this field on the base `ExecEngineConfig` — verified against the
+installed package). Interval `0` disables the check; verified `> 0` gate in
+`live/execution_engine.py`. Keep `open_check_open_only=True` for the
+reconciliation path (see above). If the check is left enabled, the operator
+accepts that a genuinely-unknown in-flight order will be resolved as a terminal
+UNKNOWN reject by the engine after ~25s (5 retries × 5s threshold) — a strategy
+may then resubmit and duplicate a live order.
+
+## Reconnect re-arm requires orders + a fresh PnL/position observation
+
+When the order plant is latched (a prior operation's venue outcome is unknown),
+a full reconnect re-arms it only after **both** complete (2026-08-19 exec
+hardening, Oracle 2nd + 3rd passes, Macroscope review):
+
+1. A bounded `load_orders` working-orders drain succeeds (one attempt per
+   barrier — a failure is surfaced as unavailable and the next connect is the
+   retry boundary), **and its rows are applied**: reconciliation status reports
+   are published (publish-before-bind — a failed publication aborts the
+   barrier, so the engine sees the venue state before trading resumes) and
+   tracked in-flight orders then get their venue id bound, so an order the
+   venue accepted while disconnected is not left unresolved/in-flight when
+   trading resumes. Stale rows are skipped when the live stream has already
+   advanced the tracked order past the captured snapshot.
+2. A fresh account/position PnL snapshot is observed from the stream when the
+   PnL stream is connected this connect (bounded `asyncio.Event` wait, default
+   `_REARM_PNL_SNAPSHOT_TIMEOUT_S = 5.0`). Positions ride the PnL stream, so
+   re-arming without re-observing it would be blind. With `soft_fail_pnl`
+   there is no stream to observe and the gate is skipped — the plant then
+   re-arms with **blind position context** (see the operational consequences
+   below). Freshness: the drain row's venue timestamp gates the stale-row
+   comparison — a row the venue sent without a timestamp (synthetic 0) is
+   never treated as stale, so its valid snapshot still publishes and binds
+   (Macroscope round 4, 2026-08-19).
+
+The barrier runs on **every** trading (re)connect — not only when a prior
+operation latched the plant — because the disconnect window can hide
+venue-side accepts/fills/terminal outcomes and position changes even when
+nothing was latched. A failed barrier leaves the plant `LATCHED` (recon
+pending — submit/modify blocked) until a later successful connect. The order
+poll loop keeps running during the barrier, so notifications are never
+dropped. The barrier clears the latch **only if the plant is still
+`CONNECTING` and the poll task is alive** when the drain finishes — so a
+*newer* anomaly during the drain (an overfill latch, a handler break, a resync
+failure, or a mid-drain resync, all of which leave `CONNECTING`) survives it.
+A reconnect re-arm can never re-enable trading over a dead/broken order
+stream.
+
+The plant lifecycle is an explicit state machine (`OrderPlantPolicy`; the
+transition table in `tests/test_order_plant.py` is the executable spec):
+`DISCONNECTED` (down / never armed), `CONNECTING` (barrier in progress),
+`LIVE` (armed), `RESYNCING` (mid-session transport resync — cancels stay
+available), `LATCHED` (blocked pending a recon cycle). Execution code never
+assigns the state directly — every transition goes through the policy, and
+`rearm` is the **only** arming transition. Consequences operators should know:
+
+- A mid-session transport resync never clears a latch: `LATCHED` stays
+  `LATCHED` through `resync_start`/`resync_complete`/`resync_failed`. The
+  recovery out of `LATCHED` is a successful re-arm barrier (a teardown also
+  moves the plant out of it, but commands stay blocked by the down state).
+- A resync DURING the reconnect barrier itself latches the plant (`CONNECTING`
+  → `LATCHED`): a channel error while the drain is in flight means the drain
+  rows may predate the drop, and the plant must never re-arm mid-barrier (the
+  only arming transition is `rearm`). The barrier then fails and the next
+  connect retries.
+- A plant that is `DISCONNECTED` (e.g. after a failed resync) cannot re-arm
+  via a later resync — `resync_start` from `DISCONNECTED` stays down. Only a
+  full reconnect (drain + PnL gate) arms the plant. (This closes a hole the
+  old code had: a resync failure followed by a channel-error resync could
+  return to `LIVE` without re-observing venue state.)
+- A persistent run of non-channel poll errors on the order stream (bounded
+  transient streak, default 5) latches the plant: a stream that delivers
+  garbage must not leave trading armed and silent. PnL keeps transient
+  semantics (`soft_fail_pnl` is the operator's escape). The streak is
+  **loop-local** (owned by the poll loop, per stream lifetime): a reconnect
+  or a successful resubscribe starts a fresh count, so transients from a
+  previous stream can never latch a healthy loop — the 4-before-drop + 1-
+  after-recovery class is structurally impossible, not a convention.
+
+**Operational consequences:**
+
+- With `soft_fail_pnl=True`, the PnL gate is **skipped** whenever the PnL
+  subscription soft-fails (`_pnl_connected` is false, which is the default
+  mode): the plant re-arms after the order drain with **blind position
+  context** — the barrier is order-drain-only in that case. This is a
+  documented escape hatch (a soft-failed PnL stream would otherwise block
+  trading with no recovery path), **not** a fail-closed guarantee. If you
+  cannot accept trading on stale positions, restore PnL (or disable trading)
+  before the plant re-arms; with the PnL stream connected, the gate does
+  apply and the plant cannot re-arm until it delivers — deliberate
+  fail-closed.
+- The 5s PnL-snapshot timeout assumes Rithmic pushes account PnL on a short
+  interval; validate the real interval on the P5 canary and raise
+  `_REARM_PNL_SNAPSHOT_TIMEOUT_S` if needed.
+
 See also: `docs/references/my046-rithmic-access.md`, `docs/references/plant-probe-2026-08-12.md`.

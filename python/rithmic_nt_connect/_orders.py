@@ -63,14 +63,19 @@ class OrderAction:
     trade_id: str | None = None
 
 
+def _enum_name(value: Any, prefix: str) -> str:
+    """Canonical enum name: the enum member's ``name`` (or its repr), uppercased
+    and stripped of the class prefix (e.g. ``OrderType.LIMIT`` -> ``"LIMIT"``)."""
+    name = getattr(value, "name", None) or str(value)
+    return str(name).upper().removeprefix(prefix)
+
+
 def _order_type_name(order_type: Any) -> str:
-    name = getattr(order_type, "name", None) or str(order_type)
-    return name.upper().removeprefix("ORDERTYPE.")
+    return _enum_name(order_type, "ORDERTYPE.")
 
 
 def nautilus_side_to_rithmic(side: Any) -> str:
-    name = getattr(side, "name", None) or str(side)
-    name = name.upper().removeprefix("ORDERSIDE.")
+    name = _enum_name(side, "ORDERSIDE.")
     if name in {"BUY", "B"}:
         return "BUY"
     if name in {"SELL", "S"}:
@@ -99,8 +104,7 @@ def trailing_ticks_from_order(order: Any) -> int | None:
     if order_type is None or not is_trailing_order_type(order_type):
         return None
     offset_type = getattr(order, "trailing_offset_type", None)
-    type_name = getattr(offset_type, "name", None) or str(offset_type)
-    type_name = str(type_name).upper().removeprefix("TRAILINGOFFSETTYPE.")
+    type_name = _enum_name(offset_type, "TRAILINGOFFSETTYPE.")
     if type_name != "TICKS":
         raise OrderMapError(
             "Rithmic trailing stops require TrailingOffsetType.TICKS; "
@@ -121,8 +125,7 @@ def trailing_ticks_from_order(order: Any) -> int | None:
 
 
 def nautilus_tif_to_rithmic(tif: Any) -> str:
-    name = getattr(tif, "name", None) or str(tif)
-    name = name.upper().removeprefix("TIMEINFORCE.")
+    name = _enum_name(tif, "TIMEINFORCE.")
     mapped = _TIF_TO_RITHMIC.get(name)
     if mapped is None:
         raise OrderMapError(f"unsupported time in force for Rithmic: {tif!r}")
@@ -163,13 +166,24 @@ def order_notification_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
         "total_fill_size": d.get("total_fill_size"),
         "total_unfilled_size": d.get("total_unfilled_size"),
         "fill_size": d.get("fill_size"),
-        "price": d.get("price"),
-        "trigger_price": d.get("trigger_price"),
-        "avg_fill_price": d.get("avg_fill_price"),
-        "fill_price": d.get("fill_price"),
+        # Single convert boundary for pending/unknown prices: the official
+        # protocol encodes an unavailable price as an absent field, and some
+        # payloads additionally report ``-1.0``; both become ``None`` here so
+        # no downstream builder can fabricate a ``Price``/``Decimal`` that was
+        # never traded.
+        "price": sentinel_none(d.get("price")),
+        "trigger_price": sentinel_none(d.get("trigger_price")),
+        "avg_fill_price": sentinel_none(d.get("avg_fill_price")),
+        "fill_price": sentinel_none(d.get("fill_price")),
         "transaction_type": d.get("transaction_type"),
-        "price_type": d.get("price_type"),
-        "duration": d.get("duration"),
+        # Single convert boundary for closed-set enums: a value survives only
+        # when it IS the exact integer (bools and non-integral numerics are
+        # coercion traps — ``int(True) == 1``, ``int(1.5) == 1`` — and become
+        # ``None`` here so no downstream builder can fabricate a LIMIT/DAY
+        # from garbage). Membership in the known enum maps is decided later
+        # (the trust boundary), not here.
+        "price_type": enum_int(d.get("price_type")),
+        "duration": enum_int(d.get("duration")),
         "fill_id": d.get("fill_id"),
         "text": d.get("text"),
         "report_text": d.get("report_text"),
@@ -219,6 +233,52 @@ def kind_from_notify(
             return "cancel_rejected"
         return None
     return None
+
+
+def enum_int(value: Any) -> int | None:
+    """Exact closed-set coercion: the integer only when the input IS that
+    integer.
+
+    ``bool`` is an ``int`` subclass (``int(True) == 1``) and non-integral
+    numerics truncate (``int(1.5) == 1``) — both would fabricate a valid enum
+    from garbage, so they become ``None``. Integral strings (``"1"``) and
+    integral floats (``1.0``) coerce exactly and are accepted; anything else
+    (``None``, non-numeric, non-integral) becomes ``None``.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+    try:
+        coerced = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if coerced != value:
+        return None
+    return coerced
+
+
+def sentinel_none(value: Any) -> Any:
+    """Map venue pending/unknown price values to ``None``.
+
+    The official Rithmic protocol encodes an unavailable price as an absent
+    field (``Option<f64>``), which the converters already map to ``None``;
+    some venue payloads additionally report a pending price as ``-1.0``.
+    Mapping both to ``None`` is defensive and provably safe: ``-1.0`` can
+    never be a traded price, so the mapping cannot fabricate or corrupt a
+    real fill. ``None`` values pass through unchanged.
+    """
+    if value is None:
+        return None
+    try:
+        if float(value) == -1.0:
+            return None
+    except (TypeError, ValueError):
+        pass
+    return value
 
 
 def trade_id_from_fill_fields(fields: Mapping[str, Any], ts_event: int) -> str:
@@ -318,15 +378,17 @@ def notification_action(fields: Mapping[str, Any], order: Any) -> OrderAction | 
     if kind == "triggered":
         return OrderAction(kind="triggered")
     if kind == "filled":
-        fill_px = fields.get("fill_price")
+        # "Is a fill" is independent of "is this fill priceable": a definitive
+        # fill whose price is absent/pending must still reach the fill handler,
+        # which latches (exposure incomplete) instead of silently dropping it.
         fill_sz = fields.get("fill_size")
-        if fill_px is None or fill_sz is None:
+        if fill_sz is None:
             return None
         ts_event = int(fields.get("ts_event") or 0)
         return OrderAction(
             kind="filled",
             fill_qty=int(fill_sz),
-            fill_px=fill_px,
+            fill_px=fields.get("fill_price"),
             trade_id=trade_id_from_fill_fields(fields, ts_event),
         )
     return None
