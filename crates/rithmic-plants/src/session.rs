@@ -22,8 +22,8 @@ use tokio::sync::broadcast::error::TryRecvError;
 use crate::account::{pick_account, rows_from_account_list};
 use crate::config::SessionConfig;
 use crate::dto::{
-    FrontMonthDto, HistoryBarDto, HistoryTickDto, OrderNotificationDto, PlantEvent,
-    ReferenceDataDto, TimeBarProbeRow,
+    AccountRmsInfoDto, FrontMonthDto, HistoryBarDto, HistoryTickDto, OrderNotificationDto,
+    PlantEvent, ProductRmsInfoDto, ReferenceDataDto, TimeBarProbeRow,
 };
 use crate::error::{Error, Result};
 use crate::history::{
@@ -580,6 +580,25 @@ impl RithmicSession {
         load_orders_on(self.order_handle()?).await
     }
 
+    /// Load product-level RMS info (per-product commission fill rates).
+    ///
+    /// One row per product the account can trade; rows without a published
+    /// ``commission_fill_rate`` keep the field `None`. Requires the order plant
+    /// (read-only query — never places or cancels).
+    pub async fn load_product_rms_info(&mut self) -> Result<Vec<ProductRmsInfoDto>> {
+        self.ensure_order_plant().await?;
+        load_product_rms_info_on(self.order_handle()?).await
+    }
+
+    /// Load account-level RMS info (default commission rate).
+    ///
+    /// Read-only query on the order plant; rows without a published
+    /// ``default_commission`` keep the field `None`.
+    pub async fn load_account_rms_info(&mut self) -> Result<Vec<AccountRmsInfoDto>> {
+        self.ensure_order_plant().await?;
+        load_account_rms_info_on(self.order_handle()?).await
+    }
+
     /// Disconnect only the order plant (leaves ticker/history/PnL connected).
     pub async fn disconnect_order_plant(&mut self) -> Result<()> {
         if let Some(order) = self.order.take() {
@@ -1134,6 +1153,32 @@ pub async fn load_orders_on(handle: &RithmicOrderPlantHandle) -> Result<Vec<Orde
     let rx = handle.subscription_receiver.resubscribe();
     check_response(handle.show_orders().await?, "show_orders")?;
     drain_order_notifications(rx).await
+}
+
+/// Fetch product-level RMS info from an already-connected order-plant handle
+/// (no session lock). Read-only venue config — never places or cancels.
+pub async fn load_product_rms_info_on(
+    handle: &RithmicOrderPlantHandle,
+) -> Result<Vec<ProductRmsInfoDto>> {
+    let responses = handle.get_product_rms_info().await?;
+    collect_history_rows(
+        responses,
+        "load_product_rms_info",
+        ProductRmsInfoDto::from_response,
+    )
+}
+
+/// Fetch account-level RMS info from an already-connected order-plant handle
+/// (no session lock). Read-only venue config — never places or cancels.
+pub async fn load_account_rms_info_on(
+    handle: &RithmicOrderPlantHandle,
+) -> Result<Vec<AccountRmsInfoDto>> {
+    let responses = handle.get_account_rms_info().await?;
+    collect_history_rows(
+        responses,
+        "load_account_rms_info",
+        AccountRmsInfoDto::from_response,
+    )
 }
 
 #[cfg(test)]

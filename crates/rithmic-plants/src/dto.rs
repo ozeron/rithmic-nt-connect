@@ -29,6 +29,55 @@ pub enum PlantEvent {
     },
 }
 
+/// Product-level RMS (Risk Management System) info — commission fill rate per
+/// product code, as published by the order plant. Read-only venue config.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProductRmsInfoDto {
+    /// Product code (e.g. `"MNQ"`, `"ES"`).
+    pub product_code: Option<String>,
+    /// Per-contract commission fill rate in the account currency.
+    pub commission_fill_rate: Option<f64>,
+    /// Field-presence bitmask from the venue (see `ResponseProductRmsInfo`).
+    pub presence_bits: Option<u32>,
+}
+
+/// Account-level RMS info — default commission rate (fallback when a product
+/// has no specific fill rate). Read-only venue config.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccountRmsInfoDto {
+    pub account_id: Option<String>,
+    /// Default per-contract commission rate in the account currency.
+    pub default_commission: Option<f64>,
+    /// Field-presence bitmask from the venue (see `ResponseAccountRmsInfo`).
+    pub presence_bits: Option<u32>,
+}
+
+impl ProductRmsInfoDto {
+    pub(crate) fn from_response(resp: &RithmicResponse) -> Option<Self> {
+        match &resp.message {
+            RithmicMessage::ResponseProductRmsInfo(m) => Some(Self {
+                product_code: m.product_code.clone(),
+                commission_fill_rate: m.commission_fill_rate,
+                presence_bits: m.presence_bits,
+            }),
+            _ => None,
+        }
+    }
+}
+
+impl AccountRmsInfoDto {
+    pub(crate) fn from_response(resp: &RithmicResponse) -> Option<Self> {
+        match &resp.message {
+            RithmicMessage::ResponseAccountRmsInfo(m) => Some(Self {
+                account_id: m.account_id.clone(),
+                default_commission: m.default_commission,
+                presence_bits: m.presence_bits,
+            }),
+            _ => None,
+        }
+    }
+}
+
 /// Order notification fields from Rithmic or exchange plants.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OrderNotificationDto {

@@ -2,9 +2,9 @@
 //! DTOs and the wire `pb` types). No Nautilus types cross this boundary.
 
 use rithmic_plants::dto::{
-    AccountPnlDto, BboDto, FrontMonthDto, HistoryBarDto, HistoryTickDto, InstrumentPnlDto,
-    LastTradeDto, OrderBookDto, OrderNotificationDto, PlantEvent, ReferenceDataDto,
-    TimeBarProbeRow,
+    AccountPnlDto, AccountRmsInfoDto, BboDto, FrontMonthDto, HistoryBarDto, HistoryTickDto,
+    InstrumentPnlDto, LastTradeDto, OrderBookDto, OrderNotificationDto, PlantEvent,
+    ProductRmsInfoDto, ReferenceDataDto, TimeBarProbeRow,
 };
 use rithmic_rs::RithmicAccount;
 
@@ -37,6 +37,22 @@ pub fn bbo_to_pb(b: BboDto) -> pb::Bbo {
         usecs: b.usecs,
         ts_event_ns: b.ts_event_ns,
         is_snapshot: b.is_snapshot,
+    }
+}
+
+pub fn product_rms_info_to_pb(r: ProductRmsInfoDto) -> pb::ProductRmsInfo {
+    pb::ProductRmsInfo {
+        product_code: r.product_code,
+        commission_fill_rate: r.commission_fill_rate,
+        presence_bits: r.presence_bits,
+    }
+}
+
+pub fn account_rms_info_to_pb(r: AccountRmsInfoDto) -> pb::AccountRmsInfo {
+    pb::AccountRmsInfo {
+        account_id: r.account_id,
+        default_commission: r.default_commission,
+        presence_bits: r.presence_bits,
     }
 }
 

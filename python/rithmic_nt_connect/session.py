@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import threading
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from rithmic_nt_connect.config import ConnectMode, SessionConfig
 from rithmic_nt_connect.errors import AlreadyConnectedError
+
+if TYPE_CHECKING:
+    from rithmic_gateway.types import AccountRmsInfo, ProductRmsInfo
 
 
 def _load_session_lock() -> Any:
@@ -125,6 +128,8 @@ class OrderSession(Protocol):
     ) -> None: ...
     def cancel_all_orders(self) -> None: ...
     def load_orders(self, start_ssboe: int, end_ssboe: int) -> list[dict[str, Any]]: ...
+    def load_product_rms_info(self) -> list[ProductRmsInfo]: ...
+    def load_account_rms_info(self) -> list[AccountRmsInfo]: ...
     def poll_order_event(self) -> dict[str, Any] | None: ...
 
 
@@ -400,6 +405,12 @@ class _FlockedDirectSession:
 
     def load_orders(self, start_ssboe: int, end_ssboe: int) -> list[dict[str, Any]]:
         return self._inner.load_orders(start_ssboe, end_ssboe)
+
+    def load_product_rms_info(self) -> list[ProductRmsInfo]:
+        return self._inner.load_product_rms_info()
+
+    def load_account_rms_info(self) -> list[AccountRmsInfo]:
+        return self._inner.load_account_rms_info()
 
     def poll_order_event(self) -> dict[str, Any] | None:
         return self._inner.poll_order_event()

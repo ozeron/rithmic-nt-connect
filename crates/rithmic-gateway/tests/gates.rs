@@ -2,8 +2,9 @@
 
 use rithmic_gateway::pb::frame::Body;
 use rithmic_gateway::pb::{
-    CancelAllOrdersRequest, LoadOrdersRequest, PlaceBracketOrderRequest, PlaceOrderRequest,
-    ResolvedAccountRequest, SubscribeBracketUpdatesRequest, SubscribeOrderUpdatesRequest,
+    CancelAllOrdersRequest, LoadAccountRmsInfoRequest, LoadOrdersRequest,
+    LoadProductRmsInfoRequest, PlaceBracketOrderRequest, PlaceOrderRequest, ResolvedAccountRequest,
+    SubscribeBracketUpdatesRequest, SubscribeOrderUpdatesRequest,
 };
 use rithmic_gateway::server::{gate_rpc_for_test, rpc_sequence_with_gates};
 use rithmic_gateway::subscriptions::ParentGates;
@@ -185,6 +186,47 @@ fn load_orders_errors_when_no_session() {
         !plan.order,
         "failed load_orders must not leave order intent"
     );
+}
+
+#[test]
+fn fetch_rms_denied_when_trading_disabled() {
+    // Order-plant login is a trading capability: the RMS read must be gated
+    // the same as load_orders so `RITHMIC_ENABLE_TRADING=0` cannot bypass it.
+    assert_error_code(
+        gate_rpc_for_test(
+            &ParentGates {
+                trading_enabled: false,
+                cancel_all_enabled: false,
+            },
+            Body::LoadProductRmsInfo(LoadProductRmsInfoRequest {}),
+        ),
+        "trading_disabled",
+    );
+    assert_error_code(
+        gate_rpc_for_test(
+            &ParentGates {
+                trading_enabled: false,
+                cancel_all_enabled: false,
+            },
+            Body::LoadAccountRmsInfo(LoadAccountRmsInfoRequest {}),
+        ),
+        "trading_disabled",
+    );
+}
+
+#[test]
+fn fetch_rms_errors_when_no_session() {
+    let (bodies, plan) = rpc_sequence_with_gates(
+        trading_on(),
+        vec![
+            Body::LoadProductRmsInfo(LoadProductRmsInfoRequest {}),
+            Body::LoadAccountRmsInfo(LoadAccountRmsInfoRequest {}),
+        ],
+    );
+    for body in bodies {
+        assert_error_code(body, "no_session");
+    }
+    assert!(!plan.order, "failed rms fetch must not leave order intent");
 }
 
 #[test]

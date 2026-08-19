@@ -11,9 +11,9 @@ use tokio::runtime::Runtime;
 
 use rithmic_plants::config::{SessionConfig, DEFAULT_LUCID_URL};
 use rithmic_plants::dto::{
-    AccountPnlDto, BboDto, FrontMonthDto, HistoryBarDto, HistoryTickDto, InstrumentPnlDto,
-    LastTradeDto, OrderBookDto, OrderNotificationDto, PlantEvent, ReferenceDataDto,
-    TimeBarProbeRow,
+    AccountPnlDto, AccountRmsInfoDto, BboDto, FrontMonthDto, HistoryBarDto, HistoryTickDto,
+    InstrumentPnlDto, LastTradeDto, OrderBookDto, OrderNotificationDto, PlantEvent,
+    ProductRmsInfoDto, ReferenceDataDto, TimeBarProbeRow,
 };
 use rithmic_plants::error::Error;
 use rithmic_plants::history::parse_time_bar_type;
@@ -74,6 +74,13 @@ fn set_opt_i32(dict: &Bound<'_, PyDict>, key: &str, value: Option<i32>) -> PyRes
 }
 
 fn set_opt_u64(dict: &Bound<'_, PyDict>, key: &str, value: Option<u64>) -> PyResult<()> {
+    if let Some(v) = value {
+        dict.set_item(key, v)?;
+    }
+    Ok(())
+}
+
+fn set_opt_u32(dict: &Bound<'_, PyDict>, key: &str, value: Option<u32>) -> PyResult<()> {
     if let Some(v) = value {
         dict.set_item(key, v)?;
     }
@@ -208,6 +215,24 @@ fn order_notification_dict(py: Python<'_>, n: OrderNotificationDto) -> PyResult<
     set_opt_i32(&d, "usecs", n.usecs)?;
     set_opt_u64(&d, "ts_event_ns", n.ts_event_ns)?;
     set_opt_bool(&d, "is_snapshot", n.is_snapshot)?;
+    Ok(d.unbind())
+}
+
+fn product_rms_info_dict(py: Python<'_>, r: ProductRmsInfoDto) -> PyResult<Py<PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("type", "product_rms_info")?;
+    set_opt_str(&d, "product_code", r.product_code)?;
+    set_opt_f64(&d, "commission_fill_rate", r.commission_fill_rate)?;
+    set_opt_u32(&d, "presence_bits", r.presence_bits)?;
+    Ok(d.unbind())
+}
+
+fn account_rms_info_dict(py: Python<'_>, r: AccountRmsInfoDto) -> PyResult<Py<PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("type", "account_rms_info")?;
+    set_opt_str(&d, "account_id", r.account_id)?;
+    set_opt_f64(&d, "default_commission", r.default_commission)?;
+    set_opt_u32(&d, "presence_bits", r.presence_bits)?;
     Ok(d.unbind())
 }
 
@@ -882,6 +907,34 @@ impl PySession {
         runtime()
             .block_on(inner.subscribe_bracket_updates())
             .map_err(to_py_err)
+    }
+
+    /// Fetch product-level RMS info (per-product commission fill rates).
+    fn load_product_rms_info(&self, py: Python<'_>) -> PyResult<Vec<Py<PyDict>>> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let rows = runtime()
+            .block_on(inner.load_product_rms_info())
+            .map_err(to_py_err)?;
+        rows.into_iter()
+            .map(|r| product_rms_info_dict(py, r))
+            .collect()
+    }
+
+    /// Fetch account-level RMS info (default commission rate).
+    fn load_account_rms_info(&self, py: Python<'_>) -> PyResult<Vec<Py<PyDict>>> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let rows = runtime()
+            .block_on(inner.load_account_rms_info())
+            .map_err(to_py_err)?;
+        rows.into_iter()
+            .map(|r| account_rms_info_dict(py, r))
+            .collect()
     }
 
     #[pyo3(signature = (

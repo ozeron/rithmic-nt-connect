@@ -320,6 +320,12 @@ class RithmicExecutionClient(LiveExecutionClient):
         # PnL is streamed frequently; avoid publishing identical AccountState
         # events (and making Nautilus Portfolio log each one).
         self._last_account_state_key: tuple[str, str, Decimal] | None = None
+        # Venue commission rates fetched from the order-plant RMS info at
+        # connect: per-contract rate keyed by product code (e.g. ``MNQ``), plus
+        # the account-level default as fallback. Empty on fetch failure — fills
+        # then report zero commission (allowed to be temporarily unavailable).
+        self._commission_rates: dict[str, Decimal] = {}
+        self._default_commission: Decimal | None = None
 
     _MAX_SEEN_FILL_KEYS = 10_000
     _REARM_PNL_SNAPSHOT_TIMEOUT_S = 5.0
@@ -336,6 +342,102 @@ class RithmicExecutionClient(LiveExecutionClient):
         self._seen_fill_keys.move_to_end(key)
         while len(self._seen_fill_keys) > self._MAX_SEEN_FILL_KEYS:
             self._seen_fill_keys.popitem(last=False)
+
+    async def _load_commission_rates(self) -> None:
+        """Fetch venue commission rates (order-plant RMS info) at connect.
+
+        Product fill rates keyed by product code, with the account default as
+        fallback. The two fetches are independent: a failed account-default
+        fetch must NOT clear an already-loaded product table (and vice versa).
+        Best-effort: failure leaves the affected cache empty and fills report
+        zero commission (the review checklist requires commission to be allowed
+        to be temporarily unavailable without crashing). Never raises.
+        """
+        try:
+            rows = await asyncio.to_thread(self._session.load_product_rms_info)
+        except Exception as exc:
+            rows = []
+            self._log.warning(
+                f"product commission rates unavailable (0.0 fallback): {exc}"
+            )
+        rates: dict[str, Decimal] = {}
+        for row in rows:
+            code = row.get("product_code")
+            rate = row.get("commission_fill_rate")
+            if code and rate is not None:
+                rates[str(code)] = Decimal(str(rate))
+        self._commission_rates = rates
+        try:
+            account_rows = await asyncio.to_thread(self._session.load_account_rms_info)
+        except Exception as exc:
+            account_rows = []
+            self._log.warning(f"account commission default unavailable: {exc}")
+        # Only the active account's default may back unknown products; another
+        # account's schedule would mis-charge fills (best effort when the
+        # account is not yet resolvable at connect time).
+        try:
+            active_account = self._account_raw()
+        except Exception:
+            active_account = None
+        default = next(
+            (
+                r.get("default_commission")
+                for r in account_rows
+                if (
+                    active_account is None or str(r.get("account_id")) == active_account
+                )
+                and r.get("default_commission") is not None
+            ),
+            None,
+        )
+        self._default_commission = (
+            Decimal(str(default)) if default is not None else None
+        )
+        self._log.info(
+            f"commission rates: {len(rates)} products"
+            + (
+                f", account default {self._default_commission}"
+                if self._default_commission is not None
+                else ""
+            )
+        )
+
+    def _product_code_for_fill(
+        self, instrument_id: InstrumentId, symbol: str | None
+    ) -> str | None:
+        """RMS product code for one fill's commission lookup.
+
+        Venue contract (verified from rithmic-rs ``MNM_SYMBOL`` tag 110100 +
+        live probe): order notifications carry the contract symbol (e.g.
+        ``MNQU6``) while RMS rates are keyed by product code (e.g. ``MNQ``).
+        The reference-data instrument knows the mapping; fall back to the raw
+        symbol for products where symbol == product code and for instruments
+        not in the cache.
+        """
+        if instrument_id is not None:
+            instrument = self._cache.instrument(instrument_id)
+            if instrument is not None:
+                code = (getattr(instrument, "info", None) or {}).get(
+                    "rithmic_product_code"
+                )
+                if code:
+                    return str(code)
+        return symbol
+
+    def _commission_money(self, product_code: str | None, qty: int) -> Money:
+        """Venue commission for one fill: per-contract RMS rate x qty (USD).
+
+        Unknown products fall back to the account default, then to zero.
+        """
+        if product_code is not None:
+            rate = self._commission_rates.get(product_code)
+            if rate is not None:
+                return Money(rate * Decimal(qty), Currency.from_str("USD"))
+        if self._default_commission is not None:
+            return Money(
+                self._default_commission * Decimal(qty), Currency.from_str("USD")
+            )
+        return Money(Decimal(0), Currency.from_str("USD"))
 
     @property
     def enable_trading(self) -> bool:
@@ -390,6 +492,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                     )
                 raise
             self._seed_account_if_needed()
+            await self._load_commission_rates()
             # The poll loop starts before the re-arm barrier (never-drop):
             # notifications must keep flowing even while the plant is
             # un-armed, so a slow or failed drain cannot drop venue events.
@@ -1140,7 +1243,10 @@ class RithmicExecutionClient(LiveExecutionClient):
                     f"leaves {leaves} by {fill_qty - leaves}; Nautilus clamps "
                     "leaves_qty and tracks overfill_qty; recon will re-sync",
                 )
-            commission = Money(Decimal(0), Currency.from_str("USD"))
+            commission = self._commission_money(
+                self._product_code_for_fill(instrument_id, fields.get("symbol")),
+                int(fill_qty),
+            )
             self.generate_order_filled(
                 strategy_id,
                 instrument_id,
@@ -1211,7 +1317,10 @@ class RithmicExecutionClient(LiveExecutionClient):
             order_side=side,
             last_qty=last_qty,
             last_px=last_px,
-            commission=Money(Decimal(0), Currency.from_str("USD")),
+            commission=self._commission_money(
+                self._product_code_for_fill(instrument_id, fields.get("symbol")),
+                int(last_qty),
+            ),
             liquidity_side=LiquiditySide.NO_LIQUIDITY_SIDE,
             report_id=UUID4(),
             ts_event=report_ts,

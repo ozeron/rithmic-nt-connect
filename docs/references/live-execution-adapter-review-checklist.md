@@ -177,8 +177,10 @@ References: #3176, #3476, #3104, #3622, and #4619.
       handled without creating a fake price. (sentinel `-1.0` → `None` at the convert boundary)
 - [ ] A filled report with missing price is held/rejected as incomplete rather
       than leaving a phantom accepted order.
-- [ ] Commission is allowed to be temporarily unavailable without crashing the
-      fill path.
+- [x] Commission is allowed to be temporarily unavailable without crashing the
+      fill path. (venue RMS fill rates fetched at connect — product `commission_fill_rate`,
+      account `default_commission` fallback; fetch failure logs and falls back to zero)
+      (C1–C5 `tests/test_exec_transport_e2e.py`)
 - [x] `None` and venue sentinel values such as `-1.0` never reach `Money()`.
       (`test_sentinel_status_fields_are_none`, `test_sentinel_fill_price_suppressed_not_crashed`)
 
