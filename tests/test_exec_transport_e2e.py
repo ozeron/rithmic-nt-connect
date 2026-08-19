@@ -83,6 +83,7 @@ def _trading_client(
         Any, SimpleNamespace(enable_trading=enable_trading, soft_fail_pnl=False)
     )
     client._order_plant = OrderPlantPolicy(plant_state)
+    client._order_poll_transient_streak = 0
     client._pnl_snapshot_observed = asyncio.Event()
     client._session = cast(WireSession, session or FaultInjectingSession())
     client._seen_fill_keys = OrderedDict()
@@ -448,6 +449,57 @@ def test_stale_drain_row_does_not_regress_live_resolution() -> None:
     assert report.venue_order_id == VenueOrderId("B1")
 
 
+def test_recovery_prefers_latest_strict_row() -> None:
+    """Oracle #5: per-tag recovery answers with the NEWEST matching strict row
+    (same (ts_event, arrival) policy as the bulk status path), not the first —
+    a drain holding ACCEPTED(t1) then CANCELED(t2) for the same order must not
+    bind on the stale OPEN row."""
+    accepted = _working_order_row(
+        tag="O-1", basket="B1", ts_event=1_700_000_000_000_000_001
+    )
+    canceled = _working_order_row(
+        tag="O-1", basket="B1", ts_event=1_700_000_000_000_000_002
+    )
+    canceled.update({"kind": "canceled", "status": "CANCELLED"})
+    session = FaultInjectingSession(working_orders=[accepted, canceled])
+    client = _trading_client(session)
+    order = _inflight_order()
+    client._cache._orders[str(order.client_order_id)] = order
+
+    report = asyncio.run(client.generate_order_status_report(_query()))
+
+    assert report is not None
+    assert report.order_status == OrderStatus.CANCELED  # newest row wins
+    assert report.venue_order_id == VenueOrderId("B1")
+    assert client._cache.venue_order_id(ClientOrderId("O-1")) == VenueOrderId("B1")
+
+
+def test_order_poll_persistent_transient_fails_closed() -> None:
+    """Oracle #6: persistent non-channel errors on the order stream fail closed
+    (latch) instead of being swallowed as transient forever while the plant
+    stays LIVE and silent."""
+    client = _trading_client()
+    calls = {"n": 0}
+
+    def poll_fn() -> dict[str, object] | None:
+        calls["n"] += 1
+        raise ValueError("protocol decode error")
+
+    awaitable = RithmicExecutionClient._plant_poll_loop(
+        cast(RithmicExecutionClient, client),
+        name="order",
+        poll_fn=poll_fn,
+        on_event=lambda event: None,
+        on_resync=lambda: None,
+    )
+    asyncio.run(awaitable)
+
+    assert calls["n"] == RithmicExecutionClient._ORDER_POLL_MAX_TRANSIENT
+    assert client._order_plant.latched
+    assert client._order_plant.state is OrderPlantState.LATCHED
+    assert not client._order_plant.allow_submit()
+
+
 class _ConnectSession(WireSessionStub):
     """Session double for ``_connect``: PnL + order plants connect, and
     ``load_orders`` fails, heals, or runs a hook on demand."""
@@ -507,10 +559,18 @@ def _connect_client(
         return None
 
     monkeypatch.setattr(client, "_await_account_registered", _await_account_registered)
-    monkeypatch.setattr(client, "create_task", lambda coro, log_msg=None: coro.close())
+
+    def _create_task(coro: Any, log_msg: str | None = None) -> asyncio.Task[Any]:
+        # Real poll task (never-drop): ``rearm`` requires a live poll task, so
+        # a None task must not count as alive. The session doubles return None
+        # from their poll fns, so the loop idles; asyncio.run cancels it at
+        # loop shutdown.
+        return asyncio.ensure_future(coro)
+
+    monkeypatch.setattr(client, "create_task", _create_task)
     if stub_snapshot_wait:
-        # Most reconnect tests stub the PnL-snapshot wait (the poll loop is
-        # closed, so nothing would deliver one); the dedicated
+        # Most reconnect tests stub the PnL-snapshot wait (the PnL session
+        # double delivers nothing); the dedicated
         # ``test_reconnect_ream_requires_pnl_snapshot`` exercises it for real.
         async def _no_snapshot_wait() -> None:
             return None
@@ -726,6 +786,98 @@ def test_drain_row_boundary_usable_bindable_are_one_decision(
     row = client._drain_row_from_fields(malformed, 1)
     assert not row.usable and not row.bindable
     assert row.strict_report is None and row.permissive_report is None
+
+
+def test_strict_drain_row_triggered_binds_and_reports_triggered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Oracle #2: an exchange TRIGGER drain row (triggered-but-working stop) is
+    strict-usable — it binds a venue id and reports TRIGGERED for a limit-style
+    stop, ACCEPTED (working) for a market-style stop. Previously the row was
+    strict-unusable and in-flight recovery skipped it entirely."""
+    client = _trading_client()
+    # Limit-style stop (price_type=3): TRIGGERED.
+    stop_limit = _working_order_row(tag="O-1", basket="B1")
+    stop_limit.update(
+        {
+            "source": "exchange",
+            "kind": "triggered",
+            "status": "TRIGGERED",
+            "price_type": 3,
+        }
+    )
+    row = client._drain_row_from_fields(stop_limit, 1)
+    assert row.bindable
+    assert row.strict_report is not None
+    assert row.strict_report.order_status is OrderStatus.TRIGGERED
+    # Market-style stop (price_type=4): no TRIGGERED state, stays working.
+    stop_market = _working_order_row(tag="O-2", basket="B2")
+    stop_market.update(
+        {
+            "source": "exchange",
+            "kind": "triggered",
+            "status": "TRIGGERED",
+            "price_type": 4,
+        }
+    )
+    row = client._drain_row_from_fields(stop_market, 1)
+    assert row.bindable
+    assert row.strict_report is not None
+    assert row.strict_report.order_status is OrderStatus.ACCEPTED
+
+
+def test_reconnect_ream_drain_publish_failure_fails_barrier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Oracle #4: the re-arm barrier must not succeed when a drained status
+    report fails to publish — the venue id is bound only after the report is
+    applied, and a publication failure aborts the barrier (latch)."""
+    session = FaultInjectingSession(
+        working_orders=[_working_order_row(tag="O-1", basket="B1")]
+    )
+    client = _connect_client(session, monkeypatch)
+    order = _inflight_order()
+    client._cache._orders[str(order.client_order_id)] = order
+    monkeypatch.setattr(
+        client,
+        "_send_order_status_report",
+        lambda report: (_ for _ in ()).throw(RuntimeError("engine bus down")),
+    )
+
+    asyncio.run(client._connect())
+
+    # Barrier aborted: plant latched, venue id NOT bound (commit ordering).
+    assert client._order_plant.latched
+    assert client._order_plant.state is OrderPlantState.LATCHED
+    assert not client._order_plant.allow_submit()
+    assert client._cache.venue_order_id(ClientOrderId("O-1")) is None
+
+
+def test_apply_drain_rows_skips_stale_live_advanced_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Oracle #7: the live stream wins over a stale drain snapshot — a tracked
+    order the live stream already resolved (terminal, or newer local ts_last)
+    must not be re-published from the captured drain row."""
+    session = FaultInjectingSession(
+        working_orders=[_working_order_row(tag="O-1", basket="B1")]
+    )
+    client = _connect_client(session, monkeypatch)
+    # The live stream advanced the order AFTER the drain captured its ACCEPTED
+    # row: still open, but with a newer local ts_last than the drain row.
+    order = _inflight_order()
+    order.ts_last = 1_700_000_000_000_000_001  # newer than the row (…000)
+    client._cache._orders[str(order.client_order_id)] = order
+    reports: list[OrderStatusReport] = []
+    monkeypatch.setattr(
+        client, "_send_order_status_report", lambda report: reports.append(report)
+    )
+
+    asyncio.run(client._connect())
+
+    assert client._order_plant.allow_submit()
+    assert reports == [], "stale drain row must not be published over live state"
+    assert client._cache.venue_order_id(ClientOrderId("O-1")) is None
 
 
 def test_pnl_marker_only_after_successful_account_processing(
@@ -987,6 +1139,7 @@ def test_fault_inject_submit_unknown_latches_and_recovers_without_duplicate(
     # the plant, and the batch status query reports it exactly once.
     session.fault = None
     client = _connect_client(session, monkeypatch)
+    monkeypatch.setattr(client, "_send_order_status_report", lambda report: None)
     asyncio.run(client._connect())
 
     assert not client._order_plant.latched

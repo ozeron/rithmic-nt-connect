@@ -11,10 +11,12 @@ possible transitions is finite and pinned by the transition table in
 blocked until a recon cycle (a successful re-arm)". It is not a parallel flag on
 the client, and it cannot be collapsed into the transport states — a resync
 must not re-arm a latched plant, and a failed re-arm leaves recon pending. Only
-``latch`` enters it; only a successful ``rearm`` leaves it. The re-arm race
-token is ``rearm``: it arms only from ``CONNECTING`` with a live poll task, so
-any anomaly during the barrier (a newer latch, a stream failure, a mid-drain
-resync) leaves the plant un-armed.
+``latch`` enters it; the recovery out of it is a successful ``rearm`` (a new
+``begin_connect``/``disconnect`` also moves out of it, but commands stay
+blocked by the un-armed/down state). The re-arm race token is ``rearm``: it
+arms only from ``CONNECTING`` with a live poll task, so any anomaly during the
+barrier (a newer latch, a stream failure, a mid-drain resync) leaves the plant
+un-armed.
 """
 
 from __future__ import annotations
@@ -46,7 +48,7 @@ class OrderPlantPolicy:
 
     @property
     def latched(self) -> bool:
-        """True while a recon cycle is required before commands can resume."""
+        """True while commands are blocked pending a recon cycle."""
         return self._state is OrderPlantState.LATCHED
 
     # --- transitions ---
@@ -71,9 +73,17 @@ class OrderPlantPolicy:
         From ``LATCHED`` the plant stays blocked (a resync never clears a
         latch). From ``DISCONNECTED`` it stays down: a dead/broken stream must
         not re-arm via a resync — only the full-connect re-arm barrier (drain
-        + PnL gate) may arm the plant.
+        + PnL gate) may arm the plant. From ``CONNECTING`` it latches: a
+        channel error during the re-arm barrier means the drain may predate the
+        drop, so the plant must not enter the cancel-enabled ``RESYNCING`` path
+        (whose ``resync_complete`` would re-arm it to ``LIVE`` mid-barrier).
+        The barrier's ``rearm`` then fails over ``LATCHED`` and the plant stays
+        un-armed.
         """
         if self._state in (OrderPlantState.LATCHED, OrderPlantState.DISCONNECTED):
+            return
+        if self._state is OrderPlantState.CONNECTING:
+            self._state = OrderPlantState.LATCHED
             return
         self._state = OrderPlantState.RESYNCING
 

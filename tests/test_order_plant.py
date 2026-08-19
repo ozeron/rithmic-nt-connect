@@ -46,10 +46,13 @@ TRANSITIONS: dict[tuple[OrderPlantState, str], OrderPlantState] = {
     (OrderPlantState.RESYNCING, "rearm(dead)"): OrderPlantState.DISCONNECTED,
     (OrderPlantState.LATCHED, "rearm(alive)"): OrderPlantState.LATCHED,
     (OrderPlantState.LATCHED, "rearm(dead)"): OrderPlantState.LATCHED,
-    # resync_start: LIVE/CONNECTING enter RESYNCING; LATCHED stays blocked;
-    # DISCONNECTED stays down (a dead stream must not re-arm via resync).
+    # resync_start: LIVE enters RESYNCING; CONNECTING latches (a channel error
+    # during the re-arm barrier must not enter the cancel-enabled RESYNCING
+    # path, whose resync_complete would re-arm the plant mid-barrier); LATCHED
+    # stays blocked; DISCONNECTED stays down (a dead stream must not re-arm via
+    # resync).
     (OrderPlantState.LIVE, "resync_start"): OrderPlantState.RESYNCING,
-    (OrderPlantState.CONNECTING, "resync_start"): OrderPlantState.RESYNCING,
+    (OrderPlantState.CONNECTING, "resync_start"): OrderPlantState.LATCHED,
     (OrderPlantState.RESYNCING, "resync_start"): OrderPlantState.RESYNCING,
     (OrderPlantState.LATCHED, "resync_start"): OrderPlantState.LATCHED,
     (OrderPlantState.DISCONNECTED, "resync_start"): OrderPlantState.DISCONNECTED,
@@ -204,3 +207,26 @@ def test_down_plant_cannot_rearm_via_resync() -> None:
     plant.resync_complete()
     assert plant.state is OrderPlantState.DISCONNECTED
     assert not plant.allow_submit()
+
+
+def test_mid_barrier_resync_cannot_arm() -> None:
+    """A channel error + successful resync DURING the reconnect barrier must
+    never arm the plant: CONNECTING -> resync -> LIVE would let strategies
+    submit while the drain/PnL gate is still running. The resync latches the
+    barrier instead, and rearm fails over LATCHED (Oracle #1)."""
+    plant = OrderPlantPolicy()
+    plant.begin_connect()
+    assert plant.state is OrderPlantState.CONNECTING
+    # Channel error on the order stream while the drain is in flight.
+    plant.resync_start()
+    assert plant.state is OrderPlantState.LATCHED
+    # The transport resubscribe succeeds: still blocked, never LIVE.
+    plant.resync_complete()
+    assert plant.state is OrderPlantState.LATCHED
+    assert not plant.allow_submit()
+    assert not plant.allow_modify()
+    assert not plant.allow_cancel()
+    # The barrier finishes: rearm cannot arm over LATCHED.
+    assert not plant.rearm(poll_alive=True)
+    assert plant.state is OrderPlantState.LATCHED
+    assert plant.latched

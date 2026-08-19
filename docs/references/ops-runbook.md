@@ -154,7 +154,9 @@ an adapter exception is swallowed), so the adapter cannot stop the synthesis by
 raising or returning `None`. The adapter's only lever is to resolve the order
 out of `SUBMITTED` first — it does so with a bounded per-`user_tag`
 `load_orders` drain in `generate_order_status_report` — and to fail closed
-(`VenueQueryUnavailable`) while the plant is latched/un-armed.
+(`VenueQueryUnavailable`) whenever the drain cannot resolve the order (the
+query itself is not gated on plant state: a latched plant still attempts the
+drain, which is the recovery path).
 
 **Operator requirement for live trading:** the terminal UNKNOWN synthesis is
 exactly the fabricated state the adapter forbids, and the only reliable way to
@@ -177,10 +179,13 @@ hardening, Oracle 2nd + 3rd passes, Macroscope review):
 
 1. A bounded `load_orders` working-orders drain succeeds (one attempt per
    barrier — a failure is surfaced as unavailable and the next connect is the
-   retry boundary), **and its rows are applied**: tracked in-flight orders get
-   their venue id bound and reconciliation status reports are published, so an
-   order the venue accepted while disconnected is not left unresolved/in-flight
-   when trading resumes.
+   retry boundary), **and its rows are applied**: reconciliation status reports
+   are published (publish-before-bind — a failed publication aborts the
+   barrier, so the engine sees the venue state before trading resumes) and
+   tracked in-flight orders then get their venue id bound, so an order the
+   venue accepted while disconnected is not left unresolved/in-flight when
+   trading resumes. Stale rows are skipped when the live stream has already
+   advanced the tracked order past the captured snapshot.
 2. A fresh account/position PnL snapshot is observed from the stream when the
    PnL stream is connected this connect (bounded `asyncio.Event` wait, default
    `_REARM_PNL_SNAPSHOT_TIMEOUT_S = 5.0`). Positions ride the PnL stream, so
@@ -208,17 +213,26 @@ transition table in `tests/test_order_plant.py` is the executable spec):
 `LIVE` (armed), `RESYNCING` (mid-session transport resync — cancels stay
 available), `LATCHED` (blocked pending a recon cycle). Execution code never
 assigns the state directly — every transition goes through the policy, and
-`rearm` is the **only** arming transition. Two consequences operators should
-know:
+`rearm` is the **only** arming transition. Consequences operators should know:
 
 - A mid-session transport resync never clears a latch: `LATCHED` stays
-  `LATCHED` through `resync_start`/`resync_complete`/`resync_failed`. The only
-  way out of `LATCHED` is a successful re-arm barrier.
+  `LATCHED` through `resync_start`/`resync_complete`/`resync_failed`. The
+  recovery out of `LATCHED` is a successful re-arm barrier (a teardown also
+  moves the plant out of it, but commands stay blocked by the down state).
+- A resync DURING the reconnect barrier itself latches the plant (`CONNECTING`
+  → `LATCHED`): a channel error while the drain is in flight means the drain
+  rows may predate the drop, and the plant must never re-arm mid-barrier (the
+  only arming transition is `rearm`). The barrier then fails and the next
+  connect retries.
 - A plant that is `DISCONNECTED` (e.g. after a failed resync) cannot re-arm
   via a later resync — `resync_start` from `DISCONNECTED` stays down. Only a
   full reconnect (drain + PnL gate) arms the plant. (This closes a hole the
   old code had: a resync failure followed by a channel-error resync could
   return to `LIVE` without re-observing venue state.)
+- A persistent run of non-channel poll errors on the order stream (bounded
+  transient streak, default 5) latches the plant: a stream that delivers
+  garbage must not leave trading armed and silent. PnL keeps transient
+  semantics (`soft_fail_pnl` is the operator's escape).
 
 **Operational consequences:**
 

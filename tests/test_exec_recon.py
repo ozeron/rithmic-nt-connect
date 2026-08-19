@@ -683,6 +683,47 @@ def test_cancel_rejected_with_cancellation_failed_is_accepted():
     assert client._order_status_from_event(fields) == OrderStatus.ACCEPTED
 
 
+def test_modify_rejected_is_working_not_terminal_rejected() -> None:
+    """Oracle #3: a venue modify rejection leaves the order working — the
+    report must not map it to terminal REJECTED (which would let the OMS treat
+    a live order as dead)."""
+    client = _client()
+    fields = {
+        "kind": "modify_rejected",
+        "status": "NOT_MODIFIED",
+        "quantity": 2,
+        "total_fill_size": 0,
+    }
+    assert client._order_status_from_event(fields) == OrderStatus.ACCEPTED
+    # Partially filled and modify-rejected: still working, still partial.
+    partial = dict(fields, total_fill_size=1)
+    assert client._order_status_from_event(partial) == OrderStatus.PARTIALLY_FILLED
+
+
+def test_cancel_rejected_partial_keeps_partially_filled() -> None:
+    """Oracle #3 sibling: a partially-filled working order with a rejected
+    cancel must keep PARTIALLY_FILLED, not regress to ACCEPTED."""
+    client = _client()
+    fields = {
+        "kind": "cancel_rejected",
+        "status": "NOT_CANCELLED",
+        "quantity": 2,
+        "total_fill_size": 1,
+    }
+    assert client._order_status_from_event(fields) == OrderStatus.PARTIALLY_FILLED
+
+
+def test_triggered_status_mapping_respects_order_type() -> None:
+    """Oracle #2 second half: an exchange TRIGGER row maps to TRIGGERED for
+    limit-style stops (the Nautilus TRIGGERED state exists) and stays ACCEPTED
+    (working) for market-style stops (no TRIGGERED state, #3812)."""
+    client = _client()
+    limit_style = {"kind": "triggered", "status": "TRIGGERED", "price_type": 3}
+    assert client._order_status_from_event(limit_style) == OrderStatus.TRIGGERED
+    market_style = {"kind": "triggered", "status": "TRIGGERED", "price_type": 4}
+    assert client._order_status_from_event(market_style) == OrderStatus.ACCEPTED
+
+
 def test_stop_order_reconciliation_preserves_trigger_type() -> None:
     client = _client()
     assert client._trigger_type_from_event({"price_type": 4}) is TriggerType.DEFAULT
