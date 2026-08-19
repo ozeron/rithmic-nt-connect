@@ -615,6 +615,26 @@ impl RithmicSession {
         Ok(())
     }
 
+    /// Disconnect + reconnect only the ticker plant (leaves history/PnL/order
+    /// connected).
+    ///
+    /// The data client's channel-error resync needs a fresh ticker receiver,
+    /// but the exec client shares this session, so the PnL/order plants must
+    /// not be disturbed. A reconnect failure leaves the ticker disconnected
+    /// (the poll loop keeps retrying the resync) and never tears down the
+    /// sibling plants.
+    pub async fn reset_ticker_plant(&mut self) -> Result<()> {
+        if let Some(ticker) = self.ticker.take() {
+            let _ = ticker.handle.disconnect().await;
+        }
+        if !self.plants.ticker {
+            return Ok(());
+        }
+        let rc = self.config.to_rithmic_config()?;
+        self.ticker = Some(connect_ticker(&rc).await?);
+        Ok(())
+    }
+
     /// Place a new order on the order plant.
     #[allow(clippy::too_many_arguments)]
     pub async fn place_order(

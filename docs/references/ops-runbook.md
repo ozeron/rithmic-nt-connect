@@ -2,7 +2,7 @@
 
 1. Close MotiveWave / R|Trader whenever **any** process will hold the Rithmic login (direct plants **or** `rithmic-gateway` parent — cold-start auto-spawn counts). Shared gateway only multiplexes **gateway clients**, not MotiveWave.
 2. Copy `.env.example` → `.env` and set `RITHMIC_USER` / `RITHMIC_PASSWORD`.
-3. Install system `protoc` (`protobuf-compiler` / `brew install protobuf`) if missing.
+3. Install system `protoc` (`protobuf-compiler` / `brew install protobuf`) if missing. The **Rust** gateway build invokes `protoc` from PATH (prost-build). The **Python** `session_pb2.py` gencode is pinned instead: it is regenerated from `proto/rithmic_gateway/v1/session.proto` with the uv dev dependency `grpcio-tools==1.71.0` (bundles protoc 29.0) via `uv run python scripts/gen_gateway_proto.py`, which restores the repo's `5.29.6` gencode marker (protoc 29.0 and 29.6 emit byte-identical gencode except the version header). The script fails loudly if the gencode shape drifts.
 4. Sync + build extension: `uv sync --extra dev && uv run maturin develop`
 5. Unit tests: `cargo test -p rithmic-plants -p rithmic-gateway -p rithmic-nt-connect && uv run pytest -q`
 6. Live smoke: `uv run python scripts/smoke_lucid_nq.py` (exits `2` if credentials missing — CI-safe).
@@ -28,7 +28,10 @@ a test/demo system, plus `RITHMIC_CONNECT_MODE` (`direct` or `gateway`).
 `RITHMIC_GATEWAY` is required only for `gateway` mode. Keep the file outside
 the repository and never print or commit it. Run only when no other
 process owns the same Rithmic login; a second direct/gateway session is refused
-by the credential flock.
+by the credential flock. Direct mode is a process-wide singleton per credential
+fingerprint: the data factory, exec factory, and `connect_market_data_session`
+all share one login, and the credential flock is released when the **last**
+holder disconnects (so a stopped node no longer blocks a separate process).
 
 ## Building a self-contained wheel
 

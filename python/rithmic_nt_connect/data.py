@@ -363,9 +363,15 @@ async def resync_ticker_session(
     book_subscriptions: set[tuple[str, str]],
     bar_subscriptions: set[tuple[str, str, int, int]] | None = None,
 ) -> None:
-    """Disconnect, reconnect, and replay ticker + book + EXTERNAL bar intent."""
-    await asyncio.to_thread(session.disconnect)
-    await asyncio.to_thread(session.connect)
+    """Reset the wire, then replay ticker + book + EXTERNAL bar intent.
+
+    ``session.reset_ticker`` is refcount-blind: a channel-error resync must
+    actually recreate the ticker plant even when the session is shared with
+    the exec client, where ``disconnect`` alone is a holder-refcounted no-op.
+    Direct mode recreates only the ticker plant (PnL/order untouched); the
+    gateway detaches + re-dials this client only (parent plants untouched).
+    """
+    await asyncio.to_thread(session.reset_ticker)
     for symbol, exchange in subscriptions:
         await asyncio.to_thread(session.subscribe, symbol, exchange)
     for symbol, exchange in book_subscriptions:
@@ -455,6 +461,65 @@ def bar_type_to_rithmic(bar_type: BarType) -> tuple[int, int]:
     )
 
 
+def bar_wire_period_keys(bar_type: BarType) -> list[int]:
+    """Wire ``period`` values under which the venue may echo this bar type.
+
+    The event ``period`` unit is documented unreliable (native vs seconds) and
+    the live venue echoes seconds (``"60"`` observed for a 1-MINUTE
+    subscription) while the request uses the native unit (1). Registering both
+    keeps the dispatch lookup (``bar_types_for_event``) working whichever unit
+    the venue emits.
+    """
+    aggregation = bar_type.spec.aggregation
+    step = int(bar_type.spec.step)
+    _rtype, period = bar_type_to_rithmic(bar_type)
+    seconds = {
+        BarAggregation.SECOND: step,
+        BarAggregation.MINUTE: step * 60,
+        BarAggregation.HOUR: step * 3600,
+        BarAggregation.DAY: step * 86400,
+        BarAggregation.WEEK: step * 604800,
+    }.get(aggregation, 0)
+    periods = [period]
+    if seconds and seconds != period:
+        periods.append(seconds)
+    return periods
+
+
+def bar_types_for_event(bar_types: dict, event: dict[str, Any]) -> set[BarType]:
+    """BarTypes registered for a wire ``time_bar`` event (venue echo shape).
+
+    Keys are ``(symbol, exchange, rtype, period)``; the event carries the
+    venue's period (seconds for minute/hour bars, observed ``"60"``), which
+    matches the seconds-period echo keys registered by
+    ``bar_wire_period_keys``.
+    """
+    symbol = str(event.get("symbol") or "")
+    exchange = str(event.get("exchange") or "")
+    rtype = int(event.get("bar_type") or 0)
+    period_raw = event.get("period")
+    try:
+        period = int(period_raw) if period_raw not in (None, "") else 1
+    except (TypeError, ValueError):
+        period = 1
+    return set(bar_types.get((symbol, exchange, rtype, period), ()))
+
+
+def bar_resync_subscriptions(bar_types: dict) -> set[tuple[str, str, int, int]]:
+    """Native wire requests to re-issue after a ticker reset, deduped.
+
+    ``bar_types`` holds both native and seconds-period echo keys per BarType;
+    re-issuing every key would double-subscribe. Derive one native request per
+    registered BarType.
+    """
+    subs: set[tuple[str, str, int, int]] = set()
+    for (symbol, exchange, _rtype, _period), mapped in bar_types.items():
+        for bar_type in mapped:
+            rtype, period = bar_type_to_rithmic(bar_type)
+            subs.add((symbol, exchange, rtype, period))
+    return subs
+
+
 class RithmicDataClient(LiveMarketDataClient):
     """Out-of-tree live market-data client backed by the Rust Rithmic session.
 
@@ -498,6 +563,9 @@ class RithmicDataClient(LiveMarketDataClient):
         self._subscriptions: set[tuple[str, str]] = set()
         self._book_subscriptions: set[tuple[str, str]] = set()
         # Wire key → one or more Nautilus BarTypes (60-MINUTE and 1-HOUR share a key).
+        # Wire key → one or more Nautilus BarTypes (60-MINUTE and 1-HOUR share
+        # a key; each BarType is registered under BOTH the native period and
+        # the venue's seconds-period echo key — see ``bar_wire_period_keys``).
         self._bar_types: dict[tuple[str, str, int, int], set[BarType]] = {}
         self._instrument_routes: dict[str, tuple[str, str]] = {}
         self._history_poll_task: asyncio.Task | None = None
@@ -569,7 +637,7 @@ class RithmicDataClient(LiveMarketDataClient):
                 self._session,
                 set(self._subscriptions),
                 set(self._book_subscriptions),
-                set(self._bar_types),
+                bar_resync_subscriptions(self._bar_types),
             )
             self._resync_generation += 1
 
@@ -723,15 +791,7 @@ class RithmicDataClient(LiveMarketDataClient):
         return self._instrument_routes[key]
 
     def _bar_types_for_event(self, event: dict[str, Any]) -> set[BarType]:
-        symbol = str(event.get("symbol") or "")
-        exchange = str(event.get("exchange") or "")
-        rtype = int(event.get("bar_type") or 0)
-        period_raw = event.get("period")
-        try:
-            period = int(period_raw) if period_raw not in (None, "") else 1
-        except (TypeError, ValueError):
-            period = 1
-        return set(self._bar_types.get((symbol, exchange, rtype, period), ()))
+        return bar_types_for_event(self._bar_types, event)
 
     async def _subscribe_trade_ticks(self, command: SubscribeTradeTicks) -> None:
         symbol, exchange = self._route(command.instrument_id)
@@ -783,8 +843,10 @@ class RithmicDataClient(LiveMarketDataClient):
         await asyncio.to_thread(
             self._session.subscribe_time_bars, symbol, exchange, rtype, period
         )
-        key = (symbol, exchange, rtype, period)
-        self._bar_types.setdefault(key, set()).add(bar_type)
+        for p in bar_wire_period_keys(bar_type):
+            self._bar_types.setdefault((symbol, exchange, rtype, p), set()).add(
+                bar_type
+            )
         self._ensure_history_poll_task()
 
     async def _unsubscribe_bars(self, command: UnsubscribeBars) -> None:
@@ -795,15 +857,21 @@ class RithmicDataClient(LiveMarketDataClient):
             return
         symbol, exchange = self._route(bar_type.instrument_id)
         rtype, period = bar_type_to_rithmic(bar_type)
-        key = (symbol, exchange, rtype, period)
-        mapped = self._bar_types.get(key)
-        if mapped is not None:
-            mapped.discard(bar_type)
-            if not mapped:
-                del self._bar_types[key]
-                await asyncio.to_thread(
-                    self._session.unsubscribe_time_bars, symbol, exchange, rtype, period
-                )
+        for p in bar_wire_period_keys(bar_type):
+            key = (symbol, exchange, rtype, p)
+            mapped = self._bar_types.get(key)
+            if mapped is not None:
+                mapped.discard(bar_type)
+                if not mapped:
+                    del self._bar_types[key]
+        still_registered = any(
+            k[0] == symbol and k[1] == exchange and k[2] == rtype and self._bar_types[k]
+            for k in self._bar_types
+        )
+        if not still_registered:
+            await asyncio.to_thread(
+                self._session.unsubscribe_time_bars, symbol, exchange, rtype, period
+            )
 
     async def _request_trade_ticks(self, request: RequestTradeTicks) -> None:
         symbol, exchange = self._route(request.instrument_id)

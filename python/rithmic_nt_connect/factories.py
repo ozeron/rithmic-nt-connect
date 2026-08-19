@@ -14,7 +14,6 @@ from nautilus_trader.config import (
 from nautilus_trader.live.factories import LiveDataClientFactory, LiveExecClientFactory
 
 from rithmic_nt_connect.config import (
-    ConnectMode,
     RithmicDataClientConfig,
     RithmicExecClientConfig,
     RithmicLiveExecClientConfig,
@@ -27,7 +26,6 @@ from rithmic_nt_connect.providers import RithmicInstrumentProvider
 from rithmic_nt_connect.session import (
     PLANTS_EXECUTION,
     PLANTS_MARKET_DATA,
-    WireSession,
     create_session,
 )
 
@@ -49,40 +47,6 @@ def _pairs_from_session(session: SessionConfig) -> list[tuple[str, str]]:
     return [("NQ", "CME")]
 
 
-def _shared_session(
-    config_session: SessionConfig,
-    cache: dict[str, WireSession],
-    *,
-    plants: str,
-) -> WireSession:
-    """Direct: one in-process plant session (Rithmic allows one login).
-
-    Gateway: a **new** unix client per Nautilus client. The parent
-    ``rithmic-gateway`` holds the single Rithmic login; sharing one
-    ``GatewayClient`` would interleave tick and order polls.
-    """
-    if config_session.connect_mode == ConnectMode.GATEWAY:
-        return create_session(config_session, plants=plants)
-
-    key = (
-        f"{config_session.connect_mode}:{config_session.user}:{config_session.system_name}:"
-        f"{config_session.url}:{config_session.account_id}:{config_session.fcm_id}:"
-        f"{config_session.ib_id}:{config_session.gateway_listen}"
-    )
-    if key not in cache:
-        cache[key] = create_session(config_session, plants=plants)
-        return cache[key]
-    existing = cache[key]
-    if plants == PLANTS_EXECUTION:
-        request = getattr(existing, "request_plants", None)
-        if callable(request):
-            request(PLANTS_EXECUTION)
-    return existing
-
-
-_SESSION_CACHE: dict[str, WireSession] = {}
-
-
 class RithmicLiveDataClientFactory(LiveDataClientFactory):
     @staticmethod
     def create(
@@ -94,9 +58,7 @@ class RithmicLiveDataClientFactory(LiveDataClientFactory):
         clock: LiveClock,
     ) -> RithmicDataClient:
         session_cfg = _session_config_from_data(config)
-        session = _shared_session(
-            session_cfg, _SESSION_CACHE, plants=PLANTS_MARKET_DATA
-        )
+        session = create_session(session_cfg, plants=PLANTS_MARKET_DATA)
         provider = RithmicInstrumentProvider(
             session=session,
             pairs=_pairs_from_session(session_cfg),
@@ -130,7 +92,7 @@ class RithmicLiveExecClientFactory(LiveExecClientFactory):
         clock: LiveClock,
     ) -> RithmicExecutionClient:
         session_cfg = _session_config_from_data(config)
-        session = _shared_session(session_cfg, _SESSION_CACHE, plants=PLANTS_EXECUTION)
+        session = create_session(session_cfg, plants=PLANTS_EXECUTION)
         provider = RithmicInstrumentProvider(
             session=session,
             pairs=_pairs_from_session(session_cfg),

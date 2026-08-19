@@ -130,25 +130,6 @@ def live_front_month(live_session):
 
 
 @pytest.fixture(scope="function")
-def front_month_instrument(credentials_available: bool):
-    """Resolve the NQ front month via a throwaway market-data session.
-
-    The throwaway session is disconnected and its credential flock released
-    before returning, so a caller (e.g. the exec ``TradingNode``) can acquire
-    the flock itself.
-    """
-    if not credentials_available:
-        pytest.skip(
-            "RITHMIC_TEST_DOTENV with test credentials is not set (safe skip for CI)"
-        )
-
-    from rithmic_nt_connect.historical import load_front_month_instrument
-
-    with _connected_data_session() as session:
-        return load_front_month_instrument(session, "NQ", "CME")
-
-
-@pytest.fixture(scope="function")
 def exec_front_month_instrument(require_test_plant, trading_credentials_available):
     """Resolve the NQ front month after the exec safety gates hold.
 

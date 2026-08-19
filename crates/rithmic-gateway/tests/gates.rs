@@ -3,8 +3,9 @@
 use rithmic_gateway::pb::frame::Body;
 use rithmic_gateway::pb::{
     CancelAllOrdersRequest, LoadAccountRmsInfoRequest, LoadOrdersRequest,
-    LoadProductRmsInfoRequest, PlaceBracketOrderRequest, PlaceOrderRequest, ResolvedAccountRequest,
-    SubscribeBracketUpdatesRequest, SubscribeOrderUpdatesRequest,
+    LoadProductRmsInfoRequest, PlaceBracketOrderRequest, PlaceOrderRequest,
+    ResetTickerPlantRequest, ResolvedAccountRequest, SubscribeBracketUpdatesRequest,
+    SubscribeOrderUpdatesRequest,
 };
 use rithmic_gateway::server::{gate_rpc_for_test, rpc_sequence_with_gates};
 use rithmic_gateway::subscriptions::ParentGates;
@@ -84,6 +85,17 @@ fn resolved_account_errors_when_no_session() {
         gate_rpc_for_test(
             &trading_on(),
             Body::ResolvedAccount(ResolvedAccountRequest {}),
+        ),
+        "no_session",
+    );
+}
+
+#[test]
+fn reset_ticker_plant_errors_when_no_session() {
+    assert_error_code(
+        gate_rpc_for_test(
+            &trading_on(),
+            Body::ResetTickerPlant(ResetTickerPlantRequest {}),
         ),
         "no_session",
     );

@@ -97,7 +97,19 @@ class TimeBarAggregator(BarAggregator):
     interval_ns: Incomplete
     next_close_ns: Incomplete
     stored_open_ns: Incomplete
-    def __init__(self, Instrumentinstrument, BarTypebar_type, handler: Callable[[Bar], None], Clockclock, strinterval_type=..., booltimestamp_on_close=..., boolskip_first_non_full_bar=..., boolbuild_with_no_updates=..., time_bars_origin_offset: pd.Timedelta | pd.DateOffset = ..., intbar_build_delay=...) -> None: ...
+    def __init__(
+        self,
+        instrument: Instrument,
+        bar_type: BarType,
+        handler: Callable[[Bar], None],
+        clock: Clock,
+        interval_type: str = "left-open",
+        timestamp_on_close: bool = True,
+        skip_first_non_full_bar: bool = False,
+        build_with_no_updates: bool = True,
+        time_bars_origin_offset: pd.Timedelta | pd.DateOffset = None,
+        bar_build_delay: int = 0,
+    ) -> None: ...
     def get_start_time(self, datetimenow: datetime) -> datetime: ...
     def set_clock(self, Clockclock) -> void: ...
     def start_timer(self) -> void: ...

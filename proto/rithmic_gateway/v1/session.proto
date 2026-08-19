@@ -154,6 +154,8 @@ message DisconnectPnlRequest {}
 
 message DisconnectOrderRequest {}
 
+message ResetTickerPlantRequest {}
+
 message EnsurePnlRequest {}
 
 message EnsureOrderRequest {}
@@ -528,6 +530,7 @@ message Frame {
     ResolvedAccountRequest resolved_account = 38;
     LoadProductRmsInfoRequest load_product_rms_info = 39;
     LoadAccountRmsInfoRequest load_account_rms_info = 40;
+    ResetTickerPlantRequest reset_ticker_plant = 41;
 
     Ack ack = 50;
     ErrorResponse error = 51;

@@ -95,6 +95,8 @@ def test_create_session_gateway_returns_adapter_without_pyo3() -> None:
         "resolved_account",
         "load_product_rms_info",
         "load_account_rms_info",
+        "reset_ticker",
+        "reset_ticker_plant",
     ):
         assert hasattr(session, name), (
             f"gateway wire missing {name} (direct/gateway parity)"
@@ -141,6 +143,15 @@ class _RecordingGatewayClient:
 
     def disconnect_pnl_plant(self) -> None:
         self.calls.append(("disconnect_pnl_plant", ()))
+
+    def disconnect(self) -> None:
+        self.calls.append(("disconnect", ()))
+
+    def connect(self) -> None:
+        self.calls.append(("connect", ()))
+
+    def reset_ticker_plant(self) -> None:
+        self.calls.append(("reset_ticker_plant", ()))
 
 
 def test_gateway_wire_restore_covers_every_intent_channel() -> None:
@@ -197,3 +208,26 @@ def test_gateway_wire_forwards_rms_fetches() -> None:
         ("load_product_rms_info", ()),
         ("load_account_rms_info", ()),
     ]
+
+
+def test_gateway_wire_reset_ticker_detaches_and_redials_client_only() -> None:
+    """Gateway ``reset_ticker`` recovers THIS client's ticker stream by
+    detach + re-dial, never tearing down parent plants for peers."""
+    inner = _RecordingGatewayClient()
+    session = GatewayWireSession(inner)  # type: ignore[arg-type]
+
+    session.reset_ticker()
+
+    assert inner.calls == [("disconnect", ()), ("connect", ())]
+
+
+def test_gateway_wire_forwards_reset_ticker_plant_rpc() -> None:
+    """Parity: the gateway wire exposes the plant-level ticker reset RPC the
+    direct path has (the adapter's own gateway resync prefers the client-level
+    ``reset_ticker``, but the surface must not drift)."""
+    inner = _RecordingGatewayClient()
+    session = GatewayWireSession(inner)  # type: ignore[arg-type]
+
+    session.reset_ticker_plant()
+
+    assert inner.calls == [("reset_ticker_plant", ())]

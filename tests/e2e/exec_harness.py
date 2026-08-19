@@ -186,7 +186,7 @@ class ExecHarness:
     def _release_session_locks(self) -> None:
         """Release the credential flock (``disconnect()`` does not); best-effort."""
         try:
-            from rithmic_nt_connect.factories import _SESSION_CACHE
+            from rithmic_nt_connect.session import _SESSION_CACHE
 
             for _sess in _SESSION_CACHE.values():
                 _lock = getattr(_sess, "_lock", None)

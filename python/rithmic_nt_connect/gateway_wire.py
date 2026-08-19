@@ -43,6 +43,27 @@ class GatewayWireSession:
     def disconnect(self) -> None:
         _call(self._client.disconnect)
 
+    def reset_ticker(self) -> None:
+        """Recover this client's ticker stream (detach + re-dial).
+
+        Parent plants are untouched for peer consumers: the gateway keeps the
+        single Rithmic login and re-issues intents on handshake, so a client
+        channel error needs no plant-level reset — unlike the direct path,
+        where the shared in-process session resets its ticker plant only.
+        """
+        _call(self._client.disconnect)
+        _call(self._client.connect)
+
+    def reset_ticker_plant(self) -> None:
+        """Plant-level ticker reset RPC (direct/gateway surface parity).
+
+        Asks the parent to recreate its ticker plant and re-issue ticker/book/
+        time-bar intents for all consumers. The adapter's own gateway data
+        resync uses ``reset_ticker`` (client-level) instead, which is strictly
+        less disruptive; this mirrors the direct path's plant primitive.
+        """
+        _call(self._client.reset_ticker_plant)
+
     def subscribe(self, symbol: str, exchange: str) -> None:
         _call(self._client.subscribe, symbol, exchange)
 

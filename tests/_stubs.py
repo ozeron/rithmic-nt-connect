@@ -52,6 +52,9 @@ class WireSessionStub:
     def disconnect(self, *args: Any, **kwargs: Any) -> None:
         raise NotImplementedError
 
+    def reset_ticker(self, *args: Any, **kwargs: Any) -> None:
+        raise NotImplementedError
+
     def subscribe(self, *args: Any, **kwargs: Any) -> None:
         raise NotImplementedError
 

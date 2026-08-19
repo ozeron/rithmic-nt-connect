@@ -1072,6 +1072,61 @@ pub(super) async fn dispatch(
             }
             ack_frame(request_id)
         }
+        Body::ResetTickerPlant(_) => {
+            let Some(session) = &state.session else {
+                return no_session_frame(request_id);
+            };
+            let mut guard = session.lock().await;
+            if let Err(e) = guard.reset_ticker_plant().await {
+                return err_to_frame(request_id, "reset_ticker_plant_failed", e);
+            }
+            // The recreated ticker plant carries no subscriptions: re-issue
+            // every remembered ticker / book / time-bar intent (pnl/order ride
+            // their own plants and are untouched). On any failure fall back to
+            // the parent full-reconnect path — which re-issues every intent —
+            // rather than silently leaving the stream dark.
+            let plan = state.reconnect.restore_plan().await;
+            let mut failed: Option<String> = None;
+            for key in &plan.ticker {
+                if let Err(e) = guard.subscribe(&key.symbol, &key.exchange).await {
+                    failed = Some(e.to_string());
+                    break;
+                }
+            }
+            if failed.is_none() {
+                for key in &plan.book {
+                    if let Err(e) = guard
+                        .subscribe_order_book_summary(&key.symbol, &key.exchange)
+                        .await
+                    {
+                        failed = Some(e.to_string());
+                        break;
+                    }
+                }
+            }
+            if failed.is_none() {
+                for intent in &plan.time_bars {
+                    if let Err(e) = guard
+                        .subscribe_time_bars(
+                            &intent.symbol,
+                            &intent.exchange,
+                            intent.bar_type,
+                            intent.period,
+                        )
+                        .await
+                    {
+                        failed = Some(e.to_string());
+                        break;
+                    }
+                }
+            }
+            if let Some(msg) = failed {
+                drop(guard);
+                state.force_reconnect.store(true, Ordering::SeqCst);
+                return err_to_frame(request_id, "reset_ticker_plant_restore_failed", msg);
+            }
+            ack_frame(request_id)
+        }
         Body::Disconnect(_) => ack_frame(request_id),
         // Responses / events are gateway→client only; a client sending one
         // back is a protocol misuse, not a crash.

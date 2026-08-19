@@ -530,6 +530,9 @@ class GatewayClient:
     def disconnect_order_plant(self) -> None:
         self._rpc(pb.Frame(disconnect_order=pb.DisconnectOrderRequest()))
 
+    def reset_ticker_plant(self) -> None:
+        self._rpc(pb.Frame(reset_ticker_plant=pb.ResetTickerPlantRequest()))
+
     def place_order(
         self,
         symbol: str,

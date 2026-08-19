@@ -109,3 +109,17 @@ fn proto_schema_has_bracket_rpcs_parity_with_plants() {
         );
     }
 }
+
+#[test]
+fn proto_schema_has_ticker_reset_parity_with_plants() {
+    // The data client's ticker resync is a plant RPC on the direct path
+    // (``RithmicSession::reset_ticker_plant``): the gateway wire must expose
+    // the same surface so the two paths cannot drift.
+    let proto = include_str!("../../../proto/rithmic_gateway/v1/session.proto");
+    for needle in ["ResetTickerPlantRequest", "reset_ticker_plant"] {
+        assert!(
+            proto.contains(needle),
+            "gateway proto must keep direct/gateway parity for {needle}"
+        );
+    }
+}

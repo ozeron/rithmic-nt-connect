@@ -141,6 +141,81 @@ def test_reconnectable_poll_error() -> None:
     assert not _reconnectable_poll_error(RuntimeError("parse failed"))
 
 
+def test_bar_wire_period_keys_cover_venue_seconds_echo() -> None:
+    """Dispatch keys must cover the venue's seconds-period event echo.
+
+    The live venue echoed ``period="60"`` for a 1-MINUTE subscription (seconds)
+    while the request uses the native period (1). Without the seconds key, a
+    live EXTERNAL bar event never matches its registration and is dropped as
+    ``time_bar_unsubscribed`` (the node-path bug the dropped TC-D54 live test's
+    bar leg caught before it was removed).
+    """
+    from nautilus_trader.model.data import BarType
+    from rithmic_nt_connect.data import bar_wire_period_keys
+
+    assert bar_wire_period_keys(
+        BarType.from_str("NQU6.RITHMIC-1-MINUTE-LAST-EXTERNAL")
+    ) == [1, 60]
+    assert bar_wire_period_keys(
+        BarType.from_str("NQU6.RITHMIC-15-MINUTE-LAST-EXTERNAL")
+    ) == [15, 900]
+    assert bar_wire_period_keys(
+        BarType.from_str("NQU6.RITHMIC-1-HOUR-LAST-EXTERNAL")
+    ) == [60, 3600]
+    assert bar_wire_period_keys(
+        BarType.from_str("NQU6.RITHMIC-1-DAY-LAST-EXTERNAL")
+    ) == [1, 86400]
+
+
+def test_time_bar_dispatch_matches_venue_seconds_period() -> None:
+    """A live EXTERNAL bar event (seconds-period echo) must not be dropped."""
+    from nautilus_trader.model.data import BarType
+    from rithmic_nt_connect.data import (
+        bar_type_to_rithmic,
+        bar_types_for_event,
+        bar_wire_period_keys,
+    )
+
+    m1 = BarType.from_str("NQU6.RITHMIC-1-MINUTE-LAST-EXTERNAL")
+    symbol, exchange = "NQU6", "CME"
+    rtype, _period = bar_type_to_rithmic(m1)
+    registered: dict = {}
+    for p in bar_wire_period_keys(m1):
+        registered.setdefault((symbol, exchange, rtype, p), set()).add(m1)
+
+    # Venue echo observed live: period "60" (seconds) for a 1-MINUTE bar.
+    found = bar_types_for_event(
+        registered,
+        {
+            "type": "time_bar",
+            "symbol": "NQU6",
+            "exchange": "CME",
+            "bar_type": 2,
+            "period": "60",
+        },
+    )
+    assert found == {m1}
+
+
+def test_bar_resync_subscriptions_dedupe_dual_keys() -> None:
+    """Resync must re-issue one native request per BarType, not both keys."""
+    from nautilus_trader.model.data import BarType
+    from rithmic_nt_connect.data import (
+        bar_resync_subscriptions,
+        bar_type_to_rithmic,
+        bar_wire_period_keys,
+    )
+
+    m1 = BarType.from_str("NQU6.RITHMIC-1-MINUTE-LAST-EXTERNAL")
+    symbol, exchange = "NQU6", "CME"
+    rtype, period = bar_type_to_rithmic(m1)
+    registered: dict = {}
+    for p in bar_wire_period_keys(m1):
+        registered.setdefault((symbol, exchange, rtype, p), set()).add(m1)
+
+    assert bar_resync_subscriptions(registered) == {(symbol, exchange, rtype, period)}
+
+
 def test_resync_ticker_session_replays_intent() -> None:
     import asyncio
 
@@ -149,11 +224,8 @@ def test_resync_ticker_session_replays_intent() -> None:
     calls: list[tuple[Any, ...]] = []
 
     class Sess(WireSessionStub):
-        def disconnect(self) -> None:
-            calls.append(("disconnect",))
-
-        def connect(self) -> None:
-            calls.append(("connect",))
+        def reset_ticker(self) -> None:
+            calls.append(("reset_ticker",))
 
         def subscribe(self, symbol: str, exchange: str) -> None:
             calls.append(("subscribe", symbol, exchange))
@@ -174,8 +246,7 @@ def test_resync_ticker_session_replays_intent() -> None:
             {("NQU6", "CME", 2, 15)},
         )
     )
-    assert calls[0] == ("disconnect",)
-    assert calls[1] == ("connect",)
+    assert calls[0] == ("reset_ticker",)
     assert ("subscribe", "NQU6", "CME") in calls
     assert ("book", "NQU6", "CME") in calls
     assert ("bars", "NQU6", "CME", 2, 15) in calls

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import threading
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from rithmic_nt_connect.config import ConnectMode, SessionConfig
 from rithmic_nt_connect.errors import AlreadyConnectedError
@@ -30,6 +30,7 @@ def _load_session_lock() -> Any:
 class TickerSession(Protocol):
     def connect(self) -> None: ...
     def disconnect(self) -> None: ...
+    def reset_ticker(self) -> None: ...
     def subscribe(self, symbol: str, exchange: str) -> None: ...
     def unsubscribe(self, symbol: str, exchange: str) -> None: ...
     def subscribe_order_book_summary(self, symbol: str, exchange: str) -> None: ...
@@ -142,20 +143,64 @@ class WireSession(TickerSession, PnlSession, OrderSession, Protocol):
 PLANTS_MARKET_DATA = "market_data"
 PLANTS_EXECUTION = "execution"
 
+# Process-wide singleton for DIRECT sessions: one in-process Rithmic login per
+# credential fingerprint, whichever entry point asks first (data factory, exec
+# factory, or ``connect_market_data_session``). Gateway is deliberately NOT
+# cached — each Nautilus client gets its own ``GatewayClient`` and the parent
+# ``rithmic-gateway`` holds the single login. Values are always
+# ``_FlockedDirectSession`` (which owns ``acquire`` / the holder refcount);
+# ``create_rust_session`` casts on the way out.
+_SESSION_CACHE: dict[str, WireSession] = {}
+
+
+def _session_cache_key(session: SessionConfig) -> str:
+    """Credential fingerprint for the direct-session singleton.
+
+    Matches the flock identity (``user`` / ``system_name`` / ``url`` / ``env``)
+    plus the account triple, so a Live node and a Demo history session can never
+    share, while data/exec factories built from the same env always do.
+    Password is deliberately absent: it is not part of the login identity and
+    must never appear in keys / reprs / logs.
+    """
+    return (
+        f"{session.connect_mode}:{session.user}:{session.system_name}:{session.url}:"
+        f"{session.env}:{session.account_id}:{session.fcm_id}:{session.ib_id}:"
+        f"{session.gateway_listen}"
+    )
+
 
 def create_rust_session(
     session: SessionConfig,
     *,
     plants: str = PLANTS_MARKET_DATA,
 ) -> WireSession:
-    """Create the PyO3 session when the extension is built.
+    """Create (or reuse) the in-process PyO3 session for ``session``.
+
+    Direct mode is a process-wide singleton keyed by credential fingerprint
+    (``_SESSION_CACHE``): the data factory, exec factory, and
+    ``connect_market_data_session`` all share one Rithmic login, so
+    initializing both clients cannot open two logins that close each other.
+    Every hand-out takes a holder (``_FlockedDirectSession.acquire``) and
+    ``disconnect`` tears plants down only when the last holder leaves, so one
+    client's teardown cannot close a shared session out from under the other.
 
     Takes the shared credential flock before constructing plants so legacy
     callers cannot open a second Rithmic login alongside a gateway parent.
 
     ``plants`` is ``market_data`` (ticker + history) or ``execution``
-    (also PnL when the account triple is set). Order plant stays lazy.
+    (also PnL when the account triple is set). Order plant stays lazy. A later
+    ``execution`` request on a cached ``market_data`` session unions the PnL
+    plant into the set (``request_plants`` attaches it even when already
+    connected).
     """
+    key = _session_cache_key(session)
+    existing = cast(_FlockedDirectSession | None, _SESSION_CACHE.get(key))
+    if existing is not None:
+        if plants == PLANTS_EXECUTION:
+            existing.request_plants(PLANTS_EXECUTION)
+        existing.acquire()
+        return existing
+
     from rithmic_nt_connect._lib import Session
 
     SessionLock = _load_session_lock()
@@ -181,7 +226,9 @@ def create_rust_session(
     # so a checker cannot see its protocol conformance; the Rust ``Session``
     # itself is verified against ``WireSession`` above (it is the ``inner``
     # argument's declared type).
-    return _FlockedDirectSession(inner, lock)
+    wrapped = _FlockedDirectSession(inner, lock, cache_key=key)
+    _SESSION_CACHE[key] = wrapped
+    return wrapped
 
 
 class _FlockedDirectSession:
@@ -194,17 +241,66 @@ class _FlockedDirectSession:
     them); ``__getattr__`` remains as a safety net for future additions.
     """
 
-    def __init__(self, inner: WireSession, lock: Any) -> None:
+    def __init__(
+        self,
+        inner: WireSession,
+        lock: Any,
+        cache_key: str | None = None,
+    ) -> None:
         self._inner = inner
         self._lock = lock
+        self._cache_key = cache_key
         self._connect_gate = threading.Lock()
+        # Holder refcount: the creator holds one; every additional factory /
+        # ``connect_market_data_session`` hand-out takes another via
+        # ``acquire``. ``disconnect`` tears the inner plants down only when the
+        # last holder leaves, so a data-client teardown cannot close a shared
+        # session that an exec client (or standalone history load) still uses.
+        self._holders = 1
+
+    def acquire(self) -> None:
+        """Take another holder on the shared session (factory hand-out)."""
+        with self._connect_gate:
+            self._holders += 1
 
     def connect(self) -> None:
         ensure_connected(self)
 
     def disconnect(self) -> None:
+        """Release this holder; tear plants down only when the last one leaves.
+
+        The last holder also releases the credential flock and evicts the
+        session from the process singleton, so a stopped node no longer blocks
+        a separate process from taking the login (the flock's lifetime is tied
+        to the owners, not to GC).
+        """
         with self._connect_gate:
-            self._inner.disconnect()
+            if self._holders <= 0:
+                return
+            self._holders -= 1
+            if self._holders == 0:
+                self._inner.disconnect()
+                self._release_credential_flock()
+
+    def _release_credential_flock(self) -> None:
+        if self._cache_key is not None and _SESSION_CACHE.get(self._cache_key) is self:
+            _SESSION_CACHE.pop(self._cache_key, None)
+        close = getattr(self._lock, "close", None)
+        if callable(close):
+            close()
+
+    def reset_ticker(self) -> None:
+        """Recreate ONLY the ticker plant, refcount-blind.
+
+        Used by the data client's channel-error resync, which must actually
+        recreate the ticker plant even while other holders are live (a
+        refcounted ``disconnect`` would be a no-op and the broken stream would
+        never recover). Sibling plants (history/PnL/order) stay untouched, so
+        the exec client sharing this session is never disturbed. The re-issued
+        subscription intent follows in ``resync_ticker_session``.
+        """
+        with self._connect_gate:
+            self._inner.reset_ticker()
 
     # -- TickerSession -----------------------------------------------------
     def subscribe(self, symbol: str, exchange: str) -> None:
@@ -454,8 +550,12 @@ def create_session(
 ) -> WireSession:
     """Create a WireSession for ``session.connect_mode`` (``direct`` or ``gateway``).
 
-    Direct takes the credential flock and opens PyO3 plants in-process.
-    Gateway dials ``rithmic-gateway`` and never opens plants locally.
+    Direct is a process-wide singleton per credential fingerprint (see
+    ``create_rust_session``): the data factory, exec factory, and
+    ``connect_market_data_session`` share one in-process Rithmic login.
+    Gateway dials ``rithmic-gateway`` and never opens plants locally; each
+    call returns a **fresh** ``GatewayClient`` — the parent owns the single
+    login, and sharing one client would interleave tick and order polls.
     """
     if session.connect_mode == ConnectMode.GATEWAY:
         from rithmic_nt_connect.gateway_wire import create_gateway_wire_session
@@ -468,7 +568,13 @@ def create_session(
 def connect_market_data_session(
     config: SessionConfig | None = None,
 ) -> WireSession:
-    """Create and connect a ticker+history session (no PnL / order plant)."""
+    """Create and connect a ticker+history session.
+
+    Direct mode returns the process-wide singleton for these credentials (so a
+    standalone history load shares the node's login instead of opening a second
+    one that would close it); the session may already carry the PnL plant when
+    an exec client requested it first. Connect is idempotent.
+    """
     session = create_session(
         config if config is not None else SessionConfig.from_env(),
         plants=PLANTS_MARKET_DATA,

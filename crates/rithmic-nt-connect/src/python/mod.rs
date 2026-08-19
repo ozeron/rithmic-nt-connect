@@ -571,6 +571,24 @@ impl PySession {
         })
     }
 
+    fn reset_ticker(&self) -> PyResult<()> {
+        // Disconnect + reconnect ONLY the ticker plant (``reset_ticker_plant``
+        // in rithmic-plants), used by the data client's channel-error resync.
+        // Refcount-blind on purpose: ``_FlockedDirectSession.disconnect`` is
+        // holder-refcounted and would be a no-op for a shared session, but the
+        // resync must actually recreate the ticker plant. Sibling plants
+        // (history/PnL/order) stay untouched, so the exec client sharing this
+        // session is never disturbed; the caller re-issues its ticker / book /
+        // time-bar intent afterwards.
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        runtime()
+            .block_on(inner.reset_ticker_plant())
+            .map_err(to_py_err)
+    }
+
     fn disconnect_order_plant(&self) -> PyResult<()> {
         self.with_disconnect_gate(|| {
             let _ops = self.acquire_session_ops_for_disconnect()?;
