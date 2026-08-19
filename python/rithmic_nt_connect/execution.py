@@ -573,8 +573,10 @@ class RithmicExecutionClient(LiveExecutionClient):
         the rows (terminal outcomes the live stream missed while
         disconnected). Typed live events are NOT re-emitted — that is the live
         stream's job and would double-emit for rows already seen live.
-        Publication failures are logged and skipped; the engine's own
-        reconciliation re-runs the drain afterwards.
+        Publication happens BEFORE the venue id is bound and a failed
+        publication raises: the engine must receive the reconciled status
+        before trading resumes, so the barrier aborts (the plant stays
+        un-armed).
         """
         latest: dict[str, tuple[int, dict[str, Any]]] = {}
         for raw in events:
@@ -1847,8 +1849,8 @@ class RithmicExecutionClient(LiveExecutionClient):
             if self._order_type_from_event(fields) in _TRIGGERABLE_ORDER_TYPES:
                 return OrderStatus.TRIGGERED
             return OrderStatus.ACCEPTED
-        if kind in ("accepted", "updated") or status_u in ("OPEN", "WORKING"):
-            return OrderStatus.ACCEPTED
+        # Everything else defaults to working (ACCEPTED): a row that is not
+        # recognizably filled/rejected/canceled/expired is an open order.
         return OrderStatus.ACCEPTED
 
     def _client_order_id_for_tag(self, tag: Any) -> ClientOrderId | None:
