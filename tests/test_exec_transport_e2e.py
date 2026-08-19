@@ -20,6 +20,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+import rithmic_nt_connect.execution as execution_mod
 from _stubs import (
     FaultInjectingSession,
     WireSessionStub,
@@ -56,6 +57,7 @@ from nautilus_trader.model.orders import LimitOrder
 from rithmic_nt_connect._order_plant import OrderPlantPolicy, OrderPlantState
 from rithmic_nt_connect._orders import order_notification_to_fields
 from rithmic_nt_connect.errors import (
+    ChannelError,
     ReconciliationUnavailableError,
     VenueQueryUnavailable,
 )
@@ -500,6 +502,44 @@ def test_order_poll_persistent_transient_fails_closed() -> None:
     assert not client._order_plant.allow_submit()
 
 
+def test_order_poll_transient_streak_resets_after_resync() -> None:
+    """Macroscope (12:16Z, High): the transient streak must not carry across
+    stream lifetimes. 4 transients -> channel drop -> successful resubscribe
+    (streak reset) -> 1 more transient must NOT reach the 5-error latch; the
+    loop keeps polling until a handler error ends it. Pre-fix the streak
+    survived the resync, so the 5th transient latched the healthy loop at call
+    6."""
+    client = _trading_client()  # plant LIVE, real OrderPlantPolicy
+    calls = {"n": 0}
+
+    def poll_fn() -> dict[str, object] | None:
+        calls["n"] += 1
+        if calls["n"] in (5, 7):
+            raise ChannelError("channel dropped")
+        if calls["n"] == 12:
+            return {"type": "order_notification"}
+        raise ValueError("protocol decode error")
+
+    def on_event(event: dict[str, object]) -> None:
+        raise RuntimeError("handler regression")
+
+    awaitable = RithmicExecutionClient._plant_poll_loop(
+        cast(RithmicExecutionClient, client),
+        name="order",
+        poll_fn=poll_fn,
+        on_event=on_event,
+        on_resync=client._resync_order_subscription,
+    )
+    asyncio.run(awaitable)
+
+    # 10 transients + 2 channel drops + 1 event: the loop survived the
+    # post-resync transient (pre-fix it stopped at 6 via _PollStreamFailed).
+    assert calls["n"] == 12
+    # The loop ended via the handler error, not the transient latch: the
+    # streak was reset by the resyncs.
+    assert client._order_plant.state is OrderPlantState.LATCHED
+
+
 class _ConnectSession(WireSessionStub):
     """Session double for ``_connect``: PnL + order plants connect, and
     ``load_orders`` fails, heals, or runs a hook on demand."""
@@ -755,6 +795,76 @@ def test_reconnect_ream_drain_binds_only_usable_rows(
     }
 
 
+def test_reconnect_ream_drain_skips_closed_tracked_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Macroscope (12:16Z, Medium): a stale drain row for a CLOSED tracked
+    order must not publish as an external status (duplicate external order /
+    stale replay). ``_resolve_client_order_id`` returns None for closed
+    orders, which previously bypassed the closed/freshness guards — resolve
+    the basket-to-client mapping from the cache first so the is_closed guard
+    applies."""
+    session = FaultInjectingSession(
+        working_orders=[_working_order_row(tag="O-1", basket="B1")]
+    )
+    client = _connect_client(session, monkeypatch)
+    closed = _inflight_order()
+    closed.is_closed = True
+    closed.status = OrderStatus.CANCELED
+    client._cache._orders[str(closed.client_order_id)] = closed
+    client._cache.add_venue_order_id(ClientOrderId("O-1"), VenueOrderId("B1"))
+    reports: list[OrderStatusReport] = []
+    monkeypatch.setattr(
+        client, "_send_order_status_report", lambda report: reports.append(report)
+    )
+
+    asyncio.run(client._connect())
+
+    # The stale row for the closed order publishes nothing; the re-arm drain
+    # still succeeds (advisory rows never block the barrier).
+    assert reports == []
+    assert client._order_plant.allow_submit()
+
+
+def test_rearm_drain_skips_row_with_malformed_ts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Macroscope (12:21Z, Medium): a malformed ``ts_event`` must skip that
+    row, never abort the whole re-arm drain (one bad advisory row must not
+    leave the plant latched). The normalize boundary already guarantees an
+    int-or-None ts_event today; this pins the defensive per-row guard for any
+    source that bypasses it."""
+    # Simulate a drain source whose normalized row carries a non-integer
+    # ts_event (bypassing ``order_notification_to_fields``).
+    bad = {
+        "basket_id": "B1",
+        "ts_event": "not-a-timestamp",
+        "symbol": "NQU6",
+        "kind": "accepted",
+        "status": "OPEN",
+        "quantity": 2,
+        "price_type": 1,
+        "duration": 1,
+    }
+    real_normalize = execution_mod.order_notification_to_fields
+
+    def fake_normalize(raw: dict[str, object]) -> dict[str, object]:
+        if raw is bad:
+            return bad
+        return real_normalize(raw)
+
+    monkeypatch.setattr(execution_mod, "order_notification_to_fields", fake_normalize)
+    client = _trading_client()
+    client._cache._orders["O-1"] = _inflight_order()
+    monkeypatch.setattr(client, "_send_order_status_report", lambda report: None)
+    good = _working_order_row(tag="O-1", basket="B2")
+
+    client._apply_drain_rows([good, bad])
+
+    # No exception: the malformed row was skipped, the valid row still bound.
+    assert client._cache.venue_order_id(ClientOrderId("O-1")) == VenueOrderId("B2")
+
+
 def test_drain_row_boundary_bindable_is_one_decision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -785,6 +895,15 @@ def test_drain_row_boundary_bindable_is_one_decision(
     row = client._drain_row_from_fields(malformed, 1)
     assert not row.bindable
     assert row.report is None
+
+    # Boolean closed-set values (``int(True) == 1``) are malformed, not
+    # LIMIT/DAY: advisory report only, never bindable (Macroscope 12:21Z).
+    bools = _working_order_row(tag="O-1", basket="B1")
+    bools["price_type"] = True
+    bools["duration"] = True
+    row = client._drain_row_from_fields(bools, 1)
+    assert not row.bindable
+    assert row.report is not None
 
 
 def test_strict_drain_row_triggered_binds_and_reports_triggered(

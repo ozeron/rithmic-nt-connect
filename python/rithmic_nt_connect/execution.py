@@ -226,7 +226,11 @@ def _row_is_trustworthy(fields: dict[str, Any]) -> bool:
         return False
     try:
         if (
-            int(price_type) not in _RITHMIC_PRICE_TYPE_TO_ORDER_TYPE
+            # bool is an int subclass: ``int(True) == 1`` would map malformed
+            # boolean values to LIMIT/DAY — reject them before coercion.
+            isinstance(price_type, bool)
+            or isinstance(duration, bool)
+            or int(price_type) not in _RITHMIC_PRICE_TYPE_TO_ORDER_TYPE
             or int(duration) not in _RITHMIC_DURATION_TO_TIF
         ):
             return False
@@ -408,6 +412,10 @@ class RithmicExecutionClient(LiveExecutionClient):
                 ),
                 log_msg="rithmic_order_poll",
             )
+            # New stream lifetime: a previous stream's transient streak must
+            # not carry over (4 transients before a channel drop + 1 after a
+            # successful resubscribe would otherwise latch a healthy loop).
+            self._order_poll_transient_streak = 0
             # Every (re)connect re-observes venue state before arming — the
             # disconnect window can hide venue-side accepts/fills/terminal
             # outcomes and position changes even when nothing was latched. The
@@ -523,6 +531,11 @@ class RithmicExecutionClient(LiveExecutionClient):
         # resolved, so commands stay blocked until a successful re-arm.
         await asyncio.to_thread(self._session.disconnect_order_plant)
         await asyncio.to_thread(self._session.subscribe_order_updates)
+        # The channel recovered: this is a fresh stream lifetime, so transient
+        # errors from before the drop must not count toward the new stream's
+        # failure streak (a healthy post-resync loop must not latch on the old
+        # count).
+        self._order_poll_transient_streak = 0
         self._order_plant.resync_complete()
 
     async def _resync_pnl_subscription(self) -> None:
@@ -587,7 +600,11 @@ class RithmicExecutionClient(LiveExecutionClient):
             basket = fields.get("basket_id")
             if not basket:
                 continue
-            ts_event = int(fields.get("ts_event") or 0)
+            try:
+                ts_event = int(fields.get("ts_event") or 0)
+            except (TypeError, ValueError, OverflowError):
+                # One malformed row must not abort the whole drain.
+                continue
             key = str(basket)
             if key not in latest or ts_event >= latest[key][0]:
                 latest[key] = (ts_event, fields)
@@ -602,7 +619,17 @@ class RithmicExecutionClient(LiveExecutionClient):
             report = row.report
             if report is None:
                 continue
-            client_order_id = self._resolve_client_order_id(fields)
+            # Resolve the basket-to-client mapping from the cache FIRST, then
+            # fall back to ``_resolve_client_order_id``: that helper returns
+            # None for a closed tracked order (so a stale notification for a
+            # closed incarnation routes to the untracked path), but here a
+            # mapped basket must still hit the closed/freshness guards below —
+            # otherwise a stale drain row for a closed tracked order would
+            # publish as an external status (duplicate external order / stale
+            # replay).
+            client_order_id = self._cache.client_order_id(VenueOrderId(basket))
+            if client_order_id is None:
+                client_order_id = self._resolve_client_order_id(fields)
             if client_order_id is not None:
                 order = self._cache.order(client_order_id)
                 if order is not None and getattr(order, "is_closed", False):
@@ -1688,7 +1715,10 @@ class RithmicExecutionClient(LiveExecutionClient):
                 continue
             if not fields.get("basket_id"):
                 continue
-            ts_event = int(fields.get("ts_event") or 0)
+            try:
+                ts_event = int(fields.get("ts_event") or 0)
+            except (TypeError, ValueError, OverflowError):
+                continue
             row = self._drain_row_from_fields(fields, ts_event)
             if not row.bindable:
                 continue
@@ -1978,7 +2008,10 @@ class RithmicExecutionClient(LiveExecutionClient):
                 self._matches_instrument(fields, command.instrument_id, venue_order_id)
             ):
                 continue
-            ts_event = int(fields.get("ts_event") or 0)
+            try:
+                ts_event = int(fields.get("ts_event") or 0)
+            except (TypeError, ValueError, OverflowError):
+                continue
             row = self._drain_row_from_fields(fields, ts_event)
             report = row.report
             if report is None:
@@ -2018,7 +2051,10 @@ class RithmicExecutionClient(LiveExecutionClient):
                 fields, command.instrument_id, command.venue_order_id
             ):
                 continue
-            ts_event = int(fields.get("ts_event") or self._clock.timestamp_ns())
+            try:
+                ts_event = int(fields.get("ts_event") or self._clock.timestamp_ns())
+            except (TypeError, ValueError, OverflowError):
+                continue
             # Share the adapter-wide fill dedup store (live path + recon) so a
             # fill already emitted live, or duplicated across the summary/today
             # drains, is not re-emitted as a second reconciliation fill.
