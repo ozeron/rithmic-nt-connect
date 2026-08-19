@@ -61,10 +61,10 @@ class OrderPlantPolicy:
         """Transport down / not armed: commands blocked."""
         self._state = OrderPlantState.DISCONNECTED
 
-    def latch(self, reason: str) -> None:
+    def latch(self) -> None:
         """An anomaly that needs a recon cycle: commands blocked until a
-        successful re-arm (``rearm``). A mid-session resync never clears it."""
-        _ = reason  # kept for caller-facing logs; the machine only needs state
+        successful re-arm (``rearm``). A mid-session resync never clears it.
+        Callers log the reason themselves; the machine only needs state."""
         self._state = OrderPlantState.LATCHED
 
     def resync_start(self) -> None:

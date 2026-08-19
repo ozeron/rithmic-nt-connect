@@ -755,36 +755,38 @@ def test_reconnect_ream_drain_binds_only_usable_rows(
     }
 
 
-def test_drain_row_boundary_usable_bindable_are_one_decision(
+def test_drain_row_boundary_bindable_is_one_decision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Root-cause item 2: the drain-row interpretation is ONE boundary
-    (``_drain_row_from_fields``). For any row: ``bindable`` (strict) implies
-    ``usable`` (permissive), and a row is usable iff a permissive report
-    builds — callers never re-interpret the row."""
+    (``_drain_row_from_fields``). For any row: ``bindable`` (strict, safe to
+    bind a venue id) is decided exactly here, the strict report is the
+    permissive report when the row is fully usable, and the permissive
+    fallback exists only for advisory publish — callers never re-interpret
+    the row."""
     client = _trading_client()
 
-    # Fully usable row: strict == permissive report.
+    # Fully usable row: strict == permissive report, bindable.
     row = client._drain_row_from_fields(_working_order_row(tag="O-1", basket="B1"), 1)
-    assert row.usable and row.bindable
+    assert row.bindable
     assert row.strict_report is row.permissive_report
     assert row.permissive_report is not None
 
-    # Terms-missing row (no price_type/duration): advisory (usable) but not
-    # bindable — the permissive fallback fabricates MARKET/GTC for publish.
+    # Terms-missing row (no price_type/duration): advisory publish fallback,
+    # but NOT bindable — the permissive fallback fabricates MARKET/GTC.
     no_terms = _working_order_row(tag="O-1", basket="B1")
     del no_terms["price_type"]
     del no_terms["duration"]
     row = client._drain_row_from_fields(no_terms, 1)
-    assert row.usable and not row.bindable
+    assert not row.bindable
     assert row.strict_report is None
     assert row.permissive_report is not None
 
-    # Malformed row (no order terms): neither usable nor bindable.
+    # Malformed row (no order terms): nothing usable or bindable.
     malformed = _working_order_row(tag="O-1", basket="B1")
     malformed["quantity"] = 0
     row = client._drain_row_from_fields(malformed, 1)
-    assert not row.usable and not row.bindable
+    assert not row.bindable
     assert row.strict_report is None and row.permissive_report is None
 
 

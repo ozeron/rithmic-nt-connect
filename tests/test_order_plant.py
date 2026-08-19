@@ -91,7 +91,7 @@ def _apply(plant: OrderPlantPolicy, event: str) -> None:
     elif event == "disconnect":
         plant.disconnect()
     elif event == "latch":
-        plant.latch("test")
+        plant.latch()
     elif event == "rearm(alive)":
         plant.rearm(poll_alive=True)
     elif event == "rearm(dead)":
@@ -164,7 +164,7 @@ def test_rearm_is_the_race_token() -> None:
     # A latch raised during the barrier survives; rearm returns False.
     plant = OrderPlantPolicy()
     plant.begin_connect()
-    plant.latch("overfill mid-drain")
+    plant.latch()
     assert not plant.rearm(poll_alive=True)
     assert plant.state is OrderPlantState.LATCHED
     assert plant.latched

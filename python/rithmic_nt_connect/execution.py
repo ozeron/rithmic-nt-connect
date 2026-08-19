@@ -196,11 +196,12 @@ class _DrainRowResult:
     """Tagged result of the drain-row interpretation boundary
     (``RithmicExecutionClient._drain_row_from_fields``).
 
-    One boundary decides, for any working-orders drain row, whether it can
-    publish an advisory report (``usable``) and whether it passes the strict
-    trust boundary safe for binding a venue id (``bindable``). No caller
-    re-implements "usable"; the permissive report is the advisory publish
-    fallback for rows whose closed-set terms are incomplete.
+    One boundary decides, for any working-orders drain row, whether it passes
+    the strict trust boundary safe for binding a venue id (``bindable``) and
+    what to publish: the strict report, or the permissive advisory fallback
+    (``permissive_report``) for rows whose closed-set terms are incomplete.
+    ``fields``/``ts_event`` let callers re-read the winning row (freshness
+    check, venue-id bind). No caller re-implements the interpretation.
     """
 
     __slots__ = ("fields", "permissive_report", "strict_report", "ts_event")
@@ -216,11 +217,6 @@ class _DrainRowResult:
         self.ts_event = ts_event
         self.strict_report = strict_report
         self.permissive_report = permissive_report
-
-    @property
-    def usable(self) -> bool:
-        """A report can be built for this row (advisory publish)."""
-        return self.permissive_report is not None
 
     @property
     def bindable(self) -> bool:
@@ -383,9 +379,7 @@ class RithmicExecutionClient(LiveExecutionClient):
             try:
                 await self._rearm_after_reconnect()
             except Exception as exc:
-                self._order_plant.latch(
-                    f"reconnect re-arm failed (drain/PnL gate): {exc}"
-                )
+                self._order_plant.latch()
                 self._log.error(
                     f"reconnect re-arm failed; order plant stays un-armed: {exc}"
                 )
@@ -870,7 +864,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         re-arm barrier uses to detect an anomaly raised while its drain was
         running.
         """
-        self._order_plant.latch(reason)
+        self._order_plant.latch()
         self._log.error(f"{action}; order plant latched: {reason}")
 
     def _mark_order_plant_failed(self, action: str, exc: BaseException) -> None:

@@ -166,15 +166,10 @@ def _report_client(
 
 
 def _drain_row_result(status: object) -> SimpleNamespace:
-    """Boundary-result double: handlers consume ``permissive_report`` /
-    ``usable`` / ``bindable`` from ``_drain_row_from_fields``; a ``None``
-    status means the row is unusable."""
-    return SimpleNamespace(
-        strict_report=status,
-        permissive_report=status,
-        usable=status is not None,
-        bindable=status is not None,
-    )
+    """Boundary-result double: the handler paths under test consume only
+    ``permissive_report`` from ``_drain_row_from_fields``; a ``None`` status
+    means the row cannot build a report."""
+    return SimpleNamespace(permissive_report=status)
 
 
 def _fill_cmd() -> GenerateFillReports:
