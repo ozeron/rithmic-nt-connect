@@ -272,6 +272,11 @@ class RithmicExecutionClient(LiveExecutionClient):
         await asyncio.to_thread(ensure_connected, self._session)
         self._log.info("Rithmic exec session ready (shared with data client)")
 
+        # Whether the PnL poll loop is running for THIS connect: the re-arm
+        # PnL gate applies only when the stream is actually connected — with
+        # ``soft_fail_pnl`` there may be no stream to observe, and requiring an
+        # observation would block trading with no recovery path.
+        self._pnl_connected = False
         try:
             await asyncio.to_thread(self._session.subscribe_pnl)
             self._apply_resolved_account_id()
@@ -285,6 +290,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                 ),
                 log_msg="rithmic_pnl_poll",
             )
+            self._pnl_connected = True
         except Exception as exc:
             if self._config_local.soft_fail_pnl:
                 self._log.warning(f"PnL/account path soft-failed: {exc}")
@@ -319,44 +325,40 @@ class RithmicExecutionClient(LiveExecutionClient):
                 ),
                 log_msg="rithmic_order_poll",
             )
-            if self._order_plant_latched:
-                # A previous operation's venue outcome is still unknown: the
-                # plant re-arms only after a bounded working-orders drain and
-                # account/position context are re-acquired. The adapter owns
-                # readiness; the engine's reconciliation is repair, not
-                # readiness. A mid-session transport resync does not clear the
-                # latch (see ``_resync_order_subscription``).
-                try:
-                    await self._rearm_after_reconnect()
-                except Exception as exc:
+            # Every (re)connect re-observes venue state before arming — the
+            # disconnect window can hide venue-side accepts/fills/terminal
+            # outcomes and position changes even when nothing was latched. The
+            # adapter owns readiness; the engine's reconciliation is repair,
+            # not readiness. A mid-session transport resync does not clear the
+            # latch (see ``_resync_order_subscription``).
+            try:
+                await self._rearm_after_reconnect()
+            except Exception as exc:
+                self._order_plant.state = OrderPlantState.DISCONNECTED
+                self._log.error(
+                    f"reconnect re-arm failed; order plant stays un-armed: {exc}"
+                )
+            else:
+                if self._order_plant.state is not OrderPlantState.CONNECTING or (
+                    self._order_poll_task is not None and self._order_poll_task.done()
+                ):
+                    # The order poll loop kept running during the drain
+                    # (never-drop). Any anomaly in that window leaves
+                    # ``CONNECTING``: a newer latch or a stream failure
+                    # (handler break / resync failure) sets DISCONNECTED, a
+                    # mid-drain resync ends DISCONNECTED while latched, and
+                    # a dead poll task cannot deliver. The re-arm must not
+                    # clear a latch or re-arm a dead/broken stream it did
+                    # not observe.
                     self._order_plant.state = OrderPlantState.DISCONNECTED
                     self._log.error(
-                        f"reconnect re-arm failed; order plant stays un-armed: {exc}"
+                        "reconnect re-arm finished but the order plant was "
+                        "re-latched or its stream failed during the drain; "
+                        "staying un-armed"
                     )
                 else:
-                    if self._order_plant.state is not OrderPlantState.CONNECTING or (
-                        self._order_poll_task is not None
-                        and self._order_poll_task.done()
-                    ):
-                        # The order poll loop kept running during the drain
-                        # (never-drop). Any anomaly in that window leaves
-                        # ``CONNECTING``: a newer latch or a stream failure
-                        # (handler break / resync failure) sets DISCONNECTED, a
-                        # mid-drain resync ends DISCONNECTED while latched, and
-                        # a dead poll task cannot deliver. The re-arm must not
-                        # clear a latch or re-arm a dead/broken stream it did
-                        # not observe.
-                        self._order_plant.state = OrderPlantState.DISCONNECTED
-                        self._log.error(
-                            "reconnect re-arm finished but the order plant was "
-                            "re-latched or its stream failed during the drain; "
-                            "staying un-armed"
-                        )
-                    else:
-                        self._order_plant_latched = False
-                        self._order_plant.state = OrderPlantState.LIVE
-            else:
-                self._order_plant.state = OrderPlantState.LIVE
+                    self._order_plant_latched = False
+                    self._order_plant.state = OrderPlantState.LIVE
         await self._await_account_registered()
 
     async def _await_account_registered(
@@ -461,10 +463,57 @@ class RithmicExecutionClient(LiveExecutionClient):
         failure raises, so the latch survives.
         """
         start_sec, end_sec = self._recon_window_sec(None, None)
-        await self._load_orders_events(start_sec, end_sec)
-        await self._await_pnl_snapshot()
+        events = await self._load_orders_events(start_sec, end_sec)
+        self._apply_drain_rows(events)
+        # The PnL gate applies only when the PnL stream is actually connected
+        # this connect: with ``soft_fail_pnl`` there is no stream to observe.
+        if self._pnl_connected:
+            await self._await_pnl_snapshot()
         self._apply_resolved_account_id()
         self._seed_account_if_needed()
+
+    def _apply_drain_rows(self, events: list[dict[str, Any]]) -> None:
+        """Apply a working-orders drain to the local cache before re-arming.
+
+        The drain is a snapshot, not a replay: bind the venue id for tracked
+        in-flight orders (so commands target the real venue order and later
+        notifications attach), and publish reconciliation status reports for
+        the rows (terminal outcomes the live stream missed while
+        disconnected). Typed live events are NOT re-emitted — that is the live
+        stream's job and would double-emit for rows already seen live.
+        Publication failures are logged and skipped; the engine's own
+        reconciliation re-runs the drain afterwards.
+        """
+        latest: dict[str, tuple[int, dict[str, Any]]] = {}
+        for raw in events:
+            try:
+                fields = order_notification_to_fields(raw)
+            except Exception:
+                continue
+            basket = fields.get("basket_id")
+            if not basket:
+                continue
+            ts_event = int(fields.get("ts_event") or 0)
+            key = str(basket)
+            if key not in latest or ts_event >= latest[key][0]:
+                latest[key] = (ts_event, fields)
+        for ts_event, fields in latest.values():
+            basket = str(fields["basket_id"])
+            client_order_id = self._resolve_client_order_id(fields)
+            if client_order_id is not None:
+                order = self._cache.order(client_order_id)
+                if (
+                    order is not None
+                    and self._cache.venue_order_id(client_order_id) is None
+                ):
+                    self._bind_venue_id(client_order_id, basket)
+            report = self._order_status_report_from_fields(fields, ts_event)
+            if report is not None:
+                RithmicExecutionClient._publish_order_status_report(
+                    self,
+                    report,
+                    context="reconnect re-arm drain",
+                )
 
     async def _await_pnl_snapshot(self, timeout_s: float | None = None) -> None:
         """Wait (bounded) for the PnL stream to deliver account/position
@@ -1719,14 +1768,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                     "expired",
                 ) or any(
                     marker in status_u
-                    for marker in (
-                        "OPEN",
-                        "WORKING",
-                        "COMPLETE",
-                        "CANCEL",
-                        "REJECT",
-                        "EXPIRED",
-                    )
+                    for marker in ("OPEN", "WORKING", "CANCEL", "REJECT", "EXPIRED")
                 )
                 if (
                     price_type is None

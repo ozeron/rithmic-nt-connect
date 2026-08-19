@@ -35,6 +35,7 @@ from nautilus_trader.execution.messages import (
     GeneratePositionStatusReports,
     SubmitOrder,
 )
+from nautilus_trader.execution.reports import OrderStatusReport
 from nautilus_trader.model.enums import (
     OrderSide,
     OrderStatus,
@@ -404,6 +405,25 @@ def test_recovery_drain_rejects_row_with_fabricated_terms() -> None:
     assert report.venue_order_id == VenueOrderId("B1")
 
 
+def test_recovery_drain_rejects_row_with_complete_status() -> None:
+    """Macroscope #3: a strict recovery row whose status is COMPLETE (which
+    the status mapper would otherwise report as ACCEPTED) is not trusted for
+    recovery — the query fails closed rather than binding a venue id with a
+    fabricated open state."""
+    bare = _working_order_row()
+    bare["kind"] = None  # no kind -> the status marker alone decides
+    bare["status"] = "COMPLETE"
+    session = FaultInjectingSession(working_orders=[bare])
+    client = _trading_client(session)
+    order = _inflight_order()
+    client._cache._orders[str(order.client_order_id)] = order
+
+    with pytest.raises(VenueQueryUnavailable, match="in-flight"):
+        asyncio.run(client.generate_order_status_report(_query()))
+
+    assert client._cache.venue_order_id(ClientOrderId("O-1")) is None
+
+
 def test_stale_drain_row_does_not_regress_live_resolution() -> None:
     """P1: if the live stream resolves the order while the drain is in flight
     (bound venue id, terminal state), the drain's stale OPEN row must not be
@@ -528,6 +548,29 @@ def test_reconnect_ream_requires_successful_drain(
     assert client._order_plant.allow_submit()
 
 
+def test_unlatched_reconnect_still_runs_rearm_barrier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Macroscope #1: an ordinary (un-latched) reconnect must not go LIVE on
+    re-subscribe alone — the drain must succeed (and PnL be re-observed)
+    before trading is re-armed on every connect."""
+    session = _ConnectSession(fail_load_orders=True)
+    client = _connect_client(session, monkeypatch)
+    client._order_plant_latched = False  # ordinary disconnect, nothing latched
+
+    asyncio.run(client._connect())
+
+    assert client._order_plant.state is OrderPlantState.DISCONNECTED
+    assert not client._order_plant.allow_submit()
+
+    # Venue heals: the next (still un-latched) connect re-arms.
+    session.fail_load_orders = False
+    asyncio.run(client._connect())
+
+    assert client._order_plant.state is OrderPlantState.LIVE
+    assert client._order_plant.allow_submit()
+
+
 def test_reconnect_ream_requires_pnl_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -577,6 +620,33 @@ def test_reconnect_ream_requires_plant_stayed_connecting(
         assert client._order_plant_latched
         assert client._order_plant.state is OrderPlantState.DISCONNECTED
         assert not client._order_plant.allow_submit()
+
+
+def test_reconnect_ream_applies_drain_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Macroscope #2: the re-arm barrier applies the drained rows — a tracked
+    in-flight order matching a drain row gets its venue id bound and a status
+    report is published, so it is not left unresolved after the plant re-arms
+    (commands cannot duplicate/conflict with an order the venue already
+    accepted)."""
+    session = FaultInjectingSession(
+        working_orders=[_working_order_row(tag="O-1", basket="B1")]
+    )
+    client = _connect_client(session, monkeypatch)
+    order = _inflight_order()
+    client._cache._orders[str(order.client_order_id)] = order
+    reports: list[OrderStatusReport] = []
+    monkeypatch.setattr(
+        client, "_send_order_status_report", lambda report: reports.append(report)
+    )
+
+    asyncio.run(client._connect())
+
+    assert client._order_plant.allow_submit()
+    assert client._cache.venue_order_id(ClientOrderId("O-1")) == VenueOrderId("B1")
+    assert len(reports) == 1
+    assert reports[0].venue_order_id == VenueOrderId("B1")
 
 
 def test_pnl_marker_only_after_successful_account_processing(

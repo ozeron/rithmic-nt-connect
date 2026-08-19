@@ -159,9 +159,11 @@ out of `SUBMITTED` first — it does so with a bounded per-`user_tag`
 **Operator requirement for live trading:** the terminal UNKNOWN synthesis is
 exactly the fabricated state the adapter forbids, and the only reliable way to
 prevent it when the venue genuinely does not know the order is to disable the
-engine checker — set `inflight_check_interval_ms=0` on the `ExecEngineConfig`
-(interval `0` disables the check; verified `> 0` gate in
-`live/execution_engine.py`). Keep `open_check_open_only=True` for the
+engine checker — set `inflight_check_interval_ms=0` on the
+`LiveExecEngineConfig` (via `TradingNodeConfig.exec_engine`; 1.231.x does not
+define this field on the base `ExecEngineConfig` — verified against the
+installed package). Interval `0` disables the check; verified `> 0` gate in
+`live/execution_engine.py`. Keep `open_check_open_only=True` for the
 reconciliation path (see above). If the check is left enabled, the operator
 accepts that a genuinely-unknown in-flight order will be resolved as a terminal
 UNKNOWN reject by the engine after ~25s (5 retries × 5s threshold) — a strategy
@@ -171,17 +173,24 @@ may then resubmit and duplicate a live order.
 
 When the order plant is latched (a prior operation's venue outcome is unknown),
 a full reconnect re-arms it only after **both** complete (2026-08-19 exec
-hardening, Oracle 2nd + 3rd passes):
+hardening, Oracle 2nd + 3rd passes, Macroscope review):
 
 1. A bounded `load_orders` working-orders drain succeeds (one attempt per
    barrier — a failure is surfaced as unavailable and the next connect is the
-   retry boundary).
-2. A fresh account/position PnL snapshot is observed from the stream (bounded
-   `asyncio.Event` wait, default `_REARM_PNL_SNAPSHOT_TIMEOUT_S = 5.0`).
-   Positions ride the PnL stream, so re-arming without re-observing it would be
-   blind.
+   retry boundary), **and its rows are applied**: tracked in-flight orders get
+   their venue id bound and reconciliation status reports are published, so an
+   order the venue accepted while disconnected is not left unresolved/in-flight
+   when trading resumes.
+2. A fresh account/position PnL snapshot is observed from the stream when the
+   PnL stream is connected this connect (bounded `asyncio.Event` wait, default
+   `_REARM_PNL_SNAPSHOT_TIMEOUT_S = 5.0`). Positions ride the PnL stream, so
+   re-arming without re-observing it would be blind. With `soft_fail_pnl`
+   there is no stream to observe and the gate is skipped.
 
-Either failure keeps the latch and leaves the plant `DISCONNECTED` (submit/
+The barrier runs on **every** trading (re)connect — not only when a prior
+operation latched the plant — because the disconnect window can hide
+venue-side accepts/fills/terminal outcomes and position changes even when
+nothing was latched. Either failure keeps the plant `DISCONNECTED` (submit/
 modify blocked) until a later successful connect. The order poll loop keeps
 running during the barrier, so notifications are never dropped. The barrier
 clears the latch **only if the plant is still `CONNECTING` and the poll task is
