@@ -9,6 +9,7 @@ from collections.abc import Callable
 from typing import Any
 
 from rithmic_gateway import GatewayClient, GatewayConfig, GatewayError
+from rithmic_gateway.types import AccountRmsInfo, ProductRmsInfo
 
 
 def _call[T](fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
@@ -147,6 +148,12 @@ class GatewayWireSession:
 
     def load_orders(self, start_ssboe: int, end_ssboe: int) -> list[dict[str, Any]]:
         return _call(self._client.load_orders, start_ssboe, end_ssboe)
+
+    def load_product_rms_info(self) -> list[ProductRmsInfo]:
+        return _call(self._client.load_product_rms_info)
+
+    def load_account_rms_info(self) -> list[AccountRmsInfo]:
+        return _call(self._client.load_account_rms_info)
 
     def subscribe_bracket_updates(self) -> None:
         _call(self._client.subscribe_bracket_updates)

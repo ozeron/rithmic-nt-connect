@@ -7,12 +7,13 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex as TokioMutex};
 
 use rithmic_plants::history::parse_time_bar_type;
-use rithmic_plants::session::load_orders_on;
+use rithmic_plants::session::{load_account_rms_info_on, load_orders_on, load_product_rms_info_on};
 use rithmic_plants::PlantSet;
 
 use crate::convert::{
-    front_month_to_pb, history_bar_to_pb, history_tick_to_pb, order_key, order_notification_to_pb,
-    pnl_key, reference_data_to_pb, resolved_account_to_pb, time_bar_probe_row_to_pb,
+    account_rms_info_to_pb, front_month_to_pb, history_bar_to_pb, history_tick_to_pb, order_key,
+    order_notification_to_pb, pnl_key, product_rms_info_to_pb, reference_data_to_pb,
+    resolved_account_to_pb, time_bar_probe_row_to_pb,
 };
 use crate::pb::{self, frame::Body, Ack, ErrorResponse, Frame};
 use crate::reconnect::{ReconnectController, TimeBarIntent};
@@ -521,6 +522,75 @@ pub(super) async fn dispatch(
                     error_frame(request_id, "reconciliation_unavailable", &msg)
                 }
                 Err(e) => err_to_frame(request_id, "load_orders_failed", e),
+            }
+        }
+        Body::LoadProductRmsInfo(_req) => {
+            // Order-plant login is a trading capability (KTD12): gate the same
+            // as LoadOrders / EnsureOrder so `RITHMIC_ENABLE_TRADING=0` cannot
+            // bypass it. The query itself is read-only (risk config).
+            if !state.gates.trading_enabled {
+                return error_frame(
+                    request_id,
+                    "trading_disabled",
+                    "load_product_rms_info denied: parent trading disabled",
+                );
+            }
+            let Some(session) = &state.session else {
+                return no_session_frame(request_id);
+            };
+            let handle = {
+                let mut guard = session.lock().await;
+                match guard.ensure_order_plant().await {
+                    Ok(()) => match guard.clone_order_handle() {
+                        Ok(handle) => handle,
+                        Err(e) => return err_to_frame(request_id, "fetch_rms_failed", e),
+                    },
+                    Err(e) => return err_to_frame(request_id, "fetch_rms_failed", e),
+                }
+            };
+            match load_product_rms_info_on(&handle).await {
+                Ok(rows) => Frame {
+                    request_id,
+                    body: Some(Body::LoadProductRmsInfoResponse(
+                        pb::LoadProductRmsInfoResponse {
+                            rows: rows.into_iter().map(product_rms_info_to_pb).collect(),
+                        },
+                    )),
+                },
+                Err(e) => err_to_frame(request_id, "fetch_rms_failed", e),
+            }
+        }
+        Body::LoadAccountRmsInfo(_req) => {
+            if !state.gates.trading_enabled {
+                return error_frame(
+                    request_id,
+                    "trading_disabled",
+                    "load_account_rms_info denied: parent trading disabled",
+                );
+            }
+            let Some(session) = &state.session else {
+                return no_session_frame(request_id);
+            };
+            let handle = {
+                let mut guard = session.lock().await;
+                match guard.ensure_order_plant().await {
+                    Ok(()) => match guard.clone_order_handle() {
+                        Ok(handle) => handle,
+                        Err(e) => return err_to_frame(request_id, "fetch_rms_failed", e),
+                    },
+                    Err(e) => return err_to_frame(request_id, "fetch_rms_failed", e),
+                }
+            };
+            match load_account_rms_info_on(&handle).await {
+                Ok(rows) => Frame {
+                    request_id,
+                    body: Some(Body::LoadAccountRmsInfoResponse(
+                        pb::LoadAccountRmsInfoResponse {
+                            rows: rows.into_iter().map(account_rms_info_to_pb).collect(),
+                        },
+                    )),
+                },
+                Err(e) => err_to_frame(request_id, "fetch_rms_failed", e),
             }
         }
         Body::LoadTicks(req) => {

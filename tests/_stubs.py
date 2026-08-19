@@ -14,7 +14,13 @@ from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any, cast
 
-from nautilus_trader.model.identifiers import AccountId, ClientOrderId, VenueOrderId
+from nautilus_trader.model.identifiers import (
+    AccountId,
+    ClientOrderId,
+    InstrumentId,
+    VenueOrderId,
+)
+from rithmic_gateway.types import AccountRmsInfo, ProductRmsInfo
 from rithmic_nt_connect.execution import RithmicExecutionClient
 from rithmic_nt_connect.session import WireSession
 
@@ -139,6 +145,12 @@ class WireSessionStub:
     def load_orders(self, *args: Any, **kwargs: Any) -> Any:
         raise NotImplementedError
 
+    def load_product_rms_info(self, *args: Any, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
+    def load_account_rms_info(self, *args: Any, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
     def poll_order_event(self, *args: Any, **kwargs: Any) -> Any:
         raise NotImplementedError
 
@@ -160,6 +172,9 @@ class FaultInjectingSession(WireSessionStub):
         working_orders: list[dict[str, object]] | None = None,
         fault: str | None = None,
         on_load_orders: Callable[[], None] | None = None,
+        product_rms_rows: list[ProductRmsInfo] | None = None,
+        account_rms_rows: list[AccountRmsInfo] | None = None,
+        account_rms_fault: bool = False,
     ) -> None:
         self.working_orders = list(working_orders or [])
         self.fault = fault
@@ -170,6 +185,19 @@ class FaultInjectingSession(WireSessionStub):
         # concurrent live-stream activity (accept/fill/latch) occurring while
         # the adapter awaits the drain.
         self.on_load_orders = on_load_orders
+        self.product_rms_rows = list(product_rms_rows or [])
+        self.account_rms_rows = list(account_rms_rows or [])
+        self.account_rms_fault = account_rms_fault
+
+    def load_product_rms_info(self) -> list[ProductRmsInfo]:
+        self.calls.append("load_product_rms_info")
+        return list(self.product_rms_rows)
+
+    def load_account_rms_info(self) -> list[AccountRmsInfo]:
+        self.calls.append("load_account_rms_info")
+        if self.account_rms_fault:
+            raise ConnectionError("account rms unavailable")
+        return list(self.account_rms_rows)
 
     def connect(self) -> None:
         self.calls.append("connect")
@@ -261,6 +289,7 @@ class _CacheStub:
         self._venue_to_client: dict[str, ClientOrderId] = {}
         self._client_to_venue: dict[str, VenueOrderId] = {}
         self._orders: dict[str, object] = {}
+        self._instruments: dict[str, object] = {}
 
     def client_order_id(self, venue_order_id: VenueOrderId) -> ClientOrderId | None:
         return self._venue_to_client.get(venue_order_id.value)
@@ -275,6 +304,10 @@ class _CacheStub:
     def order(self, client_order_id: ClientOrderId) -> object | None:
         # Presence in the cache is the adapter's source of truth for "tracked".
         return self._orders.get(client_order_id.value)
+
+    def instrument(self, instrument_id: InstrumentId) -> object | None:
+        # Mirrors the real cache's contract: None when the id is unknown.
+        return self._instruments.get(str(instrument_id))
 
 
 class _TestClient(RithmicExecutionClient):

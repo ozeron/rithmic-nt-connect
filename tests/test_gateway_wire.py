@@ -6,6 +6,7 @@ import inspect
 from typing import Any
 
 import pytest
+from rithmic_gateway.types import AccountRmsInfo, ProductRmsInfo
 from rithmic_nt_connect.config import ConfigError, ConnectMode, SessionConfig
 from rithmic_nt_connect.gateway_wire import (
     GatewayWireSession,
@@ -92,6 +93,8 @@ def test_create_session_gateway_returns_adapter_without_pyo3() -> None:
         "adjust_bracket_stop",
         "adjust_bracket_target",
         "resolved_account",
+        "load_product_rms_info",
+        "load_account_rms_info",
     ):
         assert hasattr(session, name), (
             f"gateway wire missing {name} (direct/gateway parity)"
@@ -124,6 +127,14 @@ class _RecordingGatewayClient:
 
     def subscribe_bracket_updates(self) -> None:
         self.calls.append(("brackets", ()))
+
+    def load_product_rms_info(self) -> list[ProductRmsInfo]:
+        self.calls.append(("load_product_rms_info", ()))
+        return []
+
+    def load_account_rms_info(self) -> list[AccountRmsInfo]:
+        self.calls.append(("load_account_rms_info", ()))
+        return []
 
     def disconnect_order_plant(self) -> None:
         self.calls.append(("disconnect_order_plant", ()))
@@ -169,3 +180,20 @@ def test_gateway_wire_restore_covers_every_intent_channel() -> None:
         "order",
         "brackets",
     }
+
+
+def test_gateway_wire_forwards_rms_fetches() -> None:
+    """Parity: the gateway façade forwards the RMS fetch RPCs to the client
+    (commission rates ride the same wire surface on both modes)."""
+    inner = _RecordingGatewayClient()
+    session = GatewayWireSession(inner)  # type: ignore[arg-type]
+
+    product = session.load_product_rms_info()
+    account = session.load_account_rms_info()
+
+    assert product == []
+    assert account == []
+    assert inner.calls == [
+        ("load_product_rms_info", ()),
+        ("load_account_rms_info", ()),
+    ]

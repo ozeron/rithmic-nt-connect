@@ -61,6 +61,8 @@ def _client() -> _TestClient:
     client._cache = _CacheStub()
     client.account_id = None
     client._pnl_snapshot_observed = asyncio.Event()
+    client._commission_rates = {}
+    client._default_commission = None
     return client
 
 
@@ -142,6 +144,8 @@ def _trading_client(
     source = session if session is not None else _UnavailableLoadOrdersSession()
     client._session = cast(WireSession, source)
     client._seen_fill_keys = OrderedDict()
+    client._commission_rates = {}
+    client._default_commission = None
     return client
 
 

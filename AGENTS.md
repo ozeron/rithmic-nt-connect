@@ -93,10 +93,19 @@ After a change that emits Nautilus data or execution events, check the rows that
 - Trading is off unless `enable_trading=True` / `RITHMIC_ENABLE_TRADING=1`.
 - Do **not** run `scripts/verify_order_dry_run.py --live-place` unless `RITHMIC_ENABLE_TRADING=1` is set and an explicit far `--price` is passed (BUY below / SELL above market). Test-plant order routing with `DEFAULT_APP_NAME` is confirmed authorized (proven 2026-08-17: order routed to exchange); production `Rithmic 01` / LucidTrading place still needs a conformance `app_name`.
 - Do not commit secrets, certs, or gated `.proto` sources.
+- Do not commit one-off dev probe scripts; live checks belong in mechanism-only e2e tests (`tests/e2e/`) or documented runbook commands.
 - `cancel_all_orders` is plant-wide; do not use it to clean up a smoke order.
 - Gateway `cancel_all` is an independent parent panic button (`RITHMIC_GATEWAY_CANCEL_ALL=1`): it does **not** require `RITHMIC_ENABLE_TRADING`. Still plant-wide — never use it to clean up a single smoke order.
 
 ## Verify
+
+**Venue-shaped fixtures.** When a change reads a field whose venue semantics
+matter (symbol vs product code, omitted vs `None`, closed-set enums), unit
+fixtures must use the real payload shape, and the happy-path test must keep
+that shape — overriding a fixture default to make a lookup hit is a red flag
+(2026-08-19: fills were charged $0 because the commission lookup keyed
+contract symbols like `MNQU6` against product-code rates like `MNQ`; the
+fixture already defaulted to `NQU6` and the tests overrode it).
 
 Gateway client / wire tests need the plants/gateway crates, a system `protoc`
 (`protobuf-compiler` on Debian/Ubuntu; `brew install protobuf` on macOS), and

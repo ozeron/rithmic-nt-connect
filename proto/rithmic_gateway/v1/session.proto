@@ -212,6 +212,14 @@ message LoadOrdersRequest {
 // a config override is set or PnL/order ensure resolves it).
 message ResolvedAccountRequest {}
 
+// Fetch product-level RMS info (per-product commission fill rates).
+// Mirrors `rithmic_plants::load_product_rms_info`; read-only venue config.
+message LoadProductRmsInfoRequest {}
+
+// Fetch account-level RMS info (default commission rate).
+// Mirrors `rithmic_plants::load_account_rms_info`; read-only venue config.
+message LoadAccountRmsInfoRequest {}
+
 // ---------------------------------------------------------------------------
 // Responses (Gateway -> Client, correlated to a Request by request_id)
 // ---------------------------------------------------------------------------
@@ -292,6 +300,26 @@ message ResolvedAccountResponse {
   optional string account_id = 1;
   optional string fcm_id = 2;
   optional string ib_id = 3;
+}
+
+message ProductRmsInfo {
+  optional string product_code = 1;
+  optional double commission_fill_rate = 2;
+  optional uint32 presence_bits = 3;
+}
+
+message AccountRmsInfo {
+  optional string account_id = 1;
+  optional double default_commission = 2;
+  optional uint32 presence_bits = 3;
+}
+
+message LoadProductRmsInfoResponse {
+  repeated ProductRmsInfo rows = 1;
+}
+
+message LoadAccountRmsInfoResponse {
+  repeated AccountRmsInfo rows = 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -498,6 +526,8 @@ message Frame {
     AdjustBracketTargetRequest adjust_bracket_target = 36;
     LoadOrdersRequest load_orders = 37;
     ResolvedAccountRequest resolved_account = 38;
+    LoadProductRmsInfoRequest load_product_rms_info = 39;
+    LoadAccountRmsInfoRequest load_account_rms_info = 40;
 
     Ack ack = 50;
     ErrorResponse error = 51;
@@ -508,6 +538,8 @@ message Frame {
     ProbeTimeBarsResponse probe_time_bars_response = 56;
     LoadOrdersResponse load_orders_response = 57;
     ResolvedAccountResponse resolved_account_response = 58;
+    LoadProductRmsInfoResponse load_product_rms_info_response = 59;
+    LoadAccountRmsInfoResponse load_account_rms_info_response = 60;
 
     Event event = 90;
   }

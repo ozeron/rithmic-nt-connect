@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 from collections import OrderedDict
 from collections.abc import Callable
+from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -53,7 +54,7 @@ from nautilus_trader.model.identifiers import (
     TraderId,
     VenueOrderId,
 )
-from nautilus_trader.model.objects import Price, Quantity
+from nautilus_trader.model.objects import Currency, Money, Price, Quantity
 from nautilus_trader.model.orders import LimitOrder
 from rithmic_nt_connect._order_plant import OrderPlantPolicy, OrderPlantState
 from rithmic_nt_connect._orders import order_notification_to_fields
@@ -72,6 +73,8 @@ def _client() -> _TestClient:
     client._clock = SimpleNamespace(timestamp_ns=lambda: 2)
     client._cache = _CacheStub()
     client.account_id = None
+    client._commission_rates = {}
+    client._default_commission = None
     return client
 
 
@@ -93,6 +96,8 @@ def _trading_client(
     client._positions = {}
     client._account_seeded = True
     client.account_id = AccountId("RITHMIC-ACC1")
+    client._commission_rates = {}
+    client._default_commission = None
     return client
 
 
@@ -190,6 +195,7 @@ def _fill_notification(
     basket: str = "B1",
     fill_size: int = 2,
     fill_price: float = 21000.0,
+    symbol: str = "NQU6",
 ) -> dict[str, object]:
     return {
         "type": "order_notification",
@@ -198,7 +204,7 @@ def _fill_notification(
         "status": "COMPLETE",
         "basket_id": basket,
         "user_tag": "O-1",
-        "symbol": "NQU6",
+        "symbol": symbol,
         "fill_id": fill_id,
         "fill_price": fill_price,
         "fill_size": fill_size,
@@ -1654,6 +1660,218 @@ def test_position_query_failure_emits_no_fills(
         asyncio.run(client.generate_position_status_reports(_position_cmd()))
 
     assert filled == []
+
+
+# --------------------------------------------------------------------------- #
+# Commission (venue RMS fill rates)
+# --------------------------------------------------------------------------- #
+
+
+def _tracked_order(leaves: int = 2) -> SimpleNamespace:
+    order = SimpleNamespace(
+        client_order_id=ClientOrderId("O-1"),
+        strategy_id=StrategyId("STRATEGY-1"),
+        instrument_id=InstrumentId.from_str("NQ.GLBX"),
+        order_type=OrderType.LIMIT,
+        side=OrderSide.BUY,
+        is_closed=False,
+        leaves_qty=Quantity.from_int(leaves),
+        quantity=Quantity.from_int(leaves),
+        filled_qty=Quantity.zero(),
+    )
+    return order
+
+
+def _capture_filled(
+    client: _TestClient, monkeypatch: pytest.MonkeyPatch
+) -> list[tuple[Any, ...]]:
+    filled: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(
+        client, "generate_order_filled", lambda *a, **k: filled.append(a)
+    )
+    monkeypatch.setattr(
+        client,
+        "_price_for_instrument",
+        lambda instrument_id, value: Price.from_str("21000.0"),
+    )
+    return filled
+
+
+def test_load_commission_rates_maps_venue_rows() -> None:
+    """C1: connect-time fetch maps RMS rows into the per-product rate table
+    (venue `commission_fill_rate` x fill qty) with the ACTIVE account's default
+    set (a foreign account's row is never used)."""
+    session = FaultInjectingSession(
+        product_rms_rows=[
+            {"product_code": "MNQ", "commission_fill_rate": 0.5},
+            {"product_code": "ES", "commission_fill_rate": 1.75},
+            {"product_code": "NQ"},  # no published rate (unset field omitted)
+        ],
+        account_rms_rows=[
+            {"account_id": "OTHER", "default_commission": 9.99},
+            {"account_id": "ACC1", "default_commission": 0.25},
+        ],
+    )
+    client = _trading_client(session)
+
+    asyncio.run(client._load_commission_rates())
+
+    assert client._commission_rates == {
+        "MNQ": Decimal("0.5"),
+        "ES": Decimal("1.75"),
+    }
+    assert client._default_commission == Decimal("0.25")
+    assert "load_product_rms_info" in session.calls
+    assert "load_account_rms_info" in session.calls
+
+
+def test_fill_commission_uses_venue_product_rate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C2: a tracked fill reports the per-contract rate x qty (MNQ 0.5 x 2
+    = 1.00 USD), not a hardcoded zero."""
+    client = _trading_client()
+    client._commission_rates = {"MNQ": Decimal("0.5")}
+    client._default_commission = Decimal("0.25")
+    order = _tracked_order(leaves=2)
+    client._cache._orders[str(order.client_order_id)] = order
+    filled = _capture_filled(client, monkeypatch)
+
+    RithmicExecutionClient._handle_order_notification(
+        cast(RithmicExecutionClient, client),
+        _fill_notification(fill_size=2, symbol="MNQ"),
+    )
+
+    assert len(filled) == 1
+    # generate_order_filled: (…, last_qty, last_px, quote_currency, commission, …)
+    assert filled[0][11] == Money(Decimal("1.0"), Currency.from_str("USD"))
+
+
+def test_fill_commission_falls_back_to_account_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C3: a product missing from the rate table uses the account default
+    commission (0.25 x 2 = 0.50 USD), even when the contract symbol resolves
+    through the cached instrument to a product code that has no rate."""
+    client = _trading_client()
+    client._commission_rates = {"MNQ": Decimal("0.5")}
+    client._default_commission = Decimal("0.25")
+    order = _tracked_order(leaves=2)  # instrument_id NQ.GLBX
+    client._cache._orders[str(order.client_order_id)] = order
+    client._cache._instruments["NQ.GLBX"] = SimpleNamespace(
+        info={"rithmic_product_code": "NQ"}
+    )
+    filled = _capture_filled(client, monkeypatch)
+
+    RithmicExecutionClient._handle_order_notification(
+        cast(RithmicExecutionClient, client),
+        _fill_notification(fill_size=2, symbol="NQU6"),
+    )
+
+    assert len(filled) == 1
+    assert filled[0][11] == Money(Decimal("0.5"), Currency.from_str("USD"))
+
+
+def test_fill_commission_resolves_contract_symbol_via_instrument(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C6: a futures fill's contract symbol (MNQU6) resolves to the RMS product
+    code (MNQ) through the cached instrument, so the per-product rate applies
+    instead of silently falling back to the account default."""
+    client = _trading_client()
+    client._commission_rates = {"MNQ": Decimal("0.5")}
+    client._default_commission = Decimal("0.25")
+    order = _tracked_order(leaves=2)
+    order.instrument_id = InstrumentId.from_str("MNQU6.GLBX")
+    client._cache._orders[str(order.client_order_id)] = order
+    client._cache._instruments["MNQU6.GLBX"] = SimpleNamespace(
+        info={"rithmic_product_code": "MNQ"}
+    )
+    filled = _capture_filled(client, monkeypatch)
+
+    RithmicExecutionClient._handle_order_notification(
+        cast(RithmicExecutionClient, client),
+        _fill_notification(fill_size=2, symbol="MNQU6"),
+    )
+
+    assert len(filled) == 1
+    # rate 0.5 x 2 = 1.00 — NOT the 0.50 the account default would give
+    assert filled[0][11] == Money(Decimal("1.0"), Currency.from_str("USD"))
+
+
+def test_fill_commission_zero_when_rates_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C4: no venue rates -> zero commission (allowed to be unavailable)."""
+    client = _trading_client()
+    order = _tracked_order(leaves=2)
+    client._cache._orders[str(order.client_order_id)] = order
+    filled = _capture_filled(client, monkeypatch)
+
+    RithmicExecutionClient._handle_order_notification(
+        cast(RithmicExecutionClient, client),
+        _fill_notification(fill_size=2, symbol="MNQ"),
+    )
+
+    assert len(filled) == 1
+    assert filled[0][11] == Money(Decimal(0), Currency.from_str("USD"))
+
+
+def test_load_commission_rates_fetch_failure_is_nonfatal() -> None:
+    """C5: a raising RMS fetch leaves the affected caches empty (zero fallback)
+    instead of failing the connect."""
+    client = _trading_client(WireSessionStub())  # fetch methods raise
+    log = _CaptureLog()
+    client._log = log
+
+    asyncio.run(client._load_commission_rates())
+
+    assert client._commission_rates == {}
+    assert client._default_commission is None
+    assert any("commission" in m and "unavailable" in m for m in log.messages)
+
+
+def test_load_commission_rates_preserves_products_on_account_fetch_failure() -> None:
+    """C7: a failed account-default fetch must NOT clear the loaded product
+    table — per-product rates still apply to fills."""
+    session = FaultInjectingSession(
+        product_rms_rows=[{"product_code": "MNQ", "commission_fill_rate": 0.5}],
+        account_rms_fault=True,
+    )
+    client = _trading_client(session)
+    log = _CaptureLog()
+    client._log = log
+
+    asyncio.run(client._load_commission_rates())
+
+    assert client._commission_rates == {"MNQ": Decimal("0.5")}
+    assert client._default_commission is None
+    assert any("account commission default unavailable" in m for m in log.messages)
+
+
+def test_untracked_fill_report_uses_venue_product_rate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C8: untracked fill reports carry the same venue rate x qty commission,
+    resolving the contract symbol through the cached instrument."""
+    client = _trading_client(enable_trading=False)
+    client._commission_rates = {"MNQ": Decimal("0.5")}
+    client._default_commission = Decimal("0.25")
+    client._cache._instruments["MNQU6.RITHMIC"] = SimpleNamespace(
+        info={"rithmic_product_code": "MNQ"}
+    )
+    monkeypatch.setattr(
+        client,
+        "_price_for_instrument",
+        lambda instrument_id, value: Price.from_str("21000.0"),
+    )
+
+    fields = _fill_event(fill_id="F1", basket="B1")
+    fields["symbol"] = "MNQU6"
+    report = client._fill_report_from_fields(fields, ts_event=1_700_000_000_000_000_000)
+
+    assert report is not None
+    assert report.commission == Money(Decimal("0.5"), Currency.from_str("USD"))
 
 
 def test_nonzero_position_visible_before_trading_armed(

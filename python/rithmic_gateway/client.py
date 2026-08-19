@@ -8,7 +8,7 @@ import struct
 import threading
 import time
 from collections import deque
-from typing import Any
+from typing import Any, cast
 
 from google.protobuf.json_format import MessageToDict
 
@@ -16,6 +16,7 @@ from rithmic_gateway.config import GatewayConfig
 from rithmic_gateway.flock import session_flock_held
 from rithmic_gateway.framing import MAX_FRAME_LEN, encode_frame
 from rithmic_gateway.spawn import SpawnError, spawn_gateway
+from rithmic_gateway.types import AccountRmsInfo, ProductRmsInfo
 from rithmic_gateway.v1 import session_pb2 as pb
 
 # Default dial + RPC socket timeout (seconds). Stuck parent must not hang forever.
@@ -247,6 +248,42 @@ class GatewayClient:
                 "protocol", f"expected load_orders_response, got {which}"
             )
         return [_message_to_dict(e) for e in resp.load_orders_response.events]
+
+    def load_product_rms_info(self) -> list[ProductRmsInfo]:
+        """Product-level RMS info: per-product commission fill rates.
+
+        Read-only venue config; requires parent trading enabled (order-plant
+        login). Each row: ``{product_code, commission_fill_rate, presence_bits}``
+        with unset fields omitted.
+        """
+        resp = self._rpc(pb.Frame(load_product_rms_info=pb.LoadProductRmsInfoRequest()))
+        which = resp.WhichOneof("body")
+        if which != "load_product_rms_info_response":
+            raise GatewayError(
+                "protocol", f"expected load_product_rms_info_response, got {which}"
+            )
+        return [
+            cast(ProductRmsInfo, _message_to_dict(r))
+            for r in resp.load_product_rms_info_response.rows
+        ]
+
+    def load_account_rms_info(self) -> list[AccountRmsInfo]:
+        """Account-level RMS info: default commission rate.
+
+        Read-only venue config; requires parent trading enabled (order-plant
+        login). Each row: ``{account_id, default_commission, presence_bits}``
+        with unset fields omitted.
+        """
+        resp = self._rpc(pb.Frame(load_account_rms_info=pb.LoadAccountRmsInfoRequest()))
+        which = resp.WhichOneof("body")
+        if which != "load_account_rms_info_response":
+            raise GatewayError(
+                "protocol", f"expected load_account_rms_info_response, got {which}"
+            )
+        return [
+            cast(AccountRmsInfo, _message_to_dict(r))
+            for r in resp.load_account_rms_info_response.rows
+        ]
 
     def load_ticks(
         self, symbol: str, exchange: str, start_ssboe: int, end_ssboe: int
