@@ -358,7 +358,6 @@ class RithmicExecutionClient(LiveExecutionClient):
         self._pnl_connected = False
         try:
             await asyncio.to_thread(self._session.subscribe_pnl)
-            self._apply_resolved_account_id()
             self._seed_account_if_needed()
             self._poll_task = self.create_task(
                 self._plant_poll_loop(
@@ -390,7 +389,6 @@ class RithmicExecutionClient(LiveExecutionClient):
                         f"order plant teardown after subscribe fail: {teardown_exc}"
                     )
                 raise
-            self._apply_resolved_account_id()
             self._seed_account_if_needed()
             # The poll loop starts before the re-arm barrier (never-drop):
             # notifications must keep flowing even while the plant is
@@ -422,9 +420,8 @@ class RithmicExecutionClient(LiveExecutionClient):
                     f"reconnect re-arm failed; order plant stays un-armed: {exc}"
                 )
             else:
-                # ``rearm`` requires a live poll task: a missing task must not
-                # count as alive (only the test doubles leave it None, and they
-                # now create real tasks).
+                # ``rearm`` requires a live poll task: a missing or finished
+                # task must not count as alive.
                 poll_alive = self._order_poll_task is not None and not (
                     self._order_poll_task.done()
                 )
@@ -441,7 +438,6 @@ class RithmicExecutionClient(LiveExecutionClient):
     ) -> None:
         deadline = time.monotonic() + timeout_secs
         while self.account_id is None and time.monotonic() < deadline:
-            self._apply_resolved_account_id()
             self._seed_account_if_needed()
             if self.account_id is not None:
                 break
@@ -462,11 +458,6 @@ class RithmicExecutionClient(LiveExecutionClient):
         )
         if log_registered:
             self._log.info(f"account observable in cache {self.account_id}")
-
-    def _apply_resolved_account_id(self) -> None:
-        raw = self._account_raw()
-        if raw and self.account_id is None:
-            self._set_account_id(AccountId(f"{VENUE}-{raw}"))
 
     def _account_raw(self, hint: str | None = None) -> str | None:
         if hint:
@@ -543,7 +534,6 @@ class RithmicExecutionClient(LiveExecutionClient):
         # this connect: with ``soft_fail_pnl`` there is no stream to observe.
         if self._pnl_connected:
             await self._await_pnl_snapshot()
-        self._apply_resolved_account_id()
         self._seed_account_if_needed()
 
     def _drain_row_from_fields(
@@ -632,8 +622,7 @@ class RithmicExecutionClient(LiveExecutionClient):
             # the engine must receive the reconciled status before trading
             # resumes, so a failed publication fails the barrier (raises) and
             # the plant stays un-armed; the venue id is bound only afterwards.
-            if not RithmicExecutionClient._publish_order_status_report(
-                self,
+            if not self._publish_order_status_report(
                 report,
                 context="reconnect re-arm drain",
             ):
@@ -1165,20 +1154,26 @@ class RithmicExecutionClient(LiveExecutionClient):
             )
             self._mark_fill_key(dedup)
 
+    def _instrument_id_from_order_fields(
+        self, fields: dict[str, Any]
+    ) -> InstrumentId | None:
+        """The Nautilus instrument for a normalized order-notification row."""
+        instrument_raw = fields.get("instrument_id")
+        symbol = fields.get("symbol")
+        if not (instrument_raw or symbol):
+            return None
+        try:
+            return InstrumentId.from_str(str(instrument_raw or f"{symbol}.{VENUE}"))
+        except Exception:
+            return None
+
     def _fill_report_from_fields(
         self, fields: dict[str, Any], ts_event: int
     ) -> FillReport | None:
         """Build a FillReport from a normalized order_notification fields dict."""
         basket = fields.get("basket_id")
-        instrument_raw = fields.get("instrument_id")
-        symbol = fields.get("symbol")
-        if not basket or not (instrument_raw or symbol):
-            return None
-        try:
-            instrument_id = InstrumentId.from_str(
-                str(instrument_raw or f"{symbol}.{VENUE}")
-            )
-        except Exception:
+        instrument_id = self._instrument_id_from_order_fields(fields)
+        if not basket or instrument_id is None:
             return None
         account_raw = fields.get("account_id")
         if account_raw:
@@ -1256,8 +1251,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                 == status_key
             ):
                 status_report = None
-            elif not RithmicExecutionClient._publish_order_status_report(
-                self,
+            elif not self._publish_order_status_report(
                 status_report,
                 context="untracked notification",
             ):
@@ -1316,17 +1310,21 @@ class RithmicExecutionClient(LiveExecutionClient):
             return False
         return True
 
+    def _venue_id_for_order(self, order: Order) -> str | None:
+        """Venue id for an order: the cache mapping wins, then the order model's."""
+        cached = self._cache.venue_order_id(order.client_order_id)
+        if cached is not None:
+            return cached.value
+        if order.venue_order_id is not None:
+            return order.venue_order_id.value
+        return None
+
     def _order_status_report_for(
         self,
         order: Order,
         ts_init: int,
     ) -> OrderStatusReport | None:
-        venue_id = None
-        cached_venue = self._cache.venue_order_id(order.client_order_id)
-        if cached_venue is not None:
-            venue_id = cached_venue.value
-        if venue_id is None and order.venue_order_id is not None:
-            venue_id = order.venue_order_id.value
+        venue_id = self._venue_id_for_order(order)
         if venue_id is None:
             return None
         return OrderStatusReport(
@@ -1517,12 +1515,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                 self._clock.timestamp_ns(),
             )
             return
-        venue_id = None
-        cached_venue = self._cache.venue_order_id(command.client_order_id)
-        if cached_venue is not None:
-            venue_id = cached_venue.value
-        if not venue_id and order.venue_order_id is not None:
-            venue_id = order.venue_order_id.value
+        venue_id = self._venue_id_for_order(order)
         if not venue_id:
             self.generate_order_modify_rejected(
                 command.strategy_id,
@@ -1655,10 +1648,10 @@ class RithmicExecutionClient(LiveExecutionClient):
         # In-flight order with no venue id: the engine's in-flight checker
         # queries this path. Resolve it from the venue first (bounded
         # working-orders drain) — the only adapter-side lever against the
-        # engine's terminal UNKNOWN synthesis (plan OQ2). A drain that did not
-        # find the order does not prove its fate (best-effort working-orders
-        # query), so fail closed: never fabricate a report or terminal state,
-        # never return an un-resolved answer the engine could treat as known.
+        # engine's terminal UNKNOWN synthesis. A drain that did not find the
+        # order does not prove its fate (best-effort working-orders query), so
+        # fail closed: never fabricate a report or terminal state, never
+        # return an un-resolved answer the engine could treat as known.
         if (
             order.is_inflight
             and self._cache.venue_order_id(order.client_order_id) is None
@@ -1709,19 +1702,16 @@ class RithmicExecutionClient(LiveExecutionClient):
         # the same order, and recovery must answer with the newest, not the
         # first. Bound exactly once, from the winning row.
         best: _DrainRowResult | None = None
-        best_ts = -1
-        best_index = -1
-        for index, row in enumerate(self._iter_drain_rows(events)):
+        for row in self._iter_drain_rows(events):
             if str(row.fields.get("user_tag") or "") != tag:
                 continue
             if not row.bindable:
                 continue
-            if (
-                best is None
-                or row.ts_event > best_ts
-                or (row.ts_event == best_ts and index > best_index)
-            ):
-                best, best_ts, best_index = row, row.ts_event, index
+            # Iteration is arrival order, so a later-arrived row with an equal
+            # timestamp replaces an earlier one (``>=``): newest wins, last
+            # arrival wins ties — the same policy as the bulk paths.
+            if best is None or row.ts_event >= best.ts_event:
+                best = row
         if best is None:
             return None
         self._bind_venue_id(order.client_order_id, str(best.fields["basket_id"]))
@@ -1899,15 +1889,8 @@ class RithmicExecutionClient(LiveExecutionClient):
         boundary), not here.
         """
         basket = fields.get("basket_id")
-        instrument_raw = fields.get("instrument_id")
-        symbol = fields.get("symbol")
-        if not basket or not (instrument_raw or symbol):
-            return None
-        try:
-            instrument_id = InstrumentId.from_str(
-                str(instrument_raw or f"{symbol}.{VENUE}")
-            )
-        except Exception:
+        instrument_id = self._instrument_id_from_order_fields(fields)
+        if not basket or instrument_id is None:
             return None
         account_raw = fields.get("account_id")
         if account_raw:
@@ -1970,10 +1953,6 @@ class RithmicExecutionClient(LiveExecutionClient):
         # reports only its locally cached orders (never claims venue authority).
         if not self.enable_trading:
             return self._cache_backed_order_status_reports(command)
-        if not self._order_plant.load_orders_available():
-            raise VenueQueryUnavailable(
-                "Rithmic order reconciliation unavailable (order plant not ready)"
-            )
         start_sec, end_sec = self._recon_window_sec(command.start, command.end)
         events = await self._load_orders_events(start_sec, end_sec)
         if not events:
@@ -1993,13 +1972,9 @@ class RithmicExecutionClient(LiveExecutionClient):
         for row in self._iter_drain_rows(events):
             fields = row.fields
             # GenerateOrderStatusReports carries no venue_order_id (only
-            # GenerateFillReports does); treat it as absent for filtering.
-            venue_order_id = getattr(command, "venue_order_id", None)
-            if (
-                command.instrument_id is not None or venue_order_id is not None
-            ) and not (
-                self._matches_instrument(fields, command.instrument_id, venue_order_id)
-            ):
+            # GenerateFillReports does); filter on the instrument alone.
+            # ``_matches_instrument`` returns True for instrument_id=None.
+            if not self._matches_instrument(fields, command.instrument_id, None):
                 continue
             report = row.report
             if report is None:
@@ -2023,7 +1998,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         self,
         command: GenerateFillReports,
     ) -> list[FillReport]:
-        if not self.enable_trading or not self._order_plant.load_orders_available():
+        if not self.enable_trading:
             raise VenueQueryUnavailable(
                 "Rithmic fill reconciliation unavailable (order plant not ready)"
             )
@@ -2062,8 +2037,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                     # Unreachable (the iterator already built a report for this
                     # row); narrows the type for the checker.
                     continue
-                if not RithmicExecutionClient._publish_order_status_report(
-                    self,
+                if not self._publish_order_status_report(
                     status,
                     context="fill reconciliation prerequisite",
                 ):

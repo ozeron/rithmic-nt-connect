@@ -1,7 +1,6 @@
 """Order-plant lifecycle state machine and trading policy.
 
-Root-cause design (2026-08-19, Oracle + Macroscope review rounds): the
-readiness/recovery protocol is an *explicit machine*, not scattered state
+The readiness/recovery protocol is an *explicit machine*, not scattered state
 assignments. The plant state is private and moves only through the transition
 methods below — execution code never assigns ``state`` directly, so the set of
 possible transitions is finite and pinned by the transition table in
@@ -136,9 +135,6 @@ class OrderPlantPolicy:
         # Cancels remain available during resync (risk-reducing); blocked when
         # down, un-armed, or latched (a recon cycle is required first).
         return self._state in {OrderPlantState.LIVE, OrderPlantState.RESYNCING}
-
-    def load_orders_available(self) -> bool:
-        return True
 
     def reject_reason(self, action: str) -> str:
         return f"order plant {self._state.value}; {action} blocked"

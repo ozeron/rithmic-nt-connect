@@ -591,7 +591,6 @@ def _connect_client(
     stub_snapshot_wait: bool = True,
 ) -> _TestClient:
     client = _trading_client(session, plant_state=OrderPlantState.LATCHED)
-    monkeypatch.setattr(client, "_apply_resolved_account_id", lambda: None)
     monkeypatch.setattr(client, "_seed_account_if_needed", lambda *a, **k: None)
 
     async def _await_account_registered() -> None:

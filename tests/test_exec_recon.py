@@ -6,7 +6,7 @@ import asyncio
 from collections import OrderedDict
 from dataclasses import dataclass
 from decimal import Decimal
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -154,7 +154,7 @@ def _report_client(
 ) -> SimpleNamespace:
     """A stub whose ``_order_status_report_from_fields`` collaborators are fixed,
     so a test varies only the wire fields."""
-    return SimpleNamespace(
+    client = SimpleNamespace(
         account_id="RITHMIC-ACC1",
         _clock=SimpleNamespace(timestamp_ns=lambda: 2),
         _seed_account_if_needed=lambda account_raw: None,
@@ -164,6 +164,10 @@ def _report_client(
         _order_status_from_event=lambda fields: status,
         _trigger_type_from_event=lambda fields: trigger_type,
     )
+    client._instrument_id_from_order_fields = MethodType(
+        RithmicExecutionClient._instrument_id_from_order_fields, client
+    )
+    return client
 
 
 def _drain_row_result(
@@ -232,6 +236,9 @@ def test_untracked_order_reports_status_without_strategy_ownership() -> None:
         _seed_account_if_needed=lambda account_raw: None,
         _untracked_status_keys={},
     )
+    client._publish_order_status_report = MethodType(
+        RithmicExecutionClient._publish_order_status_report, client
+    )
     status_report = SimpleNamespace(venue_order_id="B-EXTERNAL", client_order_id=None)
     client._drain_row_from_fields = lambda fields, ts_event: _drain_row_result(
         status_report
@@ -265,6 +272,9 @@ def test_untracked_status_suppresses_unchanged_re_push() -> None:
         _log=_Log(),
         _send_order_status_report=published.append,
         _seed_account_if_needed=lambda account_raw: None,
+    )
+    client._publish_order_status_report = MethodType(
+        RithmicExecutionClient._publish_order_status_report, client
     )
     status = SimpleNamespace(
         venue_order_id="B-EXT", order_status="OPEN", filled_qty="1", avg_px="100.5"
@@ -316,6 +326,9 @@ def test_untracked_status_re_push_with_changed_terms_reports() -> None:
         _send_order_status_report=published.append,
         _seed_account_if_needed=lambda account_raw: None,
         _untracked_status_keys={},
+    )
+    client._publish_order_status_report = MethodType(
+        RithmicExecutionClient._publish_order_status_report, client
     )
     status = SimpleNamespace(
         venue_order_id="B-EXT",
@@ -373,6 +386,9 @@ def test_untracked_status_publication_failure_does_not_escape_handler() -> None:
         ),
         _seed_account_if_needed=lambda account_raw: None,
         _untracked_status_keys={},
+    )
+    client._publish_order_status_report = MethodType(
+        RithmicExecutionClient._publish_order_status_report, client
     )
     status_report = SimpleNamespace(venue_order_id="B-EXTERNAL", client_order_id=None)
     client._drain_row_from_fields = lambda fields, ts_event: _drain_row_result(
@@ -919,6 +935,9 @@ def test_cached_stop_order_status_report_preserves_native_order_metadata() -> No
     client = SimpleNamespace(
         _cache=SimpleNamespace(venue_order_id=lambda cid: venue_order_id),
         account_id=AccountId("RITHMIC-ACC1"),
+    )
+    client._venue_id_for_order = MethodType(
+        RithmicExecutionClient._venue_id_for_order, client
     )
 
     report = RithmicExecutionClient._order_status_report_for(

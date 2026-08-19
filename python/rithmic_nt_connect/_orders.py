@@ -63,14 +63,19 @@ class OrderAction:
     trade_id: str | None = None
 
 
+def _enum_name(value: Any, prefix: str) -> str:
+    """Canonical enum name: the enum member's ``name`` (or its repr), uppercased
+    and stripped of the class prefix (e.g. ``OrderType.LIMIT`` -> ``"LIMIT"``)."""
+    name = getattr(value, "name", None) or str(value)
+    return str(name).upper().removeprefix(prefix)
+
+
 def _order_type_name(order_type: Any) -> str:
-    name = getattr(order_type, "name", None) or str(order_type)
-    return name.upper().removeprefix("ORDERTYPE.")
+    return _enum_name(order_type, "ORDERTYPE.")
 
 
 def nautilus_side_to_rithmic(side: Any) -> str:
-    name = getattr(side, "name", None) or str(side)
-    name = name.upper().removeprefix("ORDERSIDE.")
+    name = _enum_name(side, "ORDERSIDE.")
     if name in {"BUY", "B"}:
         return "BUY"
     if name in {"SELL", "S"}:
@@ -99,8 +104,7 @@ def trailing_ticks_from_order(order: Any) -> int | None:
     if order_type is None or not is_trailing_order_type(order_type):
         return None
     offset_type = getattr(order, "trailing_offset_type", None)
-    type_name = getattr(offset_type, "name", None) or str(offset_type)
-    type_name = str(type_name).upper().removeprefix("TRAILINGOFFSETTYPE.")
+    type_name = _enum_name(offset_type, "TRAILINGOFFSETTYPE.")
     if type_name != "TICKS":
         raise OrderMapError(
             "Rithmic trailing stops require TrailingOffsetType.TICKS; "
@@ -121,8 +125,7 @@ def trailing_ticks_from_order(order: Any) -> int | None:
 
 
 def nautilus_tif_to_rithmic(tif: Any) -> str:
-    name = getattr(tif, "name", None) or str(tif)
-    name = name.upper().removeprefix("TIMEINFORCE.")
+    name = _enum_name(tif, "TIMEINFORCE.")
     mapped = _TIF_TO_RITHMIC.get(name)
     if mapped is None:
         raise OrderMapError(f"unsupported time in force for Rithmic: {tif!r}")

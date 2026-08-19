@@ -155,7 +155,6 @@ def test_allow_policy_is_a_pure_function_of_state() -> None:
         assert plant.allow_cancel() is (
             state in (OrderPlantState.LIVE, OrderPlantState.RESYNCING)
         )
-        assert plant.load_orders_available()
 
 
 def test_rearm_is_the_race_token() -> None:
