@@ -232,7 +232,11 @@ assigns the state directly — every transition goes through the policy, and
 - A persistent run of non-channel poll errors on the order stream (bounded
   transient streak, default 5) latches the plant: a stream that delivers
   garbage must not leave trading armed and silent. PnL keeps transient
-  semantics (`soft_fail_pnl` is the operator's escape).
+  semantics (`soft_fail_pnl` is the operator's escape). The streak is
+  **loop-local** (owned by the poll loop, per stream lifetime): a reconnect
+  or a successful resubscribe starts a fresh count, so transients from a
+  previous stream can never latch a healthy loop — the 4-before-drop + 1-
+  after-recovery class is structurally impossible, not a convention.
 
 **Operational consequences:**
 

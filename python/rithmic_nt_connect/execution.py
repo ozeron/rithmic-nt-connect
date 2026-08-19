@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 import time
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from decimal import Decimal
 from typing import Any
 
@@ -183,12 +183,11 @@ def _price(value: float | Decimal | str, precision: int | None = None) -> Price:
     return Price.from_str(f"{float(value):.{int(precision)}f}")
 
 
-class _PollStreamFailed(Exception):
-    """A poll stream fails persistently (bounded consecutive transient errors).
-
-    Raised by ``_poll_session_event`` on the order path so the poll loop can
-    fail closed (latch the plant) instead of silently swallowing a broken
-    stream that delivers no notifications.
+class _PollTransientError(Exception):
+    """A transient (non-channel) poll failure: the stream may recover, so the
+    poll loop retries. The loop owns the failure streak (local state, per
+    stream lifetime) — not the client, so a transient run cannot carry across
+    a disconnect/reconnect or a successful resubscribe.
     """
 
 
@@ -301,10 +300,6 @@ class RithmicExecutionClient(LiveExecutionClient):
         self._session = session
         self._poll_task: asyncio.Task | None = None
         self._order_poll_task: asyncio.Task | None = None
-        # Consecutive transient (non-channel) poll errors on the order stream;
-        # at ``_ORDER_POLL_MAX_TRANSIENT`` the stream is treated as broken and
-        # the plant is latched (fail-closed) instead of polling garbage forever.
-        self._order_poll_transient_streak = 0
         self._positions: dict[str, dict[str, Any]] = {}
         # Client<->venue correlation lives solely on the Nautilus Cache
         # (add_venue_order_id / client_order_id / venue_order_id / order); there
@@ -412,10 +407,6 @@ class RithmicExecutionClient(LiveExecutionClient):
                 ),
                 log_msg="rithmic_order_poll",
             )
-            # New stream lifetime: a previous stream's transient streak must
-            # not carry over (4 transients before a channel drop + 1 after a
-            # successful resubscribe would otherwise latch a healthy loop).
-            self._order_poll_transient_streak = 0
             # Every (re)connect re-observes venue state before arming — the
             # disconnect window can hide venue-side accepts/fills/terminal
             # outcomes and position changes even when nothing was latched. The
@@ -531,11 +522,8 @@ class RithmicExecutionClient(LiveExecutionClient):
         # resolved, so commands stay blocked until a successful re-arm.
         await asyncio.to_thread(self._session.disconnect_order_plant)
         await asyncio.to_thread(self._session.subscribe_order_updates)
-        # The channel recovered: this is a fresh stream lifetime, so transient
-        # errors from before the drop must not count toward the new stream's
-        # failure streak (a healthy post-resync loop must not latch on the old
-        # count).
-        self._order_poll_transient_streak = 0
+        # The transient streak is loop-local (``_plant_poll_loop``): it resets
+        # structurally when this successful resubscribe returns to the loop.
         self._order_plant.resync_complete()
 
     async def _resync_pnl_subscription(self) -> None:
@@ -577,6 +565,32 @@ class RithmicExecutionClient(LiveExecutionClient):
         bindable = report is not None and _row_is_trustworthy(fields)
         return _DrainRowResult(fields, ts_event, report, bindable)
 
+    def _iter_drain_rows(
+        self, events: list[dict[str, Any]]
+    ) -> Iterator[_DrainRowResult]:
+        """Yield one interpretation per usable drain row; skip the malformed.
+
+        The raw-row pipeline — normalize, require a basket, coerce
+        ``ts_event`` — lives HERE with every guard inside, so no drain caller
+        re-implements "normalize then guard then interpret". A row that cannot
+        build an advisory report (``report is None``) is skipped too.
+        """
+        for raw in events:
+            try:
+                fields = order_notification_to_fields(raw)
+            except Exception:
+                continue
+            if not fields.get("basket_id"):
+                continue
+            try:
+                ts_event = int(fields.get("ts_event") or 0)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            row = self._drain_row_from_fields(fields, ts_event)
+            if row.report is None:
+                continue
+            yield row
+
     def _apply_drain_rows(self, events: list[dict[str, Any]]) -> None:
         """Apply a working-orders drain to the local cache before re-arming.
 
@@ -591,45 +605,20 @@ class RithmicExecutionClient(LiveExecutionClient):
         before trading resumes, so the barrier aborts (the plant stays
         un-armed).
         """
-        latest: dict[str, tuple[int, dict[str, Any]]] = {}
-        for raw in events:
-            try:
-                fields = order_notification_to_fields(raw)
-            except Exception:
-                continue
-            basket = fields.get("basket_id")
-            if not basket:
-                continue
-            try:
-                ts_event = int(fields.get("ts_event") or 0)
-            except (TypeError, ValueError, OverflowError):
-                # One malformed row must not abort the whole drain.
-                continue
-            key = str(basket)
-            if key not in latest or ts_event >= latest[key][0]:
-                latest[key] = (ts_event, fields)
-        for ts_event, fields in latest.values():
+        latest: dict[str, _DrainRowResult] = {}
+        for row in self._iter_drain_rows(events):
+            key = str(row.fields["basket_id"])
+            if key not in latest or row.ts_event >= latest[key].ts_event:
+                latest[key] = row
+        for row in latest.values():
+            fields = row.fields
             basket = str(fields["basket_id"])
-            # Build the venue report FIRST (build-then-bind): a row that
-            # cannot build a report must not bind a venue id — binding would
-            # mark a stale local order "venue-resolved" and later status
-            # checks would skip fail-closed recovery. One boundary decides
-            # usability (permissive publish) vs bindability (strict trust).
-            row = self._drain_row_from_fields(fields, ts_event)
             report = row.report
             if report is None:
+                # Unreachable (the iterator skips unusable rows); narrows the
+                # type for the checker.
                 continue
-            # Resolve the basket-to-client mapping from the cache FIRST, then
-            # fall back to ``_resolve_client_order_id``: that helper returns
-            # None for a closed tracked order (so a stale notification for a
-            # closed incarnation routes to the untracked path), but here a
-            # mapped basket must still hit the closed/freshness guards below —
-            # otherwise a stale drain row for a closed tracked order would
-            # publish as an external status (duplicate external order / stale
-            # replay).
-            client_order_id = self._cache.client_order_id(VenueOrderId(basket))
-            if client_order_id is None:
-                client_order_id = self._resolve_client_order_id(fields)
+            client_order_id = self._drain_client_order_id(fields)
             if client_order_id is not None:
                 order = self._cache.order(client_order_id)
                 if order is not None and getattr(order, "is_closed", False):
@@ -685,31 +674,18 @@ class RithmicExecutionClient(LiveExecutionClient):
     async def _poll_session_event(
         self,
         poll_fn: Callable[[], dict[str, Any] | None],
-        *,
-        track_transient: bool = False,
     ) -> dict[str, Any] | None:
-        """Return next event, or None on transient errors; re-raise channel
-        failures. With ``track_transient`` (the order stream), a bounded run of
-        consecutive non-channel errors escalates to ``_PollStreamFailed`` so
-        the loop can fail closed instead of swallowing a broken stream."""
+        """Return the next event, or None when there is none; raise
+        ``_PollTransientError`` on a transient (non-channel) failure so the
+        loop can retry (and count the streak itself); re-raise channel
+        failures for the resync path."""
         try:
-            event = await asyncio.to_thread(poll_fn)
+            return await asyncio.to_thread(poll_fn)
         except CHANNEL_ERRORS:
             raise
         except Exception as exc:
             self._log.warning(f"poll transient error: {exc}")
-            if track_transient:
-                self._order_poll_transient_streak += 1
-                if self._order_poll_transient_streak >= self._ORDER_POLL_MAX_TRANSIENT:
-                    raise _PollStreamFailed(
-                        f"{self._ORDER_POLL_MAX_TRANSIENT} consecutive transient "
-                        f"poll errors: {exc}"
-                    ) from exc
-            await asyncio.sleep(0.1)
-            return None
-        if track_transient:
-            self._order_poll_transient_streak = 0
-        return event
+            raise _PollTransientError(str(exc)) from exc
 
     async def _plant_poll_loop(
         self,
@@ -720,21 +696,28 @@ class RithmicExecutionClient(LiveExecutionClient):
         on_resync: Callable[[], Any],
     ) -> None:
         backoff = 0.05
+        # Stream-lifetime state, local to this loop: a new loop (reconnect)
+        # starts at zero and a successful resubscribe resets it, so a transient
+        # run can never carry across stream lifetimes (the 4-before-drop + 1-
+        # after-recovery latch class is structurally impossible).
+        transient_streak = 0
         while True:
             try:
-                event = await self._poll_session_event(
-                    poll_fn, track_transient=(name == "order")
-                )
-            except _PollStreamFailed as exc:
+                event = await self._poll_session_event(poll_fn)
+            except _PollTransientError as exc:
                 # A persistent non-channel failure on the order stream means
                 # notifications are not being processed: fail closed (latch)
                 # rather than keep polling garbage. PnL keeps transient
                 # semantics (soft-fail is the operator's escape).
-                self._log.error(f"{name} poll stream failing persistently: {exc}")
                 if name == "order":
-                    self._latch_order_plant("order poll stream failure", str(exc))
-                    break
-                await asyncio.sleep(backoff)
+                    transient_streak += 1
+                    if transient_streak >= self._ORDER_POLL_MAX_TRANSIENT:
+                        self._log.error(
+                            f"{name} poll stream failing persistently: {exc}"
+                        )
+                        self._latch_order_plant("order poll stream failure", str(exc))
+                        break
+                await asyncio.sleep(0.1)
                 continue
             except Exception as exc:
                 self._log.error(f"{name} poll channel error: {exc}")
@@ -746,6 +729,10 @@ class RithmicExecutionClient(LiveExecutionClient):
                         f"{name} subscription resynced after channel error"
                     )
                     backoff = 0.05
+                    if name == "order":
+                        # Fresh stream lifetime: the old transient run must not
+                        # count toward the recovered stream.
+                        transient_streak = 0
                 except Exception as resync_exc:
                     self._log.error(f"{name} subscription resync failed: {resync_exc}")
                     if name == "order":
@@ -971,6 +958,24 @@ class RithmicExecutionClient(LiveExecutionClient):
             if cached_order is not None and not cached_order.is_closed:
                 return ClientOrderId(str(tag))
         return None
+
+    def _drain_client_order_id(self, fields: dict[str, Any]) -> ClientOrderId | None:
+        """Identity for the drain-apply path: cache basket-to-client FIRST.
+
+        ``_resolve_client_order_id`` returns None for a closed tracked order
+        (correct for live notifications — a stale notification for a closed
+        incarnation must route to the untracked path), but a drain row whose
+        basket IS mapped must still hit the closed/freshness guards —
+        otherwise a stale drain row for a closed tracked order would publish
+        as an external status (duplicate external order / stale replay). For
+        an unmapped basket the tag fallback keeps external rows external.
+        """
+        basket = fields.get("basket_id")
+        if basket:
+            cached = self._cache.client_order_id(VenueOrderId(str(basket)))
+            if cached is not None:
+                return cached
+        return self._resolve_client_order_id(fields)
 
     def _bind_venue_id(self, client_order_id: ClientOrderId, venue_id: str) -> None:
         # Record the venue -> client mapping in the cache (authoritative source).
@@ -1706,28 +1711,17 @@ class RithmicExecutionClient(LiveExecutionClient):
         best: _DrainRowResult | None = None
         best_ts = -1
         best_index = -1
-        for index, raw in enumerate(events):
-            try:
-                fields = order_notification_to_fields(raw)
-            except Exception:
+        for index, row in enumerate(self._iter_drain_rows(events)):
+            if str(row.fields.get("user_tag") or "") != tag:
                 continue
-            if str(fields.get("user_tag") or "") != tag:
-                continue
-            if not fields.get("basket_id"):
-                continue
-            try:
-                ts_event = int(fields.get("ts_event") or 0)
-            except (TypeError, ValueError, OverflowError):
-                continue
-            row = self._drain_row_from_fields(fields, ts_event)
             if not row.bindable:
                 continue
             if (
                 best is None
-                or ts_event > best_ts
-                or (ts_event == best_ts and index > best_index)
+                or row.ts_event > best_ts
+                or (row.ts_event == best_ts and index > best_index)
             ):
-                best, best_ts, best_index = row, ts_event, index
+                best, best_ts, best_index = row, row.ts_event, index
         if best is None:
             return None
         self._bind_venue_id(order.client_order_id, str(best.fields["basket_id"]))
@@ -1991,14 +1985,8 @@ class RithmicExecutionClient(LiveExecutionClient):
                 "open orders on an empty recon."
             )
         latest: dict[str, tuple[int, OrderStatusReport]] = {}
-        for raw in events:
-            try:
-                fields = order_notification_to_fields(raw)
-            except Exception:
-                continue
-            basket = fields.get("basket_id")
-            if not basket:
-                continue
+        for row in self._iter_drain_rows(events):
+            fields = row.fields
             # GenerateOrderStatusReports carries no venue_order_id (only
             # GenerateFillReports does); treat it as absent for filtering.
             venue_order_id = getattr(command, "venue_order_id", None)
@@ -2008,20 +1996,17 @@ class RithmicExecutionClient(LiveExecutionClient):
                 self._matches_instrument(fields, command.instrument_id, venue_order_id)
             ):
                 continue
-            try:
-                ts_event = int(fields.get("ts_event") or 0)
-            except (TypeError, ValueError, OverflowError):
-                continue
-            row = self._drain_row_from_fields(fields, ts_event)
             report = row.report
             if report is None:
+                # Unreachable (the iterator skips unusable rows); narrows the
+                # type for the checker.
                 continue
-            key = str(basket)
+            key = str(fields["basket_id"])
             # Keep the latest row; on an equal timestamp (e.g. both 0 when
             # ts_event is missing) prefer the last-arrived row so a terminal
             # status following an earlier non-terminal is not masked.
-            if key not in latest or ts_event >= latest[key][0]:
-                latest[key] = (ts_event, report)
+            if key not in latest or row.ts_event >= latest[key][0]:
+                latest[key] = (row.ts_event, report)
         reports = [report for _, report in latest.values()]
         if command.open_only:
             reports = [
@@ -2040,21 +2025,17 @@ class RithmicExecutionClient(LiveExecutionClient):
         start_sec, end_sec = self._recon_window_sec(command.start, command.end)
         events = await self._load_orders_events(start_sec, end_sec)
         reports: list[FillReport] = []
-        for raw in events:
-            try:
-                fields = order_notification_to_fields(raw)
-            except Exception:
-                continue
+        for row in self._iter_drain_rows(events):
+            fields = row.fields
             if fields.get("kind") != "filled":
                 continue
             if not self._matches_instrument(
                 fields, command.instrument_id, command.venue_order_id
             ):
                 continue
-            try:
-                ts_event = int(fields.get("ts_event") or self._clock.timestamp_ns())
-            except (TypeError, ValueError, OverflowError):
-                continue
+            # The iterator defaults a missing ts_event to 0; the fill path
+            # prefers the adapter clock so a fill never reports epoch 0.
+            ts_event = row.ts_event or self._clock.timestamp_ns()
             # Share the adapter-wide fill dedup store (live path + recon) so a
             # fill already emitted live, or duplicated across the summary/today
             # drains, is not re-emitted as a second reconciliation fill.
@@ -2067,15 +2048,11 @@ class RithmicExecutionClient(LiveExecutionClient):
                 # Reconciliation can discover a fill after the live order event
                 # was missed, so publish a venue status first; this may create a
                 # synthetic external order when no cached strategy order exists.
-                status = self._drain_row_from_fields(fields, ts_event).report
+                # The iterator guarantees the prerequisite row built a report.
+                status = row.report
                 if status is None:
-                    # No order-status prerequisite could be built (status-only
-                    # fields malformed) — skip the fill rather than emit it
-                    # without the order Nautilus needs to reconcile it against.
-                    self._log.warning(
-                        "fill reconciliation skipped: no order status prerequisite "
-                        f"for {slim_order_fields(fields)}"
-                    )
+                    # Unreachable (the iterator skips unusable rows); narrows
+                    # the type for the checker.
                     continue
                 if not RithmicExecutionClient._publish_order_status_report(
                     self,

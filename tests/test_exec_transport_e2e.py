@@ -85,7 +85,6 @@ def _trading_client(
         Any, SimpleNamespace(enable_trading=enable_trading, soft_fail_pnl=False)
     )
     client._order_plant = OrderPlantPolicy(plant_state)
-    client._order_poll_transient_streak = 0
     client._pnl_snapshot_observed = asyncio.Event()
     client._session = cast(WireSession, session or FaultInjectingSession())
     client._seen_fill_keys = OrderedDict()
@@ -533,7 +532,7 @@ def test_order_poll_transient_streak_resets_after_resync() -> None:
     asyncio.run(awaitable)
 
     # 10 transients + 2 channel drops + 1 event: the loop survived the
-    # post-resync transient (pre-fix it stopped at 6 via _PollStreamFailed).
+    # post-resync transient (pre-fix it stopped at 6 via the 5-error latch).
     assert calls["n"] == 12
     # The loop ended via the handler error, not the transient latch: the
     # streak was reset by the resyncs.
@@ -904,6 +903,76 @@ def test_drain_row_boundary_bindable_is_one_decision(
     row = client._drain_row_from_fields(bools, 1)
     assert not row.bindable
     assert row.report is not None
+
+
+def test_drain_row_boundary_bindable_implies_real_terms_property() -> None:
+    """Root-cause item 4: the trust decision is a CHECKED class, not an
+    enumeration to rediscover. For a corpus of drain-row mutations, ``bindable``
+    must imply the report's execution terms come from the real closed-set
+    values (never the fabricated MARKET/GTC defaults) and that those values are
+    not booleans — so a malformed row can never bind a venue id and drive a
+    modify/cancel."""
+    client = _trading_client()
+    base = order_notification_to_fields(_working_order_row(tag="O-1", basket="B1"))
+    price_type_map = {
+        1: OrderType.LIMIT,
+        2: OrderType.MARKET,
+        3: OrderType.STOP_LIMIT,
+        4: OrderType.STOP_MARKET,
+    }
+    tif_map = {
+        1: TimeInForce.DAY,
+        2: TimeInForce.GTC,
+        3: TimeInForce.IOC,
+        4: TimeInForce.FOK,
+    }
+    cases: list[tuple[str, dict[str, object]]] = []
+    for key in (
+        "basket_id",
+        "symbol",
+        "quantity",
+        "price_type",
+        "duration",
+        "status",
+        "kind",
+        "transaction_type",
+    ):
+        row = dict(base)
+        del row[key]
+        cases.append((f"del {key}", row))
+    for key in ("price_type", "duration"):
+        for value in (True, False, "x", 99, None, 1.5, -1, "1", 0):
+            row = dict(base)
+            row[key] = value
+            cases.append((f"{key}={value!r}", row))
+    for qty in (0, -1):
+        row = dict(base)
+        row["quantity"] = qty
+        cases.append((f"qty={qty}", row))
+    row = dict(base)
+    row["kind"] = "weird"
+    row["status"] = "MYSTERY"
+    cases.append(("unknown state", row))
+    row = dict(base)
+    row["price"] = -1.0  # sentinel: must never fabricate a price
+    cases.append(("sentinel price", row))
+
+    for label, fields in cases:
+        result = client._drain_row_from_fields(fields, 1)
+        if not result.bindable:
+            continue
+        report = result.report
+        assert report is not None, label
+        pt = fields.get("price_type")
+        dur = fields.get("duration")
+        assert not isinstance(pt, bool), label
+        assert not isinstance(dur, bool), label
+        pt_int = int(cast(Any, pt))
+        dur_int = int(cast(Any, dur))
+        assert pt_int in price_type_map and dur_int in tif_map, label
+        # Terms come from the real values, never the fabricated defaults.
+        assert report.order_type is price_type_map[pt_int], label
+        assert report.time_in_force is tif_map[dur_int], label
 
 
 def test_strict_drain_row_triggered_binds_and_reports_triggered(

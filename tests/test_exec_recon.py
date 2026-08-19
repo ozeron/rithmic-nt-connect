@@ -165,11 +165,13 @@ def _report_client(
     )
 
 
-def _drain_row_result(status: object) -> SimpleNamespace:
-    """Boundary-result double: the handler paths under test consume only
-    ``report`` from ``_drain_row_from_fields``; a ``None`` status means the
-    row cannot build a report."""
-    return SimpleNamespace(report=status)
+def _drain_row_result(
+    status: object, fields: object | None = None, ts_event: int = 0
+) -> SimpleNamespace:
+    """Boundary-result double: handler paths consume ``report``; the
+    iterator-driven recon paths also read ``fields``/``ts_event``. A ``None``
+    status means the row cannot build a report (the iterator skips it)."""
+    return SimpleNamespace(fields=fields, ts_event=ts_event, report=status)
 
 
 def _fill_cmd() -> GenerateFillReports:
@@ -530,7 +532,7 @@ def test_status_report_publication_failure_is_non_fatal_to_fill_reconciliation(
     monkeypatch.setattr(
         client,
         "_drain_row_from_fields",
-        lambda fields, ts_event: _drain_row_result(object()),
+        lambda fields, ts_event: _drain_row_result(object(), fields, ts_event),
     )
     monkeypatch.setattr(
         client,
@@ -560,7 +562,7 @@ def test_fill_reconciliation_skips_fill_without_status_prerequisite(
     monkeypatch.setattr(
         client,
         "_drain_row_from_fields",
-        lambda fields, ts_event: _drain_row_result(None),
+        lambda fields, ts_event: _drain_row_result(None, fields, ts_event),
     )
     monkeypatch.setattr(client, "_send_order_status_report", lambda report: None)
 
@@ -580,7 +582,7 @@ def test_replayed_fill_publishes_status_before_fill_and_is_idempotent(
     monkeypatch.setattr(
         client,
         "_drain_row_from_fields",
-        lambda fields, ts_event: _drain_row_result(status_report),
+        lambda fields, ts_event: _drain_row_result(status_report, fields, ts_event),
     )
     monkeypatch.setattr(
         client, "_fill_report_from_fields", lambda fields, ts_event: fill_report
@@ -1152,7 +1154,7 @@ def _fill_reports_client(
         client,
         "_drain_row_from_fields",
         lambda fields, ts_event: _drain_row_result(
-            SimpleNamespace(venue_order_id="V-EXT")
+            SimpleNamespace(venue_order_id="V-EXT"), fields, ts_event
         ),
     )
     monkeypatch.setattr(client, "_send_order_status_report", lambda status_report: None)
@@ -1214,7 +1216,7 @@ def test_order_status_reports_last_row_wins_on_equal_ts(
         client,
         "_drain_row_from_fields",
         lambda fields, ts_event: _drain_row_result(
-            SimpleNamespace(order_status=fields["kind"])
+            SimpleNamespace(order_status=fields["kind"]), fields, ts_event
         ),
     )
     reports = asyncio.run(client.generate_order_status_reports(_status_cmd()))
