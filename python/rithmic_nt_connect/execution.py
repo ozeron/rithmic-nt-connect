@@ -499,21 +499,35 @@ class RithmicExecutionClient(LiveExecutionClient):
                 latest[key] = (ts_event, fields)
         for ts_event, fields in latest.values():
             basket = str(fields["basket_id"])
+            # Build the venue report FIRST: a row that cannot build a report
+            # must not bind a venue id — binding would mark a stale local
+            # order "venue-resolved" and later status checks would skip
+            # fail-closed recovery (build-then-bind, same as
+            # ``_resolve_inflight_by_tag``). The strict report (no fabricated
+            # closed-set execution terms) is the trust boundary for binding;
+            # the permissive report is the advisory publish fallback for rows
+            # whose terms are incomplete but otherwise usable.
+            strict_report = self._order_status_report_from_fields(
+                fields, ts_event, strict=True
+            )
+            report = strict_report or self._order_status_report_from_fields(
+                fields, ts_event
+            )
+            if report is None:
+                continue
             client_order_id = self._resolve_client_order_id(fields)
-            if client_order_id is not None:
-                order = self._cache.order(client_order_id)
-                if (
-                    order is not None
-                    and self._cache.venue_order_id(client_order_id) is None
-                ):
-                    self._bind_venue_id(client_order_id, basket)
-            report = self._order_status_report_from_fields(fields, ts_event)
-            if report is not None:
-                RithmicExecutionClient._publish_order_status_report(
-                    self,
-                    report,
-                    context="reconnect re-arm drain",
-                )
+            if (
+                client_order_id is not None
+                and strict_report is not None
+                and self._cache.order(client_order_id) is not None
+                and self._cache.venue_order_id(client_order_id) is None
+            ):
+                self._bind_venue_id(client_order_id, basket)
+            RithmicExecutionClient._publish_order_status_report(
+                self,
+                report,
+                context="reconnect re-arm drain",
+            )
 
     async def _await_pnl_snapshot(self, timeout_s: float | None = None) -> None:
         """Wait (bounded) for the PnL stream to deliver account/position

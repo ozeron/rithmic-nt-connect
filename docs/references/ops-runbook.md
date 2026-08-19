@@ -185,7 +185,9 @@ hardening, Oracle 2nd + 3rd passes, Macroscope review):
    PnL stream is connected this connect (bounded `asyncio.Event` wait, default
    `_REARM_PNL_SNAPSHOT_TIMEOUT_S = 5.0`). Positions ride the PnL stream, so
    re-arming without re-observing it would be blind. With `soft_fail_pnl`
-   there is no stream to observe and the gate is skipped.
+   there is no stream to observe and the gate is skipped — the plant then
+   re-arms with **blind position context** (see the operational consequences
+   below).
 
 The barrier runs on **every** trading (re)connect — not only when a prior
 operation latched the plant — because the disconnect window can hide
@@ -201,9 +203,16 @@ re-enable trading over a dead/broken order stream.
 
 **Operational consequences:**
 
-- With `soft_fail_pnl=True` **and** trading enabled **and** a latched plant, the
-  plant cannot re-arm until the PnL stream delivers — deliberate fail-closed
-  (position context is blind without it). Restore PnL or restart.
+- With `soft_fail_pnl=True`, the PnL gate is **skipped** whenever the PnL
+  subscription soft-fails (`_pnl_connected` is false, which is the default
+  mode): the plant re-arms after the order drain with **blind position
+  context** — the barrier is order-drain-only in that case. This is a
+  documented escape hatch (a soft-failed PnL stream would otherwise block
+  trading with no recovery path), **not** a fail-closed guarantee. If you
+  cannot accept trading on stale positions, restore PnL (or disable trading)
+  before the plant re-arms; with the PnL stream connected, the gate does
+  apply and the plant cannot re-arm until it delivers — deliberate
+  fail-closed.
 - The 5s PnL-snapshot timeout assumes Rithmic pushes account PnL on a short
   interval; validate the real interval on the P5 canary and raise
   `_REARM_PNL_SNAPSHOT_TIMEOUT_S` if needed.

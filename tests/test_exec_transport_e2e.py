@@ -649,6 +649,50 @@ def test_reconnect_ream_applies_drain_rows(
     assert reports[0].venue_order_id == VenueOrderId("B1")
 
 
+def test_reconnect_ream_drain_binds_only_usable_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Macroscope #2-followup: the re-arm drain must not bind a venue id from
+    a row that cannot build a usable report — binding would mark a stale local
+    order "venue-resolved" and skip fail-closed recovery (build-then-bind,
+    same as ``_resolve_inflight_by_tag``). A row missing closed-set terms
+    (price_type/duration) must not bind either (strict trust boundary), while
+    a fully usable row still binds and publishes."""
+    malformed = _working_order_row(tag="O-2", basket="B2")
+    malformed["quantity"] = 0  # no order terms: cannot build any report
+    no_terms = _working_order_row(tag="O-3", basket="B3")
+    del no_terms["price_type"]
+    del no_terms["duration"]
+    session = FaultInjectingSession(
+        working_orders=[
+            _working_order_row(tag="O-1", basket="B1"),
+            malformed,
+            no_terms,
+        ]
+    )
+    client = _connect_client(session, monkeypatch)
+    for cid in ("O-1", "O-2", "O-3"):
+        client._cache._orders[str(ClientOrderId(cid))] = _inflight_order(cid=cid)
+    reports: list[OrderStatusReport] = []
+    monkeypatch.setattr(
+        client, "_send_order_status_report", lambda report: reports.append(report)
+    )
+
+    asyncio.run(client._connect())
+
+    assert client._order_plant.allow_submit()
+    # Fully usable row: bound + published.
+    assert client._cache.venue_order_id(ClientOrderId("O-1")) == VenueOrderId("B1")
+    # Malformed row: no bind, no publish.
+    assert client._cache.venue_order_id(ClientOrderId("O-2")) is None
+    # Terms-missing row: advisory report still publishes, but no bind.
+    assert client._cache.venue_order_id(ClientOrderId("O-3")) is None
+    assert {r.venue_order_id for r in reports} == {
+        VenueOrderId("B1"),
+        VenueOrderId("B3"),
+    }
+
+
 def test_pnl_marker_only_after_successful_account_processing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
