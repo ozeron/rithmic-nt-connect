@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from _stubs import _CacheStub, _Log, _TestClient
 from nautilus_trader.core.uuid import UUID4
 from nautilus_trader.execution.messages import (
     GenerateFillReports,
@@ -58,67 +59,8 @@ def _client() -> _TestClient:
     client._clock = SimpleNamespace(timestamp_ns=lambda: 2)
     client._cache = _CacheStub()
     client.account_id = None
+    client._pnl_snapshot_observed = asyncio.Event()
     return client
-
-
-class _TestClient(RithmicExecutionClient):
-    """Test double: skips the Cython base's ``__init__`` and exposes the cdef
-    read-only ``_log`` / ``_clock`` / ``_cache`` / ``account_id`` as writable
-    properties, so real adapter methods run on a bare instance."""
-
-    # The cdef base declares these read-only; re-expose as writable via
-    # name-mangled storage. ``object.__getattribute__`` / ``__setattr__`` keep
-    # the dynamic slots invisible to the type checker (no ``type: ignore``).
-
-    @property
-    def _log(self) -> _Log:
-        return cast(_Log, object.__getattribute__(self, "_TestClient__log"))
-
-    @_log.setter
-    def _log(self, value: _Log) -> None:
-        object.__setattr__(self, "_TestClient__log", value)
-
-    @property
-    def _clock(self) -> SimpleNamespace:
-        return cast(
-            SimpleNamespace, object.__getattribute__(self, "_TestClient__clock")
-        )
-
-    @_clock.setter
-    def _clock(self, value: SimpleNamespace) -> None:
-        object.__setattr__(self, "_TestClient__clock", value)
-
-    @property
-    def _cache(self) -> _CacheStub:
-        return cast(_CacheStub, object.__getattribute__(self, "_TestClient__cache"))
-
-    @_cache.setter
-    def _cache(self, value: _CacheStub) -> None:
-        object.__setattr__(self, "_TestClient__cache", value)
-
-    @property
-    def account_id(self) -> AccountId | None:
-        return cast(
-            AccountId | None, object.__getattribute__(self, "_TestClient__account_id")
-        )
-
-    @account_id.setter
-    def account_id(self, value: AccountId | None) -> None:
-        object.__setattr__(self, "_TestClient__account_id", value)
-
-
-class _Log:
-    def debug(self, *args: object, **kwargs: object) -> None:
-        pass
-
-    def warning(self, *args: object, **kwargs: object) -> None:
-        pass
-
-    def error(self, *args: object, **kwargs: object) -> None:
-        pass
-
-    def exception(self, *args: object, **kwargs: object) -> None:
-        pass
 
 
 class _CacheOrder:
@@ -130,31 +72,6 @@ class _CacheOrder:
     @property
     def is_closed(self) -> bool:
         return self._closed
-
-
-class _CacheStub:
-    """Minimal cache backing ``_resolve_client_order_id`` / ``_venue_id_for``."""
-
-    def __init__(self) -> None:
-        self._venue_to_client: dict[str, ClientOrderId] = {}
-        self._client_to_venue: dict[str, VenueOrderId] = {}
-        # Mixed marker stubs and ``_OrderStub`` doubles (matches ``order()``'s
-        # ``object | None`` return).
-        self._orders: dict[str, object] = {}
-
-    def client_order_id(self, venue_order_id: VenueOrderId) -> ClientOrderId | None:
-        return self._venue_to_client.get(venue_order_id.value)
-
-    def venue_order_id(self, client_order_id: ClientOrderId) -> VenueOrderId | None:
-        return self._client_to_venue.get(client_order_id.value)
-
-    def add_venue_order_id(self, client: ClientOrderId, venue: VenueOrderId) -> None:
-        self._client_to_venue[client.value] = venue
-        self._venue_to_client[venue.value] = client
-
-    def order(self, client_order_id: ClientOrderId) -> object | None:
-        # Presence in the cache is the adapter's source of truth for "tracked".
-        return self._orders.get(client_order_id.value)
 
 
 class _LoadOrdersSession:
@@ -271,13 +188,8 @@ def _status_cmd() -> GenerateOrderStatusReports:
 
 
 def test_order_handler_failure_stops_order_poll_and_fails_closed() -> None:
-    client = SimpleNamespace(
-        _order_plant=OrderPlantPolicy(OrderPlantState.LIVE),
-        _log=_Log(),
-    )
-
-    async def poll_session_event(poll_fn):
-        return poll_fn()
+    client = _client()
+    client._order_plant = OrderPlantPolicy(OrderPlantState.LIVE)
 
     def poll_fn() -> dict[str, object] | None:
         return {"type": "order_notification"}
@@ -285,7 +197,6 @@ def test_order_handler_failure_stops_order_poll_and_fails_closed() -> None:
     def on_event(event: dict[str, object]) -> None:
         raise RuntimeError("handler regression")
 
-    client._poll_session_event = poll_session_event
     awaitable = RithmicExecutionClient._plant_poll_loop(
         cast(RithmicExecutionClient, client),
         name="order",
@@ -295,7 +206,10 @@ def test_order_handler_failure_stops_order_poll_and_fails_closed() -> None:
     )
     asyncio.run(awaitable)
 
+    # The dead stream is fail-closed: DISCONNECTED and latched so a concurrent
+    # reconnect re-arm barrier (keyed on plant state) cannot clear it.
     assert client._order_plant.state is OrderPlantState.DISCONNECTED
+    assert client._order_plant_latched
 
 
 def test_untracked_order_reports_status_without_strategy_ownership() -> None:
@@ -481,6 +395,7 @@ class _OrderStub:
     order_type: OrderType
     side: OrderSide
     is_closed: bool = False
+    leaves_qty: object | None = None  # None = unknown remaining; no overfill claim
 
 
 def _order(order_type: OrderType) -> _OrderStub:
@@ -1128,6 +1043,7 @@ def test_publish_account_suppresses_unchanged_state() -> None:
         _clock=SimpleNamespace(timestamp_ns=lambda: 123),
         _set_account_id=lambda account_id: set_account_id(client, account_id),
         _seed_account_if_needed=lambda account_raw=None: None,
+        _pnl_snapshot_observed=asyncio.Event(),
         generate_account_state=lambda **kwargs: published.append(kwargs),
     )
     event = {"type": "account_pnl", "account_id": "ACC1", "cash_on_hand": "49977.00"}
@@ -1302,6 +1218,23 @@ def test_load_orders_events_does_not_retry_unavailable_error():
 
     client = _trading_client(session=_CountingSession())
     with pytest.raises(ReconciliationUnavailableError, match="unavailable"):
+        asyncio.run(client._load_orders_events(1, 2))
+    assert calls["n"] == 1
+
+
+def test_load_orders_events_fails_once_on_transport_error():
+    # A transport failure is surfaced as unavailable after ONE attempt: the
+    # next engine query or reconnect is the retry boundary, not a hidden
+    # retry policy inside the drain.
+    calls = {"n": 0}
+
+    class _TransportFailSession:
+        def load_orders(self, start: int, end: int) -> list[dict[str, object]]:
+            calls["n"] += 1
+            raise ConnectionError("channel cut")
+
+    client = _trading_client(session=_TransportFailSession())
+    with pytest.raises(VenueQueryUnavailable, match="load_orders recon failed"):
         asyncio.run(client._load_orders_events(1, 2))
     assert calls["n"] == 1
 

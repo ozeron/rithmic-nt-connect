@@ -163,10 +163,15 @@ def order_notification_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
         "total_fill_size": d.get("total_fill_size"),
         "total_unfilled_size": d.get("total_unfilled_size"),
         "fill_size": d.get("fill_size"),
-        "price": d.get("price"),
-        "trigger_price": d.get("trigger_price"),
-        "avg_fill_price": d.get("avg_fill_price"),
-        "fill_price": d.get("fill_price"),
+        # Single convert boundary for pending/unknown prices: the official
+        # protocol encodes an unavailable price as an absent field, and some
+        # payloads additionally report ``-1.0``; both become ``None`` here so
+        # no downstream builder can fabricate a ``Price``/``Decimal`` that was
+        # never traded.
+        "price": sentinel_none(d.get("price")),
+        "trigger_price": sentinel_none(d.get("trigger_price")),
+        "avg_fill_price": sentinel_none(d.get("avg_fill_price")),
+        "fill_price": sentinel_none(d.get("fill_price")),
         "transaction_type": d.get("transaction_type"),
         "price_type": d.get("price_type"),
         "duration": d.get("duration"),
@@ -219,6 +224,26 @@ def kind_from_notify(
             return "cancel_rejected"
         return None
     return None
+
+
+def sentinel_none(value: Any) -> Any:
+    """Map venue pending/unknown price values to ``None``.
+
+    The official Rithmic protocol encodes an unavailable price as an absent
+    field (``Option<f64>``), which the converters already map to ``None``;
+    some venue payloads additionally report a pending price as ``-1.0``.
+    Mapping both to ``None`` is defensive and provably safe: ``-1.0`` can
+    never be a traded price, so the mapping cannot fabricate or corrupt a
+    real fill. ``None`` values pass through unchanged.
+    """
+    if value is None:
+        return None
+    try:
+        if float(value) == -1.0:
+            return None
+    except (TypeError, ValueError):
+        pass
+    return value
 
 
 def trade_id_from_fill_fields(fields: Mapping[str, Any], ts_event: int) -> str:
@@ -318,15 +343,17 @@ def notification_action(fields: Mapping[str, Any], order: Any) -> OrderAction | 
     if kind == "triggered":
         return OrderAction(kind="triggered")
     if kind == "filled":
-        fill_px = fields.get("fill_price")
+        # "Is a fill" is independent of "is this fill priceable": a definitive
+        # fill whose price is absent/pending must still reach the fill handler,
+        # which latches (exposure incomplete) instead of silently dropping it.
         fill_sz = fields.get("fill_size")
-        if fill_px is None or fill_sz is None:
+        if fill_sz is None:
             return None
         ts_event = int(fields.get("ts_event") or 0)
         return OrderAction(
             kind="filled",
             fill_qty=int(fill_sz),
-            fill_px=fill_px,
+            fill_px=fields.get("fill_price"),
             trade_id=trade_id_from_fill_fields(fields, ts_event),
         )
     return None

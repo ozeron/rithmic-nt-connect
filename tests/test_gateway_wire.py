@@ -96,3 +96,76 @@ def test_create_session_gateway_returns_adapter_without_pyo3() -> None:
         assert hasattr(session, name), (
             f"gateway wire missing {name} (direct/gateway parity)"
         )
+
+
+class _RecordingGatewayClient:
+    """GatewayClient double: records every intent-channel call the façade
+    forwards (the adapter's reconnect sequence re-issues these after a drop)."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[object, ...]]] = []
+        self.trading_enabled = True
+        self.cancel_all_enabled = False
+
+    def subscribe(self, *args: object) -> None:
+        self.calls.append(("ticker", args))
+
+    def subscribe_order_book_summary(self, *args: object) -> None:
+        self.calls.append(("book", args))
+
+    def subscribe_time_bars(self, *args: object) -> None:
+        self.calls.append(("time_bars", args))
+
+    def subscribe_pnl(self) -> None:
+        self.calls.append(("pnl", ()))
+
+    def subscribe_order_updates(self) -> None:
+        self.calls.append(("order", ()))
+
+    def subscribe_bracket_updates(self) -> None:
+        self.calls.append(("brackets", ()))
+
+    def disconnect_order_plant(self) -> None:
+        self.calls.append(("disconnect_order_plant", ()))
+
+    def disconnect_pnl_plant(self) -> None:
+        self.calls.append(("disconnect_pnl_plant", ()))
+
+
+def test_gateway_wire_restore_covers_every_intent_channel() -> None:
+    """P4: the Python façade re-issues every intent channel after a plant
+    drop — ticker, book, time bars, PnL, order, brackets — mirroring
+    ``reconnect.rs::restore_plan_covers_every_intent_channel``. Order and
+    bracket intents both ride the order-plant stream."""
+    inner = _RecordingGatewayClient()
+    session = GatewayWireSession(inner)  # type: ignore[arg-type]
+
+    # Plant drop -> the adapter's resync sequence re-arms each stream.
+    session.disconnect_order_plant()
+    session.disconnect_pnl_plant()
+    session.subscribe("NQ", "CME")
+    session.subscribe_order_book_summary("NQ", "CME")
+    session.subscribe_time_bars("NQ", "CME", 2, 1)
+    session.subscribe_pnl()
+    session.subscribe_order_updates()
+    session.subscribe_bracket_updates()
+
+    kinds = [kind for kind, _ in inner.calls]
+    assert kinds == [
+        "disconnect_order_plant",
+        "disconnect_pnl_plant",
+        "ticker",
+        "book",
+        "time_bars",
+        "pnl",
+        "order",
+        "brackets",
+    ]
+    assert set(kinds) >= {
+        "ticker",
+        "book",
+        "time_bars",
+        "pnl",
+        "order",
+        "brackets",
+    }
