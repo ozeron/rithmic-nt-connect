@@ -11,6 +11,7 @@ from rithmic_gateway.config import GatewayConfig
 from rithmic_gateway.history_window import (
     BAR_TYPE_DAILY,
     BAR_TYPE_MINUTE,
+    BAR_TYPE_WEEKLY,
     bar_slice_secs,
     dedupe_bars_by_marker,
     window_slices,
@@ -188,6 +189,24 @@ def test_resolve_gateway_bin_finds_cargo_target(
     assert Path(found).resolve() == release.resolve()
 
 
+def test_resolve_gateway_bin_skips_non_executable_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-executable cargo-target file must be skipped, not returned."""
+    release = tmp_path / "target" / "release" / "rithmic-gateway"
+    release.parent.mkdir(parents=True)
+    release.write_text("not a binary\n")
+    release.chmod(0o644)  # not executable
+    (tmp_path / "Cargo.toml").write_text("[workspace]\n")
+    (tmp_path / "crates").mkdir()
+    monkeypatch.delenv("RITHMIC_GATEWAY_BIN", raising=False)
+    monkeypatch.delenv("CARGO_TARGET_DIR", raising=False)
+    monkeypatch.setattr("rithmic_gateway.spawn.shutil.which", lambda _n: None)
+    monkeypatch.setattr("rithmic_gateway.spawn._bin_search_starts", lambda: [tmp_path])
+    with pytest.raises(SpawnError, match="RITHMIC_GATEWAY_BIN"):
+        resolve_gateway_bin()
+
+
 def test_resolve_gateway_bin_missing_mentions_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -212,6 +231,13 @@ def test_window_slices_daily_single() -> None:
     step = bar_slice_secs(BAR_TYPE_DAILY, 1)
     slices = window_slices(1_700_000_000, 1_700_000_000 + 30 * 86400, step)
     assert len(slices) == 1
+
+
+def test_bar_slice_daily_matches_rust_limit() -> None:
+    # Must equal Rust's `i32::MAX / 4` (rithmic-plants history::bar_slice_secs):
+    # a Python client chunks daily/weekly history identically to the Rust path.
+    assert bar_slice_secs(BAR_TYPE_DAILY, 1) == (2**31 - 1) // 4
+    assert bar_slice_secs(BAR_TYPE_WEEKLY, 1) == (2**31 - 1) // 4
 
 
 def test_dedupe_bars_by_marker() -> None:

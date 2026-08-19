@@ -1105,12 +1105,26 @@ pub async fn cancel_all_orders_on(handle: &RithmicOrderPlantHandle) -> Result<()
 /// drain generic over this trait lets the timing/collection logic be unit-tested
 /// without constructing rithmic-rs's non-exhaustive `RithmicResponse`.
 pub(crate) trait OrderDrainSource {
-    async fn recv_order(&mut self) -> std::result::Result<PlantEvent, RecvError>;
+    async fn recv_order(&mut self) -> std::result::Result<PlantEvent, Error>;
 }
 
 impl OrderDrainSource for SubscriptionFilter {
-    async fn recv_order(&mut self) -> std::result::Result<PlantEvent, RecvError> {
-        let resp = self.recv().await?;
+    async fn recv_order(&mut self) -> std::result::Result<PlantEvent, Error> {
+        let resp = match self.recv().await {
+            Ok(resp) => resp,
+            Err(RecvError::Lagged(skipped)) => {
+                return Err(Error::ChannelLagged {
+                    plant: "order",
+                    skipped,
+                });
+            }
+            Err(RecvError::Closed) => return Err(Error::ChannelClosed { plant: "order" }),
+        };
+        if let Some(err) = &resp.error {
+            if err.is_connection_issue() {
+                return Err(Error::Rithmic(err.to_string()));
+            }
+        }
         Ok(PlantEvent::from(&resp))
     }
 }
@@ -1143,13 +1157,16 @@ where
         match tokio::time::timeout(settle.min(remaining), src.recv_order()).await {
             Ok(Ok(PlantEvent::OrderNotification(dto))) => out.push(dto),
             Ok(Ok(_)) => {} // non-order events (PnL, brackets, …) are ignored
-            Ok(Err(RecvError::Lagged(skipped))) => {
+            Ok(Err(Error::ChannelLagged { skipped, .. })) => {
                 return Err(Error::ChannelLagged {
                     plant: "order",
                     skipped,
                 });
             }
-            Ok(Err(RecvError::Closed)) => return Err(Error::ChannelClosed { plant: "order" }),
+            Ok(Err(Error::ChannelClosed { .. })) => {
+                return Err(Error::ChannelClosed { plant: "order" });
+            }
+            Ok(Err(err)) => return Err(err),
             Err(_elapsed) => break, // silence window elapsed -> drain complete
         }
     }
@@ -1210,8 +1227,15 @@ mod drain_tests {
     // Make the production drain loop testable with a plain `PlantEvent` channel
     // instead of rithmic-rs's non-exhaustive `RithmicResponse`.
     impl OrderDrainSource for broadcast::Receiver<PlantEvent> {
-        async fn recv_order(&mut self) -> std::result::Result<PlantEvent, RecvError> {
-            Ok(self.recv().await?)
+        async fn recv_order(&mut self) -> std::result::Result<PlantEvent, Error> {
+            match self.recv().await {
+                Ok(event) => Ok(event),
+                Err(RecvError::Lagged(skipped)) => Err(Error::ChannelLagged {
+                    plant: "order",
+                    skipped,
+                }),
+                Err(RecvError::Closed) => Err(Error::ChannelClosed { plant: "order" }),
+            }
         }
     }
 
@@ -1284,6 +1308,26 @@ mod drain_tests {
         assert!(
             matches!(res, Err(Error::ChannelLagged { plant: "order", .. })),
             "overflowed channel must surface as ChannelLagged, got {res:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_propagates_response_level_connection_error() {
+        // A source carrying a response-level connection issue (the venue echoed
+        // an error inside a received message, not a channel drop) must abort
+        // the drain instead of being ignored as a non-order event.
+        struct ConnectionIssueSource;
+
+        impl OrderDrainSource for ConnectionIssueSource {
+            async fn recv_order(&mut self) -> std::result::Result<PlantEvent, Error> {
+                Err(Error::Rithmic("connection closed by venue".into()))
+            }
+        }
+
+        let res = drain_order_notifications(ConnectionIssueSource).await;
+        assert!(
+            matches!(res, Err(Error::Rithmic(ref msg)) if msg.contains("connection closed")),
+            "response-level connection error must abort the drain, got {res:?}"
         );
     }
 }

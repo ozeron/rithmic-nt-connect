@@ -250,3 +250,153 @@ def test_resync_ticker_session_replays_intent() -> None:
     assert ("subscribe", "NQU6", "CME") in calls
     assert ("book", "NQU6", "CME") in calls
     assert ("bars", "NQU6", "CME", 2, 15) in calls
+
+
+def test_bbo_state_cleared_on_quote_unsubscribe_and_resync() -> None:
+    """One-sided BBO accumulators must not survive unsubscribe or a ticker
+    resync: a later quote must wait for both fresh sides instead of merging
+    with pre-unsubscribe/pre-reset state (review thread 3797072595)."""
+    import asyncio
+
+    from nautilus_trader.core.uuid import UUID4
+    from nautilus_trader.data.messages import UnsubscribeQuoteTicks
+    from nautilus_trader.model.identifiers import ClientId, InstrumentId, Venue
+    from rithmic_nt_connect.data import RithmicDataClient
+
+    client = RithmicDataClient.__new__(RithmicDataClient)
+    client._bbo_state = {"NQU6:CME": {"bid_price": 100.0, "bid_size": 1}}
+    client._subscriptions = set()
+    client._book_subscriptions = set()
+    client._bar_types = {}
+    client._resync_generation = 0
+    client._resync_lock = asyncio.Lock()
+    client._instrument_routes = {"NQU6.RITHMIC": ("NQU6", "CME")}
+
+    class Sess(WireSessionStub):
+        def reset_ticker(self) -> None:
+            pass
+
+        def unsubscribe(self, symbol: str, exchange: str) -> None:
+            pass
+
+        def subscribe(self, symbol: str, exchange: str) -> None:
+            pass
+
+        def subscribe_order_book_summary(self, symbol: str, exchange: str) -> None:
+            pass
+
+        def subscribe_time_bars(
+            self, symbol: str, exchange: str, bar_type: int, period: int
+        ) -> None:
+            pass  # Quote unsubscribe drops the accumulator for that symbol.
+
+    client._session = Sess()
+    cmd = UnsubscribeQuoteTicks(
+        InstrumentId.from_str("NQU6.RITHMIC"),
+        ClientId("test"),
+        Venue("RITHMIC"),
+        UUID4(),
+        0,
+    )
+    asyncio.run(client._unsubscribe_quote_ticks(cmd))
+    assert "NQU6:CME" not in client._bbo_state
+
+    # A resync also clears all accumulators before re-issuing intents.
+    client._bbo_state = {"NQU6:CME": {"bid_price": 100.0, "bid_size": 1}}
+    asyncio.run(client._resync_ticker_subscription())
+    assert client._bbo_state == {}
+
+
+def test_connect_reissues_intent_and_resets_derived_state() -> None:
+    """A full disconnect→connect must re-issue every remembered subscription
+    and clear derived state — the same intent-replay boundary as the
+    channel-error resync, so the client never reconnects with live plants but
+    zero subscriptions (review thread 3797072595, session-reconnect leg)."""
+    import asyncio
+    import contextlib
+
+    from nautilus_trader.model.data import BarType
+    from rithmic_nt_connect.data import RithmicDataClient
+
+    calls: list[tuple[Any, ...]] = []
+
+    class Sess(WireSessionStub):
+        # ``ensure_connected`` treats a missing ``_inner`` as "the session
+        # itself"; the stub's ``__getattr__`` would raise, so point it at the
+        # instance (mirrors a plain non-flocked session).
+        _inner = None
+
+        def connect(self) -> None:
+            pass
+
+        def subscribe(self, symbol: str, exchange: str) -> None:
+            calls.append(("subscribe", symbol, exchange))
+
+        def subscribe_order_book_summary(self, symbol: str, exchange: str) -> None:
+            calls.append(("book", symbol, exchange))
+
+        def subscribe_time_bars(
+            self, symbol: str, exchange: str, bar_type: int, period: int
+        ) -> None:
+            calls.append(("bars", symbol, exchange, bar_type, period))
+
+        def poll_event(self, timeout_ms: int = 0) -> None:
+            return None
+
+        def poll_history_event(self, timeout_ms: int = 0) -> None:
+            return None
+
+    class Provider:
+        async def initialize(self) -> None:
+            pass
+
+        def list_all(self) -> list:
+            return []
+
+    async def _run() -> None:
+        client = RithmicDataClient.__new__(RithmicDataClient)
+        sess = Sess()
+        sess._inner = sess
+        client._session = sess
+        client._instrument_provider = Provider()
+        client._subscriptions = {("NQU6", "CME")}
+        client._book_subscriptions = {("NQU6", "CME")}
+        # Dual-unit keys for one BarType: replay must re-issue ONE native
+        # request, not both keys (bar_resync_subscriptions dedupes).
+        m1 = BarType.from_str("NQU6.RITHMIC-1-MINUTE-LAST-EXTERNAL")
+        client._bar_types = {
+            ("NQU6", "CME", 2, 1): {m1},
+            ("NQU6", "CME", 2, 60): {m1},
+        }
+        client._bbo_state = {"NQU6:CME": {"bid_price": 100.0, "bid_size": 1}}
+        client._resync_generation = 0
+        client._resync_lock = asyncio.Lock()
+        client._instrument_routes = {}
+        client._poll_closing = False
+        client._poll_task = None
+        client._history_poll_task = None
+        client._skip_counts = {}
+        client._skip_last_flush = 0.0
+        client._loop = asyncio.get_running_loop()
+
+        await client._connect()
+        assert ("subscribe", "NQU6", "CME") in calls
+        assert ("book", "NQU6", "CME") in calls
+        # bar_resync_subscriptions dedupes the dual-unit keys to ONE native
+        # request per BarType.
+        bar_calls = [c for c in calls if c[0] == "bars"]
+        assert bar_calls == [("bars", "NQU6", "CME", 2, 1)], bar_calls
+        # Derived state reset + history poll restarted for registered bars.
+        assert client._bbo_state == {}
+        assert client._history_poll_task is not None
+        assert client._poll_task is not None
+        # Tear the poll tasks down cleanly so asyncio.run has nothing pending.
+        client._poll_closing = True
+        for attr in ("_poll_task", "_history_poll_task"):
+            task = getattr(client, attr)
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+    asyncio.run(_run())

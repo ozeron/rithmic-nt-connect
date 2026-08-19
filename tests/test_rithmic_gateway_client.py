@@ -973,6 +973,71 @@ def test_desync_nulls_sock_for_next_rpc() -> None:
             sock.unlink()
 
 
+def test_timeout_sec_zero_nulls_sock_for_next_rpc() -> None:
+    """``timeout_sec=0`` sets non-blocking mode; treat BlockingIOError as a
+    timeout and close the socket so the next RPC is not_connected instead of
+    consuming the queued response (request-ID protocol error)."""
+    sock = Path(f"/tmp/rgw-test-{os.getpid()}-timeout0.sock")
+    if sock.exists():
+        sock.unlink()
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(sock))
+    server.listen(1)
+    server.settimeout(5.0)
+
+    def _run() -> None:
+        try:
+            conn, _ = server.accept()
+        except Exception:
+            server.close()
+            return
+        with conn:
+            header = conn.recv(4)
+            (n,) = struct.unpack("!I", header)
+            conn.recv(n)
+            conn.sendall(
+                encode_frame(
+                    pb.Frame(
+                        ready=pb.Ready(
+                            scopes=["md"],
+                            trading_enabled=False,
+                            cancel_all_enabled=False,
+                        )
+                    ).SerializeToString()
+                )
+            )
+            # Accept the RPC request, then never answer — the client's
+            # non-blocking read raises BlockingIOError immediately.
+            header = conn.recv(4)
+            (n,) = struct.unpack("!I", header)
+            conn.recv(n)
+            with contextlib.suppress(Exception):
+                conn.recv(1)
+        server.close()
+
+    threading.Thread(target=_run, daemon=True).start()
+    try:
+        cfg = GatewayConfig(
+            user="u",
+            system_name="LucidTrading",
+            url="wss://example",
+            listen=f"unix://{sock}",
+            auto_spawn=False,
+            attest_flock=False,
+        )
+        client = GatewayClient(cfg, rpc_timeout_sec=0.3)
+        client.connect()
+        with pytest.raises(GatewayError) as ei:
+            client.load_time_bars("NQ", "CME", 1, 2, rpc_timeout_sec=0)
+        assert ei.value.code == "timeout"
+        with pytest.raises(GatewayError) as ei2:
+            client.load_time_bars("ES", "CME", 1, 2)
+        assert ei2.value.code == "not_connected"
+    finally:
+        if sock.exists():
+            sock.unlink()
+
+
 def test_runtime_base_dir_happy_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

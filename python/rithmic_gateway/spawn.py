@@ -139,7 +139,7 @@ def resolve_gateway_bin(explicit: str | None = None) -> str:
             if key in seen:
                 continue
             seen.add(key)
-            if candidate.is_file():
+            if candidate.is_file() and os.access(candidate, os.X_OK):
                 return str(candidate.resolve())
     raise SpawnError(
         "rithmic-gateway not on PATH or under target/{release,debug}; "

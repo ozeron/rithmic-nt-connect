@@ -357,6 +357,29 @@ def fields_to_order_book_deltas(
     return OrderBookDeltas(instrument_id=instrument_id, deltas=deltas)
 
 
+async def replay_subscription_intent(
+    session: WireSession,
+    subscriptions: set[tuple[str, str]],
+    book_subscriptions: set[tuple[str, str]],
+    bar_subscriptions: set[tuple[str, str, int, int]] | None = None,
+) -> None:
+    """Replay ticker + book + EXTERNAL bar intent on an already-connected wire.
+
+    Idempotent re-subscribe (the venue treats a duplicate subscribe as a
+    refresh, not an error). Every path that re-establishes the wire must go
+    through this single boundary so the client can never reconnect with live
+    plants but zero subscriptions.
+    """
+    for symbol, exchange in subscriptions:
+        await asyncio.to_thread(session.subscribe, symbol, exchange)
+    for symbol, exchange in book_subscriptions:
+        await asyncio.to_thread(session.subscribe_order_book_summary, symbol, exchange)
+    for symbol, exchange, rtype, period in bar_subscriptions or ():
+        await asyncio.to_thread(
+            session.subscribe_time_bars, symbol, exchange, rtype, period
+        )
+
+
 async def resync_ticker_session(
     session: WireSession,
     subscriptions: set[tuple[str, str]],
@@ -372,14 +395,9 @@ async def resync_ticker_session(
     gateway detaches + re-dials this client only (parent plants untouched).
     """
     await asyncio.to_thread(session.reset_ticker)
-    for symbol, exchange in subscriptions:
-        await asyncio.to_thread(session.subscribe, symbol, exchange)
-    for symbol, exchange in book_subscriptions:
-        await asyncio.to_thread(session.subscribe_order_book_summary, symbol, exchange)
-    for symbol, exchange, rtype, period in bar_subscriptions or ():
-        await asyncio.to_thread(
-            session.subscribe_time_bars, symbol, exchange, rtype, period
-        )
+    await replay_subscription_intent(
+        session, subscriptions, book_subscriptions, bar_subscriptions
+    )
 
 
 def _bar_type_duration_ns(bar_type: BarType) -> int:
@@ -562,7 +580,6 @@ class RithmicDataClient(LiveMarketDataClient):
         self._poll_closing = False
         self._subscriptions: set[tuple[str, str]] = set()
         self._book_subscriptions: set[tuple[str, str]] = set()
-        # Wire key → one or more Nautilus BarTypes (60-MINUTE and 1-HOUR share a key).
         # Wire key → one or more Nautilus BarTypes (60-MINUTE and 1-HOUR share
         # a key; each BarType is registered under BOTH the native period and
         # the venue's seconds-period echo key — see ``bar_wire_period_keys``).
@@ -593,6 +610,22 @@ class RithmicDataClient(LiveMarketDataClient):
                     f"instrument {instrument.id} missing rithmic route fields in info"
                 ) from exc
             self._instrument_routes[str(instrument.id)] = (symbol, exchange)
+        # A (re)connect may have recreated the plants with zero subscriptions:
+        # re-issue every remembered ticker/book/bar intent through the same
+        # single replay boundary as the channel-error resync. Also drop the
+        # one-sided BBO accumulators — merging pre-disconnect state with the
+        # fresh post-reconnect stream would publish stale-mixed QuoteTicks —
+        # and restart the history poll when EXTERNAL bars are registered (the
+        # disconnect cancelled it and only _subscribe_bars re-creates it).
+        await replay_subscription_intent(
+            self._session,
+            set(self._subscriptions),
+            set(self._book_subscriptions),
+            bar_resync_subscriptions(self._bar_types),
+        )
+        self._bbo_state.clear()
+        if self._bar_types:
+            self._ensure_history_poll_task()
         # Own the task: LiveMarketDataClient.create_task WARNs on our cancel.
         self._poll_closing = False
         self._poll_task = self._loop.create_task(self._poll_loop(), name="rithmic_poll")
@@ -633,6 +666,10 @@ class RithmicDataClient(LiveMarketDataClient):
         async with self._resync_lock:
             if self._resync_generation != start_gen:
                 return
+            # Drop one-sided BBO accumulators: after a plant reset the venue
+            # re-sends fresh bid/ask sides, and merging them with pre-reset
+            # state would publish a QuoteTick mixing stale + fresh sides.
+            self._bbo_state.clear()
             await resync_ticker_session(
                 self._session,
                 set(self._subscriptions),
@@ -812,6 +849,9 @@ class RithmicDataClient(LiveMarketDataClient):
         symbol, exchange = self._route(command.instrument_id)
         await asyncio.to_thread(self._session.unsubscribe, symbol, exchange)
         self._subscriptions.discard((symbol, exchange))
+        # Drop the one-sided BBO accumulator so a later resubscribe waits for
+        # both sides instead of merging with pre-unsubscribe state.
+        self._bbo_state.pop(f"{symbol}:{exchange}", None)
 
     async def _subscribe_order_book_deltas(self, command: SubscribeOrderBook) -> None:
         symbol, exchange = self._route(command.instrument_id)

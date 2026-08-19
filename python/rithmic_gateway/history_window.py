@@ -23,7 +23,10 @@ DEFAULT_BAR_SLICE_SECS = 4 * 60 * 60
 def bar_slice_secs(bar_type: int, period: int) -> int:
     """Slice length (seconds) for a time-bar replay window."""
     if bar_type in (BAR_TYPE_DAILY, BAR_TYPE_WEEKLY):
-        return 2**30  # one wide window (matches Rust i32::MAX/4 order of magnitude)
+        # One wide window; must equal Rust's i32::MAX / 4 so a Python client
+        # chunks history exactly like the Rust path (and never one oversized
+        # RPC where the Rust gateway would send several bounded ones).
+        return (2**31 - 1) // 4
     if bar_type == BAR_TYPE_MINUTE:
         if period >= 60:
             return 24 * 60 * 60

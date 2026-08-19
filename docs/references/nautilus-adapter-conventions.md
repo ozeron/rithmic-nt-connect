@@ -125,7 +125,7 @@ Do not infer support from a venue API alone. Implement Nautilus command/event se
 | Definitive venue result | Structured accept / update / reject | Matching domain event |
 | Unknown | May have reached the venue | **Never** a terminal event. Stay in flight; recover via stream / query / poll / reconcile |
 
-After `OrderSubmitted`, emit `OrderRejected` only when local evidence proves **no transmission**. Transport errors, timeouts, disconnects, channel errors, 5xx without command proof, rate limits, missing acks, and parse failures **after** send are unknown.
+After `OrderSubmitted`, emit `OrderRejected` for a **definitive venue rejection** (a structured reject notification from the venue for that order). Emit it for local evidence that proves **no transmission**. Everything else stays unknown: transport errors, timeouts, disconnects, channel errors, 5xx without command proof, rate limits, missing acks, and parse failures **after** send.
 
 On 1.231.x: use `generate_order_denied` when the API exists for pre-send failure. Otherwise document the closest honest event and do not claim a venue reject.
 

@@ -739,7 +739,12 @@ class GatewayClient:
             if exc.code in {"desync", "eof", "frame_too_large"}:
                 self._close_sock()
             raise
-        except TimeoutError as exc:
+        except (TimeoutError, BlockingIOError) as exc:
+            # ``settimeout(0)`` switches the socket to non-blocking mode, so
+            # the read raises BlockingIOError (not TimeoutError) after the
+            # request was sent. Treat it as a timeout and close the socket:
+            # leaving it open with a queued response would let the next RPC
+            # consume it and fail with a request-ID protocol error.
             self._close_sock()
             raise GatewayError(
                 "timeout", f"RPC {rid} timed out after {effective}s"

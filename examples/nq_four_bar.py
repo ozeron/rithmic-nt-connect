@@ -247,11 +247,14 @@ class NqFourBarStrategy(Strategy):
         self.log.info(
             f"BAR {bar.close}  down={self._down} up={self._up}  {self._ctx()}"
         )
-        if self._down < 4 and self._up < 4:
+        # Four consecutive same-direction closes = three comparisons
+        # (closes 100, 99, 98, 97 leave _down == 3), so the signal fires on
+        # the fourth close, not the fifth.
+        if self._down < 3 and self._up < 3:
             return
         if self._has_working_order():
             return
-        side = OrderSide.BUY if self._down >= 4 else OrderSide.SELL
+        side = OrderSide.BUY if self._down >= 3 else OrderSide.SELL
         self._down = 0
         self._up = 0
         net = self.portfolio.net_position(self._instrument.id)
