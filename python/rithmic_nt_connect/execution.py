@@ -2022,26 +2022,31 @@ class RithmicExecutionClient(LiveExecutionClient):
                 fields, command.instrument_id, command.venue_order_id
             ):
                 continue
-            # The iterator defaults a missing ts_event to 0; the fill path
-            # prefers the adapter clock so a fill never reports epoch 0.
-            ts_event = row.ts_event or self._clock.timestamp_ns()
+            # Identity uses the RAW row ts (0 when the venue sent none): the
+            # fill's TradeId and dedup key must be stable across recon runs /
+            # restarts, so the clock fallback must NOT enter them. The clock
+            # fallback applies only to the report/status timestamps below.
+            raw_ts = row.ts_event
+            event_ts = raw_ts or self._clock.timestamp_ns()
             # Share the adapter-wide fill dedup store (live path + recon) so a
             # fill already emitted live, or duplicated across the summary/today
             # drains, is not re-emitted as a second reconciliation fill.
-            dedup = fill_dedup_key(fields, ts_event=ts_event)
+            dedup = fill_dedup_key(fields, ts_event=raw_ts)
             if self._fill_key_seen(dedup):
                 continue
-            report = self._fill_report_from_fields(fields, ts_event)
+            # The builder applies the clock fallback to the report timestamp
+            # itself; identity (TradeId) stays on the raw ts.
+            report = self._fill_report_from_fields(fields, raw_ts)
             if report is not None:
                 # Nautilus cannot reconcile a fill without an order prerequisite.
                 # Reconciliation can discover a fill after the live order event
                 # was missed, so publish a venue status first; this may create a
                 # synthetic external order when no cached strategy order exists.
-                # Rebuild the status with the corrected ``ts_event`` (the
+                # Rebuild the status with the corrected ``event_ts`` (the
                 # iterator's 0-default would publish an epoch-dated
                 # prerequisite for a row without a venue timestamp — the
                 # status must share the fill's clock-fallback timestamp).
-                status = self._drain_row_from_fields(fields, ts_event).report
+                status = self._drain_row_from_fields(fields, event_ts).report
                 if status is None:
                     # Unreachable (the iterator already built a report for this
                     # row); narrows the type for the checker.

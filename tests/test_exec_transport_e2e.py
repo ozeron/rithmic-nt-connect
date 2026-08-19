@@ -31,12 +31,13 @@ from _stubs import (
 )
 from nautilus_trader.core.uuid import UUID4
 from nautilus_trader.execution.messages import (
+    GenerateFillReports,
     GenerateOrderStatusReport,
     GenerateOrderStatusReports,
     GeneratePositionStatusReports,
     SubmitOrder,
 )
-from nautilus_trader.execution.reports import OrderStatusReport
+from nautilus_trader.execution.reports import FillReport, OrderStatusReport
 from nautilus_trader.model.enums import (
     OrderSide,
     OrderStatus,
@@ -118,6 +119,21 @@ def _inflight_order(cid: str = "O-1") -> SimpleNamespace:
         is_reduce_only=False,
         avg_px=None,
     )
+
+
+class _LoadOrdersSession(WireSessionStub):
+    """Session double whose ``load_orders`` returns fixed normalized rows."""
+
+    def __init__(self, events: list[dict[str, object]]) -> None:
+        self._events = events
+
+    def load_orders(self, start_ssboe: int, end_ssboe: int) -> list[dict[str, object]]:
+        _ = start_ssboe, end_ssboe
+        return self._events
+
+
+def _fill_cmd() -> GenerateFillReports:
+    return GenerateFillReports(None, None, None, None, UUID4(), 1)
 
 
 def _fill_event(*, fill_id: str = "F1", basket: str = "B1") -> dict[str, object]:
@@ -944,36 +960,40 @@ def test_fill_trade_id_stable_without_fill_id_or_venue_ts(
     timestamp must dedupe to the SAME ``TradeId`` on every reconciliation /
     restart. The clock fallback belongs in the report timestamp, not the
     identity — a clock-derived TradeId mints a new id each run and the same
-    fill can be emitted and applied more than once."""
-    client = _trading_client()
-    client.account_id = AccountId("RITHMIC-ACC1")
-    monkeypatch.setattr(client, "_seed_account_if_needed", lambda *a, **k: None)
-    monkeypatch.setattr(
-        client,
-        "_price_for_instrument",
-        lambda instrument_id, value: Price.from_str("21000.0"),
-    )
+    fill can be emitted and applied more than once.
+
+    Goes through ``generate_fill_reports`` (the real caller) with a fresh
+    client per run — the caller previously substituted the clock into the
+    identity before the builder, defeating the builder-side fix."""
     raw = _fill_event(fill_id="", basket="B-STABLE")
     del raw["ssboe"]
     del raw["usecs"]
 
-    # Two "process restarts": the adapter clock advances between runs. The
-    # TradeId must NOT change (it would re-emit and re-apply the same fill);
-    # only the report timestamp may reflect the new clock. Each builder call
-    # reads the clock twice (report_ts + ts_init).
-    clock_ticks = iter([2, 2, 99, 99])
-    monkeypatch.setattr(
-        client, "_clock", SimpleNamespace(timestamp_ns=lambda: next(clock_ticks))
-    )
+    def _run(clock: int) -> FillReport:
+        client = _trading_client()
+        client.account_id = AccountId("RITHMIC-ACC1")
+        monkeypatch.setattr(client, "_seed_account_if_needed", lambda *a, **k: None)
+        monkeypatch.setattr(
+            client,
+            "_price_for_instrument",
+            lambda instrument_id, value: Price.from_str("21000.0"),
+        )
+        monkeypatch.setattr(client, "_send_order_status_report", lambda report: None)
+        monkeypatch.setattr(
+            client, "_clock", SimpleNamespace(timestamp_ns=lambda: clock)
+        )
+        client._session = _LoadOrdersSession([raw])
+        reports = asyncio.run(client.generate_fill_reports(_fill_cmd()))
+        assert len(reports) == 1
+        return reports[0]
 
-    first = client._fill_report_from_fields(raw, 0)
-    second = client._fill_report_from_fields(raw, 0)
+    first = _run(clock=2)
+    second = _run(clock=99)  # process restart: fresh client, advanced clock
 
-    assert first is not None and second is not None
     # Identity is stable across runs (raw ts_event 0, not the clock); the
     # report timestamp still gets the adapter-clock fallback.
     assert first.trade_id == second.trade_id
-    assert str(first.trade_id).startswith("B-STABLE:")
+    assert str(first.trade_id).startswith("B-STABLE:E1:0:")
     assert first.ts_event == 2  # first run's clock fallback
     assert second.ts_event == 99  # second run's clock fallback
 
