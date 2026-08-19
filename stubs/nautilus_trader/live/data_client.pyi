@@ -23,7 +23,16 @@ class LiveDataClient(DataClient):
     def request(self, request: RequestData) -> None: ...
     async def cancel_pending_tasks(self, timeout_secs: float = 5.0) -> None: ...
 
-class LiveMarketDataClient(MarketDataClient):
+# 1.231.x models LiveMarketDataClient(MarketDataClient) and
+# LiveDataClient(DataClient) as parallel Cython branches, yet the class
+# genuinely provides the full LiveDataClient surface (loop, create_task,
+# run_after_delay, connect/disconnect, cancel_pending_tasks) and
+# LiveDataClientFactory.create contracts -> LiveDataClient. The adapter
+# subclasses LiveMarketDataClient only (the dual-base MRO breaks __init__:
+# either ordering lands on the other base's required ``loop``), so the stub
+# declares the LiveDataClient relationship to satisfy the factory contract
+# statically — the node builder registers the client, never isinstance-checks.
+class LiveMarketDataClient(MarketDataClient, LiveDataClient):
     # cdef handler surface adapters override (data_client.pxd).
     _instrument_provider: Incomplete
     # cdef handlers take the full native arg list; ``*args`` keeps the override

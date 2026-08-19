@@ -192,7 +192,10 @@ hardening, Oracle 2nd + 3rd passes, Macroscope review):
    re-arming without re-observing it would be blind. With `soft_fail_pnl`
    there is no stream to observe and the gate is skipped — the plant then
    re-arms with **blind position context** (see the operational consequences
-   below).
+   below). Freshness: the drain row's venue timestamp gates the stale-row
+   comparison — a row the venue sent without a timestamp (synthetic 0) is
+   never treated as stale, so its valid snapshot still publishes and binds
+   (Macroscope round 4, 2026-08-19).
 
 The barrier runs on **every** trading (re)connect — not only when a prior
 operation latched the plant — because the disconnect window can hide

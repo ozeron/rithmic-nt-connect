@@ -120,6 +120,30 @@ def _inflight_order(cid: str = "O-1") -> SimpleNamespace:
     )
 
 
+def _fill_event(*, fill_id: str = "F1", basket: str = "B1") -> dict[str, object]:
+    """A normalized wire row for a venue fill (matches ``load_orders``/stream)."""
+    return {
+        "type": "order_notification",
+        "source": "exchange",
+        "kind": "filled",
+        "status": "COMPLETE",
+        "basket_id": basket,
+        "exchange_order_id": "E1",
+        "symbol": "NQU6",
+        "account_id": "ACC1",
+        "fill_id": fill_id,
+        "fill_size": 1,
+        "fill_price": 21000.0,
+        "quantity": 2,
+        "total_fill_size": 2,
+        "transaction_type": 1,
+        "price_type": 1,
+        "duration": 1,
+        "ssboe": 1_700_000_000,
+        "usecs": 0,
+    }
+
+
 def _working_order_row(
     *, tag: str = "O-1", basket: str = "B1", ts_event: int = 1_700_000_000_000_000_000
 ) -> dict[str, object]:
@@ -861,6 +885,97 @@ def test_rearm_drain_skips_row_with_malformed_ts(
 
     # No exception: the malformed row was skipped, the valid row still bound.
     assert client._cache.venue_order_id(ClientOrderId("O-1")) == VenueOrderId("B2")
+
+
+def test_rearm_drain_publishes_row_without_venue_ts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Macroscope (13:37Z): a timestamp-less drain row must NOT be skipped for
+    a tracked order with positive ``ts_last``. ``0`` is the iterator's
+    synthetic missing-ts value; skipping on it would drop a valid snapshot
+    (never publish, never bind) and let ``_rearm_after_reconnect`` re-arm with
+    the in-flight order unresolved. The freshness comparison applies only
+    when the drain row carries a real venue timestamp."""
+    no_ts = _working_order_row(tag="O-1", basket="B1")
+    del no_ts["ts_event_ns"]  # normalized ts_event -> 0 (venue sent none)
+    session = FaultInjectingSession(working_orders=[no_ts])
+    client = _connect_client(session, monkeypatch)
+    client._cache._orders[str(ClientOrderId("O-1"))] = _inflight_order()
+    reports: list[OrderStatusReport] = []
+    monkeypatch.setattr(
+        client, "_send_order_status_report", lambda report: reports.append(report)
+    )
+
+    asyncio.run(client._connect())
+
+    # The valid snapshot is published AND bound, despite the tracked order
+    # having ts_last=1 > the synthetic row ts 0.
+    assert client._cache.venue_order_id(ClientOrderId("O-1")) == VenueOrderId("B1")
+    assert len(reports) == 1
+    assert client._order_plant.allow_submit()
+
+
+def test_inflight_report_uses_venue_id_on_order_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Macroscope (13:37Z): an in-flight order whose venue id lives on the
+    order model (no cache mapping yet) must answer directly — it must NOT
+    enter ``_resolve_inflight_by_tag`` (which could raise
+    ``VenueQueryUnavailable`` for a genuinely-known order). The gate uses the
+    effective venue-id lookup, not just the cache mapping."""
+    client = _trading_client()
+    order = _inflight_order()
+    order.venue_order_id = VenueOrderId("V-MODEL")
+    client._cache._orders[str(order.client_order_id)] = order
+    report = asyncio.run(
+        client.generate_order_status_report(
+            GenerateOrderStatusReport(None, order.client_order_id, None, UUID4(), 1)
+        )
+    )
+
+    assert report is not None
+    assert report.venue_order_id == VenueOrderId("V-MODEL")
+
+
+def test_fill_trade_id_stable_without_fill_id_or_venue_ts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Macroscope (13:37Z): a historical fill with no ``fill_id`` and no venue
+    timestamp must dedupe to the SAME ``TradeId`` on every reconciliation /
+    restart. The clock fallback belongs in the report timestamp, not the
+    identity — a clock-derived TradeId mints a new id each run and the same
+    fill can be emitted and applied more than once."""
+    client = _trading_client()
+    client.account_id = AccountId("RITHMIC-ACC1")
+    monkeypatch.setattr(client, "_seed_account_if_needed", lambda *a, **k: None)
+    monkeypatch.setattr(
+        client,
+        "_price_for_instrument",
+        lambda instrument_id, value: Price.from_str("21000.0"),
+    )
+    raw = _fill_event(fill_id="", basket="B-STABLE")
+    del raw["ssboe"]
+    del raw["usecs"]
+
+    # Two "process restarts": the adapter clock advances between runs. The
+    # TradeId must NOT change (it would re-emit and re-apply the same fill);
+    # only the report timestamp may reflect the new clock. Each builder call
+    # reads the clock twice (report_ts + ts_init).
+    clock_ticks = iter([2, 2, 99, 99])
+    monkeypatch.setattr(
+        client, "_clock", SimpleNamespace(timestamp_ns=lambda: next(clock_ticks))
+    )
+
+    first = client._fill_report_from_fields(raw, 0)
+    second = client._fill_report_from_fields(raw, 0)
+
+    assert first is not None and second is not None
+    # Identity is stable across runs (raw ts_event 0, not the clock); the
+    # report timestamp still gets the adapter-clock fallback.
+    assert first.trade_id == second.trade_id
+    assert str(first.trade_id).startswith("B-STABLE:")
+    assert first.ts_event == 2  # first run's clock fallback
+    assert second.ts_event == 99  # second run's clock fallback
 
 
 def test_drain_row_boundary_bindable_is_one_decision(

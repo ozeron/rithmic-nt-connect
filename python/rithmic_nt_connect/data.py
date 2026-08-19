@@ -6,12 +6,10 @@ import asyncio
 import contextlib
 import itertools
 import time
-from collections.abc import Callable, Coroutine
 from typing import Any
 
 from nautilus_trader.cache.cache import Cache
 from nautilus_trader.common.component import LiveClock, MessageBus
-from nautilus_trader.common.enums import LogColor
 from nautilus_trader.data.messages import (
     RequestBars,
     RequestTradeTicks,
@@ -24,7 +22,7 @@ from nautilus_trader.data.messages import (
     UnsubscribeQuoteTicks,
     UnsubscribeTradeTicks,
 )
-from nautilus_trader.live.data_client import LiveDataClient, LiveMarketDataClient
+from nautilus_trader.live.data_client import LiveMarketDataClient
 from nautilus_trader.model.data import (
     Bar,
     BarType,
@@ -457,35 +455,20 @@ def bar_type_to_rithmic(bar_type: BarType) -> tuple[int, int]:
     )
 
 
-class RithmicDataClient(LiveMarketDataClient, LiveDataClient):
+class RithmicDataClient(LiveMarketDataClient):
     """Out-of-tree live market-data client backed by the Rust Rithmic session.
 
     Nautilus 1.231.x models ``LiveMarketDataClient`` as a ``MarketDataClient``
     rather than a ``LiveDataClient``, yet ``LiveDataClientFactory.create``
-    contracts ``-> LiveDataClient``. Taking both bases makes this client
-    genuinely satisfy that contract (``isinstance`` included) instead of
-    suppressing the mismatch. The ``create_task`` diamond is resolved below.
+    contracts ``-> LiveDataClient``. The 8862b62 attempt to satisfy that
+    contract by taking both bases broke at runtime: the two base ``__init__``
+    chains are not cooperative in this version (either MRO ordering lands on
+    the other base's required ``loop``), so ``TradingNode.build`` raised
+    ``TypeError: LiveDataClient.__init__() missing 'loop'``. The factory
+    contract is satisfied by the vendored stub declaring
+    ``LiveMarketDataClient(LiveDataClient)``; at runtime the node builder
+    only registers the client (no ``isinstance`` check).
     """
-
-    def create_task(
-        self,
-        coro: Coroutine,
-        log_msg: str | None = None,
-        actions: Callable | None = None,
-        success_msg: str | None = None,
-        success_color: LogColor = LogColor.NORMAL,
-    ) -> asyncio.Task:
-        """Resolve the ``LiveDataClient``/``LiveMarketDataClient`` diamond.
-
-        The bases declare incompatible return types (``Task`` vs ``Task | None``);
-        ``Task`` satisfies both. ``None`` is only returned when the loop is not
-        running or the client is disposed — a programming error for a live
-        client, so fail loudly instead of silently dropping the task.
-        """
-        task = super().create_task(coro, log_msg, actions, success_msg, success_color)
-        if task is None:
-            raise RuntimeError("Rithmic data client cannot start task: not running")
-        return task
 
     def __init__(
         self,

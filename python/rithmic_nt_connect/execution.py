@@ -612,11 +612,17 @@ class RithmicExecutionClient(LiveExecutionClient):
                     # The live stream resolved this order to a terminal state
                     # while we drained; never publish a stale snapshot over it.
                     continue
-                if order is not None and (
-                    int(getattr(order, "ts_last", 0) or 0) > row.ts_event
+                if (
+                    order is not None
+                    and row.ts_event
+                    and (int(getattr(order, "ts_last", 0) or 0) > row.ts_event)
                 ):
                     # Same freshness rule as ``_resolve_inflight_by_tag``: the
-                    # live stream wins over the stale drain snapshot.
+                    # live stream wins over the stale drain snapshot. Only when
+                    # the drain row carries a real venue timestamp: ``0`` is the
+                    # iterator's synthetic missing-ts value, and skipping on it
+                    # would drop a valid snapshot (never publishing nor
+                    # binding) whenever the tracked order has any live history.
                     continue
             # Apply (publish) BEFORE binding the venue id — commit ordering:
             # the engine must receive the reconciled status before trading
@@ -1193,11 +1199,15 @@ class RithmicExecutionClient(LiveExecutionClient):
         # Same event-time fallback policy as the status builder: never report
         # a fill at epoch 0 when the venue sent no timestamp.
         report_ts = ts_event or self._clock.timestamp_ns()
+        # TradeId identity uses the RAW ``ts_event`` (0 when the venue sent
+        # none): a historical fill without fill_id must dedupe to the SAME
+        # TradeId on every recon/restart. The clock fallback would mint a new
+        # id each run, so the same fill could be emitted and applied twice.
         return FillReport(
             account_id=self.account_id,
             instrument_id=instrument_id,
             venue_order_id=VenueOrderId(str(basket)),
-            trade_id=TradeId(trade_id_from_fill_fields(fields, report_ts)),
+            trade_id=TradeId(trade_id_from_fill_fields(fields, ts_event)),
             order_side=side,
             last_qty=last_qty,
             last_px=last_px,
@@ -1645,17 +1655,16 @@ class RithmicExecutionClient(LiveExecutionClient):
         ts_init = self._clock.timestamp_ns()
         if not self.enable_trading:
             return self._order_status_report_for(order, ts_init)
-        # In-flight order with no venue id: the engine's in-flight checker
-        # queries this path. Resolve it from the venue first (bounded
-        # working-orders drain) — the only adapter-side lever against the
-        # engine's terminal UNKNOWN synthesis. A drain that did not find the
-        # order does not prove its fate (best-effort working-orders query), so
-        # fail closed: never fabricate a report or terminal state, never
-        # return an un-resolved answer the engine could treat as known.
-        if (
-            order.is_inflight
-            and self._cache.venue_order_id(order.client_order_id) is None
-        ):
+        # In-flight order with no venue id (cache mapping OR the order model):
+        # the engine's in-flight checker queries this path. Resolve it from
+        # the venue first (bounded working-orders drain) — the only
+        # adapter-side lever against the engine's terminal UNKNOWN synthesis.
+        # A drain that did not find the order does not prove its fate
+        # (best-effort working-orders query), so fail closed: never fabricate
+        # a report or terminal state, never return an un-resolved answer the
+        # engine could treat as known. An order whose venue id lives on the
+        # model (no cache mapping) can answer directly.
+        if order.is_inflight and self._venue_id_for_order(order) is None:
             report = await self._resolve_inflight_by_tag(order, ts_init)
             if report is not None:
                 return report

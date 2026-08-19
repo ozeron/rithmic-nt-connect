@@ -211,6 +211,19 @@ _EXEC_RECON_CTORS = {
     ),
 }
 
+_LIVE_MDC_LIVEDATACLIENT_HEADER = (
+    "# 1.231.x models LiveMarketDataClient(MarketDataClient) and\n"
+    "# LiveDataClient(DataClient) as parallel Cython branches, yet the class\n"
+    "# genuinely provides the full LiveDataClient surface (loop, create_task,\n"
+    "# run_after_delay, connect/disconnect, cancel_pending_tasks) and\n"
+    "# LiveDataClientFactory.create contracts -> LiveDataClient. The adapter\n"
+    "# subclasses LiveMarketDataClient only (the dual-base MRO breaks __init__:\n"
+    "# either ordering lands on the other base's required ``loop``), so the stub\n"
+    "# declares the LiveDataClient relationship to satisfy the factory contract\n"
+    "# statically - the node builder registers the client, never isinstance-checks.\n"
+)
+
+
 _LIVE_MDC_HANDLERS = """    # cdef handler surface adapters override (data_client.pxd).
     _instrument_provider: Incomplete
     # cdef handlers take the full native arg list; ``*args`` keeps the override
@@ -467,8 +480,16 @@ def _apply_hand_patches(pkg: pathlib.Path) -> int:
     applied += _patch(
         live_mdc,
         "class LiveMarketDataClient(MarketDataClient):\n",
-        "class LiveMarketDataClient(MarketDataClient):\n" + _LIVE_MDC_HANDLERS,
+        "class LiveMarketDataClient(MarketDataClient, LiveDataClient):\n"
+        + _LIVE_MDC_HANDLERS,
         marker="# cdef handler surface adapters override (data_client.pxd)",
+    )
+    applied += _patch(
+        live_mdc,
+        "class LiveMarketDataClient(MarketDataClient, LiveDataClient):\n",
+        _LIVE_MDC_LIVEDATACLIENT_HEADER + "\n"
+        "class LiveMarketDataClient(MarketDataClient, LiveDataClient):\n",
+        marker="# 1.231.x models LiveMarketDataClient(MarketDataClient)",
     )
 
     futures = pkg / "model/instruments/futures_contract.pyi"

@@ -224,7 +224,12 @@ class _FlockedDirectSession:
         return self._inner.resolved_account()
 
     def poll_event(self, timeout_ms: int = 0) -> dict[str, Any] | None:
-        return self._inner.poll_event(timeout_ms)
+        # The direct PyO3 ``Session.poll_event`` is a non-blocking ``try_recv``
+        # poll and takes no timeout argument (the gateway client's blocking
+        # ``_poll_filtered`` accepts ``timeout_ms``); a ``0`` forward would
+        # raise ``TypeError`` on the direct path. The facade keeps the shared
+        # signature but never passes the arg to the inner session.
+        return self._inner.poll_event()
 
     def load_ticks(
         self, symbol: str, exchange: str, start_ssboe: int, end_ssboe: int
