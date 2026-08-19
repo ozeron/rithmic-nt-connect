@@ -974,6 +974,19 @@ def test_drain_row_boundary_bindable_implies_real_terms_property() -> None:
         assert report.order_type is price_type_map[pt_int], label
         assert report.time_in_force is tif_map[dur_int], label
 
+    # Non-integral numerics truncate to a valid enum (1.5 -> LIMIT): malformed,
+    # never bindable. Integral floats/strings are fine (exact coercion).
+    for key in ("price_type", "duration"):
+        for value in (1.5, 2.9, 1.0, "1"):
+            row = dict(base)
+            row[key] = value
+            result = client._drain_row_from_fields(row, 1)
+            if value in (1.5, 2.9):
+                assert not result.bindable, f"{key}={value!r} must not bind"
+            else:
+                assert result.bindable, f"{key}={value!r} should bind"
+                assert result.report is not None, f"{key}={value!r}"
+
 
 def test_strict_drain_row_triggered_binds_and_reports_triggered(
     monkeypatch: pytest.MonkeyPatch,

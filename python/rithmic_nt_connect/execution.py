@@ -226,9 +226,15 @@ def _row_is_trustworthy(fields: dict[str, Any]) -> bool:
     try:
         if (
             # bool is an int subclass: ``int(True) == 1`` would map malformed
-            # boolean values to LIMIT/DAY — reject them before coercion.
+            # boolean values to LIMIT/DAY — reject them before coercion. A
+            # non-integral numeric (``1.5``) truncates to a valid enum the
+            # same way — reject any value whose int coercion differs from
+            # itself (integral strings like ``"1"`` pass: ``int(str)`` is
+            # exact or raises).
             isinstance(price_type, bool)
             or isinstance(duration, bool)
+            or (not isinstance(price_type, str) and int(price_type) != price_type)
+            or (not isinstance(duration, str) and int(duration) != duration)
             or int(price_type) not in _RITHMIC_PRICE_TYPE_TO_ORDER_TYPE
             or int(duration) not in _RITHMIC_DURATION_TO_TIF
         ):
