@@ -273,10 +273,14 @@ class _Log:
 
 
 class _CaptureLog(_Log):
-    """Captures ``error``/``warning`` messages so a test can assert on them."""
+    """Captures debug/warn/error so tests can assert on log level."""
 
     def __init__(self) -> None:
+        self.debugs: list[str] = []
         self.messages: list[str] = []
+
+    def debug(self, *args: object, **kwargs: object) -> None:
+        self.debugs.append(" ".join(str(a) for a in args))
 
     def error(self, *args: object, **kwargs: object) -> None:
         self.messages.append(" ".join(str(a) for a in args))

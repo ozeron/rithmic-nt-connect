@@ -1685,16 +1685,88 @@ def _tracked_order(leaves: int = 2) -> SimpleNamespace:
 def _capture_filled(
     client: _TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> list[tuple[Any, ...]]:
-    filled: list[tuple[Any, ...]] = []
-    monkeypatch.setattr(
-        client, "generate_order_filled", lambda *a, **k: filled.append(a)
+    return _capture_gens(client, monkeypatch, "filled")["filled"]
+
+
+def _capture_gens(
+    client: _TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    *names: str,
+    stub_reports: bool = False,
+) -> dict[str, list[tuple[Any, ...]]]:
+    """Patch ``generate_order_<name>`` collectors; price stub when fills involved."""
+    out: dict[str, list[tuple[Any, ...]]] = {name: [] for name in names}
+    for name in names:
+        bucket = out[name]
+        monkeypatch.setattr(
+            client,
+            f"generate_order_{name}",
+            lambda *a, _b=bucket, **k: _b.append(a),
+        )
+    if "filled" in names:
+        monkeypatch.setattr(
+            client,
+            "_price_for_instrument",
+            lambda instrument_id, value: Price.from_str("21000.0"),
+        )
+    if stub_reports:
+        monkeypatch.setattr(
+            client, "_publish_order_status_report", lambda report, context: True
+        )
+        monkeypatch.setattr(client, "_send_order_status_report", lambda report: None)
+    return out
+
+
+def _cancel_notification(*, basket: str, tag: str) -> dict[str, object]:
+    return {
+        "type": "order_notification",
+        "source": "rithmic",
+        "kind": "canceled",
+        "status": "CANCELED",
+        "basket_id": basket,
+        "user_tag": tag,
+        "symbol": "NQU6",
+        "account_id": "ACC1",
+        "quantity": 2,
+        "transaction_type": 1,
+        "price_type": 1,
+        "duration": 1,
+    }
+
+
+def _tracked_status_client(status: OrderStatus, *, leaves: int = 2) -> _TestClient:
+    client = _trading_client()
+    order = _tracked_order(leaves=leaves)
+    order.status = status
+    order.is_closed = status in (OrderStatus.FILLED, OrderStatus.CANCELED)
+    client._cache._orders[str(order.client_order_id)] = order
+    client._cache.add_venue_order_id(ClientOrderId("O-1"), VenueOrderId("B1"))
+    return client
+
+
+def _oco_legs(
+    client: _TestClient,
+    *,
+    stop_type: OrderType = OrderType.LIMIT,
+) -> tuple[SimpleNamespace, SimpleNamespace]:
+    """Register O-1/B1 and O-2/B2 as SUBMITTED legs (stop may be STOP_MARKET)."""
+    leg_a = _tracked_order(leaves=2)
+    leg_a.status = OrderStatus.SUBMITTED
+    leg_a.order_type = stop_type
+    leg_b = _tracked_order(leaves=2)
+    leg_b.client_order_id = ClientOrderId("O-2")
+    leg_b.status = OrderStatus.SUBMITTED
+    client._cache._orders[str(leg_a.client_order_id)] = leg_a
+    client._cache._orders[str(leg_b.client_order_id)] = leg_b
+    client._cache.add_venue_order_id(ClientOrderId("O-1"), VenueOrderId("B1"))
+    client._cache.add_venue_order_id(ClientOrderId("O-2"), VenueOrderId("B2"))
+    return leg_a, leg_b
+
+
+def _notify(client: _TestClient, fields: dict[str, object]) -> None:
+    RithmicExecutionClient._handle_order_notification(
+        cast(RithmicExecutionClient, client), fields
     )
-    monkeypatch.setattr(
-        client,
-        "_price_for_instrument",
-        lambda instrument_id, value: Price.from_str("21000.0"),
-    )
-    return filled
 
 
 def test_load_commission_rates_maps_venue_rows() -> None:
@@ -1899,3 +1971,100 @@ def test_nonzero_position_visible_before_trading_armed(
 
     assert len(reports) == 1
     assert reports[0].quantity == Quantity.from_int(1)
+
+
+# --------------------------------------------------------------------------- #
+# LAP-42: SUBMITTED-only OrderAccepted + OCO late-OPEN sequences
+# --------------------------------------------------------------------------- #
+
+
+def test_tracked_open_from_submitted_emits_accept(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _tracked_status_client(OrderStatus.SUBMITTED)
+    gens = _capture_gens(client, monkeypatch, "accepted")
+    log = _CaptureLog()
+    client._log = log
+
+    _notify(client, _accepted_notification())
+
+    assert len(gens["accepted"]) == 1
+    assert client._cache.venue_order_id(ClientOrderId("O-1")) == VenueOrderId("B1")
+    assert log.messages == []
+
+
+@pytest.mark.parametrize(
+    "late_status",
+    [
+        OrderStatus.ACCEPTED,
+        OrderStatus.PARTIALLY_FILLED,
+        OrderStatus.PENDING_CANCEL,
+        OrderStatus.PENDING_UPDATE,
+        OrderStatus.TRIGGERED,
+    ],
+)
+def test_tracked_late_open_after_advanced_state_is_ignored(
+    monkeypatch: pytest.MonkeyPatch, late_status: OrderStatus
+) -> None:
+    client = _tracked_status_client(late_status)
+    gens = _capture_gens(client, monkeypatch, "accepted")
+    log = _CaptureLog()
+    client._log = log
+
+    _notify(client, _accepted_notification())
+
+    assert gens["accepted"] == []
+    assert any("late/duplicate OrderAccepted" in m for m in log.debugs)
+    assert log.messages == []
+
+
+def test_partial_fill_open_fill_sequence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _tracked_status_client(OrderStatus.PARTIALLY_FILLED, leaves=2)
+    gens = _capture_gens(client, monkeypatch, "accepted", "filled")
+
+    _notify(client, _fill_notification(fill_id="F1", fill_size=1))
+    _notify(client, _accepted_notification())
+    _notify(client, _fill_notification(fill_id="F2", fill_size=1))
+
+    assert gens["accepted"] == []
+    assert len(gens["filled"]) == 2
+
+
+@pytest.mark.parametrize("winner", ["target", "stop"])
+def test_oco_replay(monkeypatch: pytest.MonkeyPatch, winner: str) -> None:
+    """Target-wins or stop-wins: one fill, one sibling cancel, no second accept."""
+    client = _trading_client()
+    stop_type = OrderType.STOP_MARKET if winner == "stop" else OrderType.LIMIT
+    winner_leg, _ = _oco_legs(client, stop_type=stop_type)
+    names = ("accepted", "canceled", "filled")
+    if winner == "stop":
+        names = ("accepted", "triggered", "canceled", "filled")
+    gens = _capture_gens(client, monkeypatch, *names, stub_reports=True)
+    log = _CaptureLog()
+    client._log = log
+
+    if winner == "stop":
+        _notify(client, _trigger_notification())
+        assert gens["triggered"] == []
+        fill = dict(_fill_notification(fill_id="SF", fill_size=2, basket="B1"))
+        fill["user_tag"] = "O-1"
+        cancel = _cancel_notification(basket="B2", tag="O-2")
+        late_open = dict(_accepted_notification())
+    else:
+        fill = dict(_fill_notification(fill_id="TF", fill_size=2, basket="B1"))
+        fill["user_tag"] = "O-1"
+        cancel = _cancel_notification(basket="B2", tag="O-2")
+        late_open = dict(_accepted_notification())
+
+    _notify(client, fill)
+    winner_leg.status = OrderStatus.FILLED
+    winner_leg.is_closed = True
+    _notify(client, cancel)
+    _notify(client, late_open)
+
+    assert len(gens["filled"]) == 1
+    assert len(gens["canceled"]) == 1
+    assert gens["accepted"] == []
+    assert not any("could not be built" in m for m in log.messages)

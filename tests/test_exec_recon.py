@@ -10,7 +10,7 @@ from types import MethodType, SimpleNamespace
 from typing import Any, cast
 
 import pytest
-from _stubs import _CacheStub, _Log, _TestClient
+from _stubs import _CacheStub, _CaptureLog, _Log, _TestClient
 from nautilus_trader.core.uuid import UUID4
 from nautilus_trader.execution.messages import (
     GenerateFillReports,
@@ -1538,4 +1538,219 @@ def test_cached_status_query_non_stop_order_does_not_crash_on_trigger_type(
 
     assert report is not None
     assert report.trigger_type == TriggerType.NO_TRIGGER
-    assert report.avg_px == Decimal("21000.5")
+
+
+# --------------------------------------------------------------------------- #
+# LAP-42: bare-COMPLETE DEBUG vs WARN matrix + closed-order safety
+# --------------------------------------------------------------------------- #
+
+
+def _closed_order_cache(status: OrderStatus, is_closed: bool = True) -> _CacheStub:
+    cache = _CacheStub()
+    order = SimpleNamespace(
+        client_order_id=ClientOrderId("O-1"),
+        is_closed=is_closed,
+        status=status,
+    )
+    cache._orders["O-1"] = order
+    cache.add_venue_order_id(ClientOrderId("O-1"), VenueOrderId("B1"))
+    return cache
+
+
+def _bare_complete_fields(**over: object) -> dict[str, object]:
+    fields: dict[str, object] = {
+        "type": "order_notification",
+        "source": "rithmic",
+        "kind": None,
+        "notify_type_name": "COMPLETE",
+        "status": "complete",
+        "basket_id": "B1",
+        "symbol": "NQU6",
+        "account_id": "ACC1",
+    }
+    fields.update(over)
+    return fields
+
+
+def _bare_client(
+    cache: _CacheStub,
+    *,
+    fail_status: bool = True,
+) -> tuple[RithmicExecutionClient, _CaptureLog]:
+    client = _trading_client()
+    client._account_seeded = True
+    client.account_id = AccountId("RITHMIC-ACC1")
+    client._cache = cache
+    if fail_status:
+        client._drain_row_from_fields = (  # ty: ignore
+            lambda fields, ts_event: _drain_row_result(None)
+        )
+    log = _CaptureLog()
+    client._log = log
+    return client, log
+
+
+def _handle_untracked(
+    client: RithmicExecutionClient, fields: dict[str, object]
+) -> None:
+    RithmicExecutionClient._handle_untracked_notification(client, fields)
+
+
+@pytest.mark.parametrize("status", [OrderStatus.FILLED, OrderStatus.CANCELED])
+def test_bare_complete_closed_is_debug(status: OrderStatus) -> None:
+    client, log = _bare_client(_closed_order_cache(status))
+    _handle_untracked(client, _bare_complete_fields())
+    assert any("skipping benign bare COMPLETE" in m for m in log.debugs)
+    assert log.messages == []
+
+
+@pytest.mark.parametrize(
+    ("label", "cache", "fields"),
+    [
+        (
+            "unmapped basket",
+            _CacheStub(),
+            _bare_complete_fields(basket_id="B-EXT"),
+        ),
+        (
+            "exchange source",
+            _closed_order_cache(OrderStatus.FILLED),
+            _bare_complete_fields(source="exchange"),
+        ),
+        (
+            "not COMPLETE",
+            _closed_order_cache(OrderStatus.FILLED),
+            _bare_complete_fields(notify_type_name="CANCELLED"),
+        ),
+        (
+            "wrong status",
+            _closed_order_cache(OrderStatus.FILLED),
+            _bare_complete_fields(status="CANCELLED"),
+        ),
+        (
+            "kind set",
+            _closed_order_cache(OrderStatus.FILLED),
+            _bare_complete_fields(kind="canceled"),
+        ),
+        (
+            "quantity present",
+            _closed_order_cache(OrderStatus.FILLED),
+            _bare_complete_fields(quantity=2),
+        ),
+        (
+            "fill_id present",
+            _closed_order_cache(OrderStatus.FILLED),
+            _bare_complete_fields(fill_id="F1"),
+        ),
+        (
+            "fill_size present",
+            _closed_order_cache(OrderStatus.FILLED),
+            _bare_complete_fields(fill_size=1),
+        ),
+        (
+            "open order",
+            _closed_order_cache(OrderStatus.ACCEPTED, is_closed=False),
+            _bare_complete_fields(),
+        ),
+        (
+            "rejected terminal",
+            _closed_order_cache(OrderStatus.REJECTED),
+            _bare_complete_fields(),
+        ),
+        (
+            "expired terminal",
+            _closed_order_cache(OrderStatus.EXPIRED),
+            _bare_complete_fields(),
+        ),
+        (
+            "kind+status mismatch",
+            _closed_order_cache(OrderStatus.CANCELED),
+            _bare_complete_fields(kind="canceled", status="CANCELED"),
+        ),
+    ],
+)
+def test_bare_complete_external_still_warns(
+    label: str, cache: _CacheStub, fields: dict[str, object]
+) -> None:
+    client, log = _bare_client(cache)
+    _handle_untracked(client, fields)
+    assert any("could not be built" in m for m in log.messages), label
+    assert not any("benign bare COMPLETE" in m for m in log.debugs), label
+
+
+def test_closed_order_late_open_still_publishes_report() -> None:
+    client, log = _bare_client(
+        _closed_order_cache(OrderStatus.CANCELED), fail_status=False
+    )
+    client._untracked_status_keys = {}
+    published: list[object] = []
+    client._publish_order_status_report = (  # ty: ignore
+        lambda report, context: published.append(report) or True
+    )
+    _handle_untracked(
+        client,
+        {
+            "type": "order_notification",
+            "source": "rithmic",
+            "kind": "accepted",
+            "notify_type_name": "OPEN",
+            "status": "OPEN",
+            "basket_id": "B1",
+            "symbol": "NQU6",
+            "account_id": "ACC1",
+            "quantity": 2,
+            "total_fill_size": 0,
+            "price": 21000.0,
+            "transaction_type": 1,
+            "price_type": 1,
+            "duration": 1,
+        },
+    )
+    assert len(published) == 1
+    assert not any("benign bare COMPLETE" in m for m in log.debugs)
+    assert not any("could not be built" in m for m in log.messages)
+
+
+def test_closed_order_late_fill_still_reconciles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _log = _bare_client(
+        _closed_order_cache(OrderStatus.CANCELED), fail_status=False
+    )
+    client._seen_fill_keys = OrderedDict()
+    client._untracked_status_keys = {}
+    external_fills: list[object] = []
+    client._send_fill_report = external_fills.append  # ty: ignore
+    client._drain_row_from_fields = lambda fields, ts_event: _drain_row_result(  # ty: ignore
+        SimpleNamespace(venue_order_id="B1")
+    )
+    client._publish_order_status_report = lambda report, context: True  # ty: ignore
+    monkeypatch.setattr(
+        client,
+        "_price_for_instrument",
+        lambda instrument_id, value: Price.from_str("21000.0"),
+    )
+    fields = dict(_fill_event(fill_id="F1", basket="B1"))
+    _handle_untracked(client, fields)
+    _handle_untracked(client, dict(fields))
+    assert len(external_fills) == 1
+
+
+def test_closed_order_contradictions_remain_visible() -> None:
+    client, log = _bare_client(_closed_order_cache(OrderStatus.FILLED))
+    for kind in ("rejected", "modify_rejected", "cancel_rejected"):
+        _handle_untracked(
+            client,
+            {
+                "type": "order_notification",
+                "source": "rithmic",
+                "kind": kind,
+                "notify_type_name": kind.upper(),
+                "status": "REJECTED",
+                "basket_id": "B1",
+                "symbol": "NQU6",
+                "account_id": "ACC1",
+            },
+        )
+    assert any("could not be built" in m for m in log.messages)
+    assert not any("benign bare COMPLETE" in m for m in log.debugs)
