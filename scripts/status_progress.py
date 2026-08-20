@@ -135,9 +135,11 @@ def main() -> int:
         return 2
 
     # The TOTAL row is recomputed from the same marks, so only compare section rows.
-    generated = {m.group(1).strip(): tuple(int(g) for g in m.groups()[1:])
-                 for line in rollup_rows(per_section, grand)
-                 if (m := ROLLUP_ROW_RE.match(line))}
+    generated = {
+        m.group(1).strip(): tuple(int(g) for g in m.groups()[1:])
+        for line in rollup_rows(per_section, grand)
+        if (m := ROLLUP_ROW_RE.match(line))
+    }
     errors = []
     for label, want in generated.items():
         got = doc_rows.get(label)
