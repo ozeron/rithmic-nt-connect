@@ -455,7 +455,7 @@ async fn handle_client(mut stream: UnixStream, state: Arc<GatewayState>) -> Resu
     }
     if let Err((code, msg)) = authorize_handshake(&state, &hs, same_uid) {
         let _ = write_frame(&mut stream, &dispatch::error_frame(0, code, msg)).await;
-        return Err(format!("{code}: {msg}").into());
+        return Err(format!("{code}: {msg}"));
     }
 
     write_frame(
@@ -546,11 +546,23 @@ async fn handle_client(mut stream: UnixStream, state: Arc<GatewayState>) -> Resu
     loop_result
 }
 
+/// Rebroadcast a plant event to all interested fan-out subscribers, keyed by
+/// symbol/exchange (or the internal pnl/order sentinel keys). Also feeds the
+/// [`ReconnectController`]-visible hub so late subscribers still see the
+/// venue-declared topic.
+pub async fn publish_plant_event(hub: &FanoutHub, event: rithmic_plants::dto::PlantEvent) {
+    let (key, wire_event) = crate::convert::plant_event_to_routed(event);
+    publish_event(hub, &key, wire_event).await;
+}
+
 #[cfg(test)]
 mod auth_tests {
     use super::*;
     use crate::pb::Handshake;
 
+    // Test fixture builder: maps a `Handshake`'s fields 1:1, so the arity is
+    // inherent to the wire type. Allowed rather than boxing the helper.
+    #[allow(clippy::too_many_arguments)]
     fn hs(
         user: &str,
         system: &str,
@@ -685,13 +697,4 @@ mod auth_tests {
             "not_ready"
         );
     }
-}
-
-/// Rebroadcast a plant event to all interested fan-out subscribers, keyed by
-/// symbol/exchange (or the internal pnl/order sentinel keys). Also feeds the
-/// [`ReconnectController`]-visible hub so late subscribers still see the
-/// venue-declared topic.
-pub async fn publish_plant_event(hub: &FanoutHub, event: rithmic_plants::dto::PlantEvent) {
-    let (key, wire_event) = crate::convert::plant_event_to_routed(event);
-    publish_event(hub, &key, wire_event).await;
 }

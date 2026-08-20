@@ -396,13 +396,8 @@ impl RithmicSession {
             start_time_sec,
             end_time_sec,
             DEFAULT_TICK_SLICE_SECS,
-            |slice_start, slice_end| {
-                let handle = handle;
-                let symbol = symbol;
-                let exchange = exchange;
-                async move {
-                    load_tick_slice(handle, symbol, exchange, slice_start, slice_end).await
-                }
+            |slice_start, slice_end| async move {
+                load_tick_slice(handle, symbol, exchange, slice_start, slice_end).await
             },
             |t| t.ts_event_ns.unwrap_or(0),
             dedup_ticks,
@@ -425,22 +420,17 @@ impl RithmicSession {
             start_time_sec,
             end_time_sec,
             bar_slice_secs(bar_type, bar_type_period),
-            |slice_start, slice_end| {
-                let handle = handle;
-                let symbol = symbol;
-                let exchange = exchange;
-                async move {
-                    load_bar_slice(
-                        handle,
-                        symbol,
-                        exchange,
-                        bar_type,
-                        bar_type_period,
-                        slice_start,
-                        slice_end,
-                    )
-                    .await
-                }
+            |slice_start, slice_end| async move {
+                load_bar_slice(
+                    handle,
+                    symbol,
+                    exchange,
+                    bar_type,
+                    bar_type_period,
+                    slice_start,
+                    slice_end,
+                )
+                .await
             },
             |b| b.ts_event_ns.unwrap_or(0),
             dedup_bars,
@@ -1218,120 +1208,6 @@ pub async fn load_account_rms_info_on(
     )
 }
 
-#[cfg(test)]
-mod drain_tests {
-    use super::*;
-    use tokio::sync::broadcast;
-    use tokio::time::{timeout, Duration};
-
-    // Make the production drain loop testable with a plain `PlantEvent` channel
-    // instead of rithmic-rs's non-exhaustive `RithmicResponse`.
-    impl OrderDrainSource for broadcast::Receiver<PlantEvent> {
-        async fn recv_order(&mut self) -> std::result::Result<PlantEvent, Error> {
-            match self.recv().await {
-                Ok(event) => Ok(event),
-                Err(RecvError::Lagged(skipped)) => Err(Error::ChannelLagged {
-                    plant: "order",
-                    skipped,
-                }),
-                Err(RecvError::Closed) => Err(Error::ChannelClosed { plant: "order" }),
-            }
-        }
-    }
-
-    fn order_event() -> PlantEvent {
-        PlantEvent::OrderNotification(OrderNotificationDto {
-            source: "rithmic".into(),
-            kind: None,
-            notify_type: None,
-            notify_type_name: None,
-            status: None,
-            basket_id: Some("B1".into()),
-            exchange_order_id: None,
-            user_tag: None,
-            account_id: None,
-            symbol: None,
-            exchange: None,
-            quantity: None,
-            total_fill_size: None,
-            total_unfilled_size: None,
-            fill_size: None,
-            price: None,
-            trigger_price: None,
-            avg_fill_price: None,
-            fill_price: None,
-            transaction_type: None,
-            price_type: None,
-            duration: None,
-            fill_id: None,
-            text: None,
-            report_text: None,
-            completion_reason: None,
-            ssboe: None,
-            usecs: None,
-            ts_event_ns: None,
-            is_snapshot: None,
-        })
-    }
-
-    #[tokio::test]
-    async fn drain_collects_order_notifications() {
-        let (tx, rx) = broadcast::channel(16);
-        tx.send(order_event()).unwrap();
-        tx.send(order_event()).unwrap();
-        let got = timeout(Duration::from_secs(5), drain_order_notifications(rx))
-            .await
-            .expect("drain should finish within the silence window")
-            .expect("drain should succeed");
-        assert_eq!(got.len(), 2, "both replayed order notifications collected");
-    }
-
-    #[tokio::test]
-    async fn drain_errors_on_closed_channel() {
-        let (tx, rx) = broadcast::channel(16);
-        drop(tx);
-        let res = drain_order_notifications(rx).await;
-        assert!(
-            matches!(res, Err(Error::ChannelClosed { plant: "order" })),
-            "closed channel must surface as ChannelClosed, got {res:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn drain_errors_on_lagged_channel() {
-        let (tx, rx) = broadcast::channel(8);
-        // Overflow the buffer so the never-drained receiver falls behind.
-        for _ in 0..32 {
-            let _ = tx.send(order_event());
-        }
-        let res = drain_order_notifications(rx).await;
-        assert!(
-            matches!(res, Err(Error::ChannelLagged { plant: "order", .. })),
-            "overflowed channel must surface as ChannelLagged, got {res:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn drain_propagates_response_level_connection_error() {
-        // A source carrying a response-level connection issue (the venue echoed
-        // an error inside a received message, not a channel drop) must abort
-        // the drain instead of being ignored as a non-order event.
-        struct ConnectionIssueSource;
-
-        impl OrderDrainSource for ConnectionIssueSource {
-            async fn recv_order(&mut self) -> std::result::Result<PlantEvent, Error> {
-                Err(Error::Rithmic("connection closed by venue".into()))
-            }
-        }
-
-        let res = drain_order_notifications(ConnectionIssueSource).await;
-        assert!(
-            matches!(res, Err(Error::Rithmic(ref msg)) if msg.contains("connection closed")),
-            "response-level connection error must abort the drain, got {res:?}"
-        );
-    }
-}
-
 async fn connect_ticker(rc: &RithmicConfig) -> Result<TickerPlant> {
     let plant = RithmicTickerPlant::connect(rc, ConnectStrategy::Retry).await?;
     let handle = plant.get_handle();
@@ -1484,4 +1360,118 @@ where
         check_response_ref(resp, ctx)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod drain_tests {
+    use super::*;
+    use tokio::sync::broadcast;
+    use tokio::time::{timeout, Duration};
+
+    // Make the production drain loop testable with a plain `PlantEvent` channel
+    // instead of rithmic-rs's non-exhaustive `RithmicResponse`.
+    impl OrderDrainSource for broadcast::Receiver<PlantEvent> {
+        async fn recv_order(&mut self) -> std::result::Result<PlantEvent, Error> {
+            match self.recv().await {
+                Ok(event) => Ok(event),
+                Err(RecvError::Lagged(skipped)) => Err(Error::ChannelLagged {
+                    plant: "order",
+                    skipped,
+                }),
+                Err(RecvError::Closed) => Err(Error::ChannelClosed { plant: "order" }),
+            }
+        }
+    }
+
+    fn order_event() -> PlantEvent {
+        PlantEvent::OrderNotification(OrderNotificationDto {
+            source: "rithmic".into(),
+            kind: None,
+            notify_type: None,
+            notify_type_name: None,
+            status: None,
+            basket_id: Some("B1".into()),
+            exchange_order_id: None,
+            user_tag: None,
+            account_id: None,
+            symbol: None,
+            exchange: None,
+            quantity: None,
+            total_fill_size: None,
+            total_unfilled_size: None,
+            fill_size: None,
+            price: None,
+            trigger_price: None,
+            avg_fill_price: None,
+            fill_price: None,
+            transaction_type: None,
+            price_type: None,
+            duration: None,
+            fill_id: None,
+            text: None,
+            report_text: None,
+            completion_reason: None,
+            ssboe: None,
+            usecs: None,
+            ts_event_ns: None,
+            is_snapshot: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn drain_collects_order_notifications() {
+        let (tx, rx) = broadcast::channel(16);
+        tx.send(order_event()).unwrap();
+        tx.send(order_event()).unwrap();
+        let got = timeout(Duration::from_secs(5), drain_order_notifications(rx))
+            .await
+            .expect("drain should finish within the silence window")
+            .expect("drain should succeed");
+        assert_eq!(got.len(), 2, "both replayed order notifications collected");
+    }
+
+    #[tokio::test]
+    async fn drain_errors_on_closed_channel() {
+        let (tx, rx) = broadcast::channel(16);
+        drop(tx);
+        let res = drain_order_notifications(rx).await;
+        assert!(
+            matches!(res, Err(Error::ChannelClosed { plant: "order" })),
+            "closed channel must surface as ChannelClosed, got {res:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_errors_on_lagged_channel() {
+        let (tx, rx) = broadcast::channel(8);
+        // Overflow the buffer so the never-drained receiver falls behind.
+        for _ in 0..32 {
+            let _ = tx.send(order_event());
+        }
+        let res = drain_order_notifications(rx).await;
+        assert!(
+            matches!(res, Err(Error::ChannelLagged { plant: "order", .. })),
+            "overflowed channel must surface as ChannelLagged, got {res:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_propagates_response_level_connection_error() {
+        // A source carrying a response-level connection issue (the venue echoed
+        // an error inside a received message, not a channel drop) must abort
+        // the drain instead of being ignored as a non-order event.
+        struct ConnectionIssueSource;
+
+        impl OrderDrainSource for ConnectionIssueSource {
+            async fn recv_order(&mut self) -> std::result::Result<PlantEvent, Error> {
+                Err(Error::Rithmic("connection closed by venue".into()))
+            }
+        }
+
+        let res = drain_order_notifications(ConnectionIssueSource).await;
+        assert!(
+            matches!(res, Err(Error::Rithmic(ref msg)) if msg.contains("connection closed")),
+            "response-level connection error must abort the drain, got {res:?}"
+        );
+    }
 }

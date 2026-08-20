@@ -117,8 +117,15 @@ fn bindlock_path(sock: &Path) -> PathBuf {
 }
 
 fn bind_unix_locked(path: &Path, bindlock_path: &Path) -> Result<UnixListener, ListenError> {
+    // `bindlock_path` is deterministically `sock + ".bindlock"` inside the
+    // user-owned runtime dir (see bindlock_path / default_unix_path), so it is
+    // not an attacker-chosen path. The file is **flock-only**: its contents are
+    // never read, only `lock_exclusive`'d, so truncating it on open is
+    // intentional and harmless (prevents unbounded growth). This is not a
+    // privilege boundary — the runtime dir is already owned by the user.
     let lock_file = OpenOptions::new()
         .create(true)
+        .truncate(true)
         .read(true)
         .write(true)
         .open(bindlock_path)

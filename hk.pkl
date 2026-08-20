@@ -10,7 +10,7 @@ local ruff_exclude = List(
     "python/rithmic_gateway/v1/session_pb2.py",
 )
 
-local linters = new Mapping<String, Step> {
+local rinters = new Mapping<String, Step> {
     ["ruff-format"] {
         glob = ruff_globs
         exclude = ruff_exclude
@@ -29,6 +29,21 @@ local linters = new Mapping<String, Step> {
     }
 }
 
+// Rust lint/check steps. Unlike the Python linters these run whole-workspace
+// (clippy cannot lint a per-file subset), mirroring how `ty` is run project-wide.
+local rust_checks = new Mapping<String, Step> {
+    // `cargo clippy -D warnings` is the Rust analog of `ruff check`: catches
+    // real bug patterns the compiler allows. `-D warnings` fails the gate on
+    // any warning, including in tests/benches (--all-targets).
+    ["cargo-clippy"] {
+        check = "cargo clippy --workspace --all-targets -- -D warnings"
+    }
+}
+
+local linters = new Mapping<String, Step> {
+    ...rinters
+}
+
 hooks {
     // Fix and re-stage staged files before committing.
     ["pre-commit"] {
@@ -40,12 +55,20 @@ hooks {
         fix = true
         steps = linters
     }
-    // Project-wide gate mirroring CI (ty is run whole-project, not per-file).
+    // Project-wide gate mirroring CI (ty/clippy are run whole-project, not
+    // per-file). Includes the Rust test suite so a local `hk run check`
+    // matches CI exactly.
     ["check"] {
         steps {
             ...linters
+            ...rust_checks
             ["ty"] {
                 check = "uv run ty check python/rithmic_nt_connect tests"
+            }
+            // Whole-workspace test gate (matches the CI `cargo test` step).
+            // `python` feature is empty-default so this never links libpython.
+            ["cargo-test"] {
+                check = "cargo test --workspace"
             }
         }
     }
