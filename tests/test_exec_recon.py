@@ -1576,7 +1576,7 @@ def _bare_client(
     cache: _CacheStub,
     *,
     fail_status: bool = True,
-) -> tuple[_TestClient, _CaptureLog]:
+) -> tuple[RithmicExecutionClient, _CaptureLog]:
     client = _trading_client()
     client._account_seeded = True
     client.account_id = AccountId("RITHMIC-ACC1")
@@ -1590,11 +1590,10 @@ def _bare_client(
     return client, log
 
 
-def _handle_untracked(client: _TestClient, fields: dict[str, object]) -> None:
-    RithmicExecutionClient._handle_untracked_notification(
-        cast(RithmicExecutionClient, client),  # ty: ignore[redundant-cast]
-        fields,
-    )
+def _handle_untracked(
+    client: RithmicExecutionClient, fields: dict[str, object]
+) -> None:
+    RithmicExecutionClient._handle_untracked_notification(client, fields)
 
 
 @pytest.mark.parametrize("status", [OrderStatus.FILLED, OrderStatus.CANCELED])
