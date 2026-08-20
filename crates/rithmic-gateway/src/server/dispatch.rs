@@ -775,10 +775,7 @@ pub(super) async fn dispatch(
                 let mut session_guard = session.lock().await;
                 let venue_err = match session_guard.ensure_pnl_plant().await {
                     Err(e) => Some(e),
-                    Ok(()) => match session_guard.subscribe_pnl().await {
-                        Err(e) => Some(e),
-                        Ok(()) => None,
-                    },
+                    Ok(()) => session_guard.subscribe_pnl().await.err(),
                 };
                 if let Some(e) = venue_err {
                     drop(session_guard);

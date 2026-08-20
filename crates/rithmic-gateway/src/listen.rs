@@ -119,6 +119,7 @@ fn bindlock_path(sock: &Path) -> PathBuf {
 fn bind_unix_locked(path: &Path, bindlock_path: &Path) -> Result<UnixListener, ListenError> {
     let lock_file = OpenOptions::new()
         .create(true)
+        .truncate(true)
         .read(true)
         .write(true)
         .open(bindlock_path)

@@ -32,7 +32,7 @@ pub fn bar_slice_secs(bar_type: TimeBarType, period: i32) -> i32 {
 
 /// True when `v` looks like `YYYYMMDD` in 1900–2100 (not a Unix second).
 pub fn is_yyyymmdd(v: i32) -> bool {
-    if !(1_900_0101..=2_100_1231).contains(&v) {
+    if !(19_00_01_01..=21_00_12_31).contains(&v) {
         return false;
     }
     let y = v / 10_000;
@@ -352,7 +352,7 @@ mod tests {
 
     #[test]
     fn yyyymmdd_out_of_i32_range_is_none() {
-        assert!(yyyymmdd_to_unix_utc(2_100_1231).is_none());
+        assert!(yyyymmdd_to_unix_utc(21_00_12_31).is_none());
     }
 
     #[test]

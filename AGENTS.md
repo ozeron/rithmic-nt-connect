@@ -113,6 +113,11 @@ the protobuf Python package (core dep):
 
 ```bash
 uv sync --extra dev
+# Rust: fmt + clippy (-D warnings) + tests. The hk `check`/`pre-commit` hooks
+# run these locally; CI runs the same steps. clippy is the Rust analog of
+# `ruff check`.
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test -p rithmic-plants -p rithmic-gateway -p rithmic-nt-connect
 uv run ruff check .
 uv run ruff format --check .

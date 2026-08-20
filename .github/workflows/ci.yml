@@ -14,12 +14,16 @@ jobs:
           python-version: "3.13"
       - uses: astral-sh/setup-uv@v6
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Sync Python deps
         run: uv sync --extra dev
       - name: Cargo test
         run: cargo test -p rithmic-plants -p rithmic-gateway -p rithmic-nt-connect
+      - name: Cargo clippy (lint, -D warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Ruff lint
         run: uv run ruff check .
       - name: Ruff format check
