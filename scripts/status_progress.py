@@ -1,17 +1,11 @@
 #!/usr/bin/env python3
 """Rollup + drift checker for docs/STATUS.md.
 
-STATUS.md is the single source of truth for planned-vs-done. Its marks use the
-legend `[x]` done · `[~]` partial · `[ ]` not started · `N/A` out of scope.
-This script parses those marks and prints a rollup so a human can see, at a
-glance, how much of the adapter is done / partial / left / not advertised.
+STATUS.md marks use `[x]` done · `[~]` partial · `[ ]` not started · `N/A` out of
+scope. This script prints a rollup, and `--check` exits non-zero if the doc's
+"At-a-glance" table drifts from those marks (regenerate it after editing).
 
-`--check` compares the parsed totals against the "At-a-glance" rollup table that
-the doc is expected to carry, and exits non-zero if they drift. That keeps the
-human-friendly table honest: you cannot edit the prose marks without also
-updating (or regenerating) the scoreboard.
-
-Pure stdlib — runs under `python scripts/status_progress.py` (no venv needed).
+Pure stdlib — `python scripts/status_progress.py` (no venv needed).
 """
 
 from __future__ import annotations
@@ -21,13 +15,12 @@ import re
 import sys
 from pathlib import Path
 
-# A checkbox mark: [x] done · [~] partial · [ ] not started. `N/A` is prose, not a mark.
+# Checkbox marks: [x] done · [~] partial · [ ] not started.
 MARK_RE = re.compile(r"\[([ xX~])\]")
 # Skip fenced code blocks.
 FENCE_RE = re.compile(r"^\s*(```|~~~)")
-# Section header "## Title".
 SECTION_RE = re.compile(r"^##\s+(.*?)\s*$")
-# A rollup table row: | **Label** | total | done | partial | not started | N/A |
+# Rollup table row: | **Label** | total | done | partial | not started | N/A |
 ROLLUP_ROW_RE = re.compile(
     r"^\|\s*\*\*(.+?)\*\*\s*\|"
     r"\s*(\d+)\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|\s*$"
@@ -42,10 +35,7 @@ def _zero() -> dict[str, int]:
 
 
 def parse_marks(path: Path) -> tuple[dict[str, dict[str, int]], dict[str, int]]:
-    """Return (per-section counts, grand totals) for `[x]/[~]/[ ]` marks.
-
-    `N/A` is not a checkbox, so it is excluded from every total.
-    """
+    """Return (per-section counts, grand totals) for `[x]/[~]/[ ]` marks."""
     per_section: dict[str, dict[str, int]] = {PREAMBLE: _zero()}
     grand = _zero()
     section = PREAMBLE
