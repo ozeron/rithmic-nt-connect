@@ -4,6 +4,12 @@ use rithmic_rs::rti::messages::RithmicMessage;
 use rithmic_rs::{rithmic_to_unix_nanos, RithmicResponse};
 
 /// Dict-friendly plant event for Python consumers (ticker, PnL, orders).
+///
+/// `OrderNotification` is the largest variant (~500 bytes) because a venue
+/// order notification carries many optional scalar fields. Boxing it would
+/// churn every construction/match site for a public DTO with no correctness
+/// benefit, so the size difference is allowed intentionally.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlantEvent {
     /// Last trade update.
@@ -689,6 +695,9 @@ impl HistoryBarDto {
     /// Build a bar only when OHLC are present. Missing open/high/low are dropped
     /// (never filled from close). Missing volume is allowed only for settlement
     /// replay rows (`allow_missing_volume`); otherwise the row is dropped.
+    // Flat field mapping from a venue bar record: every arg is a distinct scalar
+    // field, so a struct wrapper would only relocate the same arity. Allowed.
+    #[allow(clippy::too_many_arguments)]
     fn from_ohlcv(
         symbol: Option<String>,
         exchange: Option<String>,

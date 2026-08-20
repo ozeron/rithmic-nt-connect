@@ -17,6 +17,11 @@ pub mod singleton;
 pub mod subscriptions;
 
 /// Generated protobuf types from `proto/rithmic_gateway/v1/session.proto`.
+///
+/// Allow `large_enum_variant` here: the `Body` oneof legitimately carries a
+/// 504-byte `OrderNotification` variant, and boxing it would churn the prost
+/// output on every regen. This is generated code we do not hand-maintain.
+#[allow(clippy::large_enum_variant)]
 pub mod pb {
     include!(concat!(env!("OUT_DIR"), "/rithmic_gateway.v1.rs"));
 }
