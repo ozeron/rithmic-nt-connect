@@ -47,6 +47,16 @@ hooks {
             ["ty"] {
                 check = "uv run ty check python/rithmic_nt_connect tests"
             }
+            // Whole-workspace test gate (matches the CI `cargo test` step).
+            // `python` feature is empty-default so this never links libpython.
+            ["cargo-test"] {
+                check = "cargo test --workspace"
+            }
+            // Docs guard: STATUS.md scoreboard must match its own [x]/[~]/[ ] marks.
+            // Pure-stdlib; no venv needed.
+            ["status-progress"] {
+                check = "python scripts/status_progress.py --check"
+            }
         }
     }
 }
