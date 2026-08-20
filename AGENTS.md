@@ -123,6 +123,15 @@ uv run ruff check .
 uv run ruff format --check .
 uv run ty check python/rithmic_nt_connect tests
 uv run pytest -q
+# Docs: STATUS.md scoreboard must match its own [x]/[~]/[ ] marks
+python scripts/status_progress.py --check
+```
+
+Also regenerate the scoreboard after editing `docs/STATUS.md`:
+
+```bash
+python scripts/status_progress.py            # print rollup to paste into the At-a-glance table
+python scripts/status_progress.py --check    # CI/docs guard: fails if the table drifts
 ```
 
 Live (creds in `.env`, MotiveWave closed):
