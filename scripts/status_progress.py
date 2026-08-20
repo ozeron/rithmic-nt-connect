@@ -63,12 +63,15 @@ def pct(done: int, partial: int, total: int) -> str:
     return f"{(done + 0.5 * partial) / total * 100:.0f}%"
 
 
-def rollup_rows(per_section: dict[str, dict[str, int]], grand: dict[str, int]) -> list[str]:
+def rollup_rows(
+    per_section: dict[str, dict[str, int]], grand: dict[str, int]
+) -> list[str]:
     """Render the At-a-glance scoreboard as markdown lines."""
     rows = [
         "## At-a-glance (generated — run `python scripts/status_progress.py`)",
         "",
-        "Legend: **Done** `[x]` · **Partial** `[~]` · **Not started** `[ ]` · `N/A` out of scope.",
+        "Legend: **Done** `[x]` · **Partial** `[~]` · **Not started** `[ ]` · "
+        "`N/A` out of scope.",
         "",
         "| Area | Total | Done | Partial | Not started | N/A |",
         "| --- | ---: | ---: | ---: | ---: | ---: |",
@@ -80,7 +83,8 @@ def rollup_rows(per_section: dict[str, dict[str, int]], grand: dict[str, int]) -
         if total == 0:
             continue
         rows.append(
-            f"| **{name}** | {total} | {counts['x']} | {counts['~']} | {counts[' ']} | 0 |"
+            f"| **{name}** | {total} | {counts['x']} | {counts['~']} | "
+            f"{counts[' ']} | 0 |"
         )
     total = sum(grand[k] for k in KEYS)
     rows += [
@@ -124,7 +128,10 @@ def main() -> int:
 
     doc_rows = parse_doc_rows(args.status)
     if doc_rows is None:
-        print("ERROR: --check: no At-a-glance rollup table found in STATUS.md", file=sys.stderr)
+        print(
+            "ERROR: --check: no At-a-glance rollup table found in STATUS.md",
+            file=sys.stderr,
+        )
         return 2
 
     # The TOTAL row is recomputed from the same marks, so only compare section rows.
@@ -141,7 +148,10 @@ def main() -> int:
             if got[i] != want[i]:
                 errors.append(f"  '{label}' {name}: doc={got[i]} parsed={want[i]}")
     if errors:
-        print("ERROR: STATUS.md At-a-glance rollup drifted from its marks:", file=sys.stderr)
+        print(
+            "ERROR: STATUS.md At-a-glance rollup drifted from its marks:",
+            file=sys.stderr,
+        )
         print("\n".join(errors), file=sys.stderr)
         print("\nRegenerate with: python scripts/status_progress.py", file=sys.stderr)
         return 1
