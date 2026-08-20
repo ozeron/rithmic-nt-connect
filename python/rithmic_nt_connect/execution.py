@@ -138,7 +138,6 @@ _TERMINAL_ORDER_STATUSES = frozenset(
     }
 )
 
-
 ACCOUNT_CACHE_TIMEOUT_S = 10.0
 
 # Recon windows are clamped to this many days so a units mistake (epoch seconds
@@ -1054,6 +1053,13 @@ class RithmicExecutionClient(LiveExecutionClient):
                 return ClientOrderId(str(tag))
         return None
 
+    def _basket_client_id(self, fields: dict[str, Any]) -> ClientOrderId | None:
+        """Client order id backing a notification's basket id (or None)."""
+        basket = fields.get("basket_id")
+        if basket:
+            return self._cache.client_order_id(VenueOrderId(str(basket)))
+        return None
+
     def _drain_client_order_id(self, fields: dict[str, Any]) -> ClientOrderId | None:
         """Identity for the drain-apply path: cache basket-to-client FIRST.
 
@@ -1065,11 +1071,9 @@ class RithmicExecutionClient(LiveExecutionClient):
         as an external status (duplicate external order / stale replay). For
         an unmapped basket the tag fallback keeps external rows external.
         """
-        basket = fields.get("basket_id")
-        if basket:
-            cached = self._cache.client_order_id(VenueOrderId(str(basket)))
-            if cached is not None:
-                return cached
+        cached = self._basket_client_id(fields)
+        if cached is not None:
+            return cached
         return self._resolve_client_order_id(fields)
 
     def _bind_venue_id(self, client_order_id: ClientOrderId, venue_id: str) -> None:
@@ -1121,9 +1125,21 @@ class RithmicExecutionClient(LiveExecutionClient):
         strategy_id = order.strategy_id
         instrument_id = order.instrument_id
         if action.kind == "accepted":
-            self.generate_order_accepted(
-                strategy_id, instrument_id, client_order_id, venue_order_id, ts_event
-            )
+            # LAP-42: Rithmic may defer OPEN until terminal; only emit while
+            # still SUBMITTED (late OPEN after ACCEPTED/advanced is noise).
+            if order.status is OrderStatus.SUBMITTED:
+                self.generate_order_accepted(
+                    strategy_id,
+                    instrument_id,
+                    client_order_id,
+                    venue_order_id,
+                    ts_event,
+                )
+            else:
+                self._log.debug(
+                    f"skipping late/duplicate OrderAccepted for {client_order_id}: "
+                    f"local status={order.status}"
+                )
         elif action.kind == "rejected":
             self.generate_order_rejected(
                 strategy_id,
@@ -1327,6 +1343,21 @@ class RithmicExecutionClient(LiveExecutionClient):
             ts_init=self._clock.timestamp_ns(),
         )
 
+    def _is_benign_bare_complete(self, fields: dict[str, Any], order: Any) -> bool:
+        """Closed FILLED/CANCELED tracked leg + bare COMPLETE (no fill payload)."""
+        return (
+            order is not None
+            and getattr(order, "is_closed", False)
+            and fields.get("source") == "rithmic"
+            and str(fields.get("notify_type_name") or "").upper() == "COMPLETE"
+            and str(fields.get("status") or "").lower() == "complete"
+            and fields.get("kind") is None
+            and fields.get("quantity") is None
+            and fields.get("fill_size") is None
+            and fields.get("fill_id") is None
+            and order.status in (OrderStatus.FILLED, OrderStatus.CANCELED)
+        )
+
     def _handle_untracked_notification(self, fields: dict[str, Any]) -> None:
         """Report external venue activity without assigning it to a strategy order."""
         ts_event = fields.get("ts_event")
@@ -1386,10 +1417,19 @@ class RithmicExecutionClient(LiveExecutionClient):
                     status_key
                 )
         else:
-            self._log.warning(
-                f"untracked order status could not be built: "
-                f"{slim_order_fields(fields)}"
-            )
+            # LAP-42: bare COMPLETE on a closed tracked leg is DEBUG; else WARN.
+            cid = self._basket_client_id(fields)
+            order = self._cache.order(cid) if cid is not None else None
+            if self._is_benign_bare_complete(fields, order):
+                self._log.debug(
+                    f"skipping benign bare COMPLETE for closed {cid}: "
+                    f"{slim_order_fields(fields)}"
+                )
+            else:
+                self._log.warning(
+                    f"untracked order status could not be built: "
+                    f"{slim_order_fields(fields)}"
+                )
 
         if fields.get("kind") != "filled":
             return
