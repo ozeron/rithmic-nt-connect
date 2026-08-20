@@ -21,46 +21,43 @@ import re
 import sys
 from pathlib import Path
 
-# A checkbox mark is one of these tokens, optionally surrounded by whitespace and
-# an optional trailing " (...)" note. We accept them anywhere a list item uses them.
-MARK_RE = re.compile(r"\[([ xX~])\]")  # [x] [~] [ ]  (case-insensitive x)
-# Lines that are part of a fenced code block must be ignored.
+# A checkbox mark: [x] done · [~] partial · [ ] not started. `N/A` is prose, not a mark.
+MARK_RE = re.compile(r"\[([ xX~])\]")
+# Skip fenced code blocks.
 FENCE_RE = re.compile(r"^\s*(```|~~~)")
-# Section header "## Title"
-SECTION_RE = re.compile(r"^(#{2,6})\s+(.*?)\s*$")
-# The At-a-glance rollup table rows we expect, e.g.:
-#   | **Capability matrix** | 21 | 10 | 8 | 3 | 0 |
-# column order: label | Total | [x] | [~] | [ ] | N/A
+# Section header "## Title".
+SECTION_RE = re.compile(r"^##\s+(.*?)\s*$")
+# A rollup table row: | **Label** | total | done | partial | not started | N/A |
 ROLLUP_ROW_RE = re.compile(
-    r"^\|\s*\*\*(.+?)\*\*\s*\|"  # bold label
-    r"\s*(\d+)\s*\|"  # total
-    r"\s*(\d+)\s*\|"  # done
-    r"\s*(\d+)\s*\|"  # partial
-    r"\s*(\d+)\s*\|"  # not started
-    r"\s*(\d+)\s*\|\s*$"  # N/A
+    r"^\|\s*\*\*(.+?)\*\*\s*\|"
+    r"\s*(\d+)\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|\s*$"
 )
+
+PREAMBLE = "(preamble)"
+KEYS = ("x", "~", " ")
+
+
+def _zero() -> dict[str, int]:
+    return {k: 0 for k in KEYS}
 
 
 def parse_marks(path: Path) -> tuple[dict[str, dict[str, int]], dict[str, int]]:
-    """Return (per_section counts, grand totals).
+    """Return (per-section counts, grand totals) for `[x]/[~]/[ ]` marks.
 
-    `N/A` is not a checkbox so it is not counted as a mark; it is excluded from
-    both section and grand totals. Only `[x]/[~]/[ ]` rows feed the rollup.
+    `N/A` is not a checkbox, so it is excluded from every total.
     """
-    text = path.read_text(encoding="utf-8").splitlines()
-    in_fence = False
-    section = "(preamble)"
-    per_section: dict[str, dict[str, int]] = {section: _zero()}
+    per_section: dict[str, dict[str, int]] = {PREAMBLE: _zero()}
     grand = _zero()
-    for line in text:
+    section = PREAMBLE
+    in_fence = False
+    for line in path.read_text(encoding="utf-8").splitlines():
         if FENCE_RE.match(line):
             in_fence = not in_fence
             continue
         if in_fence:
             continue
-        m = SECTION_RE.match(line)
-        if m and m.group(1) == "##":
-            section = m.group(2).strip()
+        if m := SECTION_RE.match(line):
+            section = m.group(1)
             per_section.setdefault(section, _zero())
             continue
         for mm in MARK_RE.finditer(line):
@@ -70,67 +67,48 @@ def parse_marks(path: Path) -> tuple[dict[str, dict[str, int]], dict[str, int]]:
     return per_section, grand
 
 
-def _zero() -> dict[str, int]:
-    return {"x": 0, "~": 0, " ": 0}
-
-
 def pct(done: int, partial: int, total: int) -> str:
     if total == 0:
         return "n/a"
-    implemented = done + 0.5 * partial
-    return f"{implemented / total * 100:.0f}%"
+    return f"{(done + 0.5 * partial) / total * 100:.0f}%"
 
 
-def render_rollup(per_section: dict[str, dict[str, int]], grand: dict[str, int]) -> str:
-    lines = []
-    lines.append("## At-a-glance (generated — run `python scripts/status_progress.py`)")
-    lines.append("")
-    lines.append(
-        "Legend: **Done** `[x]` · **Partial** `[~]` · **Not started** `[ ]` · `N/A` out of scope."
-    )
-    lines.append("")
-    lines.append("| Area | Total | Done | Partial | Not started | N/A |")
-    lines.append("| --- | ---: | ---: | ---: | ---: | ---: |")
-    # Ignore the preamble (counts before first section) — it is prose, no marks.
+def rollup_rows(per_section: dict[str, dict[str, int]], grand: dict[str, int]) -> list[str]:
+    """Render the At-a-glance scoreboard as markdown lines."""
+    rows = [
+        "## At-a-glance (generated — run `python scripts/status_progress.py`)",
+        "",
+        "Legend: **Done** `[x]` · **Partial** `[~]` · **Not started** `[ ]` · `N/A` out of scope.",
+        "",
+        "| Area | Total | Done | Partial | Not started | N/A |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
     for name, counts in per_section.items():
-        if name == "(preamble)":
+        if name == PREAMBLE:
             continue
-        total = counts["x"] + counts["~"] + counts[" "]
+        total = sum(counts[k] for k in KEYS)
         if total == 0:
             continue
-        na = 0  # N/A is not a checkbox; we do not track it per section here
-        lines.append(
-            f"| **{name}** | {total} | {counts['x']} | {counts['~']} | {counts[' ']} | {na} |"
+        rows.append(
+            f"| **{name}** | {total} | {counts['x']} | {counts['~']} | {counts[' ']} | 0 |"
         )
-    total = grand["x"] + grand["~"] + grand[" "]
-    lines.append(
-        f"| **TOTAL** | {total} | {grand['x']} | {grand['~']} | {grand[' ']} | 0 |"
-    )
-    lines.append("")
-    lines.append(
+    total = sum(grand[k] for k in KEYS)
+    rows += [
+        f"| **TOTAL** | {total} | {grand['x']} | {grand['~']} | {grand[' ']} | 0 |",
+        "",
         f"**Implemented:** {pct(grand['x'], grand['~'], total)} "
         f"(`{grand['x']}` done + `{grand['~']}` partial of `{total}` marked items; "
-        f"partial counts as half)."
-    )
-    return "\n".join(lines)
+        f"partial counts as half).",
+    ]
+    return rows
 
 
-def parse_doc_rollup(path: Path) -> dict[str, dict[str, int]] | None:
-    """Read the At-a-glance rollup table back out of the doc, if present."""
-    text = path.read_text(encoding="utf-8").splitlines()
-    rows: dict[str, dict[str, int]] = {}
-    for line in text:
-        m = ROLLUP_ROW_RE.match(line)
-        if not m:
-            continue
-        label = m.group(1).strip()
-        rows[label] = {
-            "total": int(m.group(2)),
-            "x": int(m.group(3)),
-            "~": int(m.group(4)),
-            " ": int(m.group(5)),
-            "na": int(m.group(6)),
-        }
+def parse_doc_rows(path: Path) -> dict[str, tuple[int, int, int, int, int]] | None:
+    """Read the rollup table out of the doc, keyed by label: (total, x, ~, ' ', na)."""
+    rows: dict[str, tuple[int, int, int, int, int]] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if m := ROLLUP_ROW_RE.match(line):
+            rows[m.group(1).strip()] = tuple(int(g) for g in m.groups()[1:])
     return rows or None
 
 
@@ -148,55 +126,32 @@ def main() -> int:
         help="Exit non-zero if the doc's At-a-glance table drifts from parsed marks",
     )
     args = ap.parse_args()
-
     per_section, grand = parse_marks(args.status)
 
     if not args.check:
-        print(render_rollup(per_section, grand))
+        print("\n".join(rollup_rows(per_section, grand)))
         return 0
 
-    # --check mode: compare doc rollup against parsed marks.
-    doc_rows = parse_doc_rollup(args.status)
+    doc_rows = parse_doc_rows(args.status)
     if doc_rows is None:
-        print(
-            "ERROR: --check: no At-a-glance rollup table found in STATUS.md",
-            file=sys.stderr,
-        )
+        print("ERROR: --check: no At-a-glance rollup table found in STATUS.md", file=sys.stderr)
         return 2
+
+    # The TOTAL row is recomputed from the same marks, so only compare section rows.
+    generated = {m.group(1).strip(): tuple(int(g) for g in m.groups()[1:])
+                 for line in rollup_rows(per_section, grand)
+                 if (m := ROLLUP_ROW_RE.match(line))}
     errors = []
-    # Match the per-section rows we generate (skip the TOTAL row in the doc; recompute it).
-    generated = render_rollup(per_section, grand)
-    gen_rows: dict[str, dict[str, int]] = {}
-    for line in generated.splitlines():
-        m = ROLLUP_ROW_RE.match(line)
-        if not m:
-            continue
-        gen_rows[m.group(1).strip()] = {
-            "total": int(m.group(2)),
-            "x": int(m.group(3)),
-            "~": int(m.group(4)),
-            " ": int(m.group(5)),
-        }
-    for label, want in gen_rows.items():
+    for label, want in generated.items():
         got = doc_rows.get(label)
         if got is None:
             errors.append(f"  missing rollup row for '{label}'")
             continue
-        for key, klabel in (
-            ("x", "Done"),
-            ("~", "Partial"),
-            (" ", "Not started"),
-            ("total", "Total"),
-        ):
-            if got.get(key) != want.get(key):
-                errors.append(
-                    f"  '{label}' {klabel}: doc={got.get(key)} parsed={want.get(key)}"
-                )
+        for i, name in enumerate(("Total", "Done", "Partial", "Not started")):
+            if got[i] != want[i]:
+                errors.append(f"  '{label}' {name}: doc={got[i]} parsed={want[i]}")
     if errors:
-        print(
-            "ERROR: STATUS.md At-a-glance rollup drifted from its marks:",
-            file=sys.stderr,
-        )
+        print("ERROR: STATUS.md At-a-glance rollup drifted from its marks:", file=sys.stderr)
         print("\n".join(errors), file=sys.stderr)
         print("\nRegenerate with: python scripts/status_progress.py", file=sys.stderr)
         return 1
