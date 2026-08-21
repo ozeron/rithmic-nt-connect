@@ -18,7 +18,7 @@ Examples::
     RITHMIC_ENABLE_TRADING=1 python scripts/verify_order_dry_run.py \\
         --live-place --side BUY --price 28000 --seconds 5
 
-    # Live far stop (never marketable: SELL trigger above / BUY below market;
+    # Live far stop (never marketable: SELL trigger below / BUY above market;
     # --auto-trigger-offset derives it from the polled last trade)
     RITHMIC_ENABLE_TRADING=1 python scripts/verify_order_dry_run.py \\
         --live-place --order-type STOP_MARKET --side SELL \\
@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import math
 import os
 import sys
 import time
@@ -44,6 +45,53 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "python"))
 
 SMOKE_TAG_PREFIX = "rithmic-nt-connect-dryrun"
+
+# Single source of truth for the CME resting-stop rule (live-proven on
+# Rithmic Test 2026-08-21: a wrong-side stop is exchange-rejected, a
+# resting one is not). Help texts, examples, and _derive_trigger all use
+# these phrases — never restate the rule inline.
+_RESTING_SELL_RULE = "SELL stop trigger BELOW the last trade"
+_RESTING_BUY_RULE = "BUY stop trigger ABOVE the last trade"
+
+
+def _valid_offset(offset: float) -> bool:
+    """A derived stop must rest strictly away from the market: an offset of
+    zero sits at the market and negative/non-finite values land through it —
+    any of those makes the stop marketable and executes immediately."""
+    return math.isfinite(offset) and offset > 0
+
+
+def _derive_trigger(side: str, market_px: float, offset: float) -> float:
+    """Resting-side stop trigger from the last trade per the rule above:
+    SELL derives below, BUY derives above. Raises ValueError for any offset
+    that could derive a marketable stop (the invariant lives here, so every
+    caller is safe — argparse gating alone would not be)."""
+    if side not in ("SELL", "BUY"):
+        raise ValueError(f"unsupported side: {side!r}")
+    if not _valid_offset(offset):
+        raise ValueError(
+            f"offset must be finite and > 0 (got {offset!r}); "
+            f"{_RESTING_SELL_RULE} / {_RESTING_BUY_RULE}"
+        )
+    return market_px - offset if side == "SELL" else market_px + offset
+
+
+def _our_baskets(events: list[dict], tag: str) -> set[str]:
+    """Basket ids attributed to our smoke order by IDENTITY only.
+
+    Primary evidence: rows carrying our ``user_tag``. Later rows for the
+    same basket may omit the tag, so they inherit attribution from their
+    basket id. Price equality is deliberately NOT used — it assumes a LIMIT
+    price exists and can misattribute orders we do not own.
+    """
+    tagged = {
+        e["basket_id"]
+        for e in events
+        if e.get("basket_id") and e.get("user_tag") == tag
+    }
+    if not tagged:
+        return set()
+    return {e["basket_id"] for e in events if e.get("basket_id") in tagged}
 
 
 def _slim_event(ev: dict) -> dict:
@@ -77,14 +125,9 @@ def _poll_market_px(
     return None
 
 
-def _derive_trigger(side: str, market_px: float, offset: float) -> float:
-    """Resting-side stop trigger from the last trade (never marketable):
-    CME rejects a SELL stop at/above the last trade and a BUY stop at/below,
-    so SELL derives below and BUY above."""
-    return market_px - offset if side == "SELL" else market_px + offset
-
-
-def main(argv: list[str] | None = None) -> int:
+def _build_parser() -> argparse.ArgumentParser:
+    """Arg definitions; stop-rule help strings compose the module constants
+    so the documented rule can never drift from _derive_trigger."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seconds", type=float, default=3.0, help="poll window")
     parser.add_argument(
@@ -96,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--live-place",
         action="store_true",
-        help="DANGEROUS: place a 1-lot DAY limit (requires --price + env gate)",
+        help="DANGEROUS: place a 1-lot DAY order (needs --price/trigger + gate)",
     )
     parser.add_argument(
         "--no-live-place",
@@ -124,14 +167,14 @@ def main(argv: list[str] | None = None) -> int:
         "--trigger-price",
         type=float,
         default=None,
-        help="STOP_MARKET trigger (SELL far above / BUY far below market)",
+        help=f"STOP_MARKET trigger ({_RESTING_SELL_RULE} / {_RESTING_BUY_RULE})",
     )
     parser.add_argument(
         "--auto-trigger-offset",
         type=float,
         default=None,
         help="derive the STOP_MARKET trigger from the polled last trade "
-        "(SELL above / BUY below by this offset); mutually safe resting side",
+        f"({_RESTING_SELL_RULE} / {_RESTING_BUY_RULE}); finite and > 0",
     )
     parser.add_argument(
         "--market-window",
@@ -139,7 +182,11 @@ def main(argv: list[str] | None = None) -> int:
         default=6.0,
         help="seconds to poll the ticker for a last trade (auto trigger)",
     )
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _build_parser().parse_args(argv)
 
     # Safety gates evaluate FIRST, before any dotenv/credential loading or
     # session construction: a mis-gated live place must fail fast and must
@@ -159,16 +206,20 @@ def main(argv: list[str] | None = None) -> int:
             "REFUSING --live-place: pass an explicit --price "
             "(BUY far below market, SELL far above; no default)"
         )
-    elif (
-        allow_live
-        and args.order_type == "STOP_MARKET"
-        and args.trigger_price is None
-        and args.auto_trigger_offset is None
-    ):
-        refusal = (
-            "REFUSING --live-place STOP_MARKET: pass --trigger-price "
-            "(SELL far above / BUY far below market) or --auto-trigger-offset"
-        )
+    elif allow_live and args.order_type == "STOP_MARKET":
+        offset = args.auto_trigger_offset
+        if args.trigger_price is None and offset is None:
+            refusal = (
+                "REFUSING --live-place STOP_MARKET: pass --trigger-price "
+                f"({_RESTING_SELL_RULE} / {_RESTING_BUY_RULE}) "
+                "or --auto-trigger-offset"
+            )
+        elif offset is not None and not _valid_offset(offset):
+            refusal = (
+                "REFUSING --live-place STOP_MARKET: --auto-trigger-offset "
+                "must be finite and > 0 (a non-positive offset derives a "
+                "marketable stop that executes immediately)"
+            )
     if refusal is not None:
         print(refusal, file=sys.stderr)
         return 3
@@ -283,23 +334,10 @@ def main(argv: list[str] | None = None) -> int:
 
         report["cancelled"] = False
         if allow_live:
-            # Cancel only the smoke order we placed (never cancel_all / other baskets).
-            smoke_baskets = [
-                e["basket_id"]
-                for e in report["events"]
-                if e.get("basket_id") and e.get("user_tag") == smoke_tag
-            ]
-            # Fallback: basket_ids from events that also carry our place price
-            # when user_tag is missing on some notification shapes.
-            if not smoke_baskets:
-                smoke_baskets = [
-                    e["basket_id"]
-                    for e in report["events"]
-                    if e.get("basket_id")
-                    and e.get("price") is not None
-                    and float(e["price"]) == float(args.price)
-                    and e.get("symbol") == front["trading_symbol"]
-                ]
+            # Cancel only the smoke order we placed (never cancel_all /
+            # other baskets): identity attribution via user_tag + basket
+            # inheritance, never price equality.
+            smoke_baskets = sorted(_our_baskets(report["events"], smoke_tag))
             try:
                 if smoke_baskets:
                     for bid in dict.fromkeys(smoke_baskets):
@@ -316,11 +354,15 @@ def main(argv: list[str] | None = None) -> int:
                         report["events"].append(slim)
                         print(f"order_event: {slim}")
                 else:
+                    # A placed order we cannot attribute must fail the run —
+                    # it is still live at the venue and needs manual cleanup.
                     print(
-                        "WARN: no smoke basket_id found; skipping cancel "
-                        "(will not cancel_all)",
+                        "FAIL: no basket attributed to smoke tag "
+                        f"{smoke_tag}; the order may still be live — "
+                        "cancel it manually in R|Trader / the venue UI",
                         file=sys.stderr,
                     )
+                    return 1
             except Exception as cancel_exc:
                 print(f"WARN: cancel after place failed: {cancel_exc}", file=sys.stderr)
 
