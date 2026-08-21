@@ -24,6 +24,8 @@ use crate::reconnect::{ReconnectController, TimeBarIntent};
 use crate::subscriptions::{ClientId, FanoutHub, ParentGates, SharedFanout, SubKey};
 
 mod dispatch;
+pub mod pump;
+use dispatch::TopicIntent;
 pub use dispatch::{gate_rpc_for_test, rpc_sequence_with_gates};
 
 /// Shared gateway runtime state, held for the process lifetime.
@@ -298,6 +300,20 @@ impl ClientCtx {
         self.subscribed.remove(key);
     }
 
+    /// Forget one typed intent and leave the venue topic when this was the
+    /// last peer. Shared by all MD teardown drains via [`TopicIntent`].
+    async fn teardown_topic(state: &GatewayState, intent: dispatch::TopicIntent) {
+        let key = intent.key();
+        let lock = dispatch::topic_lock(state, &key).await;
+        let _guard = lock.lock().await;
+        if intent.forget(&state.reconnect).await {
+            if let Some(session) = &state.session {
+                let guard = session.lock().await;
+                let _ = intent.venue_leave(&guard).await;
+            }
+        }
+    }
+
     /// Detach-only disconnect: clear typed intents + hub interest; venue
     /// unsubscribe only when the last peer of that typed join leaves.
     async fn teardown(&mut self, state: &GatewayState) {
@@ -306,57 +322,46 @@ impl ClientCtx {
         }
         self.forwarders.clear();
 
+        // Fire-and-forget per topic: the client is dying, so unlike
+        // `unsubscribe_topic` there is no re-note on failure. The topic_lock
+        // is still held across forget + venue leave so a concurrent
+        // first-peer subscribe cannot have its join undone.
         for key in self.ticker.drain() {
-            let lock = dispatch::topic_lock(state, &key).await;
-            let _guard = lock.lock().await;
-            if state.reconnect.forget_ticker(&key).await {
-                if let Some(session) = &state.session {
-                    let guard = session.lock().await;
-                    let _ = guard.unsubscribe(&key.symbol, &key.exchange).await;
-                }
-            }
+            Self::teardown_topic(state, TopicIntent::Ticker(key)).await;
         }
         for key in self.book.drain() {
-            let lock = dispatch::topic_lock(state, &key).await;
-            let _guard = lock.lock().await;
-            if state.reconnect.forget_book(&key).await {
-                if let Some(session) = &state.session {
-                    let guard = session.lock().await;
-                    let _ = guard
-                        .unsubscribe_order_book_summary(&key.symbol, &key.exchange)
-                        .await;
-                }
-            }
+            Self::teardown_topic(state, TopicIntent::Book(key)).await;
         }
         for intent in self.time_bars.drain() {
-            let key = SubKey {
-                symbol: intent.symbol.clone(),
-                exchange: intent.exchange.clone(),
-            };
-            let lock = dispatch::topic_lock(state, &key).await;
-            let _guard = lock.lock().await;
-            if state.reconnect.forget_time_bar(&intent).await {
-                if let Some(session) = &state.session {
-                    let guard = session.lock().await;
-                    let _ = guard
-                        .unsubscribe_time_bars(
-                            &intent.symbol,
-                            &intent.exchange,
-                            intent.bar_type,
-                            intent.period,
-                        )
-                        .await;
-                }
+            Self::teardown_topic(state, TopicIntent::TimeBars(intent)).await;
+        }
+        self.teardown_pnl(state).await;
+        self.teardown_order_plants(state).await;
+
+        for key in self.subscribed.drain() {
+            let _ = state.reconnect.remove_hub_interest(&key).await;
+        }
+    }
+
+    async fn teardown_pnl(&mut self, state: &GatewayState) {
+        if !self.pnl {
+            return;
+        }
+        self.pnl = false;
+        if state.reconnect.forget_pnl().await {
+            if let Some(session) = &state.session {
+                let mut guard = session.lock().await;
+                let _ = guard.disconnect_pnl_plant().await;
             }
         }
-        if self.pnl {
-            self.pnl = false;
-            if state.reconnect.forget_pnl().await {
-                if let Some(session) = &state.session {
-                    let mut guard = session.lock().await;
-                    let _ = guard.disconnect_pnl_plant().await;
-                }
-            }
+    }
+
+    /// Order-plant teardown: brackets and order share one plant, so the last
+    /// peer of either drives the disconnect; when only brackets peers leave,
+    /// re-seat order-only to drop venue brackets (no brackets unsubscribe API).
+    async fn teardown_order_plants(&mut self, state: &GatewayState) {
+        if !self.brackets && !self.order {
+            return;
         }
         if self.brackets {
             let key = crate::convert::order_key();
@@ -381,7 +386,7 @@ impl ClientCtx {
                     state.force_reconnect.store(true, Ordering::SeqCst);
                 }
             }
-        } else if self.order {
+        } else {
             self.order = false;
             if state.reconnect.forget_order().await {
                 if let Some(session) = &state.session {
@@ -389,10 +394,6 @@ impl ClientCtx {
                     let _ = guard.disconnect_order_plant().await;
                 }
             }
-        }
-
-        for key in self.subscribed.drain() {
-            let _ = state.reconnect.remove_hub_interest(&key).await;
         }
     }
 }

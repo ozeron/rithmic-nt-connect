@@ -14,6 +14,14 @@ use super::{
     ack_frame, err_to_frame, error_frame, no_session_frame, plant_err_frame, GatewayState,
 };
 
+/// Outcome of the order-handle prelude. A dedicated enum (not
+/// `Result<_, Frame>`) keeps the error path small: `pb::Frame` embeds large
+/// response bodies, which clippy rightly refuses as a `Result` `Err` type.
+enum OrderHandleOutcome {
+    Handle(RithmicOrderPlantHandle),
+    Fail(Box<Frame>),
+}
+
 /// Ensure the order plant exists and clone a detached handle for bounded
 /// drains, mapping either failure to `err_code`. Callers run their load
 /// without holding the session lock so the event pump keeps forwarding.
@@ -21,16 +29,19 @@ async fn order_handle_or_frame(
     state: &GatewayState,
     request_id: u64,
     err_code: &str,
-) -> Result<RithmicOrderPlantHandle, Frame> {
+) -> OrderHandleOutcome {
     let Some(session) = &state.session else {
-        return Err(no_session_frame(request_id));
+        return OrderHandleOutcome::Fail(Box::new(no_session_frame(request_id)));
     };
     let mut guard = session.lock().await;
-    guard
-        .ensure_order_plant()
-        .await
-        .and_then(|()| guard.clone_order_handle())
-        .map_err(|e| err_to_frame(request_id, err_code, e))
+    match guard.ensure_order_plant().await {
+        Ok(()) => {}
+        Err(e) => return OrderHandleOutcome::Fail(Box::new(err_to_frame(request_id, err_code, e))),
+    }
+    match guard.clone_order_handle() {
+        Ok(handle) => OrderHandleOutcome::Handle(handle),
+        Err(e) => OrderHandleOutcome::Fail(Box::new(err_to_frame(request_id, err_code, e))),
+    }
 }
 
 pub(super) async fn load_orders(state: &GatewayState, request_id: u64) -> Frame {
@@ -51,8 +62,8 @@ pub(super) async fn load_orders(state: &GatewayState, request_id: u64) -> Frame 
     // the session lock so the drain never blocks the event pump.
     let _recon_guard = state.recon_lock.lock().await;
     let handle = match order_handle_or_frame(state, request_id, "load_orders_failed").await {
-        Ok(handle) => handle,
-        Err(frame) => return frame,
+        OrderHandleOutcome::Handle(handle) => handle,
+        OrderHandleOutcome::Fail(frame) => return *frame,
     };
     match load_orders_on(&handle).await {
         Ok(events) => Frame {
@@ -100,8 +111,8 @@ async fn load_rms_info(state: &GatewayState, request_id: u64, kind: RmsKind) -> 
         return error_frame(request_id, "trading_disabled", kind.denied_msg());
     }
     let handle = match order_handle_or_frame(state, request_id, "fetch_rms_failed").await {
-        Ok(handle) => handle,
-        Err(frame) => return frame,
+        OrderHandleOutcome::Handle(handle) => handle,
+        OrderHandleOutcome::Fail(frame) => return *frame,
     };
     let outcome: rithmic_plants::Result<Body> = match kind {
         RmsKind::Product => load_product_rms_info_on(&handle).await.map(|rows| {

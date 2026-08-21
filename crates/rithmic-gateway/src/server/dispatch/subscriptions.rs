@@ -29,14 +29,14 @@ fn sub_key(symbol: &str, exchange: &str) -> SubKey {
 /// the venue session call — everything the subscribe/unsubscribe templates
 /// need except their differing rollback direction.
 #[derive(Debug, Clone)]
-pub(super) enum TopicIntent {
+pub(in crate::server) enum TopicIntent {
     Ticker(SubKey),
     Book(SubKey),
     TimeBars(TimeBarIntent),
 }
 
 impl TopicIntent {
-    fn key(&self) -> SubKey {
+    pub(in crate::server) fn key(&self) -> SubKey {
         match self {
             Self::Ticker(key) | Self::Book(key) => key.clone(),
             Self::TimeBars(intent) => sub_key(&intent.symbol, &intent.exchange),
@@ -89,7 +89,7 @@ impl TopicIntent {
     }
 
     /// Removes the reconnect intent; returns whether this was the last peer.
-    async fn forget(&self, rc: &ReconnectController) -> bool {
+    pub(in crate::server) async fn forget(&self, rc: &ReconnectController) -> bool {
         match self {
             Self::Ticker(key) => rc.forget_ticker(key).await,
             Self::Book(key) => rc.forget_book(key).await,
@@ -97,7 +97,7 @@ impl TopicIntent {
         }
     }
 
-    async fn venue_join(
+    pub(in crate::server) async fn venue_join(
         &self,
         session: &rithmic_plants::RithmicSession,
     ) -> rithmic_plants::Result<()> {
@@ -121,7 +121,7 @@ impl TopicIntent {
         }
     }
 
-    async fn venue_leave(
+    pub(in crate::server) async fn venue_leave(
         &self,
         session: &rithmic_plants::RithmicSession,
     ) -> rithmic_plants::Result<()> {
@@ -158,6 +158,26 @@ impl TopicIntent {
             Self::Ticker(_) => "unsubscribe_failed",
             Self::Book(_) => "unsubscribe_book_failed",
             Self::TimeBars(_) => "unsubscribe_time_bars_failed",
+        }
+    }
+
+    /// Log line for a failed pump-side restore; kept byte-identical to the
+    /// pre-pump-relocation strings. (Pump policy is log-and-continue —
+    /// dispatch's rollback policy lives in `subscribe_topic`/`fail_*`.)
+    pub(in crate::server) fn resubscribe_fail_log(&self, e: rithmic_plants::Error) -> String {
+        match self {
+            Self::Ticker(key) => format!(
+                "rithmic-gateway: resubscribe ticker {}/{} failed: {e}",
+                key.symbol, key.exchange
+            ),
+            Self::Book(key) => format!(
+                "rithmic-gateway: resubscribe book {}/{} failed: {e}",
+                key.symbol, key.exchange
+            ),
+            Self::TimeBars(intent) => format!(
+                "rithmic-gateway: resubscribe time_bars {}/{} type={} period={} failed: {e}",
+                intent.symbol, intent.exchange, intent.bar_type, intent.period
+            ),
         }
     }
 }

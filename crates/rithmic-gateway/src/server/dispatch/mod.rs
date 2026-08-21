@@ -24,7 +24,7 @@ use crate::subscriptions::{FanoutHub, ParentGates, SharedFanout, SubKey};
 use super::{ClientCtx, Fingerprint, GatewayState, OutMsg};
 use crate::idle_exit::{IdleExit, IdleExitPolicy};
 
-use subscriptions::TopicIntent;
+pub(in crate::server) use subscriptions::TopicIntent;
 pub(super) use subscriptions::{clear_client_brackets, reseat_order_plant_without_brackets};
 
 pub(super) async fn topic_lock(state: &GatewayState, key: &SubKey) -> Arc<TokioMutex<()>> {
