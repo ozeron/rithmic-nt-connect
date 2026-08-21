@@ -8,7 +8,7 @@
 | --- | --- |
 | **Done enough to use** | Futures MD (trades/quotes + history), paper path, account auto-discovery, TC-D data sweep, order dry-run, test-plant live place (2026-08-17), self-contained wheel |
 | **Partial / advertised incomplete** | L2 book, EXTERNAL bars (1m proven), order types/brackets, PnL, submit/cancel/modify honesty, recon, reconnect restore, gateway shared login, exec hardening |
-| **Not started** | Definition updates · recovery suite (+ one phase sub-item) — **3** marks left |
+| **Not started** | Definition updates · recovery suite — **2** marks left |
 | **Out of scope (N/A)** | Non-futures · L3 MBO · mark/index/funding/greeks · catalog/Parquet · Python v2 LiveNode · native TLS remote · in-tree Rust v2 |
 
 Acceptance target: **NQ / CME via LucidTrading**. One Rithmic login (close MotiveWave / R|Trader).
@@ -38,7 +38,7 @@ Legend: **Done** `[x]` · **Partial** `[~]` · **Not started** `[ ]` · `N/A` ou
 
 **Implemented:** 80% (`44` done + `24` partial of `70` in-scope marked items (`11` N/A excluded); partial counts as half).
 
-Not started (real leftover work): Phase 2 definition updates, Phase 7 recovery suite, and one sub-item.
+Not started (real leftover work): Phase 2 definition updates, Phase 7 recovery suite.
 
 ---
 
