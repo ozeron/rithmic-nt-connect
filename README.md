@@ -132,6 +132,32 @@ from rithmic_nt_connect import resolve_front_month, run_front_month_verify
 - Discover systems (no login): `python scripts/list_systems.py`
 - See [`docs/references/ops-runbook.md`](docs/references/ops-runbook.md).
 
+## Code quality
+
+Local gates (run via `mise use -q && hk run check` — mirrors CI):
+
+| Layer | Tool | Mode |
+| --- | --- | --- |
+| Python lint | `ruff check` | block |
+| Python format | `ruff format --check` | block |
+| Python types | `ty check python/rithmic_nt_connect tests` | block |
+| Python tests | `pytest -q` | block |
+| Rust lint | `cargo clippy --workspace --all-targets -- -D warnings` | block |
+| Rust format | `cargo fmt --all --check` | block |
+| Rust tests | `cargo test --workspace` | block |
+| Orchestrator | [`qlty`](https://qlty.sh) (CI: `qltysh/qlty-action`) | block on changed files |
+
+`qlty` runs the existing linters (**ruff**, **clippy**, hk's **`cargo fmt`** + **`ruff format`**) plus **[`bandit`](https://github.com/PyCQA/bandit)**, **[`trufflehog`](https://github.com/trufflesecurity/trufflehog)** (secrets), **[`shellcheck`](https://www.shellcheck.net/)**, **[`actionlint`](https://github.com/rhysd/actionlint)** + **[`zizmor`](https://github.com/woodruffw/zizmor)** (CI YAML), **[`osv-scanner`](https://github.com/google/osv-scanner)** (dep vulns — real findings appear in baseline), and smells (duplication, complexity). CI runs `qlty check` against the merge base, so pre-existing findings are grandfathered while new ones fail the PR. Full mode (`--all`) is local-only.
+
+Install qlty (`mise.toml` pins it to the GitHub release):
+
+```bash
+mise install                # installs both hk and qlty
+qlty check                  # staged files (pre-commit)
+qlty check --all --level=low  # whole-repo scan with low-severity findings
+qlty smells --all           # duplication / complexity inventory
+```
+
 ## License
 
 Apache-2.0 — see [LICENSE](LICENSE) for details.

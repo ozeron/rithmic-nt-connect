@@ -1,2 +1,3 @@
 [tools]
+"github:qltysh/qlty" = "0.642.0"
 hk = "1.55.0"

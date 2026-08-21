@@ -10,6 +10,29 @@ local ruff_exclude = List(
     "python/rithmic_gateway/v1/session_pb2.py",
 )
 
+// qlty orchestrates other linters + security scanners (bandit, trufflehog,
+// shellcheck, actionlint, zizmor, osv-scanner, clippy, radarlint, smells).
+// Per-file on the pre-commit hook so hk's git stash is the source of truth.
+// Whole-project on `check` is delegated to the `qlty-check` step below, which
+// matches the CI PR gate (changed files vs the merge base).
+local qlty_globs = List(
+    "**/*.py",
+    "**/*.pyi",
+    "**/*.rs",
+    "**/*.toml",
+    "**/*.sh",
+    "**/*.yml",
+    "**/*.yaml",
+)
+local qlty_exclude = List(
+    "stubs/**",
+    "wheel-data/**",
+    "target/**",
+    ".venv/**",
+    ".qlty/**",
+    "python/rithmic_gateway/v1/**",
+)
+
 local rinters = new Mapping<String, Step> {
     ["ruff-format"] {
         glob = ruff_globs
@@ -26,6 +49,15 @@ local rinters = new Mapping<String, Step> {
     ["cargo-fmt"] = (Builtins.cargo_fmt) {
         check = "cargo fmt --check -- {{files}}"
         fix = "cargo fmt -- {{files}}"
+    }
+    ["qlty"] {
+        glob = qlty_globs
+        exclude = qlty_exclude
+        check = "qlty check --filter=clippy,ruff,bandit,shellcheck,actionlint,zizmor -- {{files}}"
+        // qlty's --fix applies AI/autofixes (qltysh generated); we keep hk's
+        // own autofix steps as the only mutator of the working tree on hooks
+        // so a single owner decides what --fix means across the toolchain.
+        fix = "qlty fmt -- {{files}}"
     }
 }
 
@@ -55,8 +87,8 @@ hooks {
         fix = true
         steps = linters
     }
-    // Project-wide gate mirroring CI (ty/clippy are run whole-project, not
-    // per-file). Includes the Rust test suite so a local `hk run check`
+    // Project-wide gate mirroring CI (ty/clippy/qlty are run whole-project,
+    // not per-file). Includes the Rust test suite so a local `hk run check`
     // matches CI exactly.
     ["check"] {
         steps {
@@ -64,6 +96,16 @@ hooks {
             ...rust_checks
             ["ty"] {
                 check = "uv run ty check python/rithmic_nt_connect tests"
+            }
+            // qlty mirrors the CI PR gate. Defaults to changed files vs the
+            // merge base (no `--all`), so pre-existing smells are
+            // grandfathered while NEW findings fail. `--fail-level=medium`
+            // matches CI so fmt-level nits (whitespace, import order) do not
+            // block, while medium+ findings (security, complexity,
+            // duplication, smells) block. Use `qlty check --all` against the
+            // current branch to see the full baseline.
+            ["qlty-check"] {
+                check = "qlty check --fail-level=medium"
             }
             // Whole-workspace test gate (matches the CI `cargo test` step).
             // `python` feature is empty-default so this never links libpython.

@@ -7,12 +7,19 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Explicit permissions: no GITHUB_TOKEN scope beyond contents:read. zizmor
+    # (`artipacked`, `excessive-permissions`) prefers this over the default
+    # `permissions: write-all`.
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.13"
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -32,3 +39,34 @@ jobs:
         run: uv run ty check python/rithmic_nt_connect tests
       - name: Pytest (no secrets)
         run: uv run pytest -q
+
+  qlty:
+    # Runs the qltysh orchestrator over the existing toolchain plus security
+    # plugins (bandit, trufflehog, shellcheck, actionlint, zizmor, osv-scanner).
+    # Default `qlty check` analyzes only files changed since the merge base, so
+    # pre-existing smells are grandfathered while NEW findings (introduced by
+    # the PR) fail the gate. --fail-level=medium so fmt-level noise (whitespace,
+    # micro-import-order) does not block; medium+ do.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          # qlty needs full history for git-aware baseline analysis (changed-
+          # file detection against the merge base).
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: qltysh/qlty-action@08a0a862c159eae9b9003081da6663d96efef637 # v2
+        # No `qlty-cloud-token` here yet; running as `cli` keeps the gate
+        # entirely local — see docs/references/ops-runbook.md.
+        with:
+          args: --fail-level=medium
+          version: 0.642.0
