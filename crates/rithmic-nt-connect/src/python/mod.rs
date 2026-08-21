@@ -676,7 +676,7 @@ impl PySession {
         let dto = runtime()
             .block_on(inner.get_front_month(symbol, exchange))
             .map_err(to_py_err)?;
-        Python::with_gil(|py| front_month_dict(py, dto))
+        Python::attach(|py| front_month_dict(py, dto))
     }
 
     fn get_reference_data(&self, symbol: &str, exchange: &str) -> PyResult<Py<PyDict>> {
@@ -687,7 +687,7 @@ impl PySession {
         let dto = runtime()
             .block_on(inner.get_reference_data(symbol, exchange))
             .map_err(to_py_err)?;
-        Python::with_gil(|py| reference_data_dict(py, dto))
+        Python::attach(|py| reference_data_dict(py, dto))
     }
 
     /// Non-blocking poll; returns a dict or None.
@@ -729,7 +729,7 @@ impl PySession {
         let ticks = runtime()
             .block_on(inner.load_ticks_all(symbol, exchange, start_time_sec, end_time_sec))
             .map_err(to_py_err)?;
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let list = PyList::empty(py);
             for tick in ticks {
                 list.append(history_tick_dict(py, tick)?)?;
@@ -828,7 +828,7 @@ impl PySession {
                 end_time_sec,
             ))
             .map_err(to_py_err)?;
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let list = PyList::empty(py);
             for bar in bars {
                 list.append(history_bar_dict(py, bar)?)?;
@@ -864,7 +864,7 @@ impl PySession {
                 end_time_sec,
             ))
             .map_err(to_py_err)?;
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let list = PyList::empty(py);
             for row in rows {
                 list.append(time_bar_probe_row_dict(py, row)?)?;

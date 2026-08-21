@@ -64,7 +64,21 @@ find "$dest" -name '__pycache__' -type d -prune -exec rm -rf {} +
 echo "==> maturin build"
 maturin build --release
 if [ "$install" -eq 1 ]; then
-  wheel="$(ls -t "$cargo_target_dir/wheels/rithmic_nt_connect-*.whl" | head -1)"
+  # Pick the newest build by mtime (BSD stat -f %m, GNU stat -c %Y).
+  wheel=""
+  newest=0
+  for candidate in "$cargo_target_dir"/wheels/rithmic_nt_connect-*.whl; do
+    [ -f "$candidate" ] || continue
+    mtime="$(stat -f %m "$candidate" 2>/dev/null || stat -c %Y "$candidate")"
+    if [ "${mtime:-0}" -gt "$newest" ]; then
+      newest="$mtime"
+      wheel="$candidate"
+    fi
+  done
+  if [ -z "$wheel" ]; then
+    echo "no rithmic_nt_connect wheel found under $cargo_target_dir/wheels" >&2
+    exit 1
+  fi
   echo "==> pip install $wheel"
   pip install --force-reinstall "$wheel"
 fi

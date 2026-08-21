@@ -212,7 +212,12 @@ class NqFourBarStrategy(Strategy):
                 self.log.info(f"HIST M1 #{self._hist_m1} {data.close}  {self._ctx()}")
 
     def _has_working_order(self) -> bool:
-        assert self._instrument is not None
+        # ``self._instrument`` is set in ``on_start`` before any strategy
+        # callback fires; if it ever isn't set, something has gone wrong with
+        # Nautilus lifecycle and we should fail loud rather than silently
+        # skip the bookkeeping.
+        if self._instrument is None:
+            raise RuntimeError("NqFourBarStrategy._instrument is unset")
         instrument_id = self._instrument.id
         return bool(
             self.cache.orders_inflight(instrument_id=instrument_id)

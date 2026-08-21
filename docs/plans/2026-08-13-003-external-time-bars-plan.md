@@ -40,6 +40,6 @@ for MNQ** — on this account. MNQ EXTERNAL is available **only via the history 
 `subscribe_bars(EXTERNAL)` is **not** a universal live source. Strategies needing
 EXTERNAL for a non‑streaming symbol must fall back to the history‑poll path. The
 `STATUS.md` "live‑EXTERNAL = Done" line should be scoped to streaming‑entitled
-symbols (NQ proven live 2026‑08‑14 via `test_TC_D40`); **MNQ is history‑only**.
+symbols (NQ proven live 2026‑08‑14 via `test_tc_d40`); **MNQ is history‑only**.
 Proven via `qgw_book` MY043 reconciliation (doc `003 §13`/`§13.1`): MY043 cannot
 use live EXTERNAL for MNQ and must roll `request_bars(m1_ext)`.

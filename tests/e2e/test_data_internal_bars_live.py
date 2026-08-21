@@ -35,7 +35,7 @@ pytestmark = pytest.mark.live
 class TestInternalBars:
     """TC-D50..D53 — INTERNAL tape + EXTERNAL subset + cutover + basis."""
 
-    def test_TC_D50_internal_bar_raw_material(self, live_session, live_front_month):
+    def test_tc_d50_internal_bar_raw_material(self, live_session, live_front_month):
         """TC-D50 — live trades aggregate to minute buckets with valid OHLCV.
 
         Buckets trades by open minute (floor ts_event to the minute grid) and
@@ -73,7 +73,7 @@ class TestInternalBars:
             assert max(prices) >= min(prices), "coherent OHLC range"
             assert volume >= len(ordered), "volume is summed trade size"
 
-    def test_TC_D51_external_vs_tick_replay_volume(
+    def test_tc_d51_external_vs_tick_replay_volume(
         self, live_session, live_front_month
     ):
         """TC-D51 — the history tick replay is a lossy subset of EXTERNAL bars.
@@ -120,7 +120,7 @@ class TestInternalBars:
 
         assert compared >= 1, "no minutes had both EXTERNAL bar and tick volume"
 
-    def test_TC_D53_live_trade_size_sums_to_external_volume(
+    def test_tc_d53_live_trade_size_sums_to_external_volume(
         self, live_session, live_front_month
     ):
         """TC-D53 — live ticker ``trade_size`` sums to the EXTERNAL bar volume.
@@ -207,7 +207,7 @@ class TestInternalBars:
             f"last live price {last_px}"
         )
 
-    def test_TC_D52_external_cutover_no_partial_minute(
+    def test_tc_d52_external_cutover_no_partial_minute(
         self, live_session, live_front_month
     ):
         """TC-D52 — EXTERNAL lookback ending at ``now`` returns complete bars only.

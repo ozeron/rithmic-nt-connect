@@ -123,6 +123,15 @@ uv run ruff check .
 uv run ruff format --check .
 uv run ty check python/rithmic_nt_connect tests
 uv run pytest -q
+# Qlty (added 2026-08-20): orchestrator over ruff/clippy + bandit/trufflehog/
+# shellcheck/actionlint/zizmor/osv-scanner/radarlint/smells. CI runs the
+# `check` default (changed files vs base); `--all` is only for local full-
+# repo scans and triage baseline reviews. `--sample=5` is a fast no-fail
+# smoke for first-time wiring.
+qlty check --fail-level=medium    # matches CI PR gate (changed files)
+qlty check --all --level=low      # local full scan / baseline inventory
+qlty smells --all                 # duplication / complexity report
+qlty check --sample=5             # cheap visibility check
 # Docs: STATUS.md scoreboard must match its own [x]/[~]/[ ] marks
 python scripts/status_progress.py --check
 ```

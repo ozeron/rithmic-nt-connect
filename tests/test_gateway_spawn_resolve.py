@@ -74,7 +74,7 @@ def test_spawn_environ_password_wins_over_stale_env(
             return None
 
         def terminate(self) -> None:
-            pass
+            pass  # Stub: spawn tests never trigger graceful shutdown.
 
     def _popen(*_a: Any, **kwargs: Any) -> _Proc:
         captured.update(kwargs.get("env") or {})
@@ -141,7 +141,7 @@ def test_spawn_overwrites_conflicting_url(
             return None
 
         def terminate(self) -> None:
-            pass
+            pass  # Stub: spawn tests never trigger graceful shutdown.
 
     def _popen(*_a: Any, **kwargs: Any) -> _Proc:
         captured.update(kwargs.get("env") or {})
@@ -248,7 +248,7 @@ def test_dedupe_bars_by_marker() -> None:
     ]
     out = dedupe_bars_by_marker(bars)
     assert len(out) == 2
-    assert out[0]["close_price"] == 1.0
+    assert out[0]["close_price"] == pytest.approx(1.0)
 
 
 def test_load_time_bars_range_chunks(monkeypatch: pytest.MonkeyPatch) -> None:

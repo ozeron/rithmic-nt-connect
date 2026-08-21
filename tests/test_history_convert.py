@@ -29,8 +29,8 @@ def test_history_tick_requires_trade_price_and_size():
         "usecs": 0,
     }
     fields = last_trade_to_fields(payload)
-    assert fields["price"] == 100.5
-    assert fields["size"] == 1.0
+    assert fields["price"] == pytest.approx(100.5)
+    assert fields["size"] == pytest.approx(1.0)
 
 
 def test_history_tick_does_not_invent_from_ohlc_or_volume():
@@ -64,13 +64,13 @@ def test_time_bar_to_fields_and_bar():
         "period": "60",
     }
     fields = time_bar_to_fields(raw)
-    assert fields["open"] == 100.0
+    assert fields["open"] == pytest.approx(100.0)
     # time_bar_to_fields reports the venue CLOSE time unshifted; the close→open
     # shift is applied by fields_to_bar using the authoritative BarType.
     assert fields["ts_event"] == 1_700_000_000 * 1_000_000_000
     bar_type = BarType.from_str("NQU6.RITHMIC-1-MINUTE-LAST-EXTERNAL")
     bar = fields_to_bar(fields, bar_type, ts_init=1)
-    assert float(bar.close) == 100.5
+    assert float(bar.close) == pytest.approx(100.5)
     assert int(bar.volume) == 42
     # 1-minute bar: Bar.ts_event = close (marker) - 60s = open time.
     assert bar.ts_event == (1_700_000_000 - 60) * 1_000_000_000
@@ -114,7 +114,7 @@ def test_live_time_bar_dict_converts():
     )
     # 15-minute bar: Bar.ts_event = marker - 15*60s = open time.
     assert bar.ts_event == (1_700_000_000 - 900) * 1_000_000_000
-    assert float(bar.close) == 100.5
+    assert float(bar.close) == pytest.approx(100.5)
 
 
 def test_time_bar_close_to_open_shift():

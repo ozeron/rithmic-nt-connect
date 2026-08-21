@@ -94,7 +94,8 @@ def _window(
                 f"{rth_start.isoformat()} UTC (08:30 CT)"
             )
         if end >= rth_end:
-            span = f"complete RTH {hours:.2f}h "(
+            span = (
+                f"complete RTH {hours:.2f}h "
                 f"(08:30-15:15 CT = "
                 f"{rth_start.strftime('%H:%M')}-{rth_end.strftime('%H:%M')} UTC)"
             )
@@ -143,6 +144,99 @@ def _fingerprint(engine: Any, venue: Any, ticks: list[Any]) -> dict[str, Any]:
     }
 
 
+class _HistoryError(RuntimeError):
+    """Trade-tick history could not be loaded for the window."""
+
+
+def _resolve_window(*, rth: bool, until: str | None) -> tuple[datetime, datetime, str]:
+    now = datetime.now(UTC)
+    end_until = _parse_until(until, now) if until else None
+    start, end, span = _window(now, rth, end_until)
+    if end <= start:
+        raise ValueError(f"empty window {start.isoformat()} → {end.isoformat()} UTC")
+    return start, end, span
+
+
+def _load_history(
+    root: str, exchange: str, start: datetime, end: datetime
+) -> tuple[Any, list[Any], list[Any]]:
+    from nautilus_trader.model.data import BarType
+    from rithmic_nt_connect.historical import (
+        load_front_month_instrument,
+        load_time_bars,
+        load_trade_ticks,
+    )
+
+    session = _history_session()
+    try:
+        instrument = load_front_month_instrument(session, root, exchange)
+        print(f"loading ticks {instrument.id}  {start.isoformat()} → {end.isoformat()}")
+        try:
+            ticks = load_trade_ticks(session, instrument, start, end)
+        except Exception as exc:
+            raise _HistoryError(f"history error: {exc}") from exc
+
+        daily_type = BarType.from_str(f"{instrument.id}-1-DAY-LAST-EXTERNAL")
+        daily_bars: list[Any] = []
+        try:
+            daily_from = start - timedelta(days=40)
+            print(f"loading daily bars {daily_from.date()} → {end.date()} UTC")
+            daily_bars = load_time_bars(
+                session, instrument, daily_from, end, daily_type
+            )
+        except Exception as exc:
+            print(f"history bars failed (SMA will be cold): {exc}", file=sys.stderr)
+        print(f"lookback  daily={len(daily_bars)}  (VWAP from INTERNAL 1m on ticks)")
+        return instrument, ticks, daily_bars
+    finally:
+        session.disconnect()
+
+
+def _backtest_fingerprint(
+    instrument: Any,
+    ticks: list[Any],
+    daily_bars: list[Any],
+    *,
+    log_strategy: bool,
+) -> dict[str, Any]:
+    from nautilus_trader.backtest.engine import BacktestEngine
+    from nautilus_trader.config import BacktestEngineConfig, LoggingConfig
+    from nautilus_trader.model.enums import AccountType, BookType, OmsType
+    from nautilus_trader.model.identifiers import TraderId, Venue
+    from nautilus_trader.model.objects import Currency, Money
+    from nq_four_bar import NqFourBarConfig, NqFourBarStrategy
+    from rithmic_nt_connect import VENUE
+
+    engine = BacktestEngine(
+        config=BacktestEngineConfig(
+            trader_id=TraderId("BACK-001"),
+            logging=LoggingConfig(
+                log_level="WARNING",
+                print_config=False,
+                log_component_levels={"NqFourBar-001": "INFO"} if log_strategy else {},
+            ),
+        )
+    )
+    engine.add_venue(
+        venue=Venue(VENUE),
+        oms_type=OmsType.NETTING,
+        account_type=AccountType.MARGIN,
+        starting_balances=[Money.from_str("100000 USD")],
+        base_currency=Currency.from_str("USD"),
+        default_leverage=Decimal(20),
+        book_type=BookType.L1_MBP,
+        trade_execution=True,
+        bar_execution=True,
+    )
+    engine.add_instrument(instrument)
+    if daily_bars:
+        engine.add_data(list(daily_bars))
+    engine.add_data(list(ticks))
+    engine.add_strategy(NqFourBarStrategy(NqFourBarConfig()))
+    engine.run()
+    return _fingerprint(engine, Venue(VENUE), ticks)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -178,61 +272,20 @@ Pin --until (or wait until RTH is closed) to reload the same tape.
 
     load_dotenv_files(ROOT / ".env")
 
-    from nautilus_trader.backtest.engine import BacktestEngine
-    from nautilus_trader.config import BacktestEngineConfig, LoggingConfig
-    from nautilus_trader.model.data import BarType
-    from nautilus_trader.model.enums import AccountType, BookType, OmsType
-    from nautilus_trader.model.identifiers import TraderId, Venue
-    from nautilus_trader.model.objects import Currency, Money
-    from nq_four_bar import NqFourBarConfig, NqFourBarStrategy
-    from rithmic_nt_connect import VENUE
-    from rithmic_nt_connect.historical import (
-        load_front_month_instrument,
-        load_time_bars,
-        load_trade_ticks,
-    )
-
-    now = datetime.now(UTC)
     try:
-        until = _parse_until(args.until, now) if args.until else None
+        start, end, span = _resolve_window(rth=args.rth, until=args.until)
     except ValueError as exc:
         print(exc, file=sys.stderr)
-        return 2
-    try:
-        start, end, span = _window(now, args.rth, until)
-    except ValueError as exc:
-        print(exc, file=sys.stderr)
-        return 2
-    if end <= start:
-        print(
-            f"empty window {start.isoformat()} → {end.isoformat()} UTC", file=sys.stderr
-        )
         return 2
     print(f"requested UTC {start.isoformat()} → {end.isoformat()}  {span}")
 
-    session = _history_session()
     try:
-        instrument = load_front_month_instrument(session, args.root, args.exchange)
-        print(f"loading ticks {instrument.id}  {start.isoformat()} → {end.isoformat()}")
-        try:
-            ticks = load_trade_ticks(session, instrument, start, end)
-        except Exception as exc:
-            print(f"history error: {exc}", file=sys.stderr)
-            return 1
-
-        daily_type = BarType.from_str(f"{instrument.id}-1-DAY-LAST-EXTERNAL")
-        daily_bars: list[Any] = []
-        try:
-            daily_from = start - timedelta(days=40)
-            print(f"loading daily bars {daily_from.date()} → {end.date()} UTC")
-            daily_bars = load_time_bars(
-                session, instrument, daily_from, end, daily_type
-            )
-        except Exception as exc:
-            print(f"history bars failed (SMA will be cold): {exc}", file=sys.stderr)
-        print(f"lookback  daily={len(daily_bars)}  (VWAP from INTERNAL 1m on ticks)")
-    finally:
-        session.disconnect()
+        instrument, ticks, daily_bars = _load_history(
+            args.root, args.exchange, start, end
+        )
+    except _HistoryError as exc:
+        print(exc, file=sys.stderr)
+        return 1
 
     print(f"instrument {instrument.id} prec={instrument.price_precision}")
     if not ticks:
@@ -246,47 +299,14 @@ Pin --until (or wait until RTH is closed) to reload the same tape.
         )
         return 2
     print(
-        f"ticks={len(ticks)}  "(
-            f"first={_utc_from_ns(ticks[0].ts_event)} "
-            f"last={_utc_from_ns(ticks[-1].ts_event)}"
-        )
+        f"ticks={len(ticks)}  "
+        f"first={_utc_from_ns(ticks[0].ts_event)} "
+        f"last={_utc_from_ns(ticks[-1].ts_event)}"
     )
 
-    def run_once(*, log_strategy: bool) -> tuple[Any, dict[str, Any]]:
-        engine = BacktestEngine(
-            config=BacktestEngineConfig(
-                trader_id=TraderId("BACK-001"),
-                logging=LoggingConfig(
-                    log_level="WARNING",
-                    print_config=False,
-                    log_component_levels={"NqFourBar-001": "INFO"}
-                    if log_strategy
-                    else {},
-                ),
-            )
-        )
-        engine.add_venue(
-            venue=Venue(VENUE),
-            oms_type=OmsType.NETTING,
-            account_type=AccountType.MARGIN,
-            starting_balances=[Money.from_str("100000 USD")],
-            base_currency=Currency.from_str("USD"),
-            default_leverage=Decimal(20),
-            book_type=BookType.L1_MBP,
-            trade_execution=True,
-            bar_execution=True,
-        )
-        engine.add_instrument(instrument)
-        if daily_bars:
-            engine.add_data(list(daily_bars))
-        engine.add_data(list(ticks))
-        engine.add_strategy(NqFourBarStrategy(NqFourBarConfig()))
-        engine.run()
-        return engine, _fingerprint(engine, Venue(VENUE), ticks)
-
-    _, result = run_once(log_strategy=True)
+    result = _backtest_fingerprint(instrument, ticks, daily_bars, log_strategy=True)
     if args.check:
-        _, again = run_once(log_strategy=False)
+        again = _backtest_fingerprint(instrument, ticks, daily_bars, log_strategy=False)
         same = (
             again["ticks"] == result["ticks"]
             and again["fills"] == result["fills"]

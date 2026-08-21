@@ -40,7 +40,7 @@ class _HarnessDriver(OrderDriver):
         aggregate_spread_quotes=True,
         params=None,
     ) -> None:
-        pass
+        pass  # Stub: not exercised by submit-book tests.
 
     def submit_order(
         self, order, position_id=None, client_id=None, params=None

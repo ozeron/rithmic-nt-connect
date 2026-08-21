@@ -68,7 +68,6 @@ from rithmic_nt_connect._convert import (
 from rithmic_nt_connect._order_plant import OrderPlantPolicy, OrderPlantState
 from rithmic_nt_connect._orders import (
     DEFAULT_TRAIL_BY_PRICE_ID,
-    OrderMapError,
     enum_int,
     fill_dedup_key,
     nautilus_order_type_to_rithmic,
@@ -99,6 +98,8 @@ _POSITION_SIDE = {
     "SHORT": PositionSide.SHORT,
     "FLAT": PositionSide.FLAT,
 }
+
+_TRADING_DISABLED_REASON = "Rithmic trading disabled (enable_trading=False)"
 
 # Order types that support the TRIGGERED order status (Nautilus #3812, ported
 # from upstream 2f7d3947). Market-style stops (STOP_MARKET, MARKET_IF_TOUCHED,
@@ -968,7 +969,11 @@ class RithmicExecutionClient(LiveExecutionClient):
             if not account_raw:
                 return None
             self._set_account_id(AccountId(f"{VENUE}-{account_raw}"))
-        assert self.account_id is not None
+        # ``account_id`` is guaranteed set above (either branch returns if it
+        # couldn't be resolved). Use a guarded read so the type-checker sees a
+        # non-None value without a bare ``assert`` (B101).
+        if self.account_id is None:  # pragma: no cover — defensive only
+            return None
         side = _POSITION_SIDE.get(str(fields["position_side"]), PositionSide.FLAT)
         avg = fields.get("avg_px_open")
         avg_dec = Decimal(str(avg)) if avg is not None else None
@@ -1173,16 +1178,18 @@ class RithmicExecutionClient(LiveExecutionClient):
                 else order.quantity
             )
             prec = int(order.price.precision) if order.has_price else None
-            price = (
-                _price(action.price, prec)
-                if action.price is not None
-                else (order.price if order.has_price else None)
-            )
-            trigger = (
-                _price(action.trigger, prec)
-                if action.trigger is not None
-                else (order.trigger_price if order.has_trigger_price else None)
-            )
+            if action.price is not None:
+                price = _price(action.price, prec)
+            elif order.has_price:
+                price = order.price
+            else:
+                price = None
+            if action.trigger is not None:
+                trigger = _price(action.trigger, prec)
+            elif order.has_trigger_price:
+                trigger = order.trigger_price
+            else:
+                trigger = None
             self.generate_order_updated(
                 strategy_id,
                 instrument_id,
@@ -1541,7 +1548,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                 order.strategy_id,
                 order.instrument_id,
                 order.client_order_id,
-                "Rithmic trading disabled (enable_trading=False)",
+                _TRADING_DISABLED_REASON,
                 self._clock.timestamp_ns(),
             )
             return
@@ -1560,7 +1567,7 @@ class RithmicExecutionClient(LiveExecutionClient):
             price_type = nautilus_order_type_to_rithmic(order.order_type)
             duration = nautilus_tif_to_rithmic(order.time_in_force)
             trail_by_ticks = trailing_ticks_from_order(order)
-        except (OrderMapError, ValueError) as exc:
+        except ValueError as exc:
             self.generate_order_denied(
                 order.strategy_id,
                 order.instrument_id,
@@ -1625,7 +1632,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                     order.strategy_id,
                     order.instrument_id,
                     order.client_order_id,
-                    "Rithmic trading disabled (enable_trading=False)",
+                    _TRADING_DISABLED_REASON,
                     self._clock.timestamp_ns(),
                 )
             return
@@ -1649,7 +1656,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                 command.instrument_id,
                 command.client_order_id,
                 VenueOrderId("UNKNOWN"),
-                "Rithmic trading disabled (enable_trading=False)",
+                _TRADING_DISABLED_REASON,
                 self._clock.timestamp_ns(),
             )
             return
@@ -1689,7 +1696,7 @@ class RithmicExecutionClient(LiveExecutionClient):
             symbol, exchange = self._route(command.instrument_id)
             price_type = nautilus_order_type_to_rithmic(order.order_type)
             trail_by_ticks = trailing_ticks_from_order(order)
-        except (OrderMapError, ValueError) as exc:
+        except ValueError as exc:
             self.generate_order_modify_rejected(
                 command.strategy_id,
                 command.instrument_id,
@@ -1704,15 +1711,13 @@ class RithmicExecutionClient(LiveExecutionClient):
             if command.quantity is not None
             else int(order.quantity)
         )
-        price = (
-            float(command.price)
-            if command.price is not None
-            else (float(order.price) if order.has_price else None)
-        )
+        order_price = float(order.price) if order.has_price else None
+        price = float(command.price) if command.price is not None else order_price
+        order_trigger = float(order.trigger_price) if order.has_trigger_price else None
         trigger = (
             float(command.trigger_price)
             if command.trigger_price is not None
-            else (float(order.trigger_price) if order.has_trigger_price else None)
+            else order_trigger
         )
         try:
             await asyncio.to_thread(
@@ -1737,7 +1742,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                 command.instrument_id,
                 command.client_order_id,
                 command.venue_order_id or VenueOrderId("UNKNOWN"),
-                "Rithmic trading disabled (enable_trading=False)",
+                _TRADING_DISABLED_REASON,
                 self._clock.timestamp_ns(),
             )
             return

@@ -78,7 +78,9 @@ def runtime_base_dir() -> str:
     xdg = os.environ.get("XDG_RUNTIME_DIR")
     if xdg and xdg.strip():
         return xdg
-    tmp = os.environ.get("TMPDIR") or "/tmp"
+    # Mirrors Rust ``runtime_dir::runtime_base_dir``: TMPDIR or /tmp; TEMP/TMP
+    # are deliberately ignored so Python and Rust resolve the same base dir.
+    tmp = os.environ.get("TMPDIR") or "/tmp"  # nosec B108
     uid = os.getuid()
     path = Path(tmp) / f"rgw-{uid}"
     path.mkdir(parents=True, exist_ok=True)
@@ -105,7 +107,8 @@ def _clamp_unix_path(path: str, hash_u64: int) -> str:
         return path
     # Never place default socks directly in sticky /tmp — use private 0700 dir.
     uid = os.getuid()
-    base = Path("/tmp") / f"rgw-{uid}"
+    # Mirrors Rust ``runtime_dir::clamp_unix_path``: private 0700 dir under /tmp.
+    base = Path("/tmp") / f"rgw-{uid}"  # nosec B108
     base.mkdir(parents=True, exist_ok=True)
     st = base.stat()
     if st.st_uid != uid:
@@ -168,7 +171,10 @@ class GatewayConfig:
 
     @property
     def socket_path(self) -> str:
-        assert self.listen is not None
+        if self.listen is None:
+            raise ValueError(
+                "GatewayConfig.listen is not set; call from_env or pass listen=...",
+            )
         return parse_listen_url(self.listen)
 
     @classmethod

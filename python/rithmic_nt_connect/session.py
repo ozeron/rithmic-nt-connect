@@ -203,9 +203,9 @@ def create_rust_session(
 
     from rithmic_nt_connect._lib import Session
 
-    SessionLock = _load_session_lock()
+    session_lock = _load_session_lock()
 
-    lock = SessionLock.try_acquire(
+    lock = session_lock.try_acquire(
         session.user, session.system_name, session.url, session.env
     )
     inner = Session(
@@ -329,7 +329,8 @@ class _FlockedDirectSession:
         # poll and takes no timeout argument (the gateway client's blocking
         # ``_poll_filtered`` accepts ``timeout_ms``); a ``0`` forward would
         # raise ``TypeError`` on the direct path. The facade keeps the shared
-        # signature but never passes the arg to the inner session.
+        # signature but ignores the arg on the direct path.
+        del timeout_ms
         return self._inner.poll_event()
 
     def load_ticks(

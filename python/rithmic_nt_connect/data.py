@@ -831,12 +831,13 @@ class RithmicDataClient(LiveMarketDataClient):
         return bar_types_for_event(self._bar_types, event)
 
     async def _subscribe_trade_ticks(self, command: SubscribeTradeTicks) -> None:
-        symbol, exchange = self._route(command.instrument_id)
-        await asyncio.to_thread(self._session.subscribe, symbol, exchange)
-        self._subscriptions.add((symbol, exchange))
+        await self._subscribe_symbol(command.instrument_id)
 
     async def _subscribe_quote_ticks(self, command: SubscribeQuoteTicks) -> None:
-        symbol, exchange = self._route(command.instrument_id)
+        await self._subscribe_symbol(command.instrument_id)
+
+    async def _subscribe_symbol(self, instrument_id: Any) -> None:
+        symbol, exchange = self._route(instrument_id)
         await asyncio.to_thread(self._session.subscribe, symbol, exchange)
         self._subscriptions.add((symbol, exchange))
 
@@ -960,7 +961,7 @@ class RithmicDataClient(LiveMarketDataClient):
                 price_precision=prec,
                 ts_init=ts_init,
             )
-        except (ConvertError, ValueError) as exc:
+        except ValueError as exc:
             self._log.error(f"Invalid history tick for {request.instrument_id}: {exc}")
             self._handle_trade_ticks(
                 request.instrument_id,
@@ -1051,7 +1052,7 @@ class RithmicDataClient(LiveMarketDataClient):
                 price_precision=prec,
                 ts_init=ts_init,
             )
-        except (ConvertError, ValueError) as exc:
+        except ValueError as exc:
             self._log.error(f"Invalid history bar for {bar_type}: {exc}")
             self._handle_bars(
                 bar_type,

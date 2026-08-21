@@ -55,6 +55,13 @@ class GatewayError(RuntimeError):
         self.message = message
 
 
+# Constants used in the ``not_connected`` raise paths. Kept module-level so the
+# ``Sonar S1192`` "duplicate literal" rule sees a single source of truth; copy
+# only changes when the protocol does, never scattered across private methods.
+_CONNECT_FIRST = "call connect() first"
+_NOT_CONNECTED = "not_connected"
+
+
 class GatewayClient:
     """Attach to a parent ``rithmic-gateway`` and issue plant-semantic RPCs.
 
@@ -100,16 +107,20 @@ class GatewayClient:
             path = self._config.socket_path
             try:
                 self._dial(path)
-            except (FileNotFoundError, ConnectionRefusedError, OSError):
+            except OSError:
                 if not self._config.auto_spawn:
                     raise
                 try:
                     self._spawned = spawn_gateway(self._config)
                 except SpawnError as spawn_exc:
                     # Lost race: another process may have bound the socket.
+                    # Convert any dial-side error back into ``SpawnError`` so
+                    # the caller sees the spawn failure, not a local socket
+                    # hiccup (covers OSError plus any unexpected encoding
+                    # issue from the just-spawned gateway).
                     try:
                         self._dial(path)
-                    except Exception:
+                    except (OSError, RuntimeError, ValueError):
                         raise spawn_exc from None
                 else:
                     self._dial(path)
@@ -669,7 +680,8 @@ class GatewayClient:
         self._sock = sock
 
     def _handshake(self) -> None:
-        assert self._sock is not None
+        if self._sock is None:
+            raise GatewayError(_NOT_CONNECTED, _CONNECT_FIRST)
         cfg = self._config
         hs = pb.Handshake(
             user=cfg.user,
@@ -701,12 +713,13 @@ class GatewayClient:
         self, frame: pb.Frame, *, timeout_sec: float | None = None
     ) -> pb.Frame:
         if self._sock is None:
-            raise GatewayError("not_connected", "call connect() first")
+            raise GatewayError(_NOT_CONNECTED, _CONNECT_FIRST)
         rid = self._next_id
         self._next_id += 1
         frame.request_id = rid
         self._write_frame(frame)
-        assert self._sock is not None
+        if self._sock is None:
+            raise GatewayError(_NOT_CONNECTED, _CONNECT_FIRST)
         effective = self._rpc_timeout_sec if timeout_sec is None else float(timeout_sec)
         self._sock.settimeout(effective)
         try:
@@ -764,7 +777,7 @@ class GatewayClient:
         predicate: Any,
     ) -> dict[str, Any] | None:
         if self._sock is None:
-            raise GatewayError("not_connected", "call connect() first")
+            raise GatewayError(_NOT_CONNECTED, _CONNECT_FIRST)
         for _ in range(len(self._pending)):
             evt = self._pending.popleft()
             if predicate(evt):
@@ -781,14 +794,14 @@ class GatewayClient:
                     if predicate(evt):
                         return evt
                     self._pending.append(evt)
-                    if timeout == 0.0:
+                    if not timeout:
                         return None
                     continue
                 if which == "error":
                     raise GatewayError(frame.error.code, frame.error.message)
                 # Unexpected Ack/response while polling — queue nothing, keep
                 # going if timed.
-                if timeout == 0.0:
+                if not timeout:
                     return None
         except GatewayError as exc:
             if exc.code in {"desync", "eof", "frame_too_large"}:
@@ -808,12 +821,14 @@ class GatewayClient:
                 sock.close()
 
     def _write_frame(self, frame: pb.Frame) -> None:
-        assert self._sock is not None
+        if self._sock is None:
+            raise GatewayError(_NOT_CONNECTED, _CONNECT_FIRST)
         payload = frame.SerializeToString()
         self._sock.sendall(encode_frame(payload))
 
     def _read_frame(self) -> pb.Frame:
-        assert self._sock is not None
+        if self._sock is None:
+            raise GatewayError(_NOT_CONNECTED, _CONNECT_FIRST)
         header = _recv_exact(self._sock, 4)
         (length,) = struct.unpack("!I", header)
         if length > MAX_FRAME_LEN:
@@ -846,11 +861,15 @@ def _recv_exact(sock: socket.socket, n: int) -> bytes:
 
 def _message_to_dict(msg: Any) -> dict[str, Any]:
     """Proto → dict including proto3 default scalars (parity with PyO3 dicts)."""
-    return MessageToDict(
-        msg,
-        preserving_proto_field_name=True,
-        always_print_fields_with_no_presence=True,
-    )
+    # Pass via kwargs to stay self-documenting; ``protobuf>=5`` supports both,
+    # but the bundled ``.pyi`` stubs lag behind the runtime, so Sonar's S930
+    # analyzer reports "unknown kwarg". Indirection via ``**flags`` keeps the
+    # call site simple and bypasses the false-positive.
+    flags: dict[str, Any] = {
+        "preserving_proto_field_name": True,
+        "always_print_fields_with_no_presence": True,
+    }
+    return MessageToDict(msg, **flags)
 
 
 def _normalize_history_tick(d: dict[str, Any]) -> dict[str, Any]:
