@@ -28,8 +28,8 @@ def test_future_from_reference_uses_tick_size_and_underlying():
     assert str(instrument.id) == "NQU6.RITHMIC"
     assert instrument.underlying == "NQ"
     assert instrument.price_precision == 2
-    assert float(instrument.price_increment) == 0.25
-    assert float(instrument.multiplier) == 20.0
+    assert float(instrument.price_increment) == pytest.approx(0.25)
+    assert float(instrument.multiplier) == pytest.approx(20.0)
     assert instrument.info["rithmic_symbol"] == "NQU6"
     assert instrument.activation_ns == 0
 

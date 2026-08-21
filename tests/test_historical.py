@@ -93,7 +93,7 @@ def test_load_trade_ticks_uses_session_window() -> None:
     end = datetime.fromtimestamp(1_700_000_010, tz=UTC)
     ticks = load_trade_ticks(session, instrument, start, end)
     assert len(ticks) == 1
-    assert float(ticks[0].price) == 21000.25
+    assert float(ticks[0].price) == pytest.approx(21000.25)
 
 
 def test_load_front_month_rejects_bad_ref() -> None:

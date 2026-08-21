@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from _stubs import WireSessionStub
 from rithmic_nt_connect._convert import (
     bbo_to_fields,
@@ -30,7 +31,7 @@ def test_last_trade_fields_to_trade_tick():
     fields = last_trade_to_fields(raw)
     tick = fields_to_trade_tick(fields, ts_init=1_700_000_000_000_000_001)
     assert str(tick.instrument_id) == "NQU6.RITHMIC"
-    assert float(tick.price) == 20000.25
+    assert float(tick.price) == pytest.approx(20000.25)
 
 
 def test_trade_tick_ids_unique_per_message() -> None:
@@ -73,7 +74,7 @@ def test_trade_tick_uses_instrument_price_precision() -> None:
     assert inferred.price.precision == 1
     tick = fields_to_trade_tick(fields, ts_init=1, price_precision=2)
     assert tick.price.precision == 2
-    assert float(tick.price) == 21012.5
+    assert float(tick.price) == pytest.approx(21012.5)
 
 
 def test_bbo_fields_to_quote_tick():
@@ -91,8 +92,8 @@ def test_bbo_fields_to_quote_tick():
     fields = bbo_to_fields(raw)
     assert fields is not None
     tick = fields_to_quote_tick(fields, ts_init=1)
-    assert float(tick.bid_price) == 1.0
-    assert float(tick.ask_price) == 2.0
+    assert float(tick.bid_price) == pytest.approx(1.0)
+    assert float(tick.ask_price) == pytest.approx(2.0)
 
 
 def test_order_book_fields_to_deltas():
@@ -274,16 +275,16 @@ def test_bbo_state_cleared_on_quote_unsubscribe_and_resync() -> None:
 
     class Sess(WireSessionStub):
         def reset_ticker(self) -> None:
-            pass
+            pass  # Stub: not exercised on the unsubscribe path.
 
         def unsubscribe(self, symbol: str, exchange: str) -> None:
-            pass
+            pass  # Stub: same-call assertions live in the test above.
 
         def subscribe(self, symbol: str, exchange: str) -> None:
-            pass
+            pass  # Stub: re-issue happens on the connect path, not here.
 
         def subscribe_order_book_summary(self, symbol: str, exchange: str) -> None:
-            pass
+            pass  # Stub: book subscribe is not on the unsubscribe path.
 
         def subscribe_time_bars(
             self, symbol: str, exchange: str, bar_type: int, period: int
@@ -327,7 +328,7 @@ def test_connect_reissues_intent_and_resets_derived_state() -> None:
         _inner = None
 
         def connect(self) -> None:
-            pass
+            pass  # Stub: reconnect just flips the connected flag in the client.
 
         def subscribe(self, symbol: str, exchange: str) -> None:
             calls.append(("subscribe", symbol, exchange))
@@ -348,7 +349,7 @@ def test_connect_reissues_intent_and_resets_derived_state() -> None:
 
     class Provider:
         async def initialize(self) -> None:
-            pass
+            pass  # Stub: provider is empty, init is irrelevant for this test.
 
         def list_all(self) -> list:
             return []

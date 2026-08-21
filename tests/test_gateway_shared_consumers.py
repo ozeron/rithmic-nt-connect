@@ -68,7 +68,7 @@ def _serve_shared_md_parent(sock_path: Path, *, clients: int = 2) -> threading.T
                 conn.settimeout(0.5)
                 try:
                     req = _read_frame(conn)
-                except (TimeoutError, ConnectionError, OSError):
+                except OSError:
                     # Also push any pending fan-out periodically.
                     continue
                 which = req.WhichOneof("body")

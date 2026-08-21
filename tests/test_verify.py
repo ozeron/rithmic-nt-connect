@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from _stubs import WireSessionStub
 from rithmic_nt_connect.front_month import FrontMonthError, resolve_front_month
 from rithmic_nt_connect.verify import (
@@ -109,8 +110,8 @@ def test_compare_ticks_overlap():
     ]
     cmp = compare_ticks(live, hist)
     assert cmp["matched"] == 2
-    assert cmp["overlap_ratio"] == 1.0
-    assert cmp["max_price_diff"] == 0.0
+    assert cmp["overlap_ratio"] == pytest.approx(1.0)
+    assert cmp["max_price_diff"] == pytest.approx(0.0)
 
 
 def test_compare_ticks_window_uses_min_max_not_list_ends():
@@ -145,7 +146,7 @@ def test_compare_detects_usec_truncation_as_fuzzy():
     assert cmp["live_only"] == 1
     assert cmp["history_only"] == 1
     assert cmp["fuzzy_second_matches"] == 1
-    assert cmp["live_only_samples"][0]["price"] == 21000.25
+    assert cmp["live_only_samples"][0]["price"] == pytest.approx(21000.25)
     assert any("usecs truncated" in n for n in cmp["notes"])
 
 

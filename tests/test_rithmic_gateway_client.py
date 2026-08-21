@@ -83,7 +83,7 @@ def test_spawn_injects_idle_exit_sec_default(
             return None
 
         def terminate(self) -> None:
-            pass
+            pass  # Stub: spawn tests never trigger graceful shutdown.
 
     def _popen(*_a: object, **kwargs: Any) -> _Proc:
         captured.update(kwargs.get("env") or {})
@@ -128,7 +128,7 @@ def test_spawn_preserves_explicit_idle_exit_sec(
             return None
 
         def terminate(self) -> None:
-            pass
+            pass  # Stub: spawn tests never trigger graceful shutdown.
 
     def _popen(*_a: object, **kwargs: Any) -> _Proc:
         captured.update(kwargs.get("env") or {})
@@ -173,7 +173,7 @@ def test_spawn_preserves_zero_idle_exit_sec(
             return None
 
         def terminate(self) -> None:
-            pass
+            pass  # Stub: spawn tests never trigger graceful shutdown.
 
     def _popen(*_a: object, **kwargs: Any) -> _Proc:
         captured.update(kwargs.get("env") or {})
@@ -319,10 +319,10 @@ def test_spawn_happy_path_requires_flock_not_just_listen(
             return None
 
         def terminate(self) -> None:
-            pass
+            pass  # Stub: spawn tests never trigger graceful shutdown.
 
         def kill(self) -> None:
-            pass
+            pass  # Stub: spawn tests never trigger forceful shutdown.
 
         def wait(self, timeout: float | None = None) -> int:
             return 0
@@ -452,7 +452,7 @@ def test_load_ticks_adds_trade_price_aliases() -> None:
     try:
         client.connect()
         rows = client.load_ticks("NQ", "CME", 1, 2)
-        assert rows[0]["trade_price"] == 1.5
+        assert rows[0]["trade_price"] == pytest.approx(1.5)
         assert int(rows[0]["trade_size"]) == 3
         client.disconnect()
     finally:

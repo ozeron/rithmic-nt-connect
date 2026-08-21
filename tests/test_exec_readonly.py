@@ -25,7 +25,7 @@ def test_account_pnl_fields_build_balance():
     currency = Currency.from_str(str(fields.get("currency", "USD")))
     free = Money(Decimal(str(fields["cash_on_hand"])), currency)
     bal = AccountBalance(free, Money(Decimal(0), currency), free)
-    assert float(bal.free) == 1000.0
+    assert float(bal.free) == pytest.approx(1000.0)
     assert AccountId(f"{VENUE}-{fields['account_id']}").value.startswith(f"{VENUE}-")
 
 
@@ -69,7 +69,7 @@ def test_instrument_pnl_to_position_fields():
     assert fields["position_side"] == "SHORT"
     assert fields["quantity"] == 2
     assert fields["instrument_id"] == "NQU6.RITHMIC"
-    assert fields["avg_px_open"] == 21000.5
+    assert fields["avg_px_open"] == pytest.approx(21000.5)
 
 
 def test_instrument_pnl_flat_when_zero_net():

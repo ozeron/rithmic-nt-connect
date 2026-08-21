@@ -68,8 +68,8 @@ ORDER_BOOK_FIXTURE = {
 def test_last_trade_fixture_to_trade_fields() -> None:
     fields = last_trade_to_fields(LAST_TRADE_FIXTURE)
     assert fields["instrument_id"] == f"NQU6.{VENUE}"
-    assert fields["price"] == 21012.5
-    assert fields["size"] == 1.0
+    assert fields["price"] == pytest.approx(21012.5)
+    assert fields["size"] == pytest.approx(1.0)
     assert fields["ts_event"] == 1_700_000_000 * 1_000_000_000 + 123456 * 1_000
     assert fields["type"] == "trade"
 
@@ -78,10 +78,10 @@ def test_bbo_fixture_to_quote_fields() -> None:
     fields = bbo_to_fields(BBO_FIXTURE)
     assert fields is not None
     assert fields["instrument_id"] == f"NQU6.{VENUE}"
-    assert fields["bid_price"] == 21012.0
-    assert fields["ask_price"] == 21012.25
-    assert fields["bid_size"] == 3.0
-    assert fields["ask_size"] == 2.0
+    assert fields["bid_price"] == pytest.approx(21012.0)
+    assert fields["ask_price"] == pytest.approx(21012.25)
+    assert fields["bid_size"] == pytest.approx(3.0)
+    assert fields["ask_size"] == pytest.approx(2.0)
     assert fields["type"] == "quote"
 
 
@@ -137,10 +137,10 @@ def test_one_sided_bbo_merges_into_two_sided_quote() -> None:
     )
     assert fields is not None
     assert fields["instrument_id"] == f"NQU6.{VENUE}"
-    assert fields["bid_price"] == 21012.0
-    assert fields["ask_price"] == 21012.25
-    assert fields["bid_size"] == 3.0
-    assert fields["ask_size"] == 2.0
+    assert fields["bid_price"] == pytest.approx(21012.0)
+    assert fields["ask_price"] == pytest.approx(21012.25)
+    assert fields["bid_size"] == pytest.approx(3.0)
+    assert fields["ask_size"] == pytest.approx(2.0)
     assert fields["ts_event"] == 1_700_000_000_000_000_001
 
 
@@ -165,7 +165,7 @@ def test_order_book_fixture_to_fields() -> None:
     assert fields["type"] == "order_book"
     assert len(fields["levels"]) == 4
     assert fields["levels"][0]["side"] == "BUY"
-    assert fields["levels"][0]["price"] == 21012.0
+    assert fields["levels"][0]["price"] == pytest.approx(21012.0)
     assert fields["levels"][-1]["side"] == "SELL"
     assert fields["ts_event"] == 1_700_000_000 * 1_000_000_000 + 300000 * 1_000
 
