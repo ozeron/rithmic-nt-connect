@@ -681,6 +681,40 @@ class RithmicExecutionClient(LiveExecutionClient):
                 continue
             yield row
 
+    def _latest_drain_rows(
+        self, events: list[dict[str, Any]]
+    ) -> dict[str, _DrainRowResult]:
+        """Keep only the freshest drain row per basket id."""
+        latest: dict[str, _DrainRowResult] = {}
+        for row in self._iter_drain_rows(events):
+            key = str(row.fields["basket_id"])
+            if key not in latest or row.ts_event >= latest[key].ts_event:
+                latest[key] = row
+        return latest
+
+    def _drain_row_is_stale(
+        self,
+        client_order_id: ClientOrderId,
+        row: _DrainRowResult,
+    ) -> bool:
+        """Live-stream state wins over a drained snapshot when it is ahead."""
+        order = self._cache.order(client_order_id)
+        if order is not None and getattr(order, "is_closed", False):
+            # The live stream resolved this order to a terminal state
+            # while we drained; never publish a stale snapshot over it.
+            return True
+        # Same freshness rule as ``_resolve_inflight_by_tag``: the
+        # live stream wins over the stale drain snapshot. Only when
+        # the drain row carries a real venue timestamp: ``0`` is the
+        # iterator's synthetic missing-ts value, and skipping on it
+        # would drop a valid snapshot (never publishing nor
+        # binding) whenever the tracked order has any live history.
+        return bool(
+            order is not None
+            and row.ts_event
+            and (int(getattr(order, "ts_last", 0) or 0) > row.ts_event)
+        )
+
     def _apply_drain_rows(self, events: list[dict[str, Any]]) -> None:
         """Apply a working-orders drain to the local cache before re-arming.
 
@@ -695,12 +729,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         before trading resumes, so the barrier aborts (the plant stays
         un-armed).
         """
-        latest: dict[str, _DrainRowResult] = {}
-        for row in self._iter_drain_rows(events):
-            key = str(row.fields["basket_id"])
-            if key not in latest or row.ts_event >= latest[key].ts_event:
-                latest[key] = row
-        for row in latest.values():
+        for row in self._latest_drain_rows(events).values():
             fields = row.fields
             basket = str(fields["basket_id"])
             report = row.report
@@ -709,24 +738,10 @@ class RithmicExecutionClient(LiveExecutionClient):
                 # type for the checker.
                 continue
             client_order_id = self._drain_client_order_id(fields)
-            if client_order_id is not None:
-                order = self._cache.order(client_order_id)
-                if order is not None and getattr(order, "is_closed", False):
-                    # The live stream resolved this order to a terminal state
-                    # while we drained; never publish a stale snapshot over it.
-                    continue
-                if (
-                    order is not None
-                    and row.ts_event
-                    and (int(getattr(order, "ts_last", 0) or 0) > row.ts_event)
-                ):
-                    # Same freshness rule as ``_resolve_inflight_by_tag``: the
-                    # live stream wins over the stale drain snapshot. Only when
-                    # the drain row carries a real venue timestamp: ``0`` is the
-                    # iterator's synthetic missing-ts value, and skipping on it
-                    # would drop a valid snapshot (never publishing nor
-                    # binding) whenever the tracked order has any live history.
-                    continue
+            if client_order_id is not None and self._drain_row_is_stale(
+                client_order_id, row
+            ):
+                continue
             # Apply (publish) BEFORE binding the venue id — commit ordering:
             # the engine must receive the reconciled status before trading
             # resumes, so a failed publication fails the barrier (raises) and
@@ -790,74 +805,94 @@ class RithmicExecutionClient(LiveExecutionClient):
         on_event: Callable[[dict[str, Any]], None],
         on_resync: Callable[[], Any],
     ) -> None:
-        backoff = 0.05
         # Stream-lifetime state, local to this loop: a new loop (reconnect)
         # starts at zero and a successful resubscribe resets it, so a transient
         # run can never carry across stream lifetimes (the 4-before-drop + 1-
         # after-recovery latch class is structurally impossible).
+        backoff = 0.05
         transient_streak = 0
         while True:
+            outcome = await self._poll_iteration(
+                name=name,
+                poll_fn=poll_fn,
+                on_event=on_event,
+                on_resync=on_resync,
+                backoff=backoff,
+                transient_streak=transient_streak,
+            )
+            if outcome is None:
+                return
+            backoff, transient_streak = outcome
+
+    async def _poll_iteration(
+        self,
+        *,
+        name: str,
+        poll_fn: Callable[[], dict[str, Any] | None],
+        on_event: Callable[[dict[str, Any]], None],
+        on_resync: Callable[[], Any],
+        backoff: float,
+        transient_streak: int,
+    ) -> tuple[float, int] | None:
+        """Run one poll iteration; return updated ``(backoff, transient_streak)``
+        to continue, or ``None`` when the stream must stop (order latch)."""
+        try:
+            event = await self._poll_session_event(poll_fn)
+        except _PollTransientError as exc:
+            # A persistent non-channel failure on the order stream means
+            # notifications are not being processed: fail closed (latch)
+            # rather than keep polling garbage. PnL keeps transient
+            # semantics (soft-fail is the operator's escape).
+            if name == "order":
+                transient_streak += 1
+                if transient_streak >= self._ORDER_POLL_MAX_TRANSIENT:
+                    self._log.error(f"{name} poll stream failing persistently: {exc}")
+                    self._latch_order_plant("order poll stream failure", str(exc))
+                    return None
+            await asyncio.sleep(0.1)
+            return backoff, transient_streak
+        except Exception as exc:
+            self._log.error(f"{name} poll channel error: {exc}")
+            if name == "order":
+                self._order_plant.resync_start()
             try:
-                event = await self._poll_session_event(poll_fn)
-            except _PollTransientError as exc:
-                # A persistent non-channel failure on the order stream means
-                # notifications are not being processed: fail closed (latch)
-                # rather than keep polling garbage. PnL keeps transient
-                # semantics (soft-fail is the operator's escape).
+                await on_resync()
+                self._log.warning(f"{name} subscription resynced after channel error")
+                backoff = 0.05
                 if name == "order":
-                    transient_streak += 1
-                    if transient_streak >= self._ORDER_POLL_MAX_TRANSIENT:
-                        self._log.error(
-                            f"{name} poll stream failing persistently: {exc}"
-                        )
-                        self._latch_order_plant("order poll stream failure", str(exc))
-                        break
-                await asyncio.sleep(0.1)
-                continue
-            except Exception as exc:
-                self._log.error(f"{name} poll channel error: {exc}")
+                    # Fresh stream lifetime: the old transient run must not
+                    # count toward the recovered stream.
+                    transient_streak = 0
+            except Exception as resync_exc:
+                self._log.error(f"{name} subscription resync failed: {resync_exc}")
                 if name == "order":
-                    self._order_plant.resync_start()
-                try:
-                    await on_resync()
-                    self._log.warning(
-                        f"{name} subscription resynced after channel error"
-                    )
-                    backoff = 0.05
-                    if name == "order":
-                        # Fresh stream lifetime: the old transient run must not
-                        # count toward the recovered stream.
-                        transient_streak = 0
-                except Exception as resync_exc:
-                    self._log.error(f"{name} subscription resync failed: {resync_exc}")
-                    if name == "order":
-                        # A failed resync is a dead stream: the plant machine
-                        # moves to DISCONNECTED (or stays LATCHED), so a
-                        # concurrent reconnect re-arm barrier can never clear a
-                        # latch over it, and a later resync cannot re-arm it.
-                        self._order_plant.resync_failed()
-                    backoff = min(backoff * 2, 2.0)
-                await asyncio.sleep(backoff)
-                continue
-            if event is None:
-                await asyncio.sleep(0.05)
-                continue
-            try:
-                on_event(event)
-            except Exception as exc:
-                self._log.exception(f"{name} event handler error (suppressed)", exc)
-                if name == "order":
-                    # A handler failure can leave venue and cache state divergent.
-                    # Stop the order stream and fail closed instead of continuing
-                    # to accept commands against stale execution state. Latch
-                    # (not just DISCONNECTED): the re-arm barrier (keyed on
-                    # plant state) must never clear a latch over a dead stream.
-                    self._latch_order_plant(
-                        "order handler failure",
-                        f"order stream stopped; venue/cache state may be "
-                        f"divergent: {exc}",
-                    )
-                    break
+                    # A failed resync is a dead stream: the plant machine
+                    # moves to DISCONNECTED (or stays LATCHED), so a
+                    # concurrent reconnect re-arm barrier can never clear a
+                    # latch over it, and a later resync cannot re-arm it.
+                    self._order_plant.resync_failed()
+                backoff = min(backoff * 2, 2.0)
+            await asyncio.sleep(backoff)
+            return backoff, transient_streak
+        if event is None:
+            await asyncio.sleep(0.05)
+            return backoff, transient_streak
+        try:
+            on_event(event)
+        except Exception as exc:
+            self._log.exception(f"{name} event handler error (suppressed)", exc)
+            if name == "order":
+                # A handler failure can leave venue and cache state divergent.
+                # Stop the order stream and fail closed instead of continuing
+                # to accept commands against stale execution state. Latch
+                # (not just DISCONNECTED): the re-arm barrier (keyed on
+                # plant state) must never clear a latch over a dead stream.
+                self._latch_order_plant(
+                    "order handler failure",
+                    f"order stream stopped; venue/cache state may be divergent: {exc}",
+                )
+                return None
+        return backoff, transient_streak
 
     def _dispatch_pnl_event(self, event: dict[str, Any]) -> None:
         etype = event.get("type")
@@ -1228,66 +1263,93 @@ class RithmicExecutionClient(LiveExecutionClient):
                     ts_event,
                 )
         elif action.kind == "filled":
-            if action.fill_qty is None or action.trade_id is None:
-                self._log.error(
-                    f"fill action missing fields: {slim_order_fields(fields)}"
-                )
-                return
-            dedup = fill_dedup_key(fields, ts_event=ts_event)
-            if self._fill_key_seen(dedup):
-                return
-            try:
-                fill_qty = Quantity.from_int(int(action.fill_qty))
-                if action.fill_px is None:
-                    raise ValueError("fill price missing (pending/sentinel)")
-                fill_px = self._price_for_instrument(instrument_id, action.fill_px)
-            except (TypeError, ValueError, OverflowError) as exc:
-                # A definitive venue fill we cannot price (absent price or the
-                # -1.0 pending-price sentinel) means local exposure is known to
-                # be incomplete. The dedup key is NOT consumed, so a later
-                # priced replay of the same fill id can still recover; the
-                # plant is latched (fail-closed) until a recon re-syncs.
-                self._latch_order_plant(
-                    "fill suppressed",
-                    f"tracked {client_order_id} fill unpriceable ({exc}); "
-                    "exposure may be incomplete; recon will re-sync",
-                )
-                return
-            # A2: a unique venue fill beyond the local remaining qty is real
-            # (never-drop, never cap): Nautilus 1.231.x clamps ``leaves_qty``
-            # to zero and accumulates the excess in ``overfill_qty``. Latch so
-            # a recon cycle re-syncs the cache (a missed partial is usually the
-            # cause); the fill is still emitted at its true size.
-            leaves = order.leaves_qty
-            if leaves is not None and fill_qty > leaves:
-                self._latch_order_plant(
-                    "overfill",
-                    f"tracked {client_order_id} fill qty {fill_qty} exceeds "
-                    f"leaves {leaves} by {fill_qty - leaves}; Nautilus clamps "
-                    "leaves_qty and tracks overfill_qty; recon will re-sync",
-                )
-            commission = self._commission_money(
-                self._product_code_for_fill(instrument_id, fields.get("symbol")),
-                int(fill_qty),
-            )
-            self.generate_order_filled(
-                strategy_id,
-                instrument_id,
+            self._handle_tracked_fill(
+                order,
                 client_order_id,
                 venue_order_id,
-                None,
-                TradeId(str(action.trade_id)),
-                order.side,
-                order.order_type,
-                fill_qty,
-                fill_px,
-                Currency.from_str("USD"),
-                commission,
-                LiquiditySide.NO_LIQUIDITY_SIDE,
+                fields,
                 ts_event,
-                info={"rithmic": dict(fields)},
+                action,
             )
-            self._mark_fill_key(dedup)
+
+    def _handle_tracked_fill(
+        self,
+        order: Any,
+        client_order_id: ClientOrderId,
+        venue_order_id: VenueOrderId,
+        fields: dict[str, Any],
+        ts_event: int,
+        action: Any,
+    ) -> None:
+        """Emit one venue-priced tracked fill; dedup by venue trade id.
+
+        Honesty rules enforced here (single home):
+        - an unpriceable definitive fill latches fail-closed WITHOUT consuming
+          the dedup key, so a later priced replay can recover;
+        - a unique overfill is still emitted at true size (never dropped,
+          never capped) but latches for recon;
+        - the dedup key is marked only after successful publication.
+        """
+        strategy_id = order.strategy_id
+        instrument_id = order.instrument_id
+        if action.fill_qty is None or action.trade_id is None:
+            self._log.error(f"fill action missing fields: {slim_order_fields(fields)}")
+            return
+        dedup = fill_dedup_key(fields, ts_event=ts_event)
+        if self._fill_key_seen(dedup):
+            return
+        try:
+            fill_qty = Quantity.from_int(int(action.fill_qty))
+            if action.fill_px is None:
+                raise ValueError("fill price missing (pending/sentinel)")
+            fill_px = self._price_for_instrument(instrument_id, action.fill_px)
+        except (TypeError, ValueError, OverflowError) as exc:
+            # A definitive venue fill we cannot price (absent price or the
+            # -1.0 pending-price sentinel) means local exposure is known to
+            # be incomplete. The dedup key is NOT consumed, so a later
+            # priced replay of the same fill id can still recover; the
+            # plant is latched (fail-closed) until a recon re-syncs.
+            self._latch_order_plant(
+                "fill suppressed",
+                f"tracked {client_order_id} fill unpriceable ({exc}); "
+                "exposure may be incomplete; recon will re-sync",
+            )
+            return
+        # A2: a unique venue fill beyond the local remaining qty is real
+        # (never-drop, never cap): Nautilus 1.231.x clamps ``leaves_qty``
+        # to zero and accumulates the excess in ``overfill_qty``. Latch so
+        # a recon cycle re-syncs the cache (a missed partial is usually the
+        # cause); the fill is still emitted at its true size.
+        leaves = order.leaves_qty
+        if leaves is not None and fill_qty > leaves:
+            self._latch_order_plant(
+                "overfill",
+                f"tracked {client_order_id} fill qty {fill_qty} exceeds "
+                f"leaves {leaves} by {fill_qty - leaves}; Nautilus clamps "
+                "leaves_qty and tracks overfill_qty; recon will re-sync",
+            )
+        commission = self._commission_money(
+            self._product_code_for_fill(instrument_id, fields.get("symbol")),
+            int(fill_qty),
+        )
+        self.generate_order_filled(
+            strategy_id,
+            instrument_id,
+            client_order_id,
+            venue_order_id,
+            None,
+            TradeId(str(action.trade_id)),
+            order.side,
+            order.order_type,
+            fill_qty,
+            fill_px,
+            Currency.from_str("USD"),
+            commission,
+            LiquiditySide.NO_LIQUIDITY_SIDE,
+            ts_event,
+            info={"rithmic": dict(fields)},
+        )
+        self._mark_fill_key(dedup)
 
     def _instrument_id_from_order_fields(
         self, fields: dict[str, Any]
