@@ -175,37 +175,47 @@ set.ignored = true
 [[triage]]
 # bandit B603 (subprocess untrusted input) + B404 (subprocess import) + B607
 # (partial executable path) flag every `subprocess.run` regardless of how
-# shell-safe it is. Our scripts/ invoke a fixed arglist (no shell, no
-# interpolation); our tests/ invoke `sys.executable` against the in-repo
-# `scripts/gateway_tick_consumer.py` for the contract test. Both are safe by
-# construction — silence the noise so the only remaining B603/B404/B607 hit
-# is a *new* call that adds a real path-injection risk.
+# shell-safe it is. Only the files below invoke subprocess: our scripts/ use a
+# fixed arglist (no shell, no interpolation) and our tests/ invoke
+# `sys.executable` against in-repo scripts — safe by construction. Scoped to
+# those exact files so any NEW subprocess call elsewhere stays visible.
 match.plugins = ["bandit"]
 match.rules = ["bandit:B603", "bandit:B404", "bandit:B607"]
-match.file_patterns = ["tests/**", "scripts/**"]
+match.file_patterns = [
+  "scripts/gen_gateway_proto.py",
+  "scripts/gen_nautilus_stubs.py",
+  "scripts/smoke_gateway_shared_ticks.py",
+  "tests/test_gateway_shared_consumers.py",
+  "tests/test_gateway_spawn_resolve.py",
+  "tests/test_rithmic_gateway_client.py",
+]
 set.ignored = true
 
 [[triage]]
-# bandit B110 (try / except / pass) and B112 (try / except / continue) over
-# the gateway dispatch / socket-edge recovery paths. Our recovery code
-# intentionally swallows narrow (TimeoutError, ConnectionError, OSError) to
-# keep the socket reconnect loop running on transient races; bandit's regex
-# doesn't follow the except tuple. Remaining B110/B112 in production code
-# still fire (those are real bugs we want humans to look at).
+# bandit B110 (try / except / pass) and B112 (try / except / continue) on the
+# four files with intentional swallow-and-continue recovery: the gateway
+# spawn/stderr drain and the optional-import / parse-fallback edges. Recovery
+# code swallows narrow (ImportError, TypeError, ValueError, OSError) to keep
+# reconnect/poll loops alive; bandit's regex doesn't follow the except tuple.
+# Any other production file with except-pass/continue still fires.
 match.plugins = ["bandit"]
 match.rules = ["bandit:B110", "bandit:B112"]
-match.file_patterns = ["python/**"]
+match.file_patterns = [
+  "python/rithmic_gateway/spawn.py",
+  "python/rithmic_nt_connect/_orders.py",
+  "python/rithmic_nt_connect/execution.py",
+  "python/rithmic_nt_connect/providers.py",
+]
 set.ignored = true
 
 [[triage]]
 # bandit B105/B106 flag the `"***"` redact placeholder in
-# ``python/rithmic_nt_connect/config.py`` and the literal password strings
-# in test fixtures used to assert redaction (defining a literal here is the
-# whole point of the test). Production credential paths read from env vars
-# / dotenv files and are never inline.
+# ``python/rithmic_nt_connect/config.py`` (defining a literal is the whole
+# point of redaction). Production credential paths read from env vars /
+# dotenv files and are never inline, so no other python/** file is exempted.
 match.plugins = ["bandit"]
 match.rules = ["bandit:B105", "bandit:B106", "bandit:B107"]
-match.file_patterns = ["python/**"]
+match.file_patterns = ["python/rithmic_nt_connect/config.py"]
 set.ignored = true
 
 [[triage]]

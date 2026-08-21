@@ -17,9 +17,13 @@ from pathlib import Path
 
 # Checkbox marks: [x] done · [~] partial · [ ] not started.
 MARK_RE = re.compile(r"\[([ xX~])\]")
+# Out-of-scope marker on status rows (`**N/A**` in tables, plain `N/A` elsewhere).
+NA_RE = re.compile(r"\bN/A\b")
 # Skip fenced code blocks.
 FENCE_RE = re.compile(r"^\s*(```|~~~)")
 SECTION_RE = re.compile(r"^##\s+(.*?)\s*$")
+# The generated scoreboard itself must never be re-parsed as work items.
+GENERATED_SECTION_PREFIX = "At-a-glance"
 # Rollup table row: | **Label** | total | done | partial | not started | N/A |
 ROLLUP_ROW_RE = re.compile(
     r"^\|\s*\*\*(.+?)\*\*\s*\|"
@@ -27,7 +31,8 @@ ROLLUP_ROW_RE = re.compile(
 )
 
 PREAMBLE = "(preamble)"
-KEYS = ("x", "~", " ")
+SKIPPED = "(skipped)"
+KEYS = ("x", "~", " ", "na")
 
 
 def _zero() -> dict[str, int]:
@@ -35,7 +40,13 @@ def _zero() -> dict[str, int]:
 
 
 def parse_marks(path: Path) -> tuple[dict[str, dict[str, int]], dict[str, int]]:
-    """Return (per-section counts, grand totals) for `[x]/[~]/[ ]` marks."""
+    """Return (per-section counts, grand totals) for status marks.
+
+    Counts ``[x]/[~]/[ ]`` checkboxes plus inline ``N/A`` markers. The
+    preamble (legend prose before the first heading) and the generated
+    At-a-glance section are excluded so their example glyphs are never
+    counted as work items.
+    """
     per_section: dict[str, dict[str, int]] = {PREAMBLE: _zero()}
     grand = _zero()
     section = PREAMBLE
@@ -47,9 +58,19 @@ def parse_marks(path: Path) -> tuple[dict[str, dict[str, int]], dict[str, int]]:
         if in_fence:
             continue
         if m := SECTION_RE.match(line):
-            section = m.group(1)
+            title = m.group(1)
+            if title.startswith(GENERATED_SECTION_PREFIX):
+                section = SKIPPED
+                continue
+            section = title
             per_section.setdefault(section, _zero())
             continue
+        if section in (PREAMBLE, SKIPPED):
+            continue
+        na = len(NA_RE.findall(line))
+        if na:
+            per_section[section]["na"] += na
+            grand["na"] += na
         for mm in MARK_RE.finditer(line):
             token = mm.group(1).lower()
             per_section[section][token] += 1
@@ -68,7 +89,8 @@ def rollup_rows(
 ) -> list[str]:
     """Render the At-a-glance scoreboard as markdown lines."""
     rows = [
-        "## At-a-glance (generated — run `python scripts/status_progress.py`)",
+        f"## {GENERATED_SECTION_PREFIX} "
+        "(generated — run `python scripts/status_progress.py`)",
         "",
         "Legend: **Done** `[x]` · **Partial** `[~]` · **Not started** `[ ]` · "
         "`N/A` out of scope.",
@@ -77,21 +99,23 @@ def rollup_rows(
         "| --- | ---: | ---: | ---: | ---: | ---: |",
     ]
     for name, counts in per_section.items():
-        if name == PREAMBLE:
+        if name in (PREAMBLE, SKIPPED):
             continue
         total = sum(counts[k] for k in KEYS)
         if total == 0:
             continue
         rows.append(
             f"| **{name}** | {total} | {counts['x']} | {counts['~']} | "
-            f"{counts[' ']} | 0 |"
+            f"{counts[' ']} | {counts['na']} |"
         )
     total = sum(grand[k] for k in KEYS)
     rows += [
-        f"| **TOTAL** | {total} | {grand['x']} | {grand['~']} | {grand[' ']} | 0 |",
+        f"| **TOTAL** | {total} | {grand['x']} | {grand['~']} | "
+        f"{grand[' ']} | {grand['na']} |",
         "",
-        f"**Implemented:** {pct(grand['x'], grand['~'], total)} "
-        f"(`{grand['x']}` done + `{grand['~']}` partial of `{total}` marked items; "
+        f"**Implemented:** {pct(grand['x'], grand['~'], total - grand['na'])} "
+        f"(`{grand['x']}` done + `{grand['~']}` partial of `{total - grand['na']}` "
+        f"in-scope marked items (`{grand['na']}` N/A excluded); "
         f"partial counts as half).",
     ]
     return rows
@@ -146,9 +170,12 @@ def main() -> int:
         if got is None:
             errors.append(f"  missing rollup row for '{label}'")
             continue
-        for i, name in enumerate(("Total", "Done", "Partial", "Not started")):
+        for i, name in enumerate(("Total", "Done", "Partial", "Not started", "N/A")):
             if got[i] != want[i]:
                 errors.append(f"  '{label}' {name}: doc={got[i]} parsed={want[i]}")
+    for label in doc_rows:
+        if label != "TOTAL" and label not in generated:
+            errors.append(f"  obsolete rollup row for '{label}'")
     if errors:
         print(
             "ERROR: STATUS.md At-a-glance rollup drifted from its marks:",

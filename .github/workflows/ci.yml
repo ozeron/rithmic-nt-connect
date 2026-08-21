@@ -64,9 +64,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      - uses: qltysh/qlty-action@08a0a862c159eae9b9003081da6663d96efef637 # v2
-        # No `qlty-cloud-token` here yet; running as `cli` keeps the gate
-        # entirely local — see docs/references/ops-runbook.md.
-        with:
-          args: --fail-level=medium
-          version: 0.642.0
+      # qlty's clippy plugin compiles the workspace (rithmic-gateway needs
+      # protoc for its generated session protobuf bindings).
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      # The action repo has no root entry point; `install` is the sub-action
+      # that puts the CLI on PATH. No qlty-cloud-token here yet — running as
+      # `cli` keeps the gate entirely local (docs/references/ops-runbook.md).
+      - uses: qltysh/qlty-action/install@08a0a862c159eae9b9003081da6663d96efef637 # v2.3.0
+      - name: Qlty check (changed files vs merge base; medium+ fails)
+        run: qlty check --fail-level=medium

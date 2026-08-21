@@ -25,19 +25,18 @@ Legend: `[ ]` not started · `[~]` partial / advertised but incomplete · `[x]` 
 
 ## At-a-glance (generated — run `python scripts/status_progress.py`)
 
-Regenerate with `python scripts/status_progress.py`. Drift check: `python scripts/status_progress.py --check`.
-Implemented % = done + half of partial. `N/A` is out of scope (not “not started”).
+Legend: **Done** `[x]` · **Partial** `[~]` · **Not started** `[ ]` · `N/A` out of scope.
 
 | Area | Total | Done | Partial | Not started | N/A |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| **Capability matrix** | 15 | 4 | 11 | 0 | 0 |
-| **Phase marks (0–9)** | 23 | 14 | 7 | 2 | 0 |
+| **Capability matrix** | 21 | 4 | 11 | 0 | 6 |
+| **Phase marks (0–9)** | 27 | 14 | 7 | 2 | 4 |
 | **Convention marks** | 18 | 14 | 4 | 0 | 0 |
-| **Close-outs (advertised path)** | 6 | 4 | 2 | 0 | 0 |
+| **Close-outs (advertised path)** | 7 | 4 | 2 | 0 | 1 |
 | **Paper path (intraday)** | 8 | 8 | 0 | 0 | 0 |
-| **TOTAL** | 73 | 45 | 25 | 3 | 0 |
+| **TOTAL** | 81 | 44 | 24 | 2 | 11 |
 
-**Implemented:** 79% (`45` done + `25` partial of `73` marked items; partial counts as half).
+**Implemented:** 80% (`44` done + `24` partial of `70` in-scope marked items (`11` N/A excluded); partial counts as half).
 
 Not started (real leftover work): Phase 2 definition updates, Phase 7 recovery suite, and one sub-item.
 

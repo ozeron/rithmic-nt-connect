@@ -97,6 +97,10 @@ hooks {
             ["ty"] {
                 check = "uv run ty check python/rithmic_nt_connect tests"
             }
+            // Python test gate (matches the CI `pytest` step).
+            ["pytest"] {
+                check = "uv run pytest -q"
+            }
             // qlty mirrors the CI PR gate. Defaults to changed files vs the
             // merge base (no `--all`), so pre-existing smells are
             // grandfathered while NEW findings fail. `--fail-level=medium`
