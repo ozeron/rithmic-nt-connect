@@ -304,7 +304,11 @@ _RECOGNIZABLE_KINDS = frozenset(
     }
 )
 
-_STATUS_MARKERS = ("OPEN", "WORKING", "CANCEL", "REJECT", "EXPIRED")
+# Status substrings that mark a drain row as a real venue order state.
+# "TRIGGER" covers resting stop rows ("TRIGGER_PENDING" / "trigger pending"):
+# live-proven on Rithmic Test 2026-08-21 — stops never emit an OPEN
+# notification, so this is the only state their drain rows ever carry.
+_STATUS_MARKERS = ("OPEN", "WORKING", "CANCEL", "REJECT", "EXPIRED", "TRIGGER")
 
 
 def _row_is_trustworthy(fields: dict[str, Any]) -> bool:
@@ -777,38 +781,71 @@ class RithmicExecutionClient(LiveExecutionClient):
             yield row
 
     def _latest_drain_rows(
-        self, events: list[dict[str, Any]]
+        self,
+        events: list[dict[str, Any]],
+        instrument_id: Any = None,
     ) -> dict[str, _DrainRowResult]:
-        """Keep only the freshest drain row per basket id."""
+        """Keep only the freshest drain row per basket id (optionally
+        filtered to one instrument — ``None`` matches every instrument)."""
         latest: dict[str, _DrainRowResult] = {}
         for row in self._iter_drain_rows(events):
+            if not self._matches_instrument(row.fields, instrument_id, None):
+                continue
             key = str(row.fields["basket_id"])
+            # Keep the latest row; on an equal timestamp (e.g. both 0 when
+            # ts_event is missing) prefer the last-arrived row so a terminal
+            # status following an earlier non-terminal is not masked.
             if key not in latest or row.ts_event >= latest[key].ts_event:
                 latest[key] = row
         return latest
 
-    def _drain_row_is_stale(
+    def _row_stale_reason(
         self,
-        client_order_id: ClientOrderId,
+        client_order_id: ClientOrderId | None,
         row: _DrainRowResult,
-    ) -> bool:
-        """Live-stream state wins over a drained snapshot when it is ahead."""
+        *,
+        live_stream_authoritative: bool,
+    ) -> str | None:
+        """Why a drain row must not advance local state (``None`` = forward).
+
+        The two drain consumers run under different authority models and the
+        difference is deliberate:
+
+        - Re-arm barrier (``live_stream_authoritative=True``): the live
+          stream owns tracked-order state, so ANY row for an order it
+          already closed is stale — terminal included — as is any row older
+          than the order's last local event.
+        - Bulk status recon (``False``): the drain is an advisory snapshot;
+          arrival order is not causal. A non-terminal row for a locally
+          closed order is venue lag and would reconcile ACCEPTED over
+          CANCELED/FILLED (the unguarded ``InvalidStateTrigger: CANCELED ->
+          ACCEPTED``, MY043-001 2026-08-21), so only that class is
+          suppressed. Terminal-vs-terminal still forwards: venue FILLED vs
+          local CANCELED is a real fill-after-cancel race the engine must
+          see.
+        """
+        if client_order_id is None:
+            return None
         order = self._cache.order(client_order_id)
-        if order is not None and getattr(order, "is_closed", False):
-            # The live stream resolved this order to a terminal state
-            # while we drained; never publish a stale snapshot over it.
-            return True
-        # Same freshness rule as ``_resolve_inflight_by_tag``: the
-        # live stream wins over the stale drain snapshot. Only when
-        # the drain row carries a real venue timestamp: ``0`` is the
-        # iterator's synthetic missing-ts value, and skipping on it
-        # would drop a valid snapshot (never publishing nor
-        # binding) whenever the tracked order has any live history.
-        return bool(
-            order is not None
+        if order is None:
+            return None
+        if getattr(order, "is_closed", False):
+            if live_stream_authoritative:
+                return "order closed locally"
+            report = row.report
+            if report is None or report.order_status in _TERMINAL_ORDER_STATUSES:
+                return None
+            return "non-terminal snapshot for locally closed order"
+        if (
+            live_stream_authoritative
             and row.ts_event
-            and (int(getattr(order, "ts_last", 0) or 0) > row.ts_event)
-        )
+            and int(getattr(order, "ts_last", 0) or 0) > row.ts_event
+        ):
+            # ``row.ts_event == 0`` is the iterator's synthetic missing-ts
+            # value: skipping on it would drop a valid snapshot whenever the
+            # tracked order has any live history.
+            return "live stream advanced past the snapshot"
+        return None
 
     def _apply_drain_rows(self, events: list[dict[str, Any]]) -> None:
         """Apply a working-orders drain to the local cache before re-arming.
@@ -833,8 +870,12 @@ class RithmicExecutionClient(LiveExecutionClient):
                 # type for the checker.
                 continue
             client_order_id = self._drain_client_order_id(fields)
-            if client_order_id is not None and self._drain_row_is_stale(
-                client_order_id, row
+            if (
+                client_order_id is not None
+                and self._row_stale_reason(
+                    client_order_id, row, live_stream_authoritative=True
+                )
+                is not None
             ):
                 continue
             # Apply (publish) BEFORE binding the venue id — commit ordering:
@@ -1677,6 +1718,26 @@ class RithmicExecutionClient(LiveExecutionClient):
         venue_id = self._venue_id_for_order(order)
         if venue_id is None:
             return None
+        # Acceptance-normalization policy (one invariant, three surfaces):
+        # a bound venue id means Rithmic accepted the order, so any
+        # non-terminal local state is reported as ACCEPTED (venue-working).
+        # PENDING_* are post-accept LOCAL intents (cancel/update in flight)
+        # and must keep mirroring the cache — reporting ACCEPTED over
+        # CANCELED would regress the engine FSM. The three surfaces:
+        # live TRIGGER_PENDING/OPEN notifications -> kind "accepted"
+        # (_orders.kind_from_notify / Rust order_kind); drain rows ->
+        # order_status_from_fields default ACCEPTED; and cache-backed query
+        # answers -> the SUBMITTED remap below. The remap matters because
+        # resting STOP_MARKET orders never receive OPEN (live-proven on
+        # Rithmic Test 2026-08-21) and the engine's transition table has no
+        # SUBMITTED branch: it falls into fill reconciliation and warns on
+        # avg_px None for an unfilled leg. It force-accepts in-flight
+        # reports either way, so answering ACCEPTED short-circuits cleanly.
+        report_status = (
+            OrderStatus.ACCEPTED
+            if order.status is OrderStatus.SUBMITTED
+            else order.status
+        )
         return OrderStatusReport(
             account_id=self.account_id,
             instrument_id=order.instrument_id,
@@ -1684,7 +1745,7 @@ class RithmicExecutionClient(LiveExecutionClient):
             order_side=order.side,
             order_type=order.order_type,
             time_in_force=order.time_in_force,
-            order_status=order.status,
+            order_status=report_status,
             quantity=order.quantity,
             filled_qty=order.filled_qty,
             report_id=UUID4(),
@@ -2265,26 +2326,27 @@ class RithmicExecutionClient(LiveExecutionClient):
                 "open_check_open_only=True so Nautilus does not cancel tracked "
                 "open orders on an empty recon."
             )
-        latest: dict[str, tuple[int, OrderStatusReport]] = {}
-        for row in self._iter_drain_rows(events):
-            fields = row.fields
-            # GenerateOrderStatusReports carries no venue_order_id (only
-            # GenerateFillReports does); filter on the instrument alone.
-            # ``_matches_instrument`` returns True for instrument_id=None.
-            if not self._matches_instrument(fields, command.instrument_id, None):
-                continue
+        reports: list[OrderStatusReport] = []
+        for row in self._latest_drain_rows(
+            events, instrument_id=command.instrument_id
+        ).values():
             report = row.report
             if report is None:
                 # Unreachable (the iterator skips unusable rows); narrows the
                 # type for the checker.
                 continue
-            key = str(fields["basket_id"])
-            # Keep the latest row; on an equal timestamp (e.g. both 0 when
-            # ts_event is missing) prefer the last-arrived row so a terminal
-            # status following an earlier non-terminal is not masked.
-            if key not in latest or row.ts_event >= latest[key][0]:
-                latest[key] = (row.ts_event, report)
-        reports = [report for _, report in latest.values()]
+            reason = self._row_stale_reason(
+                self._drain_client_order_id(row.fields),
+                row,
+                live_stream_authoritative=False,
+            )
+            if reason is not None:
+                self._log.debug(
+                    f"suppressing stale drain row ({reason}): "
+                    f"{slim_order_fields(row.fields)}"
+                )
+                continue
+            reports.append(report)
         if command.open_only:
             reports = [
                 r for r in reports if r.order_status not in _TERMINAL_ORDER_STATUSES

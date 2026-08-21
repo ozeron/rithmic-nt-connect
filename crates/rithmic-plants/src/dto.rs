@@ -406,6 +406,10 @@ fn order_kind(
     let name = notify_type_name?.to_ascii_uppercase();
     let kind = match (source, name.as_str()) {
         ("rithmic", "OPEN") => "accepted",
+        // Live-proven (Rithmic Test 2026-08-21): resting STOP_MARKET orders
+        // never receive OPEN — TRIGGER_PENDING is their working state, i.e.
+        // acceptance evidence (emitted guarded from SUBMITTED).
+        ("rithmic", "TRIGGER_PENDING") => "accepted",
         ("rithmic", "MODIFIED") => "updated",
         ("rithmic", "MODIFICATION_FAILED") => "modify_rejected",
         ("rithmic", "CANCELLATION_FAILED") => "cancel_rejected",
@@ -788,6 +792,25 @@ impl HistoryBarDto {
             }
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod order_kind_tests {
+    use super::order_kind;
+
+    #[test]
+    fn trigger_pending_is_stop_acceptance_evidence() {
+        // Live-proven (Rithmic Test 2026-08-21): resting STOP_MARKET orders
+        // never receive OPEN; TRIGGER_PENDING is their working state.
+        assert_eq!(
+            order_kind("rithmic", Some("TRIGGER_PENDING"), None).as_deref(),
+            Some("accepted")
+        );
+        assert_eq!(
+            order_kind("rithmic", Some("OPEN_PENDING"), None).as_deref(),
+            None
+        );
     }
 }
 

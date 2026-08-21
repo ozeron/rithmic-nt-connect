@@ -213,6 +213,8 @@ Root-cause refactor round 2 (Macroscope round 3): transient streak became loop-l
 
 A4 (client-order-id validation) parked on OQ1 (Rithmic `user_tag` constraint unsourced). P5 live canary on the test account not yet run. Live data e2e re-verified 2026-08-19 (15 passed on Rithmic Test) after fixing two pre-existing `main` regressions from the 8862b62 tooling commit: flocked direct session forwarded a `timeout_ms` arg the no-arg PyO3 `poll_event` rejects; `LiveDataClient` dual-base MRO broke `RithmicDataClient.__init__` (`TradingNode.build` raised missing-`loop`); single base restored and `LiveDataClient` factory contract satisfied by vendored stub.
 
+MY043-001 live-log follow-ups (2026-08-21): both recurring exec-engine WARNs reproduced against a real `LiveExecutionEngine` (`tests/test_exec_engine_repro.py`, no creds) and closed adapter-side. (1) Cache-backed status-query answers remap SUBMITTED→ACCEPTED for deferred-OPEN bracket stops (`_order_status_report_for`) — the engine's transition table has no SUBMITTED branch and fell into fill reconciliation warning `report.avg_px was None`. (2) The bulk drain suppresses stale non-terminal rows for locally closed orders (`_row_regresses_terminal_order`; terminal-vs-terminal still forwarded — fill-after-cancel races are real state), closing the recon-path `InvalidStateTrigger: CANCELED -> ACCEPTED` that the LAP-42 notification guard (#27) does not cover. Runbook note added for residual engine-internal races.
+
 ---
 
 ## Paper path (intraday)
