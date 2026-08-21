@@ -44,8 +44,25 @@ from rithmic_nt_connect.errors import (
     ReconciliationUnavailableError,
     VenueQueryUnavailable,
 )
-from rithmic_nt_connect.execution import RithmicExecutionClient
+from rithmic_nt_connect.execution import (
+    RithmicExecutionClient,
+    order_status_from_fields,
+)
 from rithmic_nt_connect.session import WireSession
+
+
+def _bind_untracked_methods(client: Any) -> None:
+    """Bind the split untracked phases (plus the publish guard) onto a stub."""
+    for name in (
+        "_publish_order_status_report",
+        "_publish_untracked_status",
+        "_publish_untracked_fill",
+    ):
+        setattr(
+            client,
+            name,
+            MethodType(getattr(RithmicExecutionClient, name), client),
+        )
 
 
 def _client() -> _TestClient:
@@ -240,9 +257,7 @@ def test_untracked_order_reports_status_without_strategy_ownership() -> None:
         _seed_account_if_needed=lambda account_raw: None,
         _untracked_status_keys={},
     )
-    client._publish_order_status_report = MethodType(
-        RithmicExecutionClient._publish_order_status_report, client
-    )
+    _bind_untracked_methods(client)
     status_report = SimpleNamespace(venue_order_id="B-EXTERNAL", client_order_id=None)
     client._drain_row_from_fields = lambda fields, ts_event: _drain_row_result(
         status_report
@@ -277,9 +292,7 @@ def test_untracked_status_suppresses_unchanged_re_push() -> None:
         _send_order_status_report=published.append,
         _seed_account_if_needed=lambda account_raw: None,
     )
-    client._publish_order_status_report = MethodType(
-        RithmicExecutionClient._publish_order_status_report, client
-    )
+    _bind_untracked_methods(client)
     status = SimpleNamespace(
         venue_order_id="B-EXT", order_status="OPEN", filled_qty="1", avg_px="100.5"
     )
@@ -331,9 +344,7 @@ def test_untracked_status_re_push_with_changed_terms_reports() -> None:
         _seed_account_if_needed=lambda account_raw: None,
         _untracked_status_keys={},
     )
-    client._publish_order_status_report = MethodType(
-        RithmicExecutionClient._publish_order_status_report, client
-    )
+    _bind_untracked_methods(client)
     status = SimpleNamespace(
         venue_order_id="B-EXT",
         order_status="OPEN",
@@ -391,9 +402,7 @@ def test_untracked_status_publication_failure_does_not_escape_handler() -> None:
         _seed_account_if_needed=lambda account_raw: None,
         _untracked_status_keys={},
     )
-    client._publish_order_status_report = MethodType(
-        RithmicExecutionClient._publish_order_status_report, client
-    )
+    _bind_untracked_methods(client)
     status_report = SimpleNamespace(venue_order_id="B-EXTERNAL", client_order_id=None)
     client._drain_row_from_fields = lambda fields, ts_event: _drain_row_result(
         status_report
@@ -430,6 +439,7 @@ class _OrderStub:
     side: OrderSide
     is_closed: bool = False
     leaves_qty: object | None = None  # None = unknown remaining; no overfill claim
+    status: OrderStatus | None = None
 
 
 def _order(order_type: OrderType) -> _OrderStub:
@@ -453,6 +463,218 @@ def _trigger_notification() -> dict[str, object]:
         "user_tag": "O-1",
         "ssboe": 1_700_000_000,
     }
+
+
+# --------------------------------------------------------------------------- #
+# LAP-42 accepted guard: OPEN only emits while the local order is SUBMITTED;
+# a late/duplicate OPEN after ACCEPTED/advanced is noise.
+# --------------------------------------------------------------------------- #
+
+
+def _accepted_order(status: OrderStatus) -> SimpleNamespace:
+    return SimpleNamespace(
+        status=status,
+        strategy_id=StrategyId("STRATEGY-1"),
+        instrument_id=InstrumentId.from_str("NQ.GLBX"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("status", "emits"),
+    [
+        (OrderStatus.SUBMITTED, True),
+        (OrderStatus.ACCEPTED, False),
+        (OrderStatus.PARTIALLY_FILLED, False),
+    ],
+)
+def test_emit_accepted_only_while_submitted(
+    monkeypatch: pytest.MonkeyPatch, status: OrderStatus, emits: bool
+) -> None:
+    client = _client()
+    accepted: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        client, "generate_order_accepted", lambda *args: accepted.append(args)
+    )
+
+    RithmicExecutionClient._emit_accepted(
+        cast(RithmicExecutionClient, client),
+        _accepted_order(status),
+        ClientOrderId("O-1"),
+        VenueOrderId("B1"),
+        5,
+    )
+
+    assert bool(accepted) is emits
+
+
+# --------------------------------------------------------------------------- #
+# UPDATED terms resolution: notification value wins, else the order's own
+# term, else None.
+# --------------------------------------------------------------------------- #
+
+
+def _priced_order(
+    *, qty: int = 1, price: str | None = "21000.0", trigger: str | None = None
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        quantity=Quantity.from_int(qty),
+        has_price=price is not None,
+        price=Price.from_str(price) if price is not None else None,
+        has_trigger_price=trigger is not None,
+        trigger_price=Price.from_str(trigger) if trigger is not None else None,
+    )
+
+
+def _updated_action(
+    *, qty: int | None = None, px: float | None = None, trig: float | None = None
+) -> SimpleNamespace:
+    return SimpleNamespace(quantity=qty, price=px, trigger=trig)
+
+
+@pytest.mark.parametrize(
+    ("order", "action", "want_qty", "want_px", "want_trig"),
+    [
+        # Action wins on every term.
+        (
+            _priced_order(qty=1, price="21000.0"),
+            _updated_action(qty=3, px=21001.0, trig=20999.0),
+            3,
+            "21001.0",
+            "20999.0",
+        ),
+        # Order terms fill in where the notification is silent.
+        (
+            _priced_order(qty=2, price="21000.0", trigger="20995.0"),
+            _updated_action(),
+            2,
+            "21000.0",
+            "20995.0",
+        ),
+        # Neither side knows a term -> None (never fabricated).
+        (_priced_order(qty=1, price=None), _updated_action(), 1, None, None),
+    ],
+)
+def test_resolve_updated_terms_fallback_matrix(
+    order, action, want_qty, want_px, want_trig
+) -> None:
+    client = cast(RithmicExecutionClient, _client())
+    qty, price, trigger = RithmicExecutionClient._resolve_updated_terms(
+        client, order, action
+    )
+    assert int(qty) == want_qty
+    assert (str(price) if price is not None else None) == want_px
+    assert (str(trigger) if trigger is not None else None) == want_trig
+
+
+def test_emit_triggered_guarded_suppresses_duplicate_trigger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3812 A1: a second TRIGGER for an already-TRIGGERED order is noise."""
+    client = _client()
+    order = _order(OrderType.STOP_LIMIT)
+    order.status = OrderStatus.TRIGGERED
+    triggered: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        client, "generate_order_triggered", lambda *args: triggered.append(args)
+    )
+
+    RithmicExecutionClient._emit_triggered_guarded(
+        cast(RithmicExecutionClient, client),
+        order,
+        ClientOrderId("O-1"),
+        VenueOrderId("B1"),
+        5,
+    )
+
+    assert triggered == []
+
+
+# --------------------------------------------------------------------------- #
+# Recon window: units-mistake clamp is deterministic under an injected clock.
+# --------------------------------------------------------------------------- #
+
+
+def test_recon_window_clamps_ns_epoch_end_with_injected_clock():
+    """A units mistake (ns-epoch where sec is expected) plus an over-wide
+    start cannot build a decades-wide query window; the clamp anchors on
+    ``now_fn`` so the test needs no sleeps or patching."""
+    client = cast(RithmicExecutionClient, _client())
+    now = 1_800_000_000
+
+    start_sec, end_sec = RithmicExecutionClient._recon_window_sec(
+        client,
+        now - 100 * 86_400,
+        now * 1_000_000_000 + 5,
+        now_fn=lambda: now,
+    )
+
+    assert end_sec == now
+    assert start_sec == now - 32 * 86_400
+
+
+def test_recon_window_day_start_default_with_injected_clock():
+    """start=None defaults to UTC day start of the injected now."""
+    client = cast(RithmicExecutionClient, _client())
+    now = 1_800_000_123
+
+    start_sec, end_sec = RithmicExecutionClient._recon_window_sec(
+        client, None, None, now_fn=lambda: now
+    )
+
+    assert end_sec == now
+    assert start_sec == (now // 86_400) * 86_400
+
+
+# --------------------------------------------------------------------------- #
+# Untracked split coupling: a status-publication failure suppresses the fill
+# phase too (fail-closed — no fill without its order prerequisite).
+# --------------------------------------------------------------------------- #
+
+
+def test_untracked_status_publish_failure_suppresses_fill() -> None:
+    fills: list[object] = []
+    client = SimpleNamespace(
+        account_id="RITHMIC-ACC1",
+        _clock=SimpleNamespace(timestamp_ns=lambda: 2),
+        _log=_Log(),
+        _send_order_status_report=None,  # replaced below
+        _send_fill_report=fills.append,
+        _seen_fill_keys=OrderedDict(),
+        _untracked_status_keys={},
+        _seed_account_if_needed=lambda account_raw: None,
+    )
+    _bind_untracked_methods(client)
+
+    def _fail_publish(report: object) -> None:
+        raise RuntimeError("bus down")
+
+    client._send_order_status_report = _fail_publish
+    status = SimpleNamespace(
+        venue_order_id="B-EXT", order_status="FILLED", filled_qty="1", avg_px="100.5"
+    )
+    client._drain_row_from_fields = lambda fields, ts_event: _drain_row_result(status)
+
+    fields = {
+        "basket_id": "B-EXT",
+        "symbol": "MNQU6",
+        "account_id": "ACC1",
+        "kind": "filled",
+        "status": "FILLED",
+        "fill_price": 21000.0,
+        "fill_size": 1,
+        "fill_id": "F-EXT",
+        "price_type": 1,
+        "duration": 1,
+        "quantity": 1,
+        "total_fill_size": 1,
+        "transaction_type": 1,
+    }
+
+    RithmicExecutionClient._handle_untracked_notification(
+        cast(RithmicExecutionClient, client), fields
+    )
+
+    assert fills == []
 
 
 @pytest.mark.parametrize(
@@ -677,6 +899,20 @@ def test_recovered_reports_preserve_exact_instrument_and_account_identity() -> N
 # --------------------------------------------------------------------------- #
 # _order_status_from_event: a rejected cancel is still working, not REJECTED.
 # --------------------------------------------------------------------------- #
+
+
+def test_status_delegate_matches_module_function():
+    """The back-compat delegate and the hoisted pure classifier agree."""
+    client = _client()
+    fields = {
+        "kind": "cancel_rejected",
+        "status": "CANCELLATION_FAILED",
+        "quantity": 2,
+        "total_fill_size": 1,
+        "price_type": 3,
+        "duration": 2,
+    }
+    assert client._order_status_from_event(fields) is order_status_from_fields(fields)
 
 
 def test_cancel_rejected_with_reject_status_is_accepted():
