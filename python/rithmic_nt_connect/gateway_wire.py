@@ -5,19 +5,10 @@ Plant-level dicts only — conversion to Nautilus types stays in data/execution 
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Any
 
-from rithmic_gateway import GatewayClient, GatewayConfig, GatewayError
+from rithmic_gateway import GatewayClient, GatewayConfig
 from rithmic_gateway.types import AccountRmsInfo, ProductRmsInfo
-
-
-def _call[T](fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
-    """Propagate gateway errors with ``code`` intact (timeouts must stay unknown)."""
-    try:
-        return fn(*args, **kwargs)
-    except GatewayError:
-        raise
 
 
 class GatewayWireSession:
@@ -38,10 +29,10 @@ class GatewayWireSession:
         return self._client.cancel_all_enabled
 
     def connect(self) -> None:
-        _call(self._client.connect)
+        self._client.connect()
 
     def disconnect(self) -> None:
-        _call(self._client.disconnect)
+        self._client.disconnect()
 
     def reset_ticker(self) -> None:
         """Recover this client's ticker stream (detach + re-dial).
@@ -51,8 +42,8 @@ class GatewayWireSession:
         channel error needs no plant-level reset — unlike the direct path,
         where the shared in-process session resets its ticker plant only.
         """
-        _call(self._client.disconnect)
-        _call(self._client.connect)
+        self._client.disconnect()
+        self._client.connect()
 
     def reset_ticker_plant(self) -> None:
         """Plant-level ticker reset RPC (direct/gateway surface parity).
@@ -62,36 +53,36 @@ class GatewayWireSession:
         resync uses ``reset_ticker`` (client-level) instead, which is strictly
         less disruptive; this mirrors the direct path's plant primitive.
         """
-        _call(self._client.reset_ticker_plant)
+        self._client.reset_ticker_plant()
 
     def subscribe(self, symbol: str, exchange: str) -> None:
-        _call(self._client.subscribe, symbol, exchange)
+        self._client.subscribe(symbol, exchange)
 
     def unsubscribe(self, symbol: str, exchange: str) -> None:
-        _call(self._client.unsubscribe, symbol, exchange)
+        self._client.unsubscribe(symbol, exchange)
 
     def subscribe_order_book_summary(self, symbol: str, exchange: str) -> None:
-        _call(self._client.subscribe_order_book_summary, symbol, exchange)
+        self._client.subscribe_order_book_summary(symbol, exchange)
 
     def unsubscribe_order_book_summary(self, symbol: str, exchange: str) -> None:
-        _call(self._client.unsubscribe_order_book_summary, symbol, exchange)
+        self._client.unsubscribe_order_book_summary(symbol, exchange)
 
     def get_front_month(self, symbol: str, exchange: str) -> Any:
-        return _call(self._client.get_front_month, symbol, exchange)
+        return self._client.get_front_month(symbol, exchange)
 
     def get_reference_data(self, symbol: str, exchange: str) -> Any:
-        return _call(self._client.get_reference_data, symbol, exchange)
+        return self._client.get_reference_data(symbol, exchange)
 
     def resolved_account(self) -> dict[str, Any] | None:
-        return _call(self._client.resolved_account)
+        return self._client.resolved_account()
 
     def poll_event(self, timeout_ms: int = 0) -> dict[str, Any] | None:
-        return _call(self._client.poll_event, timeout_ms=timeout_ms)
+        return self._client.poll_event(timeout_ms=timeout_ms)
 
     def load_ticks(
         self, symbol: str, exchange: str, start_ssboe: int, end_ssboe: int
     ) -> list[dict[str, Any]]:
-        return _call(self._client.load_ticks, symbol, exchange, start_ssboe, end_ssboe)
+        return self._client.load_ticks(symbol, exchange, start_ssboe, end_ssboe)
 
     def load_time_bars(
         self,
@@ -106,8 +97,7 @@ class GatewayWireSession:
         # session mutex while slicing internally — minutes for months of bars).
         # Chunk client-side like the lake ingest path (calendar slices, 120s
         # history timeout each) and merge.
-        return _call(
-            self._client.load_time_bars_range,
+        return self._client.load_time_bars_range(
             symbol,
             exchange,
             start_ssboe,
@@ -126,8 +116,7 @@ class GatewayWireSession:
         bar_type: int = 2,
         period: int = 1,
     ) -> list[dict[str, Any]]:
-        return _call(
-            self._client.probe_time_bars,
+        return self._client.probe_time_bars(
             symbol,
             exchange,
             start_ssboe,
@@ -139,48 +128,48 @@ class GatewayWireSession:
     def subscribe_time_bars(
         self, symbol: str, exchange: str, bar_type: int, period: int
     ) -> None:
-        _call(self._client.subscribe_time_bars, symbol, exchange, bar_type, period)
+        self._client.subscribe_time_bars(symbol, exchange, bar_type, period)
 
     def unsubscribe_time_bars(
         self, symbol: str, exchange: str, bar_type: int, period: int
     ) -> None:
-        _call(self._client.unsubscribe_time_bars, symbol, exchange, bar_type, period)
+        self._client.unsubscribe_time_bars(symbol, exchange, bar_type, period)
 
     def poll_history_event(self) -> dict[str, Any] | None:
-        return _call(self._client.poll_history_event, timeout_ms=0)
+        return self._client.poll_history_event(timeout_ms=0)
 
     def subscribe_pnl(self) -> None:
-        _call(self._client.subscribe_pnl)
+        self._client.subscribe_pnl()
 
     def disconnect_pnl_plant(self) -> None:
-        _call(self._client.disconnect_pnl_plant)
+        self._client.disconnect_pnl_plant()
 
     def ensure_pnl_plant(self) -> None:
-        _call(self._client.ensure_pnl_plant)
+        self._client.ensure_pnl_plant()
 
     def ensure_order_plant(self) -> None:
-        _call(self._client.ensure_order_plant)
+        self._client.ensure_order_plant()
 
     def poll_pnl_event(self) -> dict[str, Any] | None:
-        return _call(self._client.poll_pnl_event, timeout_ms=0)
+        return self._client.poll_pnl_event(timeout_ms=0)
 
     def subscribe_order_updates(self) -> None:
-        _call(self._client.subscribe_order_updates)
+        self._client.subscribe_order_updates()
 
     def load_orders(self, start_ssboe: int, end_ssboe: int) -> list[dict[str, Any]]:
-        return _call(self._client.load_orders, start_ssboe, end_ssboe)
+        return self._client.load_orders(start_ssboe, end_ssboe)
 
     def load_product_rms_info(self) -> list[ProductRmsInfo]:
-        return _call(self._client.load_product_rms_info)
+        return self._client.load_product_rms_info()
 
     def load_account_rms_info(self) -> list[AccountRmsInfo]:
-        return _call(self._client.load_account_rms_info)
+        return self._client.load_account_rms_info()
 
     def subscribe_bracket_updates(self) -> None:
-        _call(self._client.subscribe_bracket_updates)
+        self._client.subscribe_bracket_updates()
 
     def disconnect_order_plant(self) -> None:
-        _call(self._client.disconnect_order_plant)
+        self._client.disconnect_order_plant()
 
     def place_order(
         self,
@@ -196,8 +185,7 @@ class GatewayWireSession:
         trail_by_ticks: int | None = None,
         trail_by_price_id: int | None = None,
     ) -> None:
-        _call(
-            self._client.place_order,
+        self._client.place_order(
             symbol,
             exchange,
             side,
@@ -225,8 +213,7 @@ class GatewayWireSession:
         stop_ticks: int | None = None,
         target_ticks: int | None = None,
     ) -> None:
-        _call(
-            self._client.place_bracket_order,
+        self._client.place_bracket_order(
             symbol,
             exchange,
             side,
@@ -243,15 +230,15 @@ class GatewayWireSession:
     def adjust_bracket_stop(
         self, basket_id: str, ticks: int, level: int | None = None
     ) -> None:
-        _call(self._client.adjust_bracket_stop, basket_id, ticks, level)
+        self._client.adjust_bracket_stop(basket_id, ticks, level)
 
     def adjust_bracket_target(
         self, basket_id: str, ticks: int, level: int | None = None
     ) -> None:
-        _call(self._client.adjust_bracket_target, basket_id, ticks, level)
+        self._client.adjust_bracket_target(basket_id, ticks, level)
 
     def cancel_order(self, basket_id: str) -> None:
-        _call(self._client.cancel_order, basket_id)
+        self._client.cancel_order(basket_id)
 
     def modify_order(
         self,
@@ -264,8 +251,7 @@ class GatewayWireSession:
         trigger_price: float | None = None,
         trail_by_ticks: int | None = None,
     ) -> None:
-        _call(
-            self._client.modify_order,
+        self._client.modify_order(
             basket_id,
             symbol,
             exchange,
@@ -277,13 +263,13 @@ class GatewayWireSession:
         )
 
     def cancel_all_orders(self) -> None:
-        _call(self._client.cancel_all_orders)
+        self._client.cancel_all_orders()
 
     def poll_order_event(self) -> dict[str, Any] | None:
-        return _call(self._client.poll_order_event, timeout_ms=0)
+        return self._client.poll_order_event(timeout_ms=0)
 
     def request_plants(self, plants: str) -> None:
-        _call(self._client.request_plants, plants)
+        self._client.request_plants(plants)
 
 
 def gateway_config_from_session(session: Any) -> GatewayConfig:

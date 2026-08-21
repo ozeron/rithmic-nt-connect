@@ -2,7 +2,7 @@
 
 Date: 2026-08-13  
 Repo: `rithmic-nt-connect`  
-Status: code landed on `feat/intraday-sandbox-paper`; sandbox Lucid proof done (2026-08-13); venue EXTERNAL bar Lucid proof later completed (2026-08-14, `test_TC_D40`; see `docs/STATUS.md` — this plan only proves the sandbox path)  
+Status: code landed on `feat/intraday-sandbox-paper`; sandbox Lucid proof done (2026-08-13); venue EXTERNAL bar Lucid proof later completed (2026-08-14, `test_tc_d40`; see `docs/STATUS.md` — this plan only proves the sandbox path)  
 
 ## Goal
 

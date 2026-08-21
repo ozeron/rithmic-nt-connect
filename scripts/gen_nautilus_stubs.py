@@ -397,7 +397,7 @@ def _apply_hand_patches(pkg: pathlib.Path) -> int:
         end = len(text) if next_class is None else start + 1 + next_class.start()
         body = text[start:end]
         patched_body = re.sub(
-            r"    def __init__\(self, InstrumentIdinstrument_id.*?\) -> None: \.\.\.\n",
+            r" {4}def __init__\(self, InstrumentIdinstrument_id.*?\) -> None: \.\.\.\n",
             ctor + "\n",
             body,
             count=1,
@@ -419,7 +419,7 @@ def _apply_hand_patches(pkg: pathlib.Path) -> int:
             1,
         )
         text = re.sub(
-            r"    def (on_\w+)\(self, (\w+)(event)\) -> void: \.\.\.\n",
+            r" {4}def (on_\w+)\(self, (\w+)(event)\) -> void: \.\.\.\n",
             r"    def \1(self, \3) -> void: ...\n",
             text,
         )
@@ -497,7 +497,7 @@ def _apply_hand_patches(pkg: pathlib.Path) -> int:
     if _FUTURES_CTOR not in text:
         # Idempotent: patch the mangled one-liner ctor and add the type imports.
         text = re.sub(
-            r"    def __init__\(self, InstrumentIdinstrument_id.*?\) -> None: \.\.\.\n",
+            r" {4}def __init__\(self, InstrumentIdinstrument_id.*?\) -> None: \.\.\.\n",
             _FUTURES_CTOR + "\n",
             text,
             count=1,

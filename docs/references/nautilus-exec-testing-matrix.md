@@ -96,7 +96,7 @@ fail closed.
 
 | TC | Name | Status | Where verified / gap |
 |---|---|---|---|
-| TC-E20 | StopMarket BUY | [x] | merged live test `test_TC_E2X_stop` (trigger far from market; rests then cancel-on-accept); live-proven |
+| TC-E20 | StopMarket BUY | [x] | merged live test `test_tc_e2x_stop` (trigger far from market; rests then cancel-on-accept); live-proven |
 | TC-E21 | StopMarket SELL | [x] | |
 | TC-E22 | StopLimit BUY | [x] | |
 | TC-E23 | StopLimit SELL | [x] | |
@@ -123,9 +123,9 @@ fail closed.
 |---|---|---|---|
 | TC-E40 | Cancel single limit | [x] | live-proven |
 | TC-E41 | Cancel all on stop | [ ] | plant-wide — live-testing would cancel unrelated orders; collection-skipped (`tests/e2e/test_exec_client_live.py`), no safe unit boundary yet |
-| TC-E42 | Individual cancels on stop | [x] | `test_TC_E42_individual_cancels_on_stop` — two resting orders individually canceled by `OrderDriver.on_stop`; live-proven |
+| TC-E42 | Individual cancels on stop | [x] | `test_tc_e42_individual_cancels_on_stop` — two resting orders individually canceled by `OrderDriver.on_stop`; live-proven |
 | TC-E43 | Batch cancel on stop | [ ] | no batch-cancel API |
-| TC-E44 | Cancel already-canceled | [x] | `test_TC_E44_cancel_already_canceled` — second cancel of a CANCELED order is refused locally (no venue command, no events); live-proven |
+| TC-E44 | Cancel already-canceled | [x] | `test_tc_e44_cancel_already_canceled` — second cancel of a CANCELED order is refused locally (no venue command, no events); live-proven |
 
 ## Group 6: Bracket orders
 
@@ -170,7 +170,7 @@ Live bracket spike: `scripts/spike_bracket_order.py` (`RITHMIC_BRACKETS=1` +
 | TC-E81 | Cancel orders on stop | [~] | |
 | TC-E82 | Close positions on stop | [~] | |
 | TC-E83 | Unsubscribe on stop | [~] | mirrors data TC-D70 |
-| TC-E84 | Reconcile open orders | [x] | `test_TC_E84_reconcile_resting_stop_preserves_trigger` (live, through `LiveExecutionEngine._check_orders_consistency` — the path that sends `GenerateOrderStatusReports`); `test_generate_order_status_reports_preserves_stop_trigger_type` (unit, same code path). Drain best-effort, NOT complete — the exec fixture pins `open_check_open_only=True` (the 1.231.x knob; `death_policy` no longer exists) so a cached order missing from an empty drain is advisory, not canceled |
+| TC-E84 | Reconcile open orders | [x] | `test_tc_e84_reconcile_resting_stop_preserves_trigger` (live, through `LiveExecutionEngine._check_orders_consistency` — the path that sends `GenerateOrderStatusReports`); `test_generate_order_status_reports_preserves_stop_trigger_type` (unit, same code path). Drain best-effort, NOT complete — the exec fixture pins `open_check_open_only=True` (the 1.231.x knob; `death_policy` no longer exists) so a cached order missing from an empty drain is advisory, not canceled |
 | TC-E85 | Reconcile filled orders | [~] | fill query unavailable (`conventions.md:144`); `test_generate_fill_reports_*` |
 | TC-E86 | Reconcile open long | [~] | `test_position_status_reports_*` |
 | TC-E87 | Reconcile open short | [~] | |

@@ -157,14 +157,14 @@ class TestMarketOrders:
             _tc("TC-E04", OrderSide.BUY, TimeInForce.FOK),
         ],
     )
-    def test_TC_E0X_market_fill(self, live_exec, side, tif):
+    def test_tc_e0x_market_fill(self, live_exec, side, tif):
         live_exec.driver.initial.append(market(side, tif=tif))
         live_exec.start()
         live_exec.wait_for_venue_outcome("OrderFilled", timeout=40)
         assert "OrderSubmitted" in live_exec.event_types()
         assert "OrderAccepted" in live_exec.event_types()
 
-    def test_TC_E06_close_position_on_stop(self, live_exec):
+    def test_tc_e06_close_position_on_stop(self, live_exec):
         """TC-E06 — close position on stop."""
         live_exec.driver.initial.append(market(OrderSide.BUY))
         live_exec.start()
@@ -261,7 +261,7 @@ class TestLimitOrders:
             ),
         ],
     )
-    def test_TC_ElX_limit_order(
+    def test_tc_elx_limit_order(
         self, live_exec, side, price_fn, tif, cid, expected, expect_no_fill
     ):
         cid = _unique(cid)
@@ -274,7 +274,7 @@ class TestLimitOrders:
         if expect_no_fill:
             assert "OrderFilled" not in live_exec.event_types()
 
-    def test_TC_E12_limit_pair(self, live_exec):
+    def test_tc_e12_limit_pair(self, live_exec):
         """TC-E12 — limit BUY+SELL pair resting simultaneously."""
         cid_b = ClientOrderId(_unique("L12B"))
         cid_s = ClientOrderId(_unique("L12S"))
@@ -309,7 +309,7 @@ class TestStopConditionalOrders:
             _tc("TC-E23", OrderSide.SELL, far_below, relative(-550), "S23"),
         ],
     )
-    def test_TC_E2X_stop(self, live_exec, side, trigger_fn, limit_fn, cid):
+    def test_tc_e2x_stop(self, live_exec, side, trigger_fn, limit_fn, cid):
         # Trigger far from market — rests without triggering.
         cid = _unique(cid)
         if limit_fn is None:
@@ -335,7 +335,7 @@ class TestStopConditionalOrders:
 
 @pytest.mark.live
 class TestOrderCancellation:
-    def test_TC_E40_cancel_single_limit(self, live_exec):
+    def test_tc_e40_cancel_single_limit(self, live_exec):
         """TC-E40 — cancel single limit on accept."""
         cid = _unique("C40")
         live_exec.driver.initial.append(
@@ -348,7 +348,7 @@ class TestOrderCancellation:
         )
         assert "OrderAccepted" in live_exec.event_types()
 
-    def test_TC_E42_individual_cancels_on_stop(self, live_exec):
+    def test_tc_e42_individual_cancels_on_stop(self, live_exec):
         """TC-E42 — individual cancels on stop (on_stop cancels each resting order)."""
         cid_a = ClientOrderId(_unique("C42A"))
         cid_b = ClientOrderId(_unique("C42B"))
@@ -380,7 +380,7 @@ class TestOrderCancellation:
                     pytest.fail(f"{cid} not canceled by on_stop (actual={actual})")
                 time.sleep(0.2)
 
-    def test_TC_E44_cancel_already_canceled(self, live_exec):
+    def test_tc_e44_cancel_already_canceled(self, live_exec):
         """TC-E44 — cancel already-canceled is a local no-op (no new events)."""
         cid = _unique("C44")
         live_exec.driver.initial.append(
@@ -414,7 +414,7 @@ class TestOrderCancellation:
 
 @pytest.mark.live
 class TestReconciliation:
-    def test_TC_E84_reconcile_resting_stop_preserves_trigger(self, live_exec):
+    def test_tc_e84_reconcile_resting_stop_preserves_trigger(self, live_exec):
         """TC-E84 — reconcile open orders (stop trigger preserved; order stays working).
 
         Regression guard for the stop ``query_order``/recon report failure (the
@@ -466,7 +466,7 @@ class TestReconciliation:
             r.order_status == OrderStatus.CANCELED for r in post_cancel
         ), f"venue still reports the canceled stop as a working order: {post_cancel}"
 
-    def test_TC_E85_filled_order_status_query_carries_avg_px(self, live_exec):
+    def test_tc_e85_filled_order_status_query_carries_avg_px(self, live_exec):
         """TC-E85 — a status query for a FILLED order reports its average fill price.
 
         Nautilus ExecEngine logs ``report.avg_px was None`` when it reconciles a

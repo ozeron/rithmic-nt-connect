@@ -26,9 +26,9 @@ Last run **2026-08-14**: unit 137 passed; live 5 passed, 3 skipped
 
 | TC | Name | Status | Where verified |
 |---|---|---|---|
-| TC-D01 | Request instruments | [x] | `test_TC_D01_request_instruments` (live) |
+| TC-D01 | Request instruments | [x] | `test_tc_d01_request_instruments` (live) |
 | TC-D02 | Subscribe instrument | N/A | Rithmic has no live instrument-update stream |
-| TC-D03 | Load specific instrument | [x] | `test_TC_D03_load_specific_instrument` (live) |
+| TC-D03 | Load specific instrument | [x] | `test_tc_d03_load_specific_instrument` (live) |
 
 ## Group 2: Order book
 
@@ -45,22 +45,22 @@ Last run **2026-08-14**: unit 137 passed; live 5 passed, 3 skipped
 
 | TC | Name | Status | Where verified / gap |
 |---|---|---|---|
-| TC-D20 | Subscribe quotes | [x] | `test_TC_D20_subscribe_quotes` (live, bid<ask) |
+| TC-D20 | Subscribe quotes | [x] | `test_tc_d20_subscribe_quotes` (live, bid<ask) |
 | TC-D21 | Request historical quotes | [ ] | Not implemented — no Rithmic quote-history plant |
 
 ## Group 4: Trades
 
 | TC | Name | Status | Where verified |
 |---|---|---|---|
-| TC-D30 | Subscribe trades | [x] | `test_TC_D30_subscribe_trades` (live) |
-| TC-D31 | Request historical trades | [~] | `test_TC_D31_request_historical_trades` (live; skips on transient-empty) |
+| TC-D30 | Subscribe trades | [x] | `test_tc_d30_subscribe_trades` (live) |
+| TC-D31 | Request historical trades | [~] | `test_tc_d31_request_historical_trades` (live; skips on transient-empty) |
 
 ## Group 5: Bars
 
 | TC | Name | Status | Where verified |
 |---|---|---|---|
-| TC-D40 | Subscribe bars | [x] | `test_TC_D40_subscribe_external_bars` — **1m EXTERNAL live-proven** on Lucid 2026-08-14; 15m/1h/1d wired |
-| TC-D41 | Request historical bars | [~] | `test_TC_D41_request_historical_bars` (live; skips on transient-empty, so OHLCV/ordering not always verified) |
+| TC-D40 | Subscribe bars | [x] | `test_tc_d40_subscribe_external_bars` — **1m EXTERNAL live-proven** on Lucid 2026-08-14; 15m/1h/1d wired |
+| TC-D41 | Request historical bars | [~] | `test_tc_d41_request_historical_bars` (live; skips on transient-empty, so OHLCV/ordering not always verified) |
 
 > **Coverage note:** not every advertised data type has a green live test. L2 book
 > (`TC-D10/D12/D13`) is blocked by Lucid L2 permission and is unit/wired-only;
@@ -77,7 +77,7 @@ Last run **2026-08-14**: unit 137 passed; live 5 passed, 3 skipped
 
 | TC | Name | Status | Where verified |
 |---|---|---|---|
-| TC-D70 | Unsubscribe on stop | [x] | `test_TC_D70_unsubscribe_on_stop` (live) |
+| TC-D70 | Unsubscribe on stop | [x] | `test_tc_d70_unsubscribe_on_stop` (live) |
 | TC-D71 | Custom subscribe params | N/A | No adapter-specific params |
 | TC-D72 | Custom request params | N/A | No adapter-specific params |
 

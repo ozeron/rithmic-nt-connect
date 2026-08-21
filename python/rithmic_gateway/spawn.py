@@ -6,7 +6,7 @@ import contextlib
 import os
 import shutil
 import socket
-import subprocess
+import subprocess  # nosec B404 - auto-spawn requires launching the gateway binary
 import threading
 import time
 from collections.abc import Mapping, Sequence
@@ -217,7 +217,7 @@ def spawn_gateway(
             "(set spawn_environ or process env; never put password on argv)"
         )
 
-    proc = subprocess.Popen(
+    proc = subprocess.Popen(  # nosec B603 - argv allowlisted; env curated
         argv,
         env=env,
         stdin=subprocess.DEVNULL,

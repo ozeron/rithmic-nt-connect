@@ -185,7 +185,7 @@ class ExecHarness:
 
     def _release_session_locks(self) -> None:
         """Release the credential flock (``disconnect()`` does not); best-effort."""
-        try:
+        with contextlib.suppress(Exception):
             from rithmic_nt_connect.session import _SESSION_CACHE
 
             for _sess in _SESSION_CACHE.values():
@@ -194,8 +194,6 @@ class ExecHarness:
                     with contextlib.suppress(Exception):
                         _lock.close()
             _SESSION_CACHE.clear()
-        except Exception:
-            pass
 
     # -- reconciliation ---------------------------------------------------------
     def check_orders_consistency(self, timeout_secs: float = 20.0) -> list[object]:

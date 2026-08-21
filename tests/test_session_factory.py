@@ -173,7 +173,7 @@ class _FakeLock:
         _FakeLock.acquired += 1
 
     def close(self) -> None:
-        pass
+        pass  # Stub: pool tests don't exercise the release path.
 
 
 def _direct_session_config(*, env: str = "Demo") -> SessionConfig:
@@ -189,23 +189,15 @@ def _direct_session_config(*, env: str = "Demo") -> SessionConfig:
     )
 
 
-class _FakeLib:
-    """Stand-in module for the compiled ``rithmic_nt_connect._lib``: the lazy
-    ``from rithmic_nt_connect._lib import Session`` only needs a ``Session``
-    attribute, so a plain class in ``sys.modules`` satisfies it without
-    importing the macOS-only extension.
-    """
-
-    Session = _FakeSessionInner
-
-
 def _fake_rust_session(monkeypatch: pytest.MonkeyPatch) -> None:
     """Point the lazy ``_lib`` import and flock at fakes."""
     import sys
+    import types
 
     import rithmic_nt_connect.session as session_mod
 
-    monkeypatch.setitem(sys.modules, "rithmic_nt_connect._lib", _FakeLib)
+    fake_lib = types.SimpleNamespace(Session=_FakeSessionInner)
+    monkeypatch.setitem(sys.modules, "rithmic_nt_connect._lib", fake_lib)
     monkeypatch.setattr(session_mod, "_load_session_lock", lambda: _FakeLock)
     monkeypatch.setattr(session_mod, "_SESSION_CACHE", {})
     _FakeLock.acquired = 0

@@ -63,7 +63,7 @@ def wait_for_event(
 class TestInstruments:
     """TC-D01, D03 — instrument loading."""
 
-    def test_TC_D01_request_instruments(self, live_session):
+    def test_tc_d01_request_instruments(self, live_session):
         """Load all instruments for the venue — at least one, valid fields."""
         import asyncio
 
@@ -76,7 +76,7 @@ class TestInstruments:
             assert inst.price_increment.as_double() > 0, f"{inst.id}: valid tick"
             assert inst.multiplier.as_double() > 0, f"{inst.id}: valid multiplier"
 
-    def test_TC_D03_load_specific_instrument(self, live_session):
+    def test_tc_d03_load_specific_instrument(self, live_session):
         """TC-D03 — load a single NQ front month by ID — valid fields."""
         inst = load_front_month_instrument(live_session, "NQ", "CME")
         assert str(inst.id).endswith(".RITHMIC"), f"instrument_id: {inst.id}"
@@ -96,7 +96,7 @@ class TestInstruments:
 class TestOrderBook:
     """TC-D10 — L2 book subscribe (D14 managed-book lives in unit suite)."""
 
-    def test_TC_D10_subscribe_book_deltas(self, live_session, live_front_month):
+    def test_tc_d10_subscribe_book_deltas(self, live_session, live_front_month):
         """Subscribe L2 book deltas — receive at least one OrderBookDeltas event.
 
         LucidTrading demo may deny L2 access (permission denied [13]).
@@ -120,7 +120,7 @@ class TestOrderBook:
 class TestQuotes:
     """TC-D20 — live BBO subscribe."""
 
-    def test_TC_D20_subscribe_quotes(self, live_session, live_front_month):
+    def test_tc_d20_subscribe_quotes(self, live_session, live_front_month):
         """Subscribe BBO — receive QuoteTick with bid < ask."""
         _, symbol, exchange = live_front_month
         live_session.subscribe(symbol, exchange)
@@ -139,7 +139,7 @@ class TestQuotes:
 class TestTrades:
     """TC-D30, D31 — live trades subscribe + historical trades request."""
 
-    def test_TC_D30_subscribe_trades(self, live_session, live_front_month):
+    def test_tc_d30_subscribe_trades(self, live_session, live_front_month):
         """Subscribe last-trade — receive TradeTick with aggressor side."""
         _, symbol, exchange = live_front_month
         live_session.subscribe(symbol, exchange)
@@ -148,7 +148,7 @@ class TestTrades:
         assert int(ev["trade_size"]) >= 1, "positive trade size"
         assert ev.get("aggressor") in (1, 2, None), "valid aggressor"
 
-    def test_TC_D31_request_historical_trades(self, live_session, live_front_month):
+    def test_tc_d31_request_historical_trades(self, live_session, live_front_month):
         """TC-D31 — request historical trade ticks — valid timestamps, prices, sizes.
 
         Uses a window ending 1 hour ago (not "now") to avoid the live-indexing
@@ -176,7 +176,7 @@ class TestBars:
     """TC-D40, D41 — live bar subscribe + historical bars request."""
 
     @pytest.mark.slow
-    def test_TC_D40_subscribe_external_bars(self, live_session, live_front_month):
+    def test_tc_d40_subscribe_external_bars(self, live_session, live_front_month):
         """Subscribe 1-minute EXTERNAL bars — receive at least one time_bar event."""
         _, symbol, exchange = live_front_month
         live_session.subscribe_time_bars(symbol, exchange, 2, 1)  # 1-minute bars
@@ -189,7 +189,7 @@ class TestBars:
         assert float(ev["high_price"]) >= float(ev["low_price"]), "high >= low"
         assert int(ev["volume"]) >= 0, "valid volume"
 
-    def test_TC_D41_request_historical_bars(self, live_session, live_front_month):
+    def test_tc_d41_request_historical_bars(self, live_session, live_front_month):
         """TC-D41 — request historical bars — OHLCV, ascending, minute-grid open time.
 
         The venue ``marker`` is the bar CLOSE time; ``fields_to_bar`` shifts it
@@ -215,7 +215,7 @@ class TestBars:
             if i > 0:
                 assert b.ts_event >= bars[i - 1].ts_event, "ascending timestamps"
 
-    def test_TC_D42_historical_bars_close_to_open_shift(
+    def test_tc_d42_historical_bars_close_to_open_shift(
         self, live_session, live_front_month
     ):
         """TC-D42 - raw marker is CLOSE; converted ts_event is OPEN (marker - 60s).
@@ -259,7 +259,7 @@ class TestBars:
 class TestLifecycle:
     """TC-D70 — subscribe then unsubscribe, clean teardown."""
 
-    def test_TC_D70_unsubscribe_on_stop(self, live_session, live_front_month):
+    def test_tc_d70_unsubscribe_on_stop(self, live_session, live_front_month):
         """Subscribe then unsubscribe — no errors."""
         _, symbol, exchange = live_front_month
         live_session.subscribe(symbol, exchange)

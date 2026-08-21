@@ -96,19 +96,19 @@ def main(argv: list[str] | None = None) -> int:
 
     env_trading = env_truthy(os.environ.get("RITHMIC_ENABLE_TRADING"))
     allow_live = bool(args.live_place) and env_trading and not args.no_live_place
+    refusal: str | None = None
     if args.live_place and not allow_live:
-        print(
+        refusal = (
             "REFUSING --live-place: set RITHMIC_ENABLE_TRADING=1 and omit "
-            "--no-live-place",
-            file=sys.stderr,
+            "--no-live-place"
         )
-        return 3
-    if allow_live and args.price is None:
-        print(
+    elif allow_live and args.price is None:
+        refusal = (
             "REFUSING --live-place: pass an explicit --price "
-            "(BUY far below market, SELL far above; no default)",
-            file=sys.stderr,
+            "(BUY far below market, SELL far above; no default)"
         )
+    if refusal is not None:
+        print(refusal, file=sys.stderr)
         return 3
 
     session = create_session(session_cfg)
