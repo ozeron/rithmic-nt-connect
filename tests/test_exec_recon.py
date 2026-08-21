@@ -1191,6 +1191,54 @@ def test_cached_stop_order_status_report_preserves_native_order_metadata() -> No
     assert report.avg_px is None
 
 
+def test_cached_submitted_stop_query_reports_accepted() -> None:
+    """A deferred-OPEN bracket stop sits SUBMITTED locally; its cache-backed
+    query answer must say ACCEPTED so the engine's transition table
+    short-circuits instead of warning on the missing avg_px (MY043-001)."""
+    order = SimpleNamespace(
+        client_order_id=ClientOrderId("S-DEFERRED"),
+        venue_order_id=None,
+        instrument_id=InstrumentId.from_str("MNQU6.RITHMIC"),
+        side=OrderSide.SELL,
+        order_type=OrderType.STOP_MARKET,
+        time_in_force=TimeInForce.DAY,
+        status=OrderStatus.SUBMITTED,  # deferred OPEN: no venue accept yet
+        quantity=Quantity.from_int(1),
+        filled_qty=Quantity.from_int(0),
+        ts_accepted=0,
+        ts_last=1,
+        has_price=False,
+        price=None,
+        has_trigger_price=True,
+        trigger_price=Price.from_str("29255.50"),
+        trigger_type=TriggerType.DEFAULT,
+        is_reduce_only=True,
+        avg_px=None,  # unfilled resting stop
+    )
+    venue_order_id = VenueOrderId("201087037")
+    client = SimpleNamespace(
+        _cache=SimpleNamespace(venue_order_id=lambda cid: venue_order_id),
+        account_id=AccountId("RITHMIC-ACC1"),
+    )
+    client._venue_id_for_order = MethodType(
+        RithmicExecutionClient._venue_id_for_order, client
+    )
+
+    report = RithmicExecutionClient._order_status_report_for(
+        cast(RithmicExecutionClient, client), cast(Order, order), 3
+    )
+
+    assert report is not None
+    assert report.order_status is OrderStatus.ACCEPTED
+    # The remap must not leak into post-accept local states.
+    order.status = OrderStatus.PENDING_CANCEL
+    pending = RithmicExecutionClient._order_status_report_for(
+        cast(RithmicExecutionClient, client), cast(Order, order), 4
+    )
+    assert pending is not None
+    assert pending.order_status is OrderStatus.PENDING_CANCEL
+
+
 def test_true_reject_still_terminal_rejected():
     client = _client()
     fields = {

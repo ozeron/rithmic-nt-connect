@@ -1042,6 +1042,33 @@ def test_drain_row_boundary_bindable_is_one_decision(
     bools["duration"] = True
     row = client._drain_row_from_fields(bools, 1)
     assert not row.bindable
+
+    # Live-proven resting stop row (Rithmic Test 2026-08-21): stops never
+    # emit OPEN — their drain rows carry STATUS / "trigger pending" with no
+    # action kind. Real closed-set terms ⟹ bindable; the report maps to
+    # ACCEPTED (working), so recovery can re-bind and recon keeps it open.
+    stop_row = {
+        "type": "order_notification",
+        "source": "rithmic",
+        "kind": None,
+        "notify_type_name": "STATUS",
+        "status": "trigger pending",
+        "basket_id": "B-STOP",
+        "user_tag": "O-STOP",
+        "symbol": "NQU6",
+        "account_id": "ACC1",
+        "quantity": 1,
+        "total_fill_size": 0,
+        "price": 29163.25,
+        "trigger_price": 29178.25,
+        "transaction_type": 2,
+        "price_type": 4,
+        "duration": 1,
+    }
+    row = client._drain_row_from_fields(stop_row, 1)
+    assert row.bindable
+    assert row.report is not None
+    assert row.report.order_status is OrderStatus.ACCEPTED
     assert row.report is not None
 
 
@@ -1636,6 +1663,69 @@ def test_latched_submit_recovered_via_status_reports() -> None:
     reports = asyncio.run(client.generate_order_status_reports(_status_cmd()))
 
     assert [r.venue_order_id for r in reports] == [VenueOrderId("B1")]
+    assert [r.client_order_id for r in reports] == [ClientOrderId("O-1")]
+
+
+# --------------------------------------------------------------------------- #
+# MY043-001 (2026-08-21): stale non-terminal drain rows vs locally closed legs
+# --------------------------------------------------------------------------- #
+
+
+def _closed_cached_order(cid: str = "O-1") -> SimpleNamespace:
+    return SimpleNamespace(
+        client_order_id=ClientOrderId(cid),
+        strategy_id=StrategyId("STRATEGY-1"),
+        instrument_id=InstrumentId.from_str("NQ.GLBX"),
+        side=OrderSide.SELL,
+        order_type=OrderType.STOP_MARKET,
+        is_closed=True,
+        status=OrderStatus.CANCELED,
+        quantity=Quantity.from_int(1),
+        filled_qty=Quantity.zero(),
+        avg_px=None,
+    )
+
+
+def test_bulk_status_suppresses_stale_open_row_for_closed_order() -> None:
+    """A leg canceled moments ago can still appear OPEN in the working-orders
+    drain (venue lag). Forwarding it reconciles ACCEPTED over CANCELED
+    engine-side — the unguarded ``InvalidStateTrigger: CANCELED -> ACCEPTED``
+    from the MY043-001 live log — so the drain boundary suppresses it."""
+    session = FaultInjectingSession(
+        working_orders=[_working_order_row(tag="O-1", basket="B1")]
+    )
+    client = _trading_client(session)
+    client._cache._orders["O-1"] = _closed_cached_order()
+    client._cache.add_venue_order_id(ClientOrderId("O-1"), VenueOrderId("B1"))
+    log = _CaptureLog()
+    client._log = log
+
+    reports = asyncio.run(client.generate_order_status_reports(_status_cmd()))
+
+    assert reports == []
+    assert any("suppressing stale drain row" in m for m in log.debugs)
+
+
+def test_bulk_status_still_reports_terminal_row_for_closed_order() -> None:
+    """Terminal-vs-terminal is never hidden: a venue FILLED/CANCELED snapshot
+    row for a locally closed order must reach the engine (fill-after-cancel
+    races are real state, not lag)."""
+    session = FaultInjectingSession(
+        working_orders=[
+            {
+                **_working_order_row(tag="O-1", basket="B1"),
+                "kind": "canceled",
+                "status": "CANCELED",
+            }
+        ]
+    )
+    client = _trading_client(session)
+    client._cache._orders["O-1"] = _closed_cached_order()
+    client._cache.add_venue_order_id(ClientOrderId("O-1"), VenueOrderId("B1"))
+
+    reports = asyncio.run(client.generate_order_status_reports(_status_cmd()))
+
+    assert [r.order_status for r in reports] == [OrderStatus.CANCELED]
     assert [r.client_order_id for r in reports] == [ClientOrderId("O-1")]
 
 

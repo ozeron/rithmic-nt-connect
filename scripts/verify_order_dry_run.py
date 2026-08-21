@@ -3,10 +3,11 @@
 Default mode is **dry-run**: connect, login order plant, subscribe to order
 updates, optionally poll for a few seconds, and exit **without placing orders**.
 
-Live place is intentionally gated behind ``--live-place`` **and**
-``RITHMIC_ENABLE_TRADING=1`` (plus an explicit far ``--price``). Test-plant order
-routing with ``DEFAULT_APP_NAME`` is confirmed authorized (proven 2026-08-17); the
-script cancels only its own basket, never ``cancel_all``.
+    Live place is intentionally gated behind ``--live-place`` **and**
+    ``RITHMIC_ENABLE_TRADING=1`` (plus an explicit far ``--price`` / stop
+    trigger). Test-plant order routing with ``DEFAULT_APP_NAME`` is confirmed
+    authorized (proven 2026-08-17); the script cancels only its own basket,
+    never ``cancel_all``.
 
 Examples::
 
@@ -16,6 +17,12 @@ Examples::
     # Live far-limit smoke (requires explicit --price; BUY below / SELL above market)
     RITHMIC_ENABLE_TRADING=1 python scripts/verify_order_dry_run.py \\
         --live-place --side BUY --price 28000 --seconds 5
+
+    # Live far stop (never marketable: SELL trigger above / BUY below market;
+    # --auto-trigger-offset derives it from the polled last trade)
+    RITHMIC_ENABLE_TRADING=1 python scripts/verify_order_dry_run.py \\
+        --live-place --order-type STOP_MARKET --side SELL \\
+        --auto-trigger-offset 500 --seconds 12
 
     # Explicitly refuse live place even if env is set
     python scripts/verify_order_dry_run.py --no-live-place
@@ -31,6 +38,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "python"))
@@ -51,6 +59,29 @@ def _slim_event(ev: dict) -> dict:
         "report_text": ev.get("report_text"),
         "price": ev.get("price"),
     }
+
+
+def _poll_market_px(
+    session: Any, symbol: str, exchange: str, window: float
+) -> float | None:
+    """Subscribe the ticker and return the first last-trade price (or None)."""
+    session.subscribe(symbol, exchange)
+    deadline = time.monotonic() + max(0.0, window)
+    while time.monotonic() < deadline:
+        ev = session.poll_event()
+        if ev is not None and ev.get("type") == "last_trade":
+            px = ev.get("trade_price")
+            if px is not None:
+                return float(px)
+        time.sleep(0.05)
+    return None
+
+
+def _derive_trigger(side: str, market_px: float, offset: float) -> float:
+    """Resting-side stop trigger from the last trade (never marketable):
+    CME rejects a SELL stop at/above the last trade and a BUY stop at/below,
+    so SELL derives below and BUY above."""
+    return market_px - offset if side == "SELL" else market_px + offset
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -83,16 +114,37 @@ def main(argv: list[str] | None = None) -> int:
         help="required with --live-place: BUY far below market, SELL far above",
     )
     parser.add_argument("--side", default="BUY", choices=["BUY", "SELL"])
+    parser.add_argument(
+        "--order-type",
+        default="LIMIT",
+        choices=["LIMIT", "STOP_MARKET"],
+        help="order type to place when --live-place is set",
+    )
+    parser.add_argument(
+        "--trigger-price",
+        type=float,
+        default=None,
+        help="STOP_MARKET trigger (SELL far above / BUY far below market)",
+    )
+    parser.add_argument(
+        "--auto-trigger-offset",
+        type=float,
+        default=None,
+        help="derive the STOP_MARKET trigger from the polled last trade "
+        "(SELL above / BUY below by this offset); mutually safe resting side",
+    )
+    parser.add_argument(
+        "--market-window",
+        type=float,
+        default=6.0,
+        help="seconds to poll the ticker for a last trade (auto trigger)",
+    )
     args = parser.parse_args(argv)
 
-    from rithmic_nt_connect import env_truthy, load_dotenv_files
-    from rithmic_nt_connect.config import SessionConfig
-    from rithmic_nt_connect.front_month import resolve_front_month
-    from rithmic_nt_connect.session import create_session
-
-    load_dotenv_files(ROOT / ".env")
-
-    session_cfg = SessionConfig.from_env()
+    # Safety gates evaluate FIRST, before any dotenv/credential loading or
+    # session construction: a mis-gated live place must fail fast and must
+    # not depend on a repo .env existing at all.
+    from rithmic_nt_connect import env_truthy
 
     env_trading = env_truthy(os.environ.get("RITHMIC_ENABLE_TRADING"))
     allow_live = bool(args.live_place) and env_trading and not args.no_live_place
@@ -102,14 +154,33 @@ def main(argv: list[str] | None = None) -> int:
             "REFUSING --live-place: set RITHMIC_ENABLE_TRADING=1 and omit "
             "--no-live-place"
         )
-    elif allow_live and args.price is None:
+    elif allow_live and args.order_type == "LIMIT" and args.price is None:
         refusal = (
             "REFUSING --live-place: pass an explicit --price "
             "(BUY far below market, SELL far above; no default)"
         )
+    elif (
+        allow_live
+        and args.order_type == "STOP_MARKET"
+        and args.trigger_price is None
+        and args.auto_trigger_offset is None
+    ):
+        refusal = (
+            "REFUSING --live-place STOP_MARKET: pass --trigger-price "
+            "(SELL far above / BUY far below market) or --auto-trigger-offset"
+        )
     if refusal is not None:
         print(refusal, file=sys.stderr)
         return 3
+
+    from rithmic_nt_connect import load_dotenv_files
+    from rithmic_nt_connect.config import SessionConfig
+    from rithmic_nt_connect.front_month import resolve_front_month
+    from rithmic_nt_connect.session import create_session
+
+    load_dotenv_files(ROOT / ".env")
+
+    session_cfg = SessionConfig.from_env()
 
     session = create_session(session_cfg)
     smoke_tag = f"{SMOKE_TAG_PREFIX}-{uuid.uuid4().hex[:8]}"
@@ -147,27 +218,54 @@ def main(argv: list[str] | None = None) -> int:
         )
 
         if allow_live:
-            assert args.price is not None  # gated above
-            print(
-                f"WARNING: placing live {args.side} LIMIT @ {args.price} "
-                f"tag={smoke_tag}",
-                file=sys.stderr,
-            )
+            trigger_price: float | None = None
+            if args.order_type == "STOP_MARKET":
+                trigger_price = args.trigger_price
+                if trigger_price is None:
+                    market_px = _poll_market_px(
+                        session,
+                        front["trading_symbol"],
+                        front["trading_exchange"],
+                        args.market_window,
+                    )
+                    if market_px is None:
+                        print(
+                            "no last trade observed in the market window; "
+                            "refusing to guess a stop trigger",
+                            file=sys.stderr,
+                        )
+                        return 4
+                    offset = float(args.auto_trigger_offset or 0.0)
+                    trigger_price = _derive_trigger(args.side, market_px, offset)
+                print(
+                    f"WARNING: placing live {args.side} STOP_MARKET "
+                    f"trigger @ {trigger_price} tag={smoke_tag}",
+                    file=sys.stderr,
+                )
+            else:
+                assert args.price is not None  # gated above
+                print(
+                    f"WARNING: placing live {args.side} LIMIT @ {args.price} "
+                    f"tag={smoke_tag}",
+                    file=sys.stderr,
+                )
             session.place_order(
                 front["trading_symbol"],
                 front["trading_exchange"],
                 args.side,
-                "LIMIT",
+                args.order_type,
                 1,
                 smoke_tag,
-                price=args.price,
+                price=args.price if args.order_type == "LIMIT" else None,
+                trigger_price=trigger_price,
                 duration="DAY",
             )
             report["placed"] = True
             report["place"] = {
                 "side": args.side,
-                "price_type": "LIMIT",
+                "price_type": args.order_type,
                 "price": args.price,
+                "trigger_price": trigger_price,
                 "qty": 1,
                 "user_tag": smoke_tag,
             }

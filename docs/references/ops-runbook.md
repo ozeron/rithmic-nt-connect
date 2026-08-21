@@ -174,6 +174,28 @@ accepts that a genuinely-unknown in-flight order will be resolved as a terminal
 UNKNOWN reject by the engine after ~25s (5 retries × 5s threshold) — a strategy
 may then resubmit and duplicate a live order.
 
+## Benign exec-engine warnings (MY043-001, 2026-08-21)
+
+Two `ExecEngine` WARNs seen in the MY043-001 live log are engine-side noise the
+adapter now feeds cleanly; both are pinned against a real `LiveExecutionEngine`
+in `tests/test_exec_engine_repro.py`:
+
+- `report.avg_px was 'None' when a value was expected` — a status query on a
+  bracket stop whose OPEN Rithmic defers (local `SUBMITTED`) used to fall
+  through the engine's transition table into fill reconciliation. The
+  cache-backed query answer now reports such legs as `ACCEPTED`
+  (`_order_status_report_for`), which short-circuits before the warn.
+- `InvalidStateTrigger: CANCELED -> ACCEPTED` — an open-order drain row taken
+  before a cancel propagated used to reconcile ACCEPTED over a locally
+  CANCELED leg. The bulk drain now suppresses stale non-terminal rows for
+  locally closed orders (`_row_regresses_terminal_order`); terminal-vs-
+  terminal rows (venue FILLED vs local CANCELED) still pass through.
+
+Residual exposure: Nautilus applies recon reports without a monotonic guard,
+so a race entirely inside the engine (report built before a cancel, applied
+after) can still warn once. Adapter-fed paths are guarded; treat a single
+occurrence right after a cancel as benign, repeated ones as a bug report.
+
 ## Reconnect re-arm requires orders + a fresh PnL/position observation
 
 When the order plant is latched (a prior operation's venue outcome is unknown),

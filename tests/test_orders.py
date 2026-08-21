@@ -122,6 +122,10 @@ def test_order_notification_fields_and_kind():
 def test_kind_from_notify_covers_main_paths():
     assert kind_from_notify("rithmic", "OPEN") == "accepted"
     assert kind_from_notify("rithmic", "MODIFIED") == "updated"
+    # Live-proven (Rithmic Test 2026-08-21): resting stops never get OPEN;
+    # TRIGGER_PENDING is their working/accepted evidence.
+    assert kind_from_notify("rithmic", "TRIGGER_PENDING") == "accepted"
+    assert kind_from_notify("rithmic", "OPEN_PENDING") is None
     assert kind_from_notify("exchange", "FILL") == "filled"
     assert kind_from_notify("exchange", "REJECT") == "rejected"
     assert kind_from_notify("exchange", "CANCEL") == "canceled"

@@ -206,6 +206,11 @@ def kind_from_notify(
     if source == "rithmic":
         if name == "OPEN":
             return "accepted"
+        if name == "TRIGGER_PENDING":
+            # Live-proven (Rithmic Test 2026-08-21): resting STOP_MARKET
+            # orders never receive OPEN — TRIGGER_PENDING is their working
+            # state, i.e. acceptance evidence (emit guarded from SUBMITTED).
+            return "accepted"
         if name == "MODIFIED":
             return "updated"
         if name == "MODIFICATION_FAILED":
