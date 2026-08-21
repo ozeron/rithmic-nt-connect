@@ -146,6 +146,101 @@ ACCOUNT_CACHE_TIMEOUT_S = 10.0
 _MAX_RECON_SPAN_S = 32 * 86_400
 
 
+def order_type_from_fields(fields: dict[str, Any]) -> OrderType:
+    """Nautilus order type for a normalized notification row (pure)."""
+    raw = fields.get("price_type")
+    if raw is None:
+        return OrderType.MARKET
+    try:
+        return _RITHMIC_PRICE_TYPE_TO_ORDER_TYPE.get(int(raw), OrderType.MARKET)
+    except (TypeError, ValueError):
+        return OrderType.MARKET
+
+
+def tif_from_fields(fields: dict[str, Any]) -> TimeInForce:
+    """Nautilus time-in-force for a normalized notification row (pure)."""
+    raw = fields.get("duration")
+    if raw is None:
+        return TimeInForce.GTC
+    try:
+        return _RITHMIC_DURATION_TO_TIF.get(int(raw), TimeInForce.GTC)
+    except (TypeError, ValueError):
+        return TimeInForce.GTC
+
+
+def trigger_type_from_fields(fields: dict[str, Any]) -> TriggerType:
+    """Nautilus trigger type for a normalized notification row (pure)."""
+    raw = fields.get("price_type")
+    if raw is None:
+        return TriggerType.NO_TRIGGER
+    try:
+        if int(raw) in (3, 4):  # Rithmic StopLimit / StopMarket
+            return TriggerType.DEFAULT
+    except (TypeError, ValueError):
+        pass
+    return TriggerType.NO_TRIGGER
+
+
+def order_status_from_fields(fields: dict[str, Any]) -> OrderStatus:
+    """Venue drain/notification row -> Nautilus order status (pure).
+
+    Operation-rejection kinds leave the order working (never terminal
+    REJECTED for a live order); everything not recognizably terminal maps to
+    ACCEPTED so recon never fabricates a terminal outcome.
+    """
+    kind = fields.get("kind")
+    status_u = str(fields.get("status") or "").upper()
+    try:
+        qty = int(fields.get("quantity") or 0)
+        filled = int(fields.get("total_fill_size") or 0)
+    except (TypeError, ValueError):
+        qty = filled = 0
+    if kind == "filled" or (qty > 0 and filled >= qty):
+        return OrderStatus.FILLED
+    # PARTIALLY_FILLED when partial, else ACCEPTED (not PENDING_CANCEL:
+    # recon would leave the OMS believing a cancel is in flight forever).
+    if kind in ("modify_rejected", "cancel_rejected"):
+        if qty > 0 and 0 < filled < qty:
+            return OrderStatus.PARTIALLY_FILLED
+        return OrderStatus.ACCEPTED
+    # Check genuine reject kinds/status before the CANCEL substring so a
+    # rejected cancel (e.g. "CANCELLATION_FAILED") is not CANCELED.
+    if kind == "rejected" or "REJECT" in status_u:
+        return OrderStatus.REJECTED
+    if kind == "canceled" or status_u in ("CANCELLED", "CANCELED"):
+        return OrderStatus.CANCELED
+    if kind == "expired" or "EXPIRED" in status_u:
+        return OrderStatus.EXPIRED
+    if qty > 0 and 0 < filled < qty:
+        return OrderStatus.PARTIALLY_FILLED
+    if kind == "triggered":
+        # Only limit-style stops expose TRIGGERED (#3812); market-style
+        # stops execute straight through on trigger and stay ACCEPTED
+        # (working) until the fill arrives.
+        if order_type_from_fields(fields) in _TRIGGERABLE_ORDER_TYPES:
+            return OrderStatus.TRIGGERED
+        return OrderStatus.ACCEPTED
+    # Everything else defaults to working (ACCEPTED): a row that is not
+    # recognizably filled/rejected/canceled/expired is an open order.
+    return OrderStatus.ACCEPTED
+
+
+def is_benign_bare_complete(fields: dict[str, Any], order: Any) -> bool:
+    """Closed FILLED/CANCELED tracked leg + bare COMPLETE (no fill payload)."""
+    return (
+        order is not None
+        and getattr(order, "is_closed", False)
+        and fields.get("source") == "rithmic"
+        and str(fields.get("notify_type_name") or "").upper() == "COMPLETE"
+        and str(fields.get("status") or "").lower() == "complete"
+        and fields.get("kind") is None
+        and fields.get("quantity") is None
+        and fields.get("fill_size") is None
+        and fields.get("fill_id") is None
+        and order.status in (OrderStatus.FILLED, OrderStatus.CANCELED)
+    )
+
+
 async def wait_account_in_cache(
     cache: Any,
     account_id: AccountId,
@@ -681,6 +776,40 @@ class RithmicExecutionClient(LiveExecutionClient):
                 continue
             yield row
 
+    def _latest_drain_rows(
+        self, events: list[dict[str, Any]]
+    ) -> dict[str, _DrainRowResult]:
+        """Keep only the freshest drain row per basket id."""
+        latest: dict[str, _DrainRowResult] = {}
+        for row in self._iter_drain_rows(events):
+            key = str(row.fields["basket_id"])
+            if key not in latest or row.ts_event >= latest[key].ts_event:
+                latest[key] = row
+        return latest
+
+    def _drain_row_is_stale(
+        self,
+        client_order_id: ClientOrderId,
+        row: _DrainRowResult,
+    ) -> bool:
+        """Live-stream state wins over a drained snapshot when it is ahead."""
+        order = self._cache.order(client_order_id)
+        if order is not None and getattr(order, "is_closed", False):
+            # The live stream resolved this order to a terminal state
+            # while we drained; never publish a stale snapshot over it.
+            return True
+        # Same freshness rule as ``_resolve_inflight_by_tag``: the
+        # live stream wins over the stale drain snapshot. Only when
+        # the drain row carries a real venue timestamp: ``0`` is the
+        # iterator's synthetic missing-ts value, and skipping on it
+        # would drop a valid snapshot (never publishing nor
+        # binding) whenever the tracked order has any live history.
+        return bool(
+            order is not None
+            and row.ts_event
+            and (int(getattr(order, "ts_last", 0) or 0) > row.ts_event)
+        )
+
     def _apply_drain_rows(self, events: list[dict[str, Any]]) -> None:
         """Apply a working-orders drain to the local cache before re-arming.
 
@@ -695,12 +824,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         before trading resumes, so the barrier aborts (the plant stays
         un-armed).
         """
-        latest: dict[str, _DrainRowResult] = {}
-        for row in self._iter_drain_rows(events):
-            key = str(row.fields["basket_id"])
-            if key not in latest or row.ts_event >= latest[key].ts_event:
-                latest[key] = row
-        for row in latest.values():
+        for row in self._latest_drain_rows(events).values():
             fields = row.fields
             basket = str(fields["basket_id"])
             report = row.report
@@ -709,24 +833,10 @@ class RithmicExecutionClient(LiveExecutionClient):
                 # type for the checker.
                 continue
             client_order_id = self._drain_client_order_id(fields)
-            if client_order_id is not None:
-                order = self._cache.order(client_order_id)
-                if order is not None and getattr(order, "is_closed", False):
-                    # The live stream resolved this order to a terminal state
-                    # while we drained; never publish a stale snapshot over it.
-                    continue
-                if (
-                    order is not None
-                    and row.ts_event
-                    and (int(getattr(order, "ts_last", 0) or 0) > row.ts_event)
-                ):
-                    # Same freshness rule as ``_resolve_inflight_by_tag``: the
-                    # live stream wins over the stale drain snapshot. Only when
-                    # the drain row carries a real venue timestamp: ``0`` is the
-                    # iterator's synthetic missing-ts value, and skipping on it
-                    # would drop a valid snapshot (never publishing nor
-                    # binding) whenever the tracked order has any live history.
-                    continue
+            if client_order_id is not None and self._drain_row_is_stale(
+                client_order_id, row
+            ):
+                continue
             # Apply (publish) BEFORE binding the venue id — commit ordering:
             # the engine must receive the reconciled status before trading
             # resumes, so a failed publication fails the barrier (raises) and
@@ -790,74 +900,94 @@ class RithmicExecutionClient(LiveExecutionClient):
         on_event: Callable[[dict[str, Any]], None],
         on_resync: Callable[[], Any],
     ) -> None:
-        backoff = 0.05
         # Stream-lifetime state, local to this loop: a new loop (reconnect)
         # starts at zero and a successful resubscribe resets it, so a transient
         # run can never carry across stream lifetimes (the 4-before-drop + 1-
         # after-recovery latch class is structurally impossible).
+        backoff = 0.05
         transient_streak = 0
         while True:
+            outcome = await self._poll_iteration(
+                name=name,
+                poll_fn=poll_fn,
+                on_event=on_event,
+                on_resync=on_resync,
+                backoff=backoff,
+                transient_streak=transient_streak,
+            )
+            if outcome is None:
+                return
+            backoff, transient_streak = outcome
+
+    async def _poll_iteration(
+        self,
+        *,
+        name: str,
+        poll_fn: Callable[[], dict[str, Any] | None],
+        on_event: Callable[[dict[str, Any]], None],
+        on_resync: Callable[[], Any],
+        backoff: float,
+        transient_streak: int,
+    ) -> tuple[float, int] | None:
+        """Run one poll iteration; return updated ``(backoff, transient_streak)``
+        to continue, or ``None`` when the stream must stop (order latch)."""
+        try:
+            event = await self._poll_session_event(poll_fn)
+        except _PollTransientError as exc:
+            # A persistent non-channel failure on the order stream means
+            # notifications are not being processed: fail closed (latch)
+            # rather than keep polling garbage. PnL keeps transient
+            # semantics (soft-fail is the operator's escape).
+            if name == "order":
+                transient_streak += 1
+                if transient_streak >= self._ORDER_POLL_MAX_TRANSIENT:
+                    self._log.error(f"{name} poll stream failing persistently: {exc}")
+                    self._latch_order_plant("order poll stream failure", str(exc))
+                    return None
+            await asyncio.sleep(0.1)
+            return backoff, transient_streak
+        except Exception as exc:
+            self._log.error(f"{name} poll channel error: {exc}")
+            if name == "order":
+                self._order_plant.resync_start()
             try:
-                event = await self._poll_session_event(poll_fn)
-            except _PollTransientError as exc:
-                # A persistent non-channel failure on the order stream means
-                # notifications are not being processed: fail closed (latch)
-                # rather than keep polling garbage. PnL keeps transient
-                # semantics (soft-fail is the operator's escape).
+                await on_resync()
+                self._log.warning(f"{name} subscription resynced after channel error")
+                backoff = 0.05
                 if name == "order":
-                    transient_streak += 1
-                    if transient_streak >= self._ORDER_POLL_MAX_TRANSIENT:
-                        self._log.error(
-                            f"{name} poll stream failing persistently: {exc}"
-                        )
-                        self._latch_order_plant("order poll stream failure", str(exc))
-                        break
-                await asyncio.sleep(0.1)
-                continue
-            except Exception as exc:
-                self._log.error(f"{name} poll channel error: {exc}")
+                    # Fresh stream lifetime: the old transient run must not
+                    # count toward the recovered stream.
+                    transient_streak = 0
+            except Exception as resync_exc:
+                self._log.error(f"{name} subscription resync failed: {resync_exc}")
                 if name == "order":
-                    self._order_plant.resync_start()
-                try:
-                    await on_resync()
-                    self._log.warning(
-                        f"{name} subscription resynced after channel error"
-                    )
-                    backoff = 0.05
-                    if name == "order":
-                        # Fresh stream lifetime: the old transient run must not
-                        # count toward the recovered stream.
-                        transient_streak = 0
-                except Exception as resync_exc:
-                    self._log.error(f"{name} subscription resync failed: {resync_exc}")
-                    if name == "order":
-                        # A failed resync is a dead stream: the plant machine
-                        # moves to DISCONNECTED (or stays LATCHED), so a
-                        # concurrent reconnect re-arm barrier can never clear a
-                        # latch over it, and a later resync cannot re-arm it.
-                        self._order_plant.resync_failed()
-                    backoff = min(backoff * 2, 2.0)
-                await asyncio.sleep(backoff)
-                continue
-            if event is None:
-                await asyncio.sleep(0.05)
-                continue
-            try:
-                on_event(event)
-            except Exception as exc:
-                self._log.exception(f"{name} event handler error (suppressed)", exc)
-                if name == "order":
-                    # A handler failure can leave venue and cache state divergent.
-                    # Stop the order stream and fail closed instead of continuing
-                    # to accept commands against stale execution state. Latch
-                    # (not just DISCONNECTED): the re-arm barrier (keyed on
-                    # plant state) must never clear a latch over a dead stream.
-                    self._latch_order_plant(
-                        "order handler failure",
-                        f"order stream stopped; venue/cache state may be "
-                        f"divergent: {exc}",
-                    )
-                    break
+                    # A failed resync is a dead stream: the plant machine
+                    # moves to DISCONNECTED (or stays LATCHED), so a
+                    # concurrent reconnect re-arm barrier can never clear a
+                    # latch over it, and a later resync cannot re-arm it.
+                    self._order_plant.resync_failed()
+                backoff = min(backoff * 2, 2.0)
+            await asyncio.sleep(backoff)
+            return backoff, transient_streak
+        if event is None:
+            await asyncio.sleep(0.05)
+            return backoff, transient_streak
+        try:
+            on_event(event)
+        except Exception as exc:
+            self._log.exception(f"{name} event handler error (suppressed)", exc)
+            if name == "order":
+                # A handler failure can leave venue and cache state divergent.
+                # Stop the order stream and fail closed instead of continuing
+                # to accept commands against stale execution state. Latch
+                # (not just DISCONNECTED): the re-arm barrier (keyed on
+                # plant state) must never clear a latch over a dead stream.
+                self._latch_order_plant(
+                    "order handler failure",
+                    f"order stream stopped; venue/cache state may be divergent: {exc}",
+                )
+                return None
+        return backoff, transient_streak
 
     def _dispatch_pnl_event(self, event: dict[str, Any]) -> None:
         etype = event.get("type")
@@ -1130,21 +1260,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         strategy_id = order.strategy_id
         instrument_id = order.instrument_id
         if action.kind == "accepted":
-            # LAP-42: Rithmic may defer OPEN until terminal; only emit while
-            # still SUBMITTED (late OPEN after ACCEPTED/advanced is noise).
-            if order.status is OrderStatus.SUBMITTED:
-                self.generate_order_accepted(
-                    strategy_id,
-                    instrument_id,
-                    client_order_id,
-                    venue_order_id,
-                    ts_event,
-                )
-            else:
-                self._log.debug(
-                    f"skipping late/duplicate OrderAccepted for {client_order_id}: "
-                    f"local status={order.status}"
-                )
+            self._emit_accepted(order, client_order_id, venue_order_id, ts_event)
         elif action.kind == "rejected":
             self.generate_order_rejected(
                 strategy_id,
@@ -1172,24 +1288,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                 ts_event,
             )
         elif action.kind == "updated":
-            qty = (
-                Quantity.from_int(int(action.quantity))
-                if action.quantity is not None
-                else order.quantity
-            )
-            prec = int(order.price.precision) if order.has_price else None
-            if action.price is not None:
-                price = _price(action.price, prec)
-            elif order.has_price:
-                price = order.price
-            else:
-                price = None
-            if action.trigger is not None:
-                trigger = _price(action.trigger, prec)
-            elif order.has_trigger_price:
-                trigger = order.trigger_price
-            else:
-                trigger = None
+            qty, price, trigger = self._resolve_updated_terms(order, action)
             self.generate_order_updated(
                 strategy_id,
                 instrument_id,
@@ -1205,89 +1304,177 @@ class RithmicExecutionClient(LiveExecutionClient):
                 strategy_id, instrument_id, client_order_id, venue_order_id, ts_event
             )
         elif action.kind == "triggered":
-            # Producer guard (#3812 / upstream 2f7d3947): only limit-style
-            # stops have a TRIGGERED state. Market-style stops go straight to
-            # FILLED on trigger; emitting OrderTriggered for them is rejected by
-            # the Nautilus model, which would kill the order event stream.
-            # A1: a duplicate TRIGGER for an already-TRIGGERED order is
-            # suppressed too (terminal-state monotonicity). A closed order
-            # never reaches this branch: ``_resolve_client_order_id`` routes it
-            # to the untracked report path.
-            already_triggered = getattr(order, "status", None) is OrderStatus.TRIGGERED
-            if order.order_type not in _TRIGGERABLE_ORDER_TYPES or already_triggered:
-                self._log.debug(
-                    f"skipping OrderTriggered for {order.order_type} order "
-                    f"{client_order_id} (market-style stop or already triggered)"
-                )
-            else:
-                self.generate_order_triggered(
-                    strategy_id,
-                    instrument_id,
-                    client_order_id,
-                    venue_order_id,
-                    ts_event,
-                )
-        elif action.kind == "filled":
-            if action.fill_qty is None or action.trade_id is None:
-                self._log.error(
-                    f"fill action missing fields: {slim_order_fields(fields)}"
-                )
-                return
-            dedup = fill_dedup_key(fields, ts_event=ts_event)
-            if self._fill_key_seen(dedup):
-                return
-            try:
-                fill_qty = Quantity.from_int(int(action.fill_qty))
-                if action.fill_px is None:
-                    raise ValueError("fill price missing (pending/sentinel)")
-                fill_px = self._price_for_instrument(instrument_id, action.fill_px)
-            except (TypeError, ValueError, OverflowError) as exc:
-                # A definitive venue fill we cannot price (absent price or the
-                # -1.0 pending-price sentinel) means local exposure is known to
-                # be incomplete. The dedup key is NOT consumed, so a later
-                # priced replay of the same fill id can still recover; the
-                # plant is latched (fail-closed) until a recon re-syncs.
-                self._latch_order_plant(
-                    "fill suppressed",
-                    f"tracked {client_order_id} fill unpriceable ({exc}); "
-                    "exposure may be incomplete; recon will re-sync",
-                )
-                return
-            # A2: a unique venue fill beyond the local remaining qty is real
-            # (never-drop, never cap): Nautilus 1.231.x clamps ``leaves_qty``
-            # to zero and accumulates the excess in ``overfill_qty``. Latch so
-            # a recon cycle re-syncs the cache (a missed partial is usually the
-            # cause); the fill is still emitted at its true size.
-            leaves = order.leaves_qty
-            if leaves is not None and fill_qty > leaves:
-                self._latch_order_plant(
-                    "overfill",
-                    f"tracked {client_order_id} fill qty {fill_qty} exceeds "
-                    f"leaves {leaves} by {fill_qty - leaves}; Nautilus clamps "
-                    "leaves_qty and tracks overfill_qty; recon will re-sync",
-                )
-            commission = self._commission_money(
-                self._product_code_for_fill(instrument_id, fields.get("symbol")),
-                int(fill_qty),
+            self._emit_triggered_guarded(
+                order, client_order_id, venue_order_id, ts_event
             )
-            self.generate_order_filled(
-                strategy_id,
-                instrument_id,
+        elif action.kind == "filled":
+            self._handle_tracked_fill(
+                order,
                 client_order_id,
                 venue_order_id,
-                None,
-                TradeId(str(action.trade_id)),
-                order.side,
-                order.order_type,
-                fill_qty,
-                fill_px,
-                Currency.from_str("USD"),
-                commission,
-                LiquiditySide.NO_LIQUIDITY_SIDE,
+                fields,
                 ts_event,
-                info={"rithmic": dict(fields)},
+                action,
             )
-            self._mark_fill_key(dedup)
+
+    def _emit_accepted(
+        self,
+        order: Any,
+        client_order_id: ClientOrderId,
+        venue_order_id: VenueOrderId,
+        ts_event: int,
+    ) -> None:
+        """Emit OrderAccepted under the LAP-42 guard: Rithmic may defer OPEN
+        until terminal; only emit while still SUBMITTED (late OPEN after
+        ACCEPTED/advanced is noise)."""
+        if order.status is OrderStatus.SUBMITTED:
+            self.generate_order_accepted(
+                order.strategy_id,
+                order.instrument_id,
+                client_order_id,
+                venue_order_id,
+                ts_event,
+            )
+        else:
+            self._log.debug(
+                f"skipping late/duplicate OrderAccepted for {client_order_id}: "
+                f"local status={order.status}"
+            )
+
+    def _resolve_updated_terms(
+        self, order: Any, action: Any
+    ) -> tuple[Quantity, Any, Any]:
+        """Resolve UPDATED-branch qty/price/trigger: the notification value
+        wins; else the order's own term; else None."""
+        qty = (
+            Quantity.from_int(int(action.quantity))
+            if action.quantity is not None
+            else order.quantity
+        )
+        prec = int(order.price.precision) if order.has_price else None
+        if action.price is not None:
+            price = _price(action.price, prec)
+        elif order.has_price:
+            price = order.price
+        else:
+            price = None
+        if action.trigger is not None:
+            trigger = _price(action.trigger, prec)
+        elif order.has_trigger_price:
+            trigger = order.trigger_price
+        else:
+            trigger = None
+        return qty, price, trigger
+
+    def _emit_triggered_guarded(
+        self,
+        order: Any,
+        client_order_id: ClientOrderId,
+        venue_order_id: VenueOrderId,
+        ts_event: int,
+    ) -> None:
+        """Emit OrderTriggered under the #3812 producer guard: only
+        limit-style stops have a TRIGGERED state. Market-style stops go
+        straight to FILLED on trigger; emitting OrderTriggered for them is
+        rejected by the Nautilus model, which would kill the order event
+        stream. A duplicate TRIGGER for an already-TRIGGERED order is
+        suppressed too (terminal-state monotonicity). A closed order never
+        reaches this branch: ``_resolve_client_order_id`` routes it to the
+        untracked report path.
+        """
+        already_triggered = getattr(order, "status", None) is OrderStatus.TRIGGERED
+        if order.order_type not in _TRIGGERABLE_ORDER_TYPES or already_triggered:
+            self._log.debug(
+                f"skipping OrderTriggered for {order.order_type} order "
+                f"{client_order_id} (market-style stop or already triggered)"
+            )
+            return
+        self.generate_order_triggered(
+            order.strategy_id,
+            order.instrument_id,
+            client_order_id,
+            venue_order_id,
+            ts_event,
+        )
+
+    def _handle_tracked_fill(
+        self,
+        order: Any,
+        client_order_id: ClientOrderId,
+        venue_order_id: VenueOrderId,
+        fields: dict[str, Any],
+        ts_event: int,
+        action: Any,
+    ) -> None:
+        """Emit one venue-priced tracked fill; dedup by venue trade id.
+
+        Honesty rules enforced here (single home):
+        - an unpriceable definitive fill latches fail-closed WITHOUT consuming
+          the dedup key, so a later priced replay can recover;
+        - a unique overfill is still emitted at true size (never dropped,
+          never capped) but latches for recon;
+        - the dedup key is marked only after successful publication.
+        """
+        strategy_id = order.strategy_id
+        instrument_id = order.instrument_id
+        if action.fill_qty is None or action.trade_id is None:
+            self._log.error(f"fill action missing fields: {slim_order_fields(fields)}")
+            return
+        dedup = fill_dedup_key(fields, ts_event=ts_event)
+        if self._fill_key_seen(dedup):
+            return
+        try:
+            fill_qty = Quantity.from_int(int(action.fill_qty))
+            if action.fill_px is None:
+                raise ValueError("fill price missing (pending/sentinel)")
+            fill_px = self._price_for_instrument(instrument_id, action.fill_px)
+        except (TypeError, ValueError, OverflowError) as exc:
+            # A definitive venue fill we cannot price (absent price or the
+            # -1.0 pending-price sentinel) means local exposure is known to
+            # be incomplete. The dedup key is NOT consumed, so a later
+            # priced replay of the same fill id can still recover; the
+            # plant is latched (fail-closed) until a recon re-syncs.
+            self._latch_order_plant(
+                "fill suppressed",
+                f"tracked {client_order_id} fill unpriceable ({exc}); "
+                "exposure may be incomplete; recon will re-sync",
+            )
+            return
+        # A2: a unique venue fill beyond the local remaining qty is real
+        # (never-drop, never cap): Nautilus 1.231.x clamps ``leaves_qty``
+        # to zero and accumulates the excess in ``overfill_qty``. Latch so
+        # a recon cycle re-syncs the cache (a missed partial is usually the
+        # cause); the fill is still emitted at its true size.
+        leaves = order.leaves_qty
+        if leaves is not None and fill_qty > leaves:
+            self._latch_order_plant(
+                "overfill",
+                f"tracked {client_order_id} fill qty {fill_qty} exceeds "
+                f"leaves {leaves} by {fill_qty - leaves}; Nautilus clamps "
+                "leaves_qty and tracks overfill_qty; recon will re-sync",
+            )
+        commission = self._commission_money(
+            self._product_code_for_fill(instrument_id, fields.get("symbol")),
+            int(fill_qty),
+        )
+        self.generate_order_filled(
+            strategy_id,
+            instrument_id,
+            client_order_id,
+            venue_order_id,
+            None,
+            TradeId(str(action.trade_id)),
+            order.side,
+            order.order_type,
+            fill_qty,
+            fill_px,
+            Currency.from_str("USD"),
+            commission,
+            LiquiditySide.NO_LIQUIDITY_SIDE,
+            ts_event,
+            info={"rithmic": dict(fields)},
+        )
+        self._mark_fill_key(dedup)
 
     def _instrument_id_from_order_fields(
         self, fields: dict[str, Any]
@@ -1351,19 +1538,78 @@ class RithmicExecutionClient(LiveExecutionClient):
         )
 
     def _is_benign_bare_complete(self, fields: dict[str, Any], order: Any) -> bool:
-        """Closed FILLED/CANCELED tracked leg + bare COMPLETE (no fill payload)."""
-        return (
-            order is not None
-            and getattr(order, "is_closed", False)
-            and fields.get("source") == "rithmic"
-            and str(fields.get("notify_type_name") or "").upper() == "COMPLETE"
-            and str(fields.get("status") or "").lower() == "complete"
-            and fields.get("kind") is None
-            and fields.get("quantity") is None
-            and fields.get("fill_size") is None
-            and fields.get("fill_id") is None
-            and order.status in (OrderStatus.FILLED, OrderStatus.CANCELED)
+        return is_benign_bare_complete(fields, order)
+
+    def _publish_untracked_status(self, fields: dict[str, Any], ts_event: int) -> bool:
+        """Status phase of the untracked path. Returns ``False`` when the
+        caller must stop — a failed status publication also suppresses the
+        fill phase (fail-closed: no venue fill without its order
+        prerequisite)."""
+        status_report = self._drain_row_from_fields(fields, ts_event).report
+        if status_report is None:
+            # LAP-42: bare COMPLETE on a closed tracked leg is DEBUG; else WARN.
+            cid = self._basket_client_id(fields)
+            order = self._cache.order(cid) if cid is not None else None
+            if is_benign_bare_complete(fields, order):
+                self._log.debug(
+                    f"skipping benign bare COMPLETE for closed {cid}: "
+                    f"{slim_order_fields(fields)}"
+                )
+            else:
+                self._log.warning(
+                    f"untracked order status could not be built: "
+                    f"{slim_order_fields(fields)}"
+                )
+            return True
+
+        # Rithmic re-pushes order state frequently; skip an unchanged
+        # re-push of an external order (fills below are deduped separately).
+        # Include the mutable order terms — an ACCEPTED re-push that changes
+        # quantity/price/trigger must update Nautilus, not be discarded.
+        status_key = (
+            str(status_report.venue_order_id),
+            str(getattr(status_report, "order_status", "")),
+            str(getattr(status_report, "quantity", "")),
+            str(getattr(status_report, "price", "")),
+            str(getattr(status_report, "trigger_price", "")),
+            str(getattr(status_report, "filled_qty", "")),
+            str(getattr(status_report, "avg_px", "")),
         )
+        if (
+            self._untracked_status_keys.get(str(status_report.venue_order_id))
+            == status_key
+        ):
+            return True
+        if not self._publish_order_status_report(
+            status_report,
+            context="untracked notification",
+        ):
+            return False
+        # Record only on success so a later re-push can retry.
+        if (
+            len(self._untracked_status_keys)
+            >= RithmicExecutionClient._MAX_SEEN_FILL_KEYS
+        ):
+            self._untracked_status_keys.clear()
+        self._untracked_status_keys[str(status_report.venue_order_id)] = status_key
+        return True
+
+    def _publish_untracked_fill(self, fields: dict[str, Any], ts_event: int) -> None:
+        """Fill phase of the untracked path: dedupe by venue trade id and
+        publish one external FillReport."""
+        if fields.get("kind") != "filled":
+            return
+        dedup = fill_dedup_key(fields, ts_event=ts_event)
+        if self._fill_key_seen(dedup):
+            return
+        report = self._fill_report_from_fields(fields, ts_event)
+        if report is None:
+            self._log.error(
+                f"untracked fill suppressed (build failed): {slim_order_fields(fields)}"
+            )
+            return
+        self._send_fill_report(report)
+        self._mark_fill_key(dedup)
 
     def _handle_untracked_notification(self, fields: dict[str, Any]) -> None:
         """Report external venue activity without assigning it to a strategy order."""
@@ -1387,71 +1633,9 @@ class RithmicExecutionClient(LiveExecutionClient):
                 f"{slim_order_fields(fields)}"
             )
             return
-
-        status_report = self._drain_row_from_fields(fields, ts_event).report
-        if status_report is not None:
-            # Rithmic re-pushes order state frequently; skip an unchanged
-            # re-push of an external order (fills below are deduped separately).
-            # Include the mutable order terms — an ACCEPTED re-push that changes
-            # quantity/price/trigger must update Nautilus, not be discarded.
-            status_key = (
-                str(status_report.venue_order_id),
-                str(getattr(status_report, "order_status", "")),
-                str(getattr(status_report, "quantity", "")),
-                str(getattr(status_report, "price", "")),
-                str(getattr(status_report, "trigger_price", "")),
-                str(getattr(status_report, "filled_qty", "")),
-                str(getattr(status_report, "avg_px", "")),
-            )
-            if (
-                self._untracked_status_keys.get(str(status_report.venue_order_id))
-                == status_key
-            ):
-                status_report = None
-            elif not self._publish_order_status_report(
-                status_report,
-                context="untracked notification",
-            ):
-                # Record only on success so a later re-push can retry.
-                return
-            else:
-                if (
-                    len(self._untracked_status_keys)
-                    >= RithmicExecutionClient._MAX_SEEN_FILL_KEYS
-                ):
-                    self._untracked_status_keys.clear()
-                self._untracked_status_keys[str(status_report.venue_order_id)] = (
-                    status_key
-                )
-        else:
-            # LAP-42: bare COMPLETE on a closed tracked leg is DEBUG; else WARN.
-            cid = self._basket_client_id(fields)
-            order = self._cache.order(cid) if cid is not None else None
-            if self._is_benign_bare_complete(fields, order):
-                self._log.debug(
-                    f"skipping benign bare COMPLETE for closed {cid}: "
-                    f"{slim_order_fields(fields)}"
-                )
-            else:
-                self._log.warning(
-                    f"untracked order status could not be built: "
-                    f"{slim_order_fields(fields)}"
-                )
-
-        if fields.get("kind") != "filled":
+        if not self._publish_untracked_status(fields, ts_event):
             return
-
-        dedup = fill_dedup_key(fields, ts_event=ts_event)
-        if self._fill_key_seen(dedup):
-            return
-        report = self._fill_report_from_fields(fields, ts_event)
-        if report is None:
-            self._log.error(
-                f"untracked fill suppressed (build failed): {slim_order_fields(fields)}"
-            )
-            return
-        self._send_fill_report(report)
-        self._mark_fill_key(dedup)
+        self._publish_untracked_fill(fields, ts_event)
 
     def _publish_order_status_report(
         self,
@@ -1880,8 +2064,14 @@ class RithmicExecutionClient(LiveExecutionClient):
         self._bind_venue_id(order.client_order_id, str(best.fields["basket_id"]))
         return best.report
 
-    def _recon_window_sec(self, start: Any, end: Any) -> tuple[int, int]:
-        now_sec = int(time.time())
+    def _recon_window_sec(
+        self,
+        start: Any,
+        end: Any,
+        *,
+        now_fn: Callable[[], float] = time.time,
+    ) -> tuple[int, int]:
+        now_sec = int(now_fn())
 
         def _to_sec(value: Any) -> int | None:
             if value is None:
@@ -1963,72 +2153,16 @@ class RithmicExecutionClient(LiveExecutionClient):
         )
 
     def _order_type_from_event(self, fields: dict[str, Any]) -> OrderType:
-        raw = fields.get("price_type")
-        if raw is None:
-            return OrderType.MARKET
-        try:
-            return _RITHMIC_PRICE_TYPE_TO_ORDER_TYPE.get(int(raw), OrderType.MARKET)
-        except (TypeError, ValueError):
-            return OrderType.MARKET
+        return order_type_from_fields(fields)
 
     def _tif_from_event(self, fields: dict[str, Any]) -> TimeInForce:
-        raw = fields.get("duration")
-        if raw is None:
-            return TimeInForce.GTC
-        try:
-            return _RITHMIC_DURATION_TO_TIF.get(int(raw), TimeInForce.GTC)
-        except (TypeError, ValueError):
-            return TimeInForce.GTC
+        return tif_from_fields(fields)
 
     def _trigger_type_from_event(self, fields: dict[str, Any]) -> TriggerType:
-        raw = fields.get("price_type")
-        if raw is None:
-            return TriggerType.NO_TRIGGER
-        try:
-            if int(raw) in (3, 4):  # Rithmic StopLimit / StopMarket
-                return TriggerType.DEFAULT
-        except (TypeError, ValueError):
-            pass
-        return TriggerType.NO_TRIGGER
+        return trigger_type_from_fields(fields)
 
     def _order_status_from_event(self, fields: dict[str, Any]) -> OrderStatus:
-        kind = fields.get("kind")
-        status_u = str(fields.get("status") or "").upper()
-        try:
-            qty = int(fields.get("quantity") or 0)
-            filled = int(fields.get("total_fill_size") or 0)
-        except (TypeError, ValueError):
-            qty = filled = 0
-        if kind == "filled" or (qty > 0 and filled >= qty):
-            return OrderStatus.FILLED
-        # Operation-rejection kinds (the venue refused a modify/cancel): the
-        # order is still working — never terminal REJECTED for a live order.
-        # PARTIALLY_FILLED when partial, else ACCEPTED (not PENDING_CANCEL:
-        # recon would leave the OMS believing a cancel is in flight forever).
-        if kind in ("modify_rejected", "cancel_rejected"):
-            if qty > 0 and 0 < filled < qty:
-                return OrderStatus.PARTIALLY_FILLED
-            return OrderStatus.ACCEPTED
-        # Check genuine reject kinds/status before the CANCEL substring so a
-        # rejected cancel (e.g. "CANCELLATION_FAILED") is not CANCELED.
-        if kind == "rejected" or "REJECT" in status_u:
-            return OrderStatus.REJECTED
-        if kind == "canceled" or status_u in ("CANCELLED", "CANCELED"):
-            return OrderStatus.CANCELED
-        if kind == "expired" or "EXPIRED" in status_u:
-            return OrderStatus.EXPIRED
-        if qty > 0 and 0 < filled < qty:
-            return OrderStatus.PARTIALLY_FILLED
-        if kind == "triggered":
-            # Only limit-style stops expose TRIGGERED (#3812); market-style
-            # stops execute straight through on trigger and stay ACCEPTED
-            # (working) until the fill arrives.
-            if self._order_type_from_event(fields) in _TRIGGERABLE_ORDER_TYPES:
-                return OrderStatus.TRIGGERED
-            return OrderStatus.ACCEPTED
-        # Everything else defaults to working (ACCEPTED): a row that is not
-        # recognizably filled/rejected/canceled/expired is an open order.
-        return OrderStatus.ACCEPTED
+        return order_status_from_fields(fields)
 
     def _client_order_id_for_tag(self, tag: Any) -> ClientOrderId | None:
         # user_tag == client_order_id.value for orders this client placed, so
