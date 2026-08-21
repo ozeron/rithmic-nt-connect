@@ -268,6 +268,13 @@ def spawn_gateway(
             if proc.poll() is not None:
                 if _listening() and _session_flock_held():
                     return proc
+                if _session_flock_held():
+                    # Lost the flock race: another client's gateway won and is
+                    # still binding its socket (plants connect after bind). Keep
+                    # waiting for that socket instead of failing the caller on a
+                    # transient concurrent-spawn race.
+                    time.sleep(0.05)
+                    continue
                 err = b""
                 if proc.stderr is not None:
                     err = proc.stderr.read() or b""
