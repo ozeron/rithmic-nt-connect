@@ -33,6 +33,37 @@ fingerprint: the data factory, exec factory, and `connect_market_data_session`
 all share one login, and the credential flock is released when the **last**
 holder disconnects (so a stopped node no longer blocks a separate process).
 
+### LucidTrading override (explicit operator act)
+
+Live proofs that only LucidTrading can host (e.g. TC-D40 bar delivery,
+ticker resync — the Rithmic Test plants stream no incremental data) require
+an explicit process-env override on top of a production-system env file:
+
+```bash
+# Refused without the flag; a flag inside the dotenv file is ignored.
+RITHMIC_TEST_DOTENV=/secure/local/lucid.env RITHMIC_ALLOW_LUCID_E2E=1 \
+uv run pytest tests/e2e/test_reconnect_live.py -v
+```
+
+The adapter prints a loud WARNING to stderr when the override is active.
+Set it only with MotiveWave / R|Trader closed — it is the same one-login
+system. The override widens nothing else: unknown system names stay refused.
+Known venue gaps are tracked in the skipped-spec register below.
+
+## Skipped-spec register
+
+Known test skips that are venue/environment facts, not adapter bugs. Each
+entry names what would unblock it. Phase 7 deliverable (gap-closure plan P3).
+
+| Skip | Reason | Unblock |
+| --- | --- | --- |
+| TC-D10 L2 book | LucidTrading denies book permission (`[13] permission denied`) | FCM/account with book entitlement |
+| TC-D31/D41/D42 history empty | LucidTrading history plant transiently returns empty windows | Retry at market hours; no code change |
+| TC-D40 on Rithmic Test | Test history plant streams **zero** `time_bar` events for any period (probed 2026-08-22: 75s silence, all event types) | LucidTrading run via `RITHMIC_ALLOW_LUCID_E2E=1`, or Rithmic fixing Test streaming |
+| TC-D54 full-node bar parity | Dropped: Rithmic Test ticker plant silent + stale synthetic snapshots while its bar plant runs | Same as TC-D40 row |
+| P0.2 resync proof | Needs live `last_trade`/`bbo`; only LucidTrading streams them | `RITHMIC_ALLOW_LUCID_E2E=1` + MotiveWave closed |
+| A4 client-order-id validation | OQ1: Rithmic `user_tag` length/format constraint unsourced | Vendor answer from Rithmic support |
+
 ## Building a self-contained wheel
 
 The wheel carries the adapter, the `rithmic_gateway` pure-Python client, **and** the
