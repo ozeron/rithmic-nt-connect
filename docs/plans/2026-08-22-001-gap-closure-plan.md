@@ -206,3 +206,25 @@ P0 → P1 → P2 → P3 → P4. Evidence runs first while login windows are fres
 offline suites after, since they have no scheduling constraint. Each slice
 lands as its own PR with its own STATUS/scoreboard update; no slice may flip
 a mark without the artifact or test named in this plan.
+
+## Execution status (2026-08-22, end of day)
+
+All code deliverables for P0–P2 are landed and green; live evidence is the
+remainder and is externally blocked (ops-runbook skipped-spec register):
+
+| Slice | Code | Evidence |
+| --- | --- | --- |
+| P0.1 bars | done — TC-D40 parametrized 1m/15m/1h/1d (#33) | BLOCKED: Test bar plant streams zero events; needs Lucid env file + `RITHMIC_ALLOW_LUCID_E2E=1` |
+| P0.2 resync | done — `tests/e2e/test_reconnect_live.py` (#33) | BLOCKED: same (needs live last_trade/bbo) |
+| P1 drain E88 | done (#35) | BLOCKED: Test order routing rejects every order (`COMPLETE` "No such route exists.", probed 3×); self-skips cleanly now |
+| P1 canary E89 | done — capfd mechanics pinned offline (#35) | BLOCKED: same routing state |
+| P1 cancel_all decision | **DONE** — N/A-for-line documented, scoreboard check green (#35) | none needed |
+| P2 pre-check | **DONE** — direct lacked bracket intent; parity fix landed (#34) | none needed |
+| P2 vehicle | done — spike accept/survive/cleanup rework + review fixes + 7 unit pins (#34) | BLOCKED: same routing state |
+
+Unblock paths, in preference order:
+
+1. Provide a LucidTrading env file (outside repo) → run `RITHMIC_TEST_DOTENV=<file>
+   RITHMIC_ALLOW_LUCID_E2E=1 uv run pytest tests/e2e -v` with MotiveWave closed.
+2. Rithmic repairs Test streaming/routing → re-run on `.env` as-is.
+3. Reviews/merges of #33/#34/#35 gate any STATUS mark flips that follow.
