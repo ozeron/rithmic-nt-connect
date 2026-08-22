@@ -449,6 +449,24 @@ class TestOrderCancellation:
 # Group 9: Lifecycle & reconciliation
 
 
+def _venue_route_broken(live_exec) -> bool:
+    """True if any recorded event carries the Rithmic Test routing-reject
+    signature ('No such route exists.'): the venue completes every order
+    without resting it, so drain-based proofs are meaningless there
+    (probed 2026-08-22; ops-runbook skipped-spec register)."""
+    for evt in live_exec.driver.events:
+        haystack = " ".join(
+            str(v)
+            for v in (
+                getattr(evt, "reason", ""),
+                (getattr(evt, "info", {}) or {}).get("text", ""),
+            )
+        )
+        if "No such route exists" in haystack:
+            return True
+    return False
+
+
 @pytest.mark.live
 class TestReconciliation:
     def test_tc_e84_reconcile_resting_stop_preserves_trigger(self, live_exec):
@@ -546,6 +564,12 @@ class TestReconciliation:
         live_exec.wait_for_venue_outcome(
             "OrderAccepted", timeout=45, client_order_id=cid
         )
+        if _venue_route_broken(live_exec):
+            pytest.skip(
+                "venue completes every order with 'No such route exists.' "
+                "(Rithmic Test routing broken 2026-08-22) — nothing rests, "
+                "drain proof impossible; see ops-runbook skipped-spec"
+            )
 
         working = [
             r
@@ -610,6 +634,12 @@ class TestReconciliation:
             live_exec.wait_for_venue_outcome(
                 "OrderAccepted", timeout=45, client_order_id=cid
             )
+            if _venue_route_broken(live_exec):
+                pytest.skip(
+                    "venue completes every order with 'No such route exists.' "
+                    "(Rithmic Test routing broken 2026-08-22) — canary flow "
+                    "meaningless; see ops-runbook skipped-spec"
+                )
             # Drive BOTH query paths the MY043 warnings came from.
             report = live_exec.order_status_report(cid)
             assert report is not None, "no status report for the order query"

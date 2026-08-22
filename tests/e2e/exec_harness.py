@@ -21,7 +21,15 @@ from nautilus_trader.model.enums import OrderStatus
 from nautilus_trader.model.identifiers import ClientOrderId
 from nautilus_trader.trading.strategy import Strategy, StrategyConfig
 
-_VENUE_CONDITIONAL_MARKERS = ("market is closed", "permission denied", "not entitled")
+_VENUE_CONDITIONAL_MARKERS = (
+    "market is closed",
+    "permission denied",
+    "not entitled",
+    # Rithmic Test 2026-08-22: order routing completes every order with
+    # "No such route exists." — a venue state, not an adapter bug (ops-runbook
+    # skipped-spec register). Nothing rests, so exec proofs are unhostable.
+    "no such route exists",
+)
 
 
 def venue_conditional_reason(event) -> str | None:
