@@ -20,9 +20,11 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import itertools
 import time
 import uuid
+from contextlib import contextmanager
 
 import pytest
 from exec_harness import ExecHarness, OrderDriver, OrderDriverConfig
@@ -69,6 +71,9 @@ def _make_live_exec(instrument, **logging_kwargs):
     driver = OrderDriver(
         OrderDriverConfig(instrument_id=str(instrument.id)), instrument
     )
+    # Callers may override any LoggingConfig field; the level default keeps
+    # the shared suite quiet.
+    log_level = logging_kwargs.pop("log_level", "WARNING")
     # A prior test disposed its loop; give the next node a fresh one so it does
     # not bind to a closed loop ("Event loop is closed").
     asyncio.set_event_loop(asyncio.new_event_loop())
@@ -76,7 +81,7 @@ def _make_live_exec(instrument, **logging_kwargs):
         config=TradingNodeConfig(
             trader_id=TraderId("TESTER-001"),
             logging=LoggingConfig(
-                log_level="WARNING", print_config=False, **logging_kwargs
+                log_level=log_level, print_config=False, **logging_kwargs
             ),
             data_engine=LiveDataEngineConfig(graceful_shutdown_on_exception=False),
             exec_engine=LiveExecEngineConfig(
@@ -122,15 +127,29 @@ def live_exec(exec_front_month_instrument):
     yield from _make_live_exec(exec_front_month_instrument)
 
 
-@pytest.fixture
-def live_exec_logcapture(exec_front_month_instrument, tmp_path):
-    """Same node, but Nautilus engine logs are written to ``tmp_path`` so the
-    MY043 canary can scan them for forbidden warning signatures."""
-    yield from _make_live_exec(
-        exec_front_month_instrument,
-        log_directory=str(tmp_path),
-        log_file_name="my043_canary",
-        log_level_file="WARNING",
+def test_tc_e89_logging_capture_mechanics(capfd):
+    """Offline pin of the MY043 canary's capture mechanics: pytest ``capfd``
+    sees the Nautilus Rust logger's WARNING lines on stdout. The file sink
+    was rejected 2026-08-22 — it lags stdout asynchronously and loses the
+    tail (probed: 0 bytes at any WARNING-global combo; truncated tail at
+    INFO). Guards against a Nautilus/pytest upgrade silently breaking the
+    canary into vacuous green."""
+
+    from nautilus_trader.config import LoggingConfig, TradingNodeConfig
+    from nautilus_trader.live.node import TradingNode
+    from nautilus_trader.model.identifiers import TraderId
+
+    node = TradingNode(
+        config=TradingNodeConfig(
+            trader_id=TraderId("PROBE-001"),
+            logging=LoggingConfig(log_level="WARNING", print_config=False),
+        )
+    )
+    node.build()
+    node.dispose()
+    out = capfd.readouterr().out
+    assert "No `data_clients` configuration found" in out, (
+        f"Nautilus WARN lines not captured on stdout: {out[-500:]}"
     )
 
 
@@ -555,48 +574,61 @@ class TestReconciliation:
         ), f"venue still reports the canceled limit as working: {post_cancel}"
 
     def test_tc_e89_my043_canary_no_engine_warn_regressions(
-        self, live_exec_logcapture, tmp_path
+        self, exec_front_month_instrument, capfd
     ):
         """TC-E89 — P5 canary: place→accept→cancel leaves NO MY043 WARNs.
 
-        Scans the Nautilus engine log file for the exact regression
-        signatures closed 2026-08-21: the recon-path ``InvalidStateTrigger``
-        (``CANCELED -> ACCEPTED``) from stale bulk-drain rows, and the fill
-        reconciliation ``report.avg_px was None`` warning from cache-backed
-        status queries. Fails loudly if no log file was produced (the scan
-        must never silently pass over missing evidence).
+        Runs the node at INFO so the engine log is guaranteed non-empty
+        (positive control: banner/trader-id lines), captures stdout at fd
+        level via ``capfd`` (see ``test_tc_e89_logging_capture_mechanics``
+        for why not the file sink), and asserts the exact regression
+        signatures closed 2026-08-21 never appear: the recon-path
+        ``InvalidStateTrigger`` (``CANCELED -> ACCEPTED``) from stale
+        bulk-drain rows, and the fill reconciliation
+        ``report.avg_px was None`` warning from cache-backed status queries.
         """
         cid = ClientOrderId(_unique("E89"))
-        live_exec_logcapture.driver.initial.append(
-            limit(OrderSide.BUY, below, TimeInForce.GTC, client_order_id=cid.value)
-        )
-        live_exec_logcapture.start()
-        live_exec_logcapture.wait_for_venue_outcome(
-            "OrderAccepted", timeout=45, client_order_id=cid
-        )
-        # Drive BOTH query paths the MY043 warnings came from.
-        report = live_exec_logcapture.order_status_report(cid)
-        assert report is not None, "no status report for the canceled-order query"
-        live_exec_logcapture.driver.cancel_order(live_exec_logcapture.cache.order(cid))
-        live_exec_logcapture.wait_order_status(cid, OrderStatus.CANCELED, timeout=20)
-        live_exec_logcapture.check_orders_consistency(timeout_secs=20.0)
 
-        log_files = list(tmp_path.rglob("*.log"))
-        assert log_files, (
-            "no Nautilus log file produced — canary scanned nothing; "
-            f"tmp_path contents: {[str(p) for p in tmp_path.rglob('*')]}"
+        @contextmanager
+        def info_node():
+            gen = _make_live_exec(
+                exec_front_month_instrument,
+                log_level="INFO",
+            )
+            harness = next(gen)
+            try:
+                yield harness
+            finally:
+                with contextlib.suppress(StopIteration):
+                    next(gen)  # generator finally → full shutdown + dispose
+
+        with info_node() as live_exec:
+            live_exec.driver.initial.append(
+                limit(OrderSide.BUY, below, TimeInForce.GTC, client_order_id=cid.value)
+            )
+            live_exec.start()
+            live_exec.wait_for_venue_outcome(
+                "OrderAccepted", timeout=45, client_order_id=cid
+            )
+            # Drive BOTH query paths the MY043 warnings came from.
+            report = live_exec.order_status_report(cid)
+            assert report is not None, "no status report for the order query"
+            live_exec.driver.cancel_order(live_exec.cache.order(cid))
+            live_exec.wait_order_status(cid, OrderStatus.CANCELED, timeout=20)
+            live_exec.check_orders_consistency(timeout_secs=20.0)
+
+        captured = capfd.readouterr().out
+        assert "TESTER-001" in captured, (
+            f"positive control failed — node log not captured: {captured[-500:]}"
         )
-        text = "\n".join(p.read_text(errors="replace") for p in log_files)
-        assert text.strip(), "Nautilus log file is empty; scan would be vacuous"
         forbidden = [
             "InvalidStateTrigger",
             "avg_px was None",
             "CANCELED -> ACCEPTED",
         ]
         for signature in forbidden:
-            assert signature not in text, (
-                f"MY043 regression signature {signature!r} reappeared in "
-                f"{[p.name for p in log_files]}"
+            assert signature not in captured, (
+                f"MY043 regression signature {signature!r} reappeared"
             )
 
 
