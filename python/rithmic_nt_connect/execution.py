@@ -581,6 +581,13 @@ class RithmicExecutionClient(LiveExecutionClient):
             self._order_plant.begin_connect()
             try:
                 await asyncio.to_thread(self._session.subscribe_order_updates)
+                # Bracket notifications ride the same order-plant stream but
+                # need their own venue subscription flag; without it a placed
+                # bracket's stop/target legs go silent. Same hard-fail
+                # semantics as the order subscription — a trading session
+                # that cannot receive bracket updates must not claim the
+                # bracket surface.
+                await asyncio.to_thread(self._session.subscribe_bracket_updates)
             except Exception:
                 self._order_plant.disconnect()
                 try:
@@ -712,6 +719,9 @@ class RithmicExecutionClient(LiveExecutionClient):
         # resolved, so commands stay blocked until a successful re-arm.
         await asyncio.to_thread(self._session.disconnect_order_plant)
         await asyncio.to_thread(self._session.subscribe_order_updates)
+        # Re-issue the bracket intent too: reconnect restores auth AND
+        # subscription intent (both order-plant flags), not only the socket.
+        await asyncio.to_thread(self._session.subscribe_bracket_updates)
         # The transient streak is loop-local (``_plant_poll_loop``): it resets
         # structurally when this successful resubscribe returns to the loop.
         self._order_plant.resync_complete()

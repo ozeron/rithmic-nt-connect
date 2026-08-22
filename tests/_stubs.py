@@ -217,6 +217,9 @@ class FaultInjectingSession(WireSessionStub):
     def subscribe_order_updates(self) -> None:
         self.calls.append("subscribe_order_updates")
 
+    def subscribe_bracket_updates(self) -> None:
+        self.calls.append("subscribe_bracket_updates")
+
     def disconnect_order_plant(self) -> None:
         self.calls.append("disconnect_order_plant")
 
