@@ -62,6 +62,7 @@ entry names what would unblock it. Phase 7 deliverable (gap-closure plan P3).
 | TC-D40 on Rithmic Test | Test history plant streams **zero** `time_bar` events for any period (probed 2026-08-22: 75s silence, all event types) | LucidTrading run via `RITHMIC_ALLOW_LUCID_E2E=1`, or Rithmic fixing Test streaming |
 | TC-D54 full-node bar parity | Dropped: Rithmic Test ticker plant silent + stale synthetic snapshots while its bar plant runs | Same as TC-D40 row |
 | P0.2 resync proof | Needs live `last_trade`/`bbo`; only LucidTrading streams them | `RITHMIC_ALLOW_LUCID_E2E=1` + MotiveWave closed |
+| P1 exec e2e on Rithmic Test (TC-E84/E88/E89) | Test order routing currently rejects **every** order: lifecycle is `ORDER_RCVD_FROM_CLNT` → `COMPLETE` "No such route exists." (probed 2026-08-22, baskets 183261261-63; drain permanently empty because nothing ever rests) | Rithmic fixing Test routing, or LucidTrading run via `RITHMIC_ALLOW_LUCID_E2E=1`; the E88/E89 tests skip themselves when this signature appears |
 | A4 client-order-id validation | OQ1: Rithmic `user_tag` length/format constraint unsourced | Vendor answer from Rithmic support |
 
 ## Building a self-contained wheel
