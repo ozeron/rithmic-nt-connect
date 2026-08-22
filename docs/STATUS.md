@@ -32,9 +32,9 @@ Legend: **Done** `[x]` · **Partial** `[~]` · **Not started** `[ ]` · `N/A` ou
 | **Capability matrix** | 21 | 4 | 11 | 0 | 6 |
 | **Phase marks (0–9)** | 27 | 14 | 7 | 2 | 4 |
 | **Convention marks** | 18 | 14 | 4 | 0 | 0 |
-| **Close-outs (advertised path)** | 7 | 4 | 2 | 0 | 1 |
+| **Close-outs (advertised path)** | 8 | 4 | 2 | 0 | 2 |
 | **Paper path (intraday)** | 8 | 8 | 0 | 0 | 0 |
-| **TOTAL** | 81 | 44 | 24 | 2 | 11 |
+| **TOTAL** | 82 | 44 | 24 | 2 | 12 |
 
 **Implemented:** 80% (`44` done + `24` partial of `70` in-scope marked items (`11` N/A excluded); partial counts as half).
 
@@ -192,7 +192,7 @@ Cross-cutting items from [`references/nautilus-adapter-conventions.md`](referenc
 Do not mark Phase 3, 4, or 7 `[x]` until the matching items are proven.
 
 1. **Incremental book updates** — summary snapshots only (L2); L3 MBO N/A.
-2. **Execution honesty** — [~] three evidence classes; untracked → reports; recon is a bounded `show_orders` drain (best-effort, not provably complete); dedup by venue id. (`cancel_all_orders` still out of honesty claim.)
+2. **Execution honesty** — [~] three evidence classes; untracked → reports; recon is a bounded `show_orders` drain (best-effort, not provably complete); dedup by venue id. `cancel_all_orders` is **decided N/A for this support line's honesty claim** (2026-08-22, gap-closure plan P1.3): it is plant-wide by venue contract, kept only as the parent panic button (`RITHMIC_GATEWAY_CANCEL_ALL`), never adapter-advertised and never live-tested as an order-management primitive (TC-E41 collection-skip stands).
 3. **Account auto-discovery** — [x] wire resolve on ensure_order/ensure_pnl; optional env triple / `ACCOUNT_ID` selector. Plan: [`plans/2026-08-13-001-account-auto-discovery-plan.md`](plans/2026-08-13-001-account-auto-discovery-plan.md) + umbrella [`plans/2026-08-14-001-exec-honesty-account-discovery-dryrun-plan.md`](plans/2026-08-14-001-exec-honesty-account-discovery-dryrun-plan.md).
 4. **Live-prove ticker resync** on LucidTrading (code + unit test landed).
 4. **Data Testing Spec (TC-D) sweep** — [x] 2026-08-14 `tests/e2e/test_data_client_live.py` (7 passed / 2 skipped; TC-D01/03/20/30/40/41/70). TC-D40 1m EXTERNAL bars live-proven on LucidTrading. Skips: TC-D10 (Lucid denies L2 book `[13] permission denied`), TC-D31 (history plant transient empty).
