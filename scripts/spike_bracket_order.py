@@ -40,6 +40,12 @@ _RC_INCONCLUSIVE = 3
 _RC_SURVIVAL = 4
 _RC_CLEANUP = 5
 
+# Explicit terminal states for drain-row classification. Substring token
+# matching is banned here: "cancel rejected" contains "cancel" but the
+# bracket is still live, and a rejection is the opposite of terminal.
+_TERMINAL_STATUSES = {"complete", "canceled", "cancelled", "expired", "filled"}
+_REJECT_TOKENS = ("reject", "denied", "fail", "error")
+
 
 def _poll_for(
     session,
@@ -79,23 +85,43 @@ def _poll_for(
     return last, basket
 
 
-def _drain_basket_working(session, basket: str, *, seconds: float = 8.0) -> bool:
-    """True if a bounded load_orders drain still reports the basket working."""
+def _event_is_rejection(ev: dict) -> bool:
+    """Venue/plant rejection on a notification (status or free text)."""
+    low = f"{ev.get('status') or ''} {ev.get('text') or ev.get('report_text') or ''}"
+    return any(tok in low.lower() for tok in _REJECT_TOKENS)
+
+
+def _latest_basket_row(session, basket: str):
+    """Newest history row for the basket from a bounded load_orders drain.
+
+    'Newest' is by venue timestamp when present, else arrival order — an
+    older OPEN row arriving before its terminal row must not mask the
+    terminal state.
+    """
     end = int(time.time())
-    rows = session.load_orders(end - 3600, end)
-    for row in rows or ():
-        if str(row.get("basket_id") or "") == basket:
-            status = str(row.get("status") or "")
-            text = str(row.get("text") or "").lower()
-            closed = any(
-                tok in f"{status} {text}".lower()
-                for tok in ("complete", "cancel", "fill", "expired")
-            )
-            if not closed:
-                print(f"drain: basket {basket} still working ({status!r})")
-                return True
-    print(f"drain: basket {basket} not reported working")
-    return False
+    rows = session.load_orders(end - 3600, end) or ()
+    latest = None
+    latest_key = None
+    for idx, row in enumerate(rows):
+        if str(row.get("basket_id") or "") != basket:
+            continue
+        key = row.get("ts_event_ns") or row.get("ssboe") or idx
+        if latest_key is None or key >= latest_key:
+            latest, latest_key = row, key
+    return latest
+
+
+def _drain_basket_working(session, basket: str, *, seconds: float = 8.0) -> bool:
+    """True if the basket's newest drain row is NOT an explicitly terminal
+    state. Rejections stay 'working' — a cancel-rejected bracket is live."""
+    latest = _latest_basket_row(session, basket)
+    if latest is None:
+        print(f"drain: basket {basket} not present (no rows)")
+        return False
+    status = str(latest.get("status") or "").strip().lower()
+    text = str(latest.get("text") or "").strip()
+    print(f"drain: basket {basket} latest row status={status!r} text={text!r}")
+    return status not in _TERMINAL_STATUSES
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -173,9 +199,12 @@ def main(argv: list[str] | None = None) -> int:
             f"PLACE sent front={front['trading_symbol']}.{front['trading_exchange']} "
             f"entry={entry_desc} localid={smoke_localid}; polling {args.seconds}s…"
         )
-        _, basket_id = _poll_for(
+        ack_event, basket_id = _poll_for(
             session, seconds=args.seconds, want_basket=None, localid=smoke_localid
         )
+        if ack_event is not None and _event_is_rejection(ack_event):
+            print("PLACE rejected by venue/plant", file=sys.stderr)
+            return _RC_REJECTED
 
         # --- Phase 2: SURVIVE ---------------------------------------------
         if not basket_id:
@@ -189,16 +218,25 @@ def main(argv: list[str] | None = None) -> int:
         session.disconnect_order_plant()
         session.subscribe_order_updates()
         session.subscribe_bracket_updates()
-        _poll_for(
+        survived_event, _ = _poll_for(
             session,
             seconds=args.seconds,
             want_basket=basket_id,
             localid=smoke_localid,
         )
         still_working = _drain_basket_working(session, basket_id)
-        if not still_working:
+        if survived_event is None or not still_working:
+            missing = "no notification after redial" if survived_event is None else ""
+            state = " and ".join(
+                part
+                for part in (
+                    missing,
+                    "" if still_working else "legs not working in drain",
+                )
+                if part
+            )
             print(
-                "SURVIVAL FAILED: bracket legs not working after plant redial",
+                f"SURVIVAL FAILED: {state or 'unknown'}",
                 file=sys.stderr,
             )
             return _RC_SURVIVAL
