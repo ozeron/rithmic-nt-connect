@@ -244,6 +244,51 @@ def test_explicit_test_env_rejects_production_system(tmp_path, monkeypatch) -> N
         explicit_test_env()
 
 
+def test_explicit_test_env_lucid_override_requires_process_env_flag(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """The only way through the production refusal is RITHMIC_ALLOW_LUCID_E2E=1
+    set in the *process* environment — a flag inside the dotenv file is
+    ignored (the file is untrusted input; the override must be an operator
+    act at invocation)."""
+    from rithmic_nt_connect.config import ConfigError, explicit_test_env
+
+    env_file = tmp_path / "lucid.env"
+    env_file.write_text(
+        "RITHMIC_USER=u\nRITHMIC_PASSWORD=p\n"
+        "RITHMIC_SYSTEM_NAME=LucidTrading\n"
+        "RITHMIC_GATEWAY=wss://prod.example\nRITHMIC_CONNECT_MODE=direct\n"
+        "RITHMIC_ALLOW_LUCID_E2E=1\n"  # inside the file: deliberately ignored
+    )
+    monkeypatch.setenv("RITHMIC_TEST_DOTENV", str(env_file))
+
+    with pytest.raises(ConfigError, match="production"):
+        explicit_test_env()
+
+    monkeypatch.setenv("RITHMIC_ALLOW_LUCID_E2E", "1")
+    values = explicit_test_env()
+    assert values["RITHMIC_SYSTEM_NAME"] == "LucidTrading"
+    captured = capsys.readouterr()
+    assert "RITHMIC_ALLOW_LUCID_E2E=1" in captured.err
+    assert "MotiveWave" in captured.err
+
+
+def test_explicit_test_env_unknown_system_still_refused(tmp_path, monkeypatch) -> None:
+    """The Lucid override must not widen into unknown systems."""
+    from rithmic_nt_connect.config import ConfigError, explicit_test_env
+
+    env_file = tmp_path / "weird.env"
+    env_file.write_text(
+        "RITHMIC_USER=u\nRITHMIC_PASSWORD=p\n"
+        "RITHMIC_SYSTEM_NAME=MysterySystem\n"
+        "RITHMIC_CONNECT_MODE=direct\n"
+    )
+    monkeypatch.setenv("RITHMIC_TEST_DOTENV", str(env_file))
+    monkeypatch.setenv("RITHMIC_ALLOW_LUCID_E2E", "1")
+    with pytest.raises(ConfigError, match="not recognized"):
+        explicit_test_env()
+
+
 def test_package_imports_without_network() -> None:
     import rithmic_nt_connect
 
