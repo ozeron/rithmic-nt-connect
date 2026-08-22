@@ -36,7 +36,7 @@ Legend: **Done** `[x]` · **Partial** `[~]` · **Not started** `[ ]` · `N/A` ou
 | **Paper path (intraday)** | 8 | 8 | 0 | 0 | 0 |
 | **TOTAL** | 82 | 44 | 24 | 2 | 12 |
 
-**Implemented:** 80% (`44` done + `24` partial of `70` in-scope marked items (`11` N/A excluded); partial counts as half).
+**Implemented:** 80% (`44` done + `24` partial of `70` in-scope marked items (`12` N/A excluded); partial counts as half).
 
 Not started (real leftover work): Phase 2 definition updates, Phase 7 recovery suite.
 
