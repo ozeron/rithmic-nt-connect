@@ -30,19 +30,11 @@ Legend: **Done** `[x]` · **Partial** `[~]` · **Not started** `[ ]` · `N/A` ou
 | Area | Total | Done | Partial | Not started | N/A |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | **Capability matrix** | 21 | 4 | 11 | 0 | 6 |
-<<<<<<< HEAD
 | **Phase marks (0–9)** | 27 | 15 | 6 | 2 | 4 |
 | **Convention marks** | 18 | 15 | 3 | 0 | 0 |
 | **Close-outs (advertised path)** | 8 | 5 | 2 | 0 | 1 |
 | **Paper path (intraday)** | 8 | 8 | 0 | 0 | 0 |
 | **TOTAL** | 82 | 47 | 22 | 2 | 11 |
-=======
-| **Phase marks (0–9)** | 27 | 14 | 7 | 2 | 4 |
-| **Convention marks** | 18 | 14 | 4 | 0 | 0 |
-| **Close-outs (advertised path)** | 8 | 4 | 2 | 0 | 2 |
-| **Paper path (intraday)** | 8 | 8 | 0 | 0 | 0 |
-| **TOTAL** | 82 | 44 | 24 | 2 | 12 |
->>>>>>> 81b36e3 (docs(status): cancel_all honesty decision — N/A for this line (P1.3))
 
 **Implemented:** 82% (`47` done + `22` partial of `71` in-scope marked items (`11` N/A excluded); partial counts as half).
 
