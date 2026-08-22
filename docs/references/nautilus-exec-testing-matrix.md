@@ -174,6 +174,8 @@ Live bracket spike: `scripts/spike_bracket_order.py` (`RITHMIC_BRACKETS=1` +
 | TC-E85 | Reconcile filled orders | [~] | fill query unavailable (`conventions.md:144`); `test_generate_fill_reports_*` |
 | TC-E86 | Reconcile open long | [~] | `test_position_status_reports_*` |
 | TC-E87 | Reconcile open short | [~] | |
+| TC-E88 (local) | Drain returns working orders by identity | [~] | `test_tc_e88_drain_reports_working_limit_by_identity` — far LIMIT drained as ACCEPTED with matching side; clears after cancel. Closes the STATUS TODO "live-venue proof that the drain returns working orders" once run live. Local id: upstream matrix ends at E87 |
+| TC-E89 (local) | MY043 canary: no engine WARN regressions | [~] | `test_tc_e89_my043_canary_no_engine_warn_regressions` — place→accept→cancel through a log-capturing node; scans engine log for `InvalidStateTrigger`, `avg_px was None`, `CANCELED -> ACCEPTED`. Fails if no log file is produced (never vacuously green) |
 
 Recon honesty caveat (trading): the `load_orders` drain is best-effort and *not*
 provably complete — an empty result means "no working orders seen", not "venue has

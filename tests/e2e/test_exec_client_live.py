@@ -58,14 +58,13 @@ from rithmic_nt_connect import (
 )
 
 
-@pytest.fixture
-def live_exec(exec_front_month_instrument):
-    """Build a TradingNode (data + exec) with an OrderDriver; start on demand.
+def _make_live_exec(instrument, **logging_kwargs):
+    """Build a TradingNode (data + exec) with an OrderDriver; yield harness.
 
-    Depends on ``exec_front_month_instrument``, so the safety gates run first.
+    Shared by ``live_exec`` and the MY043 log-capture variant; safety gates
+    run first because callers depend on ``exec_front_month_instrument``.
     """
     test_session = session_config_from_explicit_test_env()
-    instrument = exec_front_month_instrument
 
     driver = OrderDriver(
         OrderDriverConfig(instrument_id=str(instrument.id)), instrument
@@ -76,7 +75,9 @@ def live_exec(exec_front_month_instrument):
     node = TradingNode(
         config=TradingNodeConfig(
             trader_id=TraderId("TESTER-001"),
-            logging=LoggingConfig(log_level="WARNING", print_config=False),
+            logging=LoggingConfig(
+                log_level="WARNING", print_config=False, **logging_kwargs
+            ),
             data_engine=LiveDataEngineConfig(graceful_shutdown_on_exception=False),
             exec_engine=LiveExecEngineConfig(
                 reconciliation=True,
@@ -114,6 +115,23 @@ def live_exec(exec_front_month_instrument):
         yield harness
     finally:
         harness.shutdown()
+
+
+@pytest.fixture
+def live_exec(exec_front_month_instrument):
+    yield from _make_live_exec(exec_front_month_instrument)
+
+
+@pytest.fixture
+def live_exec_logcapture(exec_front_month_instrument, tmp_path):
+    """Same node, but Nautilus engine logs are written to ``tmp_path`` so the
+    MY043 canary can scan them for forbidden warning signatures."""
+    yield from _make_live_exec(
+        exec_front_month_instrument,
+        log_directory=str(tmp_path),
+        log_file_name="my043_canary",
+        log_level_file="WARNING",
+    )
 
 
 def _tc(tc_id: str, *values):
@@ -490,6 +508,96 @@ class TestReconciliation:
         assert abs(float(report.avg_px) - float(order.avg_px)) < 0.01, (
             f"status report avg_px {report.avg_px} != order avg_px {order.avg_px}"
         )
+
+    def test_tc_e88_drain_reports_working_limit_by_identity(self, live_exec):
+        """TC-E88 — the drain returns the venue's WORKING order by identity.
+
+        Closes the STATUS TODO "live-venue proof that the drain returns the
+        venue's working orders": a far resting LIMIT must come back from
+        ``GenerateOrderStatusReports`` matched by client_order_id with its
+        placed terms (side/status), and stop being reported working after a
+        cancel. Best-effort semantics stay: an empty post-cancel drain is
+        advisory, not proof of absence.
+        """
+        cid = ClientOrderId(_unique("E88"))
+        live_exec.driver.initial.append(
+            limit(OrderSide.BUY, below, TimeInForce.GTC, client_order_id=cid.value)
+        )
+        live_exec.start()
+        live_exec.wait_for_venue_outcome(
+            "OrderAccepted", timeout=45, client_order_id=cid
+        )
+
+        working = [
+            r
+            for r in live_exec.check_orders_consistency(timeout_secs=20.0)
+            if getattr(r, "client_order_id", None) == cid
+        ]
+        assert working, "drain returned no row for the working far LIMIT"
+        for r in working:
+            assert r.order_status == OrderStatus.ACCEPTED, (
+                f"working order drained as {r.order_status}"
+            )
+            assert r.order_side == OrderSide.BUY, (
+                f"identity mismatch on side: {r.order_side}"
+            )
+
+        live_exec.driver.cancel_order(live_exec.cache.order(cid))
+        live_exec.wait_order_status(cid, OrderStatus.CANCELED, timeout=20)
+
+        post_cancel = [
+            r
+            for r in live_exec.check_orders_consistency(timeout_secs=20.0)
+            if getattr(r, "client_order_id", None) == cid
+        ]
+        assert not post_cancel or all(
+            r.order_status == OrderStatus.CANCELED for r in post_cancel
+        ), f"venue still reports the canceled limit as working: {post_cancel}"
+
+    def test_tc_e89_my043_canary_no_engine_warn_regressions(
+        self, live_exec_logcapture, tmp_path
+    ):
+        """TC-E89 — P5 canary: place→accept→cancel leaves NO MY043 WARNs.
+
+        Scans the Nautilus engine log file for the exact regression
+        signatures closed 2026-08-21: the recon-path ``InvalidStateTrigger``
+        (``CANCELED -> ACCEPTED``) from stale bulk-drain rows, and the fill
+        reconciliation ``report.avg_px was None`` warning from cache-backed
+        status queries. Fails loudly if no log file was produced (the scan
+        must never silently pass over missing evidence).
+        """
+        cid = ClientOrderId(_unique("E89"))
+        live_exec_logcapture.driver.initial.append(
+            limit(OrderSide.BUY, below, TimeInForce.GTC, client_order_id=cid.value)
+        )
+        live_exec_logcapture.start()
+        live_exec_logcapture.wait_for_venue_outcome(
+            "OrderAccepted", timeout=45, client_order_id=cid
+        )
+        # Drive BOTH query paths the MY043 warnings came from.
+        report = live_exec_logcapture.order_status_report(cid)
+        assert report is not None, "no status report for the canceled-order query"
+        live_exec_logcapture.driver.cancel_order(live_exec_logcapture.cache.order(cid))
+        live_exec_logcapture.wait_order_status(cid, OrderStatus.CANCELED, timeout=20)
+        live_exec_logcapture.check_orders_consistency(timeout_secs=20.0)
+
+        log_files = list(tmp_path.rglob("*.log"))
+        assert log_files, (
+            "no Nautilus log file produced — canary scanned nothing; "
+            f"tmp_path contents: {[str(p) for p in tmp_path.rglob('*')]}"
+        )
+        text = "\n".join(p.read_text(errors="replace") for p in log_files)
+        assert text.strip(), "Nautilus log file is empty; scan would be vacuous"
+        forbidden = [
+            "InvalidStateTrigger",
+            "avg_px was None",
+            "CANCELED -> ACCEPTED",
+        ]
+        for signature in forbidden:
+            assert signature not in text, (
+                f"MY043 regression signature {signature!r} reappeared in "
+                f"{[p.name for p in log_files]}"
+            )
 
 
 # ══════════════════════════════════════════════════════════════════════
