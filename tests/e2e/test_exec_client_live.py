@@ -20,9 +20,11 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import itertools
 import time
 import uuid
+from contextlib import contextmanager
 
 import pytest
 from exec_harness import ExecHarness, OrderDriver, OrderDriverConfig
@@ -58,25 +60,29 @@ from rithmic_nt_connect import (
 )
 
 
-@pytest.fixture
-def live_exec(exec_front_month_instrument):
-    """Build a TradingNode (data + exec) with an OrderDriver; start on demand.
+def _make_live_exec(instrument, **logging_kwargs):
+    """Build a TradingNode (data + exec) with an OrderDriver; yield harness.
 
-    Depends on ``exec_front_month_instrument``, so the safety gates run first.
+    Shared by ``live_exec`` and the MY043 log-capture variant; safety gates
+    run first because callers depend on ``exec_front_month_instrument``.
     """
     test_session = session_config_from_explicit_test_env()
-    instrument = exec_front_month_instrument
 
     driver = OrderDriver(
         OrderDriverConfig(instrument_id=str(instrument.id)), instrument
     )
+    # Callers may override any LoggingConfig field; the level default keeps
+    # the shared suite quiet.
+    log_level = logging_kwargs.pop("log_level", "WARNING")
     # A prior test disposed its loop; give the next node a fresh one so it does
     # not bind to a closed loop ("Event loop is closed").
     asyncio.set_event_loop(asyncio.new_event_loop())
     node = TradingNode(
         config=TradingNodeConfig(
             trader_id=TraderId("TESTER-001"),
-            logging=LoggingConfig(log_level="WARNING", print_config=False),
+            logging=LoggingConfig(
+                log_level=log_level, print_config=False, **logging_kwargs
+            ),
             data_engine=LiveDataEngineConfig(graceful_shutdown_on_exception=False),
             exec_engine=LiveExecEngineConfig(
                 reconciliation=True,
@@ -114,6 +120,37 @@ def live_exec(exec_front_month_instrument):
         yield harness
     finally:
         harness.shutdown()
+
+
+@pytest.fixture
+def live_exec(exec_front_month_instrument):
+    yield from _make_live_exec(exec_front_month_instrument)
+
+
+def test_tc_e89_logging_capture_mechanics(capfd):
+    """Offline pin of the MY043 canary's capture mechanics: pytest ``capfd``
+    sees the Nautilus Rust logger's WARNING lines on stdout. The file sink
+    was rejected 2026-08-22 — it lags stdout asynchronously and loses the
+    tail (probed: 0 bytes at any WARNING-global combo; truncated tail at
+    INFO). Guards against a Nautilus/pytest upgrade silently breaking the
+    canary into vacuous green."""
+
+    from nautilus_trader.config import LoggingConfig, TradingNodeConfig
+    from nautilus_trader.live.node import TradingNode
+    from nautilus_trader.model.identifiers import TraderId
+
+    node = TradingNode(
+        config=TradingNodeConfig(
+            trader_id=TraderId("PROBE-001"),
+            logging=LoggingConfig(log_level="WARNING", print_config=False),
+        )
+    )
+    node.build()
+    node.dispose()
+    out = capfd.readouterr().out
+    assert "No `data_clients` configuration found" in out, (
+        f"Nautilus WARN lines not captured on stdout: {out[-500:]}"
+    )
 
 
 def _tc(tc_id: str, *values):
@@ -412,6 +449,24 @@ class TestOrderCancellation:
 # Group 9: Lifecycle & reconciliation
 
 
+def _venue_route_broken(live_exec) -> bool:
+    """True if any recorded event carries the Rithmic Test routing-reject
+    signature ('No such route exists.'): the venue completes every order
+    without resting it, so drain-based proofs are meaningless there
+    (probed 2026-08-22; ops-runbook skipped-spec register)."""
+    for evt in live_exec.driver.events:
+        haystack = " ".join(
+            str(v)
+            for v in (
+                getattr(evt, "reason", ""),
+                (getattr(evt, "info", {}) or {}).get("text", ""),
+            )
+        )
+        if "No such route exists" in haystack:
+            return True
+    return False
+
+
 @pytest.mark.live
 class TestReconciliation:
     def test_tc_e84_reconcile_resting_stop_preserves_trigger(self, live_exec):
@@ -490,6 +545,121 @@ class TestReconciliation:
         assert abs(float(report.avg_px) - float(order.avg_px)) < 0.01, (
             f"status report avg_px {report.avg_px} != order avg_px {order.avg_px}"
         )
+
+    def test_tc_e88_drain_reports_working_limit_by_identity(self, live_exec):
+        """TC-E88 — the drain returns the venue's WORKING order by identity.
+
+        Closes the STATUS TODO "live-venue proof that the drain returns the
+        venue's working orders": a far resting LIMIT must come back from
+        ``GenerateOrderStatusReports`` matched by client_order_id with its
+        placed terms (side/status), and stop being reported working after a
+        cancel. Best-effort semantics stay: an empty post-cancel drain is
+        advisory, not proof of absence.
+        """
+        cid = ClientOrderId(_unique("E88"))
+        live_exec.driver.initial.append(
+            limit(OrderSide.BUY, below, TimeInForce.GTC, client_order_id=cid.value)
+        )
+        live_exec.start()
+        live_exec.wait_for_venue_outcome(
+            "OrderAccepted", timeout=45, client_order_id=cid
+        )
+        if _venue_route_broken(live_exec):
+            pytest.skip(
+                "venue completes every order with 'No such route exists.' "
+                "(Rithmic Test routing broken 2026-08-22) — nothing rests, "
+                "drain proof impossible; see ops-runbook skipped-spec"
+            )
+
+        working = [
+            r
+            for r in live_exec.check_orders_consistency(timeout_secs=20.0)
+            if getattr(r, "client_order_id", None) == cid
+        ]
+        assert working, "drain returned no row for the working far LIMIT"
+        for r in working:
+            assert r.order_status == OrderStatus.ACCEPTED, (
+                f"working order drained as {r.order_status}"
+            )
+            assert r.order_side == OrderSide.BUY, (
+                f"identity mismatch on side: {r.order_side}"
+            )
+
+        live_exec.driver.cancel_order(live_exec.cache.order(cid))
+        live_exec.wait_order_status(cid, OrderStatus.CANCELED, timeout=20)
+
+        post_cancel = [
+            r
+            for r in live_exec.check_orders_consistency(timeout_secs=20.0)
+            if getattr(r, "client_order_id", None) == cid
+        ]
+        assert not post_cancel or all(
+            r.order_status == OrderStatus.CANCELED for r in post_cancel
+        ), f"venue still reports the canceled limit as working: {post_cancel}"
+
+    def test_tc_e89_my043_canary_no_engine_warn_regressions(
+        self, exec_front_month_instrument, capfd
+    ):
+        """TC-E89 — P5 canary: place→accept→cancel leaves NO MY043 WARNs.
+
+        Runs the node at INFO so the engine log is guaranteed non-empty
+        (positive control: banner/trader-id lines), captures stdout at fd
+        level via ``capfd`` (see ``test_tc_e89_logging_capture_mechanics``
+        for why not the file sink), and asserts the exact regression
+        signatures closed 2026-08-21 never appear: the recon-path
+        ``InvalidStateTrigger`` (``CANCELED -> ACCEPTED``) from stale
+        bulk-drain rows, and the fill reconciliation
+        ``report.avg_px was None`` warning from cache-backed status queries.
+        """
+        cid = ClientOrderId(_unique("E89"))
+
+        @contextmanager
+        def info_node():
+            gen = _make_live_exec(
+                exec_front_month_instrument,
+                log_level="INFO",
+            )
+            harness = next(gen)
+            try:
+                yield harness
+            finally:
+                with contextlib.suppress(StopIteration):
+                    next(gen)  # generator finally → full shutdown + dispose
+
+        with info_node() as live_exec:
+            live_exec.driver.initial.append(
+                limit(OrderSide.BUY, below, TimeInForce.GTC, client_order_id=cid.value)
+            )
+            live_exec.start()
+            live_exec.wait_for_venue_outcome(
+                "OrderAccepted", timeout=45, client_order_id=cid
+            )
+            if _venue_route_broken(live_exec):
+                pytest.skip(
+                    "venue completes every order with 'No such route exists.' "
+                    "(Rithmic Test routing broken 2026-08-22) — canary flow "
+                    "meaningless; see ops-runbook skipped-spec"
+                )
+            # Drive BOTH query paths the MY043 warnings came from.
+            report = live_exec.order_status_report(cid)
+            assert report is not None, "no status report for the order query"
+            live_exec.driver.cancel_order(live_exec.cache.order(cid))
+            live_exec.wait_order_status(cid, OrderStatus.CANCELED, timeout=20)
+            live_exec.check_orders_consistency(timeout_secs=20.0)
+
+        captured = capfd.readouterr().out
+        assert "TESTER-001" in captured, (
+            f"positive control failed — node log not captured: {captured[-500:]}"
+        )
+        forbidden = [
+            "InvalidStateTrigger",
+            "avg_px was None",
+            "CANCELED -> ACCEPTED",
+        ]
+        for signature in forbidden:
+            assert signature not in captured, (
+                f"MY043 regression signature {signature!r} reappeared"
+            )
 
 
 # ══════════════════════════════════════════════════════════════════════
