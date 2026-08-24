@@ -177,15 +177,15 @@ rule. Explicit `--market-entry` only — never implicit MARKET for P2 proof.
 | TC-E85 | Reconcile filled orders | [~] | fill query unavailable (`conventions.md:144`); `test_generate_fill_reports_*` |
 | TC-E86 | Reconcile open long | [~] | `test_position_status_reports_*` |
 | TC-E87 | Reconcile open short | [~] | |
-| TC-E88 (local) | Drain returns working orders by identity | [~] | `test_tc_e88_drain_reports_working_limit_by_identity` — far LIMIT drained as ACCEPTED with matching side; clears after cancel. Closes the STATUS TODO "live-venue proof that the drain returns working orders" once run live. Local id: upstream matrix ends at E87 |
-| TC-E89 (local) | MY043 canary: no engine WARN regressions | [~] | `test_tc_e89_my043_canary_no_engine_warn_regressions` — place→accept→cancel through an INFO-logging node; scans fd-captured stdout (`capfd`) for `avg_px was None` (forbid) and repeated `InvalidStateTrigger`/`CANCELED -> ACCEPTED` (≤1 allowed = engine residual per ops-runbook); positive control is the run CID / ExecClient label. File sink rejected: it lags stdout and loses the tail. `test_tc_e89_logging_capture_mechanics` pins the capture offline |
+| TC-E88 (local) | Drain returns working orders by identity | [~] | `test_tc_e88_drain_reports_working_limit_by_identity` — far LIMIT drained as ACCEPTED with matching side; clears after cancel. Live-proven on Rithmic Test 2026-08-24. Local id: upstream matrix ends at E87 |
+| TC-E89 (local) | MY043 canary: no engine WARN regressions | [~] | `test_tc_e89_my043_canary_no_engine_warn_regressions` — place→accept→cancel through an INFO-logging node; scans fd-captured stdout (`capfd`) for `avg_px was None` (forbid) and repeated `InvalidStateTrigger`/`CANCELED -> ACCEPTED` (≤1 allowed = engine residual per ops-runbook); positive control is the run CID / ExecClient label. `test_tc_e89_logging_capture_mechanics` pins the capture offline. Live-proven on Rithmic Test 2026-08-24 |
 
 Recon honesty caveat (trading): the `load_orders` drain is best-effort and *not*
 provably complete — an empty result means "no working orders seen", not "venue has
 none". The exec fixture therefore pins `open_check_open_only=True` (the 1.231.x
 replacement for the removed `death_policy=trust_stop`): with it, a cached open
 order missing from the drain is logged as advisory instead of canceled.
-Live-venue proof that the drain returns the venue's working orders is still TODO.
+Drain-by-identity live proof: TC-E88 on Rithmic Test 2026-08-24.
 
 ## Group 10: Options trading
 
@@ -207,9 +207,9 @@ Live-venue proof that the drain returns the venue's working orders is still TODO
 | 6. Brackets | 4 | 0 | 4 | 0 | 0 | 0 |
 | 7. Flags | 4 | 0 | 1 | 3 | 0 | 0 |
 | 8. Rejection | 9 | 1 | 2 | 3 | 3 | 0 |
-| 9. Lifecycle/Recon | 8 | 1 | 7 | 0 | 0 | 0 |
+| 9. Lifecycle/Recon | 10 | 1 | 9 | 0 | 0 | 0 |
 | 10. Options | 12 | 0 | 0 | 0 | 0 | 12 |
-| **Total** | **73** | **22** | **19** | **17** | **3** | **12** |
+| **Total** | **75** | **22** | **21** | **17** | **3** | **12** |
 
 **Baseline-compliant (groups 1–5) achieved** — the CAN-set (`TC-E01..E04,E06,E10..E16,
 E19,E20..E23,E40,E42,E44`) is `[x]` live-proven on `Rithmic Test` (2026-08-18), and
