@@ -226,7 +226,6 @@ def kind_from_notify(
             if status_u in {"CANCELLED", "CANCELED"}:
                 return "canceled"
             if str(text or "").strip():
-                # COMPLETE+text = terminal reject; bare completes stay None.
                 return "rejected"
             return None
         return None

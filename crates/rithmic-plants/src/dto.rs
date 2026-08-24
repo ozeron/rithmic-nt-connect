@@ -419,7 +419,7 @@ fn order_kind(
             if status_u == "CANCELLED" || status_u == "CANCELED" {
                 "canceled"
             } else if text.is_some_and(|t| !t.trim().is_empty()) {
-                "rejected" // COMPLETE+text = terminal reject; bare completes stay None
+                "rejected"
             } else {
                 return None;
             }
@@ -838,7 +838,6 @@ mod order_kind_tests {
             .as_deref(),
             Some("rejected")
         );
-        // Bare completes stay unclassified.
         assert_eq!(
             order_kind("rithmic", Some("COMPLETE"), Some("complete"), None).as_deref(),
             None
@@ -847,7 +846,6 @@ mod order_kind_tests {
             order_kind("rithmic", Some("COMPLETE"), Some("complete"), Some("  ")).as_deref(),
             None
         );
-        // Cancel-completion still wins over text.
         assert_eq!(
             order_kind(
                 "rithmic",
