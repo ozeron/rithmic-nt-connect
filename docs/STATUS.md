@@ -30,13 +30,13 @@ Legend: **Done** `[x]` · **Partial** `[~]` · **Not started** `[ ]` · `N/A` ou
 | Area | Total | Done | Partial | Not started | N/A |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | **Capability matrix** | 21 | 4 | 11 | 0 | 6 |
-| **Phase marks (0–9)** | 27 | 15 | 6 | 2 | 4 |
+| **Phase marks (0–9)** | 29 | 15 | 8 | 2 | 4 |
 | **Convention marks** | 18 | 15 | 3 | 0 | 0 |
 | **Close-outs (advertised path)** | 9 | 5 | 2 | 0 | 2 |
 | **Paper path (intraday)** | 8 | 8 | 0 | 0 | 0 |
-| **TOTAL** | 83 | 47 | 22 | 2 | 12 |
+| **TOTAL** | 85 | 47 | 24 | 2 | 12 |
 
-**Implemented:** 82% (`47` done + `22` partial of `71` in-scope marked items (`12` N/A excluded); partial counts as half).
+**Implemented:** 81% (`47` done + `24` partial of `73` in-scope marked items (`12` N/A excluded); partial counts as half).
 
 Not started (real leftover work): Phase 2 definition updates, Phase 7 recovery suite.
 
@@ -134,7 +134,7 @@ Not started (real leftover work): Phase 2 definition updates, Phase 7 recovery s
 ### Phase 5: Optional
 
 - N/A until advertised: depth-by-order, 1-SECOND-EXTERNAL, weekly/tick bars, catalog
-- [x] Live EXTERNAL time bars (1m/15m/1h/1d): subscribe + poll wired; **1m live-proven on LucidTrading 2026-08-14** and **again on Rithmic Test 2026-08-24** (`test_tc_d40_subscribe_external_bars`). 15m/1h/1d still need live proof (Test skips into register; Lucid preferred).
+- [~] Live EXTERNAL time bars (1m/15m/1h/1d): subscribe + poll wired; **1m live-proven on LucidTrading 2026-08-14** and **again on Rithmic Test 2026-08-24** (`test_tc_d40_subscribe_external_bars`); 15m/1h/1d wired but no live payload (SKIP).
 - `cancel_all_orders` exists on the wire; not a safe default
 
 ### Phase 6: Factories
@@ -145,7 +145,7 @@ Not started (real leftover work): Phase 2 definition updates, Phase 7 recovery s
 ### Phase 7: Conformance
 
 - [~] Unit + MD smoke + live↔history; order dry-run exercised LucidTrading 2026-08-14 (local under gitignored `artifacts/`)
-- [ ] Recovery suite; skipped-spec register
+- [~] Recovery suite [ ] + skipped-spec register [x] (`docs/references/ops-runbook.md:54`)
 - [~] **Exit:** not claimed until advertised close-outs have evidence
 
 ### Phase 8: Perf / robustness
@@ -228,7 +228,7 @@ Live Rithmic MD + Nautilus sandbox exec. Plan: [`plans/2026-08-13-002-intraday-s
 - [x] Shared `examples/nq_four_bar.py` (SMA20 on 1-DAY EXTERNAL / VWAP on 1-MINUTE INTERNAL + 1s 4-bar). Live: `live_nq_intraday_sandbox.py` (sandbox exec). Backtest: `backtest_nq_today.py`. Refuses `RITHMIC_ENABLE_TRADING` on paper.
 - [x] README + ops point at the paper example
 - [x] Unit tests: flags + resync double (`pytest`)
-- [x] Live Lucid run of the sandbox example (2026-08-13: NQU6 trades + two INTERNAL 1-minute bars; clean stop)
+- [x] Live Lucid run of the sandbox example (2026-08-13: NQU6 trades + two INTERNAL 1-minute bars; clean stop) — manual smoke, no committed e2e harness (`scripts/smoke_*`)
 
 Do not register Rithmic exec on the same node as sandbox.
 
