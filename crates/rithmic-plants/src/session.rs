@@ -240,7 +240,14 @@ impl RithmicSession {
         let rc = self.config.to_rithmic_config()?;
         let order_plant = RithmicOrderPlant::connect(&rc, ConnectStrategy::Retry).await?;
         let order_handle = order_plant.get_handle(&account);
-        check_response(order_handle.login().await?, "order login")?;
+        let result = login_result(order_handle.login().await, "order login");
+        after_failed_login(
+            async {
+                let _ = order_handle.disconnect().await;
+            },
+            result,
+        )
+        .await?;
         self.order = Some(OrderPlant {
             _plant: order_plant,
             handle: order_handle,
@@ -292,7 +299,14 @@ impl RithmicSession {
         let rc = self.config.to_rithmic_config()?;
         let pnl_plant = RithmicPnlPlant::connect(&rc, ConnectStrategy::Retry).await?;
         let pnl_handle = pnl_plant.get_handle(&account);
-        check_response(pnl_handle.login().await?, "pnl login")?;
+        let result = login_result(pnl_handle.login().await, "pnl login");
+        after_failed_login(
+            async {
+                let _ = pnl_handle.disconnect().await;
+            },
+            result,
+        )
+        .await?;
         self.pnl = Some(PnlPlant {
             _plant: pnl_plant,
             handle: pnl_handle,
@@ -539,15 +553,15 @@ impl RithmicSession {
     /// Subscribe to order plant notifications (Rithmic + exchange).
     pub async fn subscribe_order_updates(&mut self) -> Result<()> {
         self.ensure_order_plant().await?;
-        let handle = self.order_handle()?;
-        if let Err(e) = check_response(
-            handle.subscribe_order_updates().await?,
-            "subscribe_order_updates",
-        ) {
-            let _ = self.disconnect_order_plant().await;
-            return Err(e);
+        let result = async {
+            let handle = self.order_handle()?;
+            check_response(
+                handle.subscribe_order_updates().await?,
+                "subscribe_order_updates",
+            )
         }
-        Ok(())
+        .await;
+        rollback_order_plant_subscribe(self, result, true).await
     }
 
     /// Load current working orders via a bounded silence-window drain.
@@ -661,12 +675,17 @@ impl RithmicSession {
 
     /// Subscribe to bracket update notifications (required for plant brackets).
     pub async fn subscribe_bracket_updates(&mut self) -> Result<()> {
+        let opened_here = self.order.is_none();
         self.ensure_order_plant().await?;
-        let handle = self.order_handle()?;
-        check_response(
-            handle.subscribe_bracket_updates().await?,
-            "subscribe_bracket_updates",
-        )
+        let result = async {
+            let handle = self.order_handle()?;
+            check_response(
+                handle.subscribe_bracket_updates().await?,
+                "subscribe_bracket_updates",
+            )
+        }
+        .await;
+        rollback_order_plant_subscribe(self, result, opened_here).await
     }
 
     /// Place a server-side bracket (entry + stop_ticks / target_ticks from fill).
@@ -768,18 +787,7 @@ impl RithmicSession {
     /// Non-blocking poll of the next ticker-plant subscription message.
     pub fn poll_event(&mut self) -> Result<Option<PlantEvent>> {
         let handle = self.ticker_handle_mut()?;
-        match handle.subscription_receiver.try_recv() {
-            Ok(resp) => {
-                if let Some(err) = &resp.error {
-                    if err.is_connection_issue() {
-                        return Err(Error::Rithmic(err.to_string()));
-                    }
-                }
-                Ok(Some(PlantEvent::from(&resp)))
-            }
-            Err(TryRecvError::Empty) | Err(TryRecvError::Lagged(_)) => Ok(None),
-            Err(TryRecvError::Closed) => Err(Error::ChannelClosed { plant: "ticker" }),
-        }
+        map_try_recv_poll("ticker", handle.subscription_receiver.try_recv())
     }
 
     /// Non-blocking poll of the next PnL-plant subscription message.
@@ -1163,6 +1171,25 @@ where
     Ok(out)
 }
 
+/// On subscribe failure, disconnect the order plant when `disconnect_on_err`.
+/// Order-updates always pass `true`. Brackets pass `opened_here` so a failure
+/// on an already-live plant does not tear down a shared order stream.
+async fn rollback_order_plant_subscribe(
+    session: &mut RithmicSession,
+    result: Result<()>,
+    disconnect_on_err: bool,
+) -> Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            if disconnect_on_err {
+                let _ = session.disconnect_order_plant().await;
+            }
+            Err(err)
+        }
+    }
+}
+
 /// Drain current working orders on an already-connected handle (no session lock).
 ///
 /// `show_orders` triggers a replay of the current working orders, which arrive
@@ -1208,10 +1235,39 @@ pub async fn load_account_rms_info_on(
     )
 }
 
+/// Best-effort logout after a failed plant login so Drop does not leave a
+/// hung Rithmic session (one-login-session rule).
+async fn after_failed_login(
+    disconnect: impl Future<Output = ()>,
+    result: Result<()>,
+) -> Result<()> {
+    if result.is_err() {
+        disconnect.await;
+    }
+    result
+}
+
+fn login_result(
+    login: std::result::Result<rithmic_rs::RithmicResponse, rithmic_rs::RithmicError>,
+    ctx: &str,
+) -> Result<()> {
+    match login {
+        Ok(resp) => check_response(resp, ctx),
+        Err(e) => Err(Error::from(e)),
+    }
+}
+
 async fn connect_ticker(rc: &RithmicConfig) -> Result<TickerPlant> {
     let plant = RithmicTickerPlant::connect(rc, ConnectStrategy::Retry).await?;
     let handle = plant.get_handle();
-    check_response(handle.login().await?, "ticker login")?;
+    let result = login_result(handle.login().await, "ticker login");
+    after_failed_login(
+        async {
+            let _ = handle.disconnect().await;
+        },
+        result,
+    )
+    .await?;
     Ok(TickerPlant {
         _plant: plant,
         handle,
@@ -1221,7 +1277,14 @@ async fn connect_ticker(rc: &RithmicConfig) -> Result<TickerPlant> {
 async fn connect_history(rc: &RithmicConfig) -> Result<HistoryPlant> {
     let plant = RithmicHistoryPlant::connect(rc, ConnectStrategy::Retry).await?;
     let handle = plant.get_handle();
-    check_response(handle.login().await?, "history login")?;
+    let result = login_result(handle.login().await, "history login");
+    after_failed_login(
+        async {
+            let _ = handle.disconnect().await;
+        },
+        result,
+    )
+    .await?;
     Ok(HistoryPlant {
         _plant: plant,
         handle,
@@ -1231,7 +1294,14 @@ async fn connect_history(rc: &RithmicConfig) -> Result<HistoryPlant> {
 async fn connect_pnl(rc: &RithmicConfig, account: &RithmicAccount) -> Result<PnlPlant> {
     let plant = RithmicPnlPlant::connect(rc, ConnectStrategy::Retry).await?;
     let handle = plant.get_handle(account);
-    check_response(handle.login().await?, "pnl login")?;
+    let result = login_result(handle.login().await, "pnl login");
+    after_failed_login(
+        async {
+            let _ = handle.disconnect().await;
+        },
+        result,
+    )
+    .await?;
     Ok(PnlPlant {
         _plant: plant,
         handle,
@@ -1322,19 +1392,34 @@ fn update_bar_type(bar_type: i32) -> Result<request_time_bar_update::BarType> {
     })
 }
 
+fn map_connection_response(resp: rithmic_rs::RithmicResponse) -> Result<Option<PlantEvent>> {
+    if let Some(err) = &resp.error {
+        if err.is_connection_issue() {
+            return Err(Error::Rithmic(err.to_string()));
+        }
+    }
+    Ok(Some(PlantEvent::from(&resp)))
+}
+
+/// Map a ticker `try_recv` result. Lag surfaces as [`Error::ChannelLagged`].
+fn map_try_recv_poll(
+    plant: &'static str,
+    polled: std::result::Result<rithmic_rs::RithmicResponse, TryRecvError>,
+) -> Result<Option<PlantEvent>> {
+    match polled {
+        Ok(resp) => map_connection_response(resp),
+        Err(TryRecvError::Empty) => Ok(None),
+        Err(TryRecvError::Lagged(skipped)) => Err(Error::ChannelLagged { plant, skipped }),
+        Err(TryRecvError::Closed) => Err(Error::ChannelClosed { plant }),
+    }
+}
+
 fn map_broadcast_poll(
     plant: &'static str,
     polled: Option<std::result::Result<rithmic_rs::RithmicResponse, RecvError>>,
 ) -> Result<Option<PlantEvent>> {
     match polled {
-        Some(Ok(resp)) => {
-            if let Some(err) = &resp.error {
-                if err.is_connection_issue() {
-                    return Err(Error::Rithmic(err.to_string()));
-                }
-            }
-            Ok(Some(PlantEvent::from(&resp)))
-        }
+        Some(Ok(resp)) => map_connection_response(resp),
         Some(Err(RecvError::Lagged(skipped))) => Err(Error::ChannelLagged { plant, skipped }),
         Some(Err(RecvError::Closed)) => Err(Error::ChannelClosed { plant }),
         None => Ok(None),
@@ -1360,6 +1445,139 @@ where
         check_response_ref(resp, ctx)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod login_disconnect_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[tokio::test]
+    async fn failed_login_runs_disconnect() {
+        let called = AtomicBool::new(false);
+        let err = after_failed_login(
+            async {
+                called.store(true, Ordering::SeqCst);
+            },
+            Err(Error::Rithmic("order login: boom".into())),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            called.load(Ordering::SeqCst),
+            "failed login must disconnect before drop"
+        );
+        assert!(matches!(
+            err,
+            Error::Rithmic(ref msg) if msg.contains("order login")
+        ));
+    }
+
+    #[tokio::test]
+    async fn successful_login_skips_disconnect() {
+        let called = AtomicBool::new(false);
+        after_failed_login(
+            async {
+                called.store(true, Ordering::SeqCst);
+            },
+            Ok(()),
+        )
+        .await
+        .expect("ok");
+        assert!(
+            !called.load(Ordering::SeqCst),
+            "successful login must not disconnect"
+        );
+    }
+}
+
+#[cfg(test)]
+mod order_subscribe_rollback_tests {
+    use super::*;
+
+    fn disconnected_session() -> RithmicSession {
+        let cfg = SessionConfig::builder()
+            .user("alice")
+            .password("pw")
+            .build()
+            .unwrap();
+        RithmicSession::new(cfg)
+    }
+
+    #[tokio::test]
+    async fn err_with_disconnect_propagates() {
+        let mut session = disconnected_session();
+        let err = rollback_order_plant_subscribe(
+            &mut session,
+            Err(Error::Rithmic("subscribe_order_updates: boom".into())),
+            true,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            Error::Rithmic(ref msg) if msg.contains("subscribe_order_updates")
+        ));
+        assert!(format!("{session:?}").contains("order_connected: false"));
+    }
+
+    #[tokio::test]
+    async fn err_without_disconnect_still_propagates() {
+        let mut session = disconnected_session();
+        let err = rollback_order_plant_subscribe(
+            &mut session,
+            Err(Error::Rithmic("subscribe_bracket_updates: boom".into())),
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            Error::Rithmic(ref msg) if msg.contains("subscribe_bracket_updates")
+        ));
+    }
+
+    #[tokio::test]
+    async fn ok_path() {
+        let mut session = disconnected_session();
+        rollback_order_plant_subscribe(&mut session, Ok(()), true)
+            .await
+            .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod try_recv_poll_tests {
+    use super::*;
+
+    #[test]
+    fn lagged_surfaces_channel_lagged() {
+        let err = map_try_recv_poll("ticker", Err(TryRecvError::Lagged(42))).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::ChannelLagged {
+                    plant: "ticker",
+                    skipped: 42
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn empty_is_idle() {
+        assert!(matches!(
+            map_try_recv_poll("ticker", Err(TryRecvError::Empty)),
+            Ok(None)
+        ));
+    }
+
+    #[test]
+    fn closed_surfaces_channel_closed() {
+        let err = map_try_recv_poll("ticker", Err(TryRecvError::Closed)).unwrap_err();
+        assert!(matches!(err, Error::ChannelClosed { plant: "ticker" }));
+    }
 }
 
 #[cfg(test)]
