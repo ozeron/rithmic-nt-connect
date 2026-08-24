@@ -358,11 +358,7 @@ def fields_to_order_book_deltas(
 
 
 def _is_duplicate_subscribe_error(exc: BaseException) -> bool:
-    """Venue ``[8] already exists`` — subscribe intent survived ``reset_ticker``.
-
-    History-plant bars (and sometimes ticker/book refcounts) are not torn down
-    on ticker-only reset; replay must treat this as success, not abort resync.
-    """
+    """True for venue ``[8] already exists`` (intent survived ticker reset)."""
     msg = str(exc).lower()
     return "[8]" in msg and "already exists" in msg
 

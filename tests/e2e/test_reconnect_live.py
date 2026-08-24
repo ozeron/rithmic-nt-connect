@@ -28,7 +28,6 @@ def wait_for_any_event(
     timeout_sec: float,
     sleep_sec: float = 0.1,
 ) -> dict:
-    """Poll until an event whose type is in ``event_types`` arrives."""
     deadline = time.monotonic() + timeout_sec
     while time.monotonic() < deadline:
         ev = poll()
@@ -41,7 +40,7 @@ def wait_for_any_event(
 class TestResyncRestoresIntent:
     @pytest.mark.slow
     def test_resync_restores_ticker_book_and_bars(self, live_session, live_front_month):
-        """Subscribe all three surfaces, resync, assert events resume."""
+        """Subscribe ticker, book, and 1m bars; resync; assert events resume."""
         _, symbol, exchange = live_front_month
         ticker_subs = {(symbol, exchange)}
         book_subs = {(symbol, exchange)}

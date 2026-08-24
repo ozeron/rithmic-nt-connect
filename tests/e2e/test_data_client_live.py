@@ -189,10 +189,7 @@ class TestBars:
     def test_tc_d40_subscribe_external_bars(
         self, live_session, live_front_month, rtype: int, period: int
     ):
-        """Subscribe EXTERNAL time bars; first payload counts (in-progress OK).
-
-        Venue refusal or no payload within the poll window → skip (ops-runbook).
-        """
+        """Subscribe EXTERNAL time bars; skip if venue refuses or times out."""
         _, symbol, exchange = live_front_month
         try:
             live_session.subscribe_time_bars(symbol, exchange, rtype, period)

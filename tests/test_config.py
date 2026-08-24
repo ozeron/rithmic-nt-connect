@@ -247,7 +247,7 @@ def test_explicit_test_env_rejects_production_system(tmp_path, monkeypatch) -> N
 def test_explicit_test_env_lucid_override_requires_process_env_flag(
     tmp_path, monkeypatch, capsys
 ) -> None:
-    """Lucid override requires RITHMIC_ALLOW_LUCID_E2E=1 in process env, not dotenv."""
+    """Lucid override requires RITHMIC_ALLOW_LUCID_E2E=1 in process env."""
     from rithmic_nt_connect.config import ConfigError, explicit_test_env
 
     env_file = tmp_path / "lucid.env"
@@ -271,7 +271,7 @@ def test_explicit_test_env_lucid_override_requires_process_env_flag(
 
 
 def test_explicit_test_env_unknown_system_still_refused(tmp_path, monkeypatch) -> None:
-    """Lucid override does not accept unknown system names."""
+    """Unknown system names stay refused even with the Lucid override."""
     from rithmic_nt_connect.config import ConfigError, explicit_test_env
 
     env_file = tmp_path / "weird.env"

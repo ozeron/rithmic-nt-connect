@@ -190,8 +190,7 @@ def explicit_test_env(environ: Mapping[str, str] | None = None) -> dict[str, str
         # A gateway test env must name its endpoint; a direct env never uses one.
         raise ConfigError("explicit test env file is missing RITHMIC_GATEWAY")
     kind = system_kind(values["RITHMIC_SYSTEM_NAME"])
-    # Lucid/production: only when RITHMIC_ALLOW_LUCID_E2E=1 is in process env
-    # (never the dotenv file). See ops-runbook LucidTrading override.
+    # Lucid/production only if RITHMIC_ALLOW_LUCID_E2E=1 is in process env.
     allow_production = kind == "production" and env_truthy(
         _env_first(source_env, "RITHMIC_ALLOW_LUCID_E2E")
     )

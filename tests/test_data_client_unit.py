@@ -254,7 +254,7 @@ def test_resync_ticker_session_replays_intent() -> None:
 
 
 def test_resync_tolerates_venue_duplicate_subscribe() -> None:
-    """History-plant bars often survive ``reset_ticker``; ``[8]`` must not abort."""
+    """History-plant bars often survive reset_ticker; ``[8]`` must not abort."""
     import asyncio
 
     from rithmic_nt_connect.data import resync_ticker_session
