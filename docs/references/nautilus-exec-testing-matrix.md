@@ -138,6 +138,9 @@ fail closed.
 
 Live bracket spike: `scripts/spike_bracket_order.py` (`RITHMIC_BRACKETS=1` +
 `RITHMIC_ENABLE_TRADING=1`; spike-only flag, not enforced in plants/gateway).
+Default entry is a far LIMIT derived from live BBO (`BUY = bid − N×tick`,
+`--far-ticks`, default 20); optional `--limit-price` must still clear that
+rule. Explicit `--market-entry` only — never implicit MARKET for P2 proof.
 
 ## Group 7: Order flags
 

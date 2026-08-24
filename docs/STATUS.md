@@ -57,7 +57,7 @@ Not started (real leftover work): Phase 2 definition updates, Phase 7 recovery s
 | Mark / index / funding / greeks | Not advertised | **N/A** |
 | Catalog / Parquet | Other repo | **N/A** |
 | Order types | Market, limit, stop / stop-limit, trailing-stop (tick offset) | [~] mapped; test-plant live place confirmed 2026-08-17 (default `app_name` authorized to exchange) |
-| Brackets / OCO | Plant bracket API | [~] wire on direct + gateway; Lucid accept/survival **not proven**. Spike: `scripts/spike_bracket_order.py` (`RITHMIC_BRACKETS=1` + `RITHMIC_ENABLE_TRADING=1`; spike-only flag, not enforced in plants/gateway). |
+| Brackets / OCO | Plant bracket API | [~] wire on direct + gateway; spike harness derives far LIMIT from BBO (`--far-ticks`), survives plant redial, identity-cancels (`scripts/spike_bracket_order.py`; `RITHMIC_BRACKETS=1` + `RITHMIC_ENABLE_TRADING=1`, spike-only). Re-run `--place` after pricing changes to refresh Lucid evidence. |
 | Account / positions | Best-effort PnL | [~] auto-discovers FCM/IB/account when unset (multi-account: `RITHMIC_ACCOUNT_ID`); soft-fail PnL otherwise |
 | Submit / cancel / modify + fills | Gated order plant | [~] see notes |
 | Order status reports | Venue recon when trading; cache-backed when read-only | [~] (best-effort) — `load_orders` = `show_orders` + bounded silence. Not provably complete (no end-of-list; 10k replay cap). Advisory, not authoritative. Read-only → cache-backed. |

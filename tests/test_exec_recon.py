@@ -1118,6 +1118,7 @@ def test_order_plant_failure_latches_across_resync() -> None:
         SimpleNamespace(
             disconnect_order_plant=lambda: None,
             subscribe_order_updates=lambda: None,
+            subscribe_bracket_updates=lambda: None,
         ),
     )
 
@@ -1141,11 +1142,35 @@ def test_resync_without_latch_restores_live() -> None:
         SimpleNamespace(
             disconnect_order_plant=lambda: None,
             subscribe_order_updates=lambda: None,
+            subscribe_bracket_updates=lambda: None,
         ),
     )
 
     asyncio.run(client._resync_order_subscription())
 
+    assert client._order_plant.state is OrderPlantState.LIVE
+
+
+def test_resync_reissues_both_order_plant_intents() -> None:
+    """Direct/gateway parity drift guard (AGENTS): the order plant carries
+    TWO venue subscription flags — order updates AND bracket updates — and a
+    reconnect must re-issue both. Dropping the bracket flag is how bracket
+    notifications went silent after plant reconnects historically."""
+    client = _client()
+    client._order_plant = OrderPlantPolicy(OrderPlantState.LIVE)
+    calls: list[str] = []
+    client._session = cast(
+        WireSession,
+        SimpleNamespace(
+            disconnect_order_plant=lambda: calls.append("disconnect"),
+            subscribe_order_updates=lambda: calls.append("order"),
+            subscribe_bracket_updates=lambda: calls.append("brackets"),
+        ),
+    )
+
+    asyncio.run(client._resync_order_subscription())
+
+    assert calls == ["disconnect", "order", "brackets"], calls
     assert client._order_plant.state is OrderPlantState.LIVE
 
 
