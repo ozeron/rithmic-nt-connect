@@ -222,12 +222,6 @@ Alex re-review / merge.
 | P2 pre-check | **DONE** — direct bracket intent restore (#34) | none needed |
 | P2 vehicle | done + post-redial nudge + always-cleanup (#34) | **DONE** 2026-08-24 — accept+survive+cleanup on **direct** and **gateway** (far LIMIT, `scripts/spike_bracket_order.py`) |
 
-Historical blockers (2026-08-22 EOD) that cleared on 2026-08-24:
-
-1. Test order routing — orders now reach exchange (`OPEN_PENDING` → `SENT_TO_EXCH`); keep CME-band prices.
-2. Test MD/bars — 1m EXTERNAL + last_trade/bbo flow during market hours; slower bar periods still skip.
-3. Resync `[8] already exists` — history-plant bars survive `reset_ticker`; replay treats `[8]` as success.
-
 Still open:
 
 1. LucidTrading env for full P0.1 (15m/1h/1d) and Lucid-hosted proofs — `RITHMIC_ALLOW_LUCID_E2E=1`, MotiveWave closed.

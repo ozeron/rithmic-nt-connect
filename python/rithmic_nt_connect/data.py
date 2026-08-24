@@ -358,19 +358,16 @@ def fields_to_order_book_deltas(
 
 
 def _is_duplicate_subscribe_error(exc: BaseException) -> bool:
-    """Rithmic rp_code ``[8] already exists`` — intent is already live.
+    """Venue ``[8] already exists`` — subscribe intent survived ``reset_ticker``.
 
-    ``reset_ticker`` recreates only the ticker plant; the history plant (and
-    sometimes ticker/book refcounts) can retain a prior subscribe across the
-    reset. Re-issue must treat that as success so channel-error resync does
-    not abort with bars/ticker already registered (live-proven 2026-08-24).
+    History-plant bars (and sometimes ticker/book refcounts) are not torn down
+    on ticker-only reset; replay must treat this as success, not abort resync.
     """
     msg = str(exc).lower()
     return "[8]" in msg and "already exists" in msg
 
 
 async def _subscribe_replay(call: Any, *args: Any) -> None:
-    """Issue one subscribe; swallow venue duplicate-subscribe ``[8]`` only."""
     try:
         await asyncio.to_thread(call, *args)
     except Exception as exc:
@@ -387,12 +384,9 @@ async def replay_subscription_intent(
 ) -> None:
     """Replay ticker + book + EXTERNAL bar intent on an already-connected wire.
 
-    Re-subscribe is best-effort idempotent: a venue ``[8] already exists``
-    means the intent is already live (common for history-plant bars after
-    ``reset_ticker``, which does not drop that plant). Other errors still
-    propagate. Every path that re-establishes the wire must go through this
-    single boundary so the client can never reconnect with live plants but
-    zero subscriptions.
+    Every path that re-establishes the wire must go through this single
+    boundary so the client can never reconnect with live plants but zero
+    subscriptions.
     """
     for symbol, exchange in subscriptions:
         await _subscribe_replay(session.subscribe, symbol, exchange)

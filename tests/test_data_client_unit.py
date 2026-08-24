@@ -291,7 +291,6 @@ def test_resync_tolerates_venue_duplicate_subscribe() -> None:
 def test_resync_reraises_non_duplicate_subscribe_errors() -> None:
     import asyncio
 
-    import pytest
     from rithmic_nt_connect.data import resync_ticker_session
 
     class Sess(WireSessionStub):

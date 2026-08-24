@@ -8,6 +8,7 @@ production R|Protocol URL. Passwords are never included in ``repr`` or error tex
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -189,17 +190,12 @@ def explicit_test_env(environ: Mapping[str, str] | None = None) -> dict[str, str
         # A gateway test env must name its endpoint; a direct env never uses one.
         raise ConfigError("explicit test env file is missing RITHMIC_GATEWAY")
     kind = system_kind(values["RITHMIC_SYSTEM_NAME"])
-    # Deliberate refusal: live pytest suites must not touch production /
-    # LucidTrading by accident. The only way through is an explicit
-    # process-env override set at invocation (never inside the dotenv file),
-    # which the operator sets only with the production login's other
-    # consumers (MotiveWave / R|Trader) closed.
+    # Lucid/production: only when RITHMIC_ALLOW_LUCID_E2E=1 is in process env
+    # (never the dotenv file). See ops-runbook LucidTrading override.
     allow_production = kind == "production" and env_truthy(
         _env_first(source_env, "RITHMIC_ALLOW_LUCID_E2E")
     )
     if allow_production:
-        import sys
-
         print(
             f"WARNING: RITHMIC_ALLOW_LUCID_E2E=1 — running live tests against "
             f"production system {values['RITHMIC_SYSTEM_NAME']!r}; close "

@@ -177,10 +177,6 @@ class TestTrades:
 class TestBars:
     """TC-D40, D41 — live bar subscribe + historical bars request."""
 
-    # (id, rithmic_bar_type, wire period) — period units follow
-    # ``bar_type_to_rithmic``: minutes for MINUTE rtype, 1 bar for DAILY.
-    # 1m stays the anchor case (proven 2026-08-14); 15m/1h/1d extend the
-    # EXTERNAL proof per gap-closure plan P0.1.
     _BAR_PARAMS: ClassVar[list] = [
         pytest.param(2, 1, id="1m"),
         pytest.param(2, 15, id="15m"),
@@ -193,12 +189,9 @@ class TestBars:
     def test_tc_d40_subscribe_external_bars(
         self, live_session, live_front_month, rtype: int, period: int
     ):
-        """Subscribe EXTERNAL time bars — receive at least one time_bar event.
+        """Subscribe EXTERNAL time bars; first payload counts (in-progress OK).
 
-        Assertion bar is the FIRST payload (an in-progress bar counts); the
-        test does not wait for a period rollover. A period the venue refuses
-        or never delivers inside the window SKIPS (recorded in the ops-runbook
-        skipped-spec register), matching TC-D31 transient-empty policy.
+        Venue refusal or no payload within the poll window → skip (ops-runbook).
         """
         _, symbol, exchange = live_front_month
         try:
