@@ -63,6 +63,23 @@ def test_no_rows_is_not_working() -> None:
     assert spike._drain_basket_working(_DrainSession([]), "B1") is False
 
 
+def test_cleanup_requires_explicit_terminal_row() -> None:
+    """Empty drain must not print CLEANUP OK (propagation lag ≠ canceled)."""
+    assert spike._drain_basket_terminal(_DrainSession([]), "B1") is False
+    assert (
+        spike._drain_basket_terminal(
+            _DrainSession([{"basket_id": "B1", "status": "OPEN"}]), "B1"
+        )
+        is False
+    )
+    assert (
+        spike._drain_basket_terminal(
+            _DrainSession([{"basket_id": "B1", "status": "COMPLETE"}]), "B1"
+        )
+        is True
+    )
+
+
 def test_other_baskets_ignored() -> None:
     rows = [
         {"basket_id": "OTHER", "status": "OPEN"},

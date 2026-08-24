@@ -124,6 +124,25 @@ def _drain_basket_working(session, basket: str, *, seconds: float = 8.0) -> bool
     return status not in _TERMINAL_STATUSES
 
 
+def _drain_basket_terminal(session, basket: str) -> bool:
+    """True only when the newest drain row is an explicit terminal status.
+
+    Empty / missing drain is *not* proof of cleanup (best-effort ``load_orders``
+    can lag); CLEANUP OK requires a concrete complete/canceled/… row.
+    """
+    latest = _latest_basket_row(session, basket)
+    if latest is None:
+        print(
+            f"drain: basket {basket} not present (no rows) — "
+            "not proof of terminal cleanup"
+        )
+        return False
+    status = str(latest.get("status") or "").strip().lower()
+    text = str(latest.get("text") or "").strip()
+    print(f"drain: basket {basket} latest row status={status!r} text={text!r}")
+    return status in _TERMINAL_STATUSES
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--place", action="store_true")
@@ -276,14 +295,15 @@ def main(argv: list[str] | None = None) -> int:
             want_basket=basket_id,
             localid=smoke_localid,
         )
-        if _drain_basket_working(session, basket_id):
+        if not _drain_basket_terminal(session, basket_id):
             print(
-                f"CLEANUP INCOMPLETE: basket {basket_id} still working after "
-                "identity cancel — close it out manually",
+                f"CLEANUP INCOMPLETE: basket {basket_id} has no explicit "
+                "terminal drain row after identity cancel — close it out "
+                "manually (empty drain is not proof)",
                 file=sys.stderr,
             )
             return _RC_CLEANUP
-        print("CLEANUP OK: basket no longer working at venue")
+        print("CLEANUP OK: basket terminal at venue")
         return _RC_OK if survival_ok else _RC_SURVIVAL
     finally:
         try:
