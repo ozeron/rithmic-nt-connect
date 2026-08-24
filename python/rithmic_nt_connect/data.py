@@ -357,6 +357,28 @@ def fields_to_order_book_deltas(
     return OrderBookDeltas(instrument_id=instrument_id, deltas=deltas)
 
 
+def _is_duplicate_subscribe_error(exc: BaseException) -> bool:
+    """Rithmic rp_code ``[8] already exists`` — intent is already live.
+
+    ``reset_ticker`` recreates only the ticker plant; the history plant (and
+    sometimes ticker/book refcounts) can retain a prior subscribe across the
+    reset. Re-issue must treat that as success so channel-error resync does
+    not abort with bars/ticker already registered (live-proven 2026-08-24).
+    """
+    msg = str(exc).lower()
+    return "[8]" in msg and "already exists" in msg
+
+
+async def _subscribe_replay(call: Any, *args: Any) -> None:
+    """Issue one subscribe; swallow venue duplicate-subscribe ``[8]`` only."""
+    try:
+        await asyncio.to_thread(call, *args)
+    except Exception as exc:
+        if _is_duplicate_subscribe_error(exc):
+            return
+        raise
+
+
 async def replay_subscription_intent(
     session: WireSession,
     subscriptions: set[tuple[str, str]],
@@ -365,17 +387,19 @@ async def replay_subscription_intent(
 ) -> None:
     """Replay ticker + book + EXTERNAL bar intent on an already-connected wire.
 
-    Idempotent re-subscribe (the venue treats a duplicate subscribe as a
-    refresh, not an error). Every path that re-establishes the wire must go
-    through this single boundary so the client can never reconnect with live
-    plants but zero subscriptions.
+    Re-subscribe is best-effort idempotent: a venue ``[8] already exists``
+    means the intent is already live (common for history-plant bars after
+    ``reset_ticker``, which does not drop that plant). Other errors still
+    propagate. Every path that re-establishes the wire must go through this
+    single boundary so the client can never reconnect with live plants but
+    zero subscriptions.
     """
     for symbol, exchange in subscriptions:
-        await asyncio.to_thread(session.subscribe, symbol, exchange)
+        await _subscribe_replay(session.subscribe, symbol, exchange)
     for symbol, exchange in book_subscriptions:
-        await asyncio.to_thread(session.subscribe_order_book_summary, symbol, exchange)
+        await _subscribe_replay(session.subscribe_order_book_summary, symbol, exchange)
     for symbol, exchange, rtype, period in bar_subscriptions or ():
-        await asyncio.to_thread(
+        await _subscribe_replay(
             session.subscribe_time_bars, symbol, exchange, rtype, period
         )
 

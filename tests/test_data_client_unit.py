@@ -253,6 +253,73 @@ def test_resync_ticker_session_replays_intent() -> None:
     assert ("bars", "NQU6", "CME", 2, 15) in calls
 
 
+def test_resync_tolerates_venue_duplicate_subscribe() -> None:
+    """History-plant bars often survive ``reset_ticker``; ``[8]`` must not abort."""
+    import asyncio
+
+    from rithmic_nt_connect.data import resync_ticker_session
+
+    calls: list[str] = []
+
+    class Sess(WireSessionStub):
+        def reset_ticker(self) -> None:
+            calls.append("reset")
+
+        def subscribe(self, symbol: str, exchange: str) -> None:
+            calls.append("subscribe")
+
+        def subscribe_order_book_summary(self, symbol: str, exchange: str) -> None:
+            calls.append("book")
+
+        def subscribe_time_bars(
+            self, symbol: str, exchange: str, bar_type: int, period: int
+        ) -> None:
+            calls.append("bars")
+            raise RuntimeError("subscribe_time_bars: [8] already exists")
+
+    asyncio.run(
+        resync_ticker_session(
+            Sess(),
+            {("NQU6", "CME")},
+            {("NQU6", "CME")},
+            {("NQU6", "CME", 2, 1)},
+        )
+    )
+    assert calls == ["reset", "subscribe", "book", "bars"]
+
+
+def test_resync_reraises_non_duplicate_subscribe_errors() -> None:
+    import asyncio
+
+    import pytest
+    from rithmic_nt_connect.data import resync_ticker_session
+
+    class Sess(WireSessionStub):
+        def reset_ticker(self) -> None:
+            pass
+
+        def subscribe(self, symbol: str, exchange: str) -> None:
+            raise RuntimeError("subscribe: [13] permission denied")
+
+        def subscribe_order_book_summary(self, symbol: str, exchange: str) -> None:
+            pass
+
+        def subscribe_time_bars(
+            self, symbol: str, exchange: str, bar_type: int, period: int
+        ) -> None:
+            pass
+
+    with pytest.raises(RuntimeError, match="permission denied"):
+        asyncio.run(
+            resync_ticker_session(
+                Sess(),
+                {("NQU6", "CME")},
+                set(),
+                None,
+            )
+        )
+
+
 def test_bbo_state_cleared_on_quote_unsubscribe_and_resync() -> None:
     """One-sided BBO accumulators must not survive unsubscribe or a ticker
     resync: a later quote must wait for both fresh sides instead of merging

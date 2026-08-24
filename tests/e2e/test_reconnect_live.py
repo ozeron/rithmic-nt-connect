@@ -55,10 +55,11 @@ class TestResyncRestoresIntent:
     def test_resync_restores_ticker_book_and_bars(self, live_session, live_front_month):
         """Baseline on all three surfaces → reset+replay → all three resume.
 
-        The venue treats duplicate subscribes as refresh, so the replay is
-        idempotent; what this pins is that a re-established ticker plant is
-        not left with zero subscriptions (the disconnect→zero-subs bug this
-        boundary exists for).
+        Replay is idempotent: a venue ``[8] already exists`` (history-plant
+        bars retained across ``reset_ticker``) is treated as success. What
+        this pins is that a re-established ticker plant is not left with
+        zero subscriptions (the disconnect→zero-subs bug this boundary
+        exists for).
         """
         _, symbol, exchange = live_front_month
         ticker_subs = {(symbol, exchange)}
