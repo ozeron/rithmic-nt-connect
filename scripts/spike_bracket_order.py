@@ -40,9 +40,6 @@ _RC_INCONCLUSIVE = 3
 _RC_SURVIVAL = 4
 _RC_CLEANUP = 5
 
-# Explicit terminal states for drain-row classification. Substring token
-# matching is banned here: "cancel rejected" contains "cancel" but the
-# bracket is still live, and a rejection is the opposite of terminal.
 _TERMINAL_STATUSES = {"complete", "canceled", "cancelled", "expired", "filled"}
 _REJECT_TOKENS = ("reject", "denied", "fail", "error")
 
@@ -54,11 +51,6 @@ def _poll_for(
     want_basket: str | None,
     localid: str,
 ):
-    """Poll order events within the window; return (last_event_for_us, basket).
-
-    Events match by identity first (user_tag/localid), then — once the
-    basket is known — by basket id so tag-less leg rows still count.
-    """
     deadline = time.monotonic() + max(0.0, seconds)
     basket: str | None = want_basket
     last = None
@@ -86,19 +78,12 @@ def _poll_for(
 
 
 def _event_is_rejection(ev: dict) -> bool:
-    """Venue/plant rejection on a notification (status or free text)."""
     low = f"{ev.get('status') or ''} {ev.get('text') or ev.get('report_text') or ''}"
     return any(tok in low.lower() for tok in _REJECT_TOKENS)
 
 
 def _event_is_bracket_path(ev: dict) -> bool:
-    """True if the notification is a bracket-adjust / modify-path ack.
-
-    Rithmic does not expose a separate poll for bracket updates; adjust_stop
-    acks arrive as order_notification with MODIFY_* notify types (or status
-    text containing modify/bracket). Plain OPEN/STATUS rows from place must
-    not satisfy survival after redial.
-    """
+    """MODIFY_* / bracket adjust ack — plain OPEN rows must not satisfy survival."""
     notify = str(ev.get("notify_type_name") or "").upper()
     status = str(ev.get("status") or "").lower()
     text = str(ev.get("text") or ev.get("report_text") or "").lower()
@@ -109,12 +94,6 @@ def _event_is_bracket_path(ev: dict) -> bool:
 
 
 def _latest_basket_row(session, basket: str):
-    """Newest history row for the basket from a bounded load_orders drain.
-
-    'Newest' is by venue timestamp when present, else arrival order — an
-    older OPEN row arriving before its terminal row must not mask the
-    terminal state.
-    """
     end = int(time.time())
     rows = session.load_orders(end - 3600, end) or ()
     latest = None
@@ -128,35 +107,32 @@ def _latest_basket_row(session, basket: str):
     return latest
 
 
-def _drain_basket_working(session, basket: str, *, seconds: float = 8.0) -> bool:
-    """True if the basket's newest drain row is NOT an explicitly terminal
-    state. Rejections stay 'working' — a cancel-rejected bracket is live."""
+def _latest_basket_drain_status(session, basket: str) -> str | None:
     latest = _latest_basket_row(session, basket)
     if latest is None:
-        print(f"drain: basket {basket} not present (no rows)")
-        return False
+        return None
     status = str(latest.get("status") or "").strip().lower()
     text = str(latest.get("text") or "").strip()
     print(f"drain: basket {basket} latest row status={status!r} text={text!r}")
+    return status
+
+
+def _drain_basket_working(session, basket: str) -> bool:
+    status = _latest_basket_drain_status(session, basket)
+    if status is None:
+        print(f"drain: basket {basket} not present (no rows)")
+        return False
     return status not in _TERMINAL_STATUSES
 
 
 def _drain_basket_terminal(session, basket: str) -> bool:
-    """True only when the newest drain row is an explicit terminal status.
-
-    Empty / missing drain is *not* proof of cleanup (best-effort ``load_orders``
-    can lag); CLEANUP OK requires a concrete complete/canceled/… row.
-    """
-    latest = _latest_basket_row(session, basket)
-    if latest is None:
+    status = _latest_basket_drain_status(session, basket)
+    if status is None:
         print(
             f"drain: basket {basket} not present (no rows) — "
             "not proof of terminal cleanup"
         )
         return False
-    status = str(latest.get("status") or "").strip().lower()
-    text = str(latest.get("text") or "").strip()
-    print(f"drain: basket {basket} latest row status={status!r} text={text!r}")
     return status in _TERMINAL_STATUSES
 
 
@@ -242,7 +218,6 @@ def main(argv: list[str] | None = None) -> int:
             print("PLACE rejected by venue/plant", file=sys.stderr)
             return _RC_REJECTED
 
-        # --- Phase 2: SURVIVE ---------------------------------------------
         if not basket_id:
             print(
                 "INCONCLUSIVE: no basket identified; skipping survival/cleanup",
@@ -254,11 +229,7 @@ def main(argv: list[str] | None = None) -> int:
         session.disconnect_order_plant()
         session.subscribe_order_updates()
         session.subscribe_bracket_updates()
-        # Bracket-path nudge (not plain modify_order): proves the restored
-        # bracket subscribe + order plant can carry an adjust. Rithmic surfaces
-        # the ack as order_notification MODIFY_*; level=0 is required on Test.
-        # A far LIMIT parent may then report Modification Failed — the
-        # notification itself is the survival signal; legs stay working.
+        survived_event = None
         nudge_ticks = int(args.stop_ticks) + 1
         try:
             session.adjust_bracket_stop(basket_id, nudge_ticks, 0)
@@ -267,9 +238,6 @@ def main(argv: list[str] | None = None) -> int:
                 f"SURVIVAL FAILED: adjust_bracket_stop rejected: {exc}",
                 file=sys.stderr,
             )
-            survived_event = None
-            still_working = _drain_basket_working(session, basket_id)
-            survival_ok = False
         else:
             print(
                 f"SURVIVAL: adjust_bracket_stop ticks={nudge_ticks} level=0 "
@@ -281,12 +249,12 @@ def main(argv: list[str] | None = None) -> int:
                 want_basket=basket_id,
                 localid=smoke_localid,
             )
-            still_working = _drain_basket_working(session, basket_id)
-            survival_ok = (
-                survived_event is not None
-                and _event_is_bracket_path(survived_event)
-                and still_working
-            )
+        still_working = _drain_basket_working(session, basket_id)
+        survival_ok = (
+            survived_event is not None
+            and _event_is_bracket_path(survived_event)
+            and still_working
+        )
         if not survival_ok:
             missing = []
             if survived_event is None:
@@ -302,9 +270,6 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print("SURVIVAL OK: bracket-path notifications resumed; legs working")
 
-        # --- Phase 3: CLEANUP (identity cancel, never cancel_all) ----------
-        # Always cancel once a basket is known — survival failure must not
-        # leave a live far LIMIT at the venue.
         session.cancel_order(basket_id)
         print(f"cancel_order sent basket_id={basket_id}")
         _poll_for(

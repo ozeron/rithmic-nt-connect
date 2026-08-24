@@ -28,7 +28,6 @@ class _DrainSession:
 
 
 def test_reject_text_is_not_terminal() -> None:
-    """High-fix pin: 'cancel rejected' keeps the basket WORKING."""
     rows = [
         {"basket_id": "B1", "status": "OPEN", "text": "cancel rejected"},
     ]
@@ -43,7 +42,6 @@ def test_explicit_terminal_status_closes() -> None:
 
 
 def test_latest_row_wins_over_stale_open() -> None:
-    """An OPEN row arriving before its terminal row must not mask closure."""
     rows = [
         {"basket_id": "B1", "status": "OPEN", "ssboe": 100},
         {"basket_id": "B1", "status": "COMPLETE", "ssboe": 200},
@@ -64,7 +62,6 @@ def test_no_rows_is_not_working() -> None:
 
 
 def test_cleanup_requires_explicit_terminal_row() -> None:
-    """Empty drain must not print CLEANUP OK (propagation lag ≠ canceled)."""
     assert spike._drain_basket_terminal(_DrainSession([]), "B1") is False
     assert (
         spike._drain_basket_terminal(
