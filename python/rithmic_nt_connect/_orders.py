@@ -225,13 +225,8 @@ def kind_from_notify(
             status_u = str(status or "").upper()
             if status_u in {"CANCELLED", "CANCELED"}:
                 return "canceled"
-            # Terminal venue rejection for an unroutable/unfillable order.
-            # Live-proven (Rithmic Test 2026-08-22): route failures arrive as
-            # rithmic COMPLETE with status='complete' and the reason in text;
-            # without this mapping the row is dropped and a tracked order
-            # stays ACCEPTED locally while dead at the venue. Bare completes
-            # (no text) stay unclassified as before.
             if str(text or "").strip():
+                # COMPLETE+text = terminal reject; bare completes stay None.
                 return "rejected"
             return None
         return None

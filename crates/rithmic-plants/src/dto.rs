@@ -419,11 +419,7 @@ fn order_kind(
             if status_u == "CANCELLED" || status_u == "CANCELED" {
                 "canceled"
             } else if text.is_some_and(|t| !t.trim().is_empty()) {
-                // Terminal venue rejection for an unroutable/unfillable
-                // order (live-proven on Rithmic Test 2026-08-22: route
-                // failures arrive as COMPLETE/status='complete' with the
-                // reason in text). Bare completes stay unclassified.
-                "rejected"
+                "rejected" // COMPLETE+text = terminal reject; bare completes stay None
             } else {
                 return None;
             }
@@ -832,8 +828,6 @@ mod order_kind_tests {
 
     #[test]
     fn complete_with_text_is_terminal_reject() {
-        // Live-proven (Rithmic Test 2026-08-22): route failures arrive as
-        // rithmic COMPLETE/status='complete' with the reason in text.
         assert_eq!(
             order_kind(
                 "rithmic",

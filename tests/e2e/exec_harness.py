@@ -25,10 +25,7 @@ _VENUE_CONDITIONAL_MARKERS = (
     "market is closed",
     "permission denied",
     "not entitled",
-    # Rithmic Test 2026-08-22: order routing completes every order with
-    # "No such route exists." — a venue state, not an adapter bug (ops-runbook
-    # skipped-spec register). Nothing rests, so exec proofs are unhostable.
-    "no such route exists",
+    "no such route exists",  # Rithmic Test routing reject — nothing rests
 )
 
 

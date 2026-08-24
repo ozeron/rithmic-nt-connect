@@ -24,7 +24,6 @@ import contextlib
 import itertools
 import time
 import uuid
-from contextlib import contextmanager
 
 import pytest
 from exec_harness import ExecHarness, OrderDriver, OrderDriverConfig
@@ -61,18 +60,12 @@ from rithmic_nt_connect import (
 
 
 def _make_live_exec(instrument, **logging_kwargs):
-    """Build a TradingNode (data + exec) with an OrderDriver; yield harness.
-
-    Shared by ``live_exec`` and the MY043 log-capture variant; safety gates
-    run first because callers depend on ``exec_front_month_instrument``.
-    """
+    """TradingNode + OrderDriver harness; shared by ``live_exec`` and E89."""
     test_session = session_config_from_explicit_test_env()
 
     driver = OrderDriver(
         OrderDriverConfig(instrument_id=str(instrument.id)), instrument
     )
-    # Callers may override any LoggingConfig field; the level default keeps
-    # the shared suite quiet.
     log_level = logging_kwargs.pop("log_level", "WARNING")
     # A prior test disposed its loop; give the next node a fresh one so it does
     # not bind to a closed loop ("Event loop is closed").
@@ -128,12 +121,7 @@ def live_exec(exec_front_month_instrument):
 
 
 def test_tc_e89_logging_capture_mechanics(capfd):
-    """Offline pin of the MY043 canary's capture mechanics: pytest ``capfd``
-    sees the Nautilus Rust logger's WARNING lines on stdout. The file sink
-    was rejected 2026-08-22 — it lags stdout asynchronously and loses the
-    tail (probed: 0 bytes at any WARNING-global combo; truncated tail at
-    INFO). Guards against a Nautilus/pytest upgrade silently breaking the
-    canary into vacuous green."""
+    """Offline pin: ``capfd`` captures Nautilus WARNING lines on stdout."""
 
     from nautilus_trader.config import LoggingConfig, TradingNodeConfig
     from nautilus_trader.live.node import TradingNode
@@ -141,8 +129,6 @@ def test_tc_e89_logging_capture_mechanics(capfd):
 
     node = TradingNode(
         config=TradingNodeConfig(
-            # Same trader id as `_make_live_exec`: the Nautilus Rust logger is
-            # process-global and the first node wins the log-line prefix.
             trader_id=TraderId("TESTER-001"),
             logging=LoggingConfig(log_level="WARNING", print_config=False),
         )
@@ -451,22 +437,41 @@ class TestOrderCancellation:
 # Group 9: Lifecycle & reconciliation
 
 
+_ROUTE_BROKEN_SKIP = (
+    "venue completes every order with 'No such route exists.' "
+    "(Rithmic Test routing broken 2026-08-22) — {detail}; "
+    "see ops-runbook skipped-spec"
+)
+
+
 def _venue_route_broken(live_exec) -> bool:
-    """True if any recorded event carries the Rithmic Test routing-reject
-    signature ('No such route exists.'): the venue completes every order
-    without resting it, so drain-based proofs are meaningless there
-    (probed 2026-08-22; ops-runbook skipped-spec register)."""
-    for evt in live_exec.driver.events:
-        haystack = " ".join(
+    return any(
+        "No such route exists"
+        in " ".join(
             str(v)
             for v in (
                 getattr(evt, "reason", ""),
                 (getattr(evt, "info", {}) or {}).get("text", ""),
             )
         )
-        if "No such route exists" in haystack:
-            return True
-    return False
+        for evt in live_exec.driver.events
+    )
+
+
+def _skip_if_route_broken(live_exec, detail: str) -> None:
+    if _venue_route_broken(live_exec):
+        pytest.skip(_ROUTE_BROKEN_SKIP.format(detail=detail))
+
+
+@contextlib.contextmanager
+def _info_live_exec(instrument):
+    gen = _make_live_exec(instrument, log_level="INFO")
+    harness = next(gen)
+    try:
+        yield harness
+    finally:
+        with contextlib.suppress(StopIteration):
+            next(gen)
 
 
 @pytest.mark.live
@@ -549,15 +554,7 @@ class TestReconciliation:
         )
 
     def test_tc_e88_drain_reports_working_limit_by_identity(self, live_exec):
-        """TC-E88 — the drain returns the venue's WORKING order by identity.
-
-        Closes the STATUS TODO "live-venue proof that the drain returns the
-        venue's working orders": a far resting LIMIT must come back from
-        ``GenerateOrderStatusReports`` matched by client_order_id with its
-        placed terms (side/status), and stop being reported working after a
-        cancel. Best-effort semantics stay: an empty post-cancel drain is
-        advisory, not proof of absence.
-        """
+        """TC-E88 — drain returns resting LIMIT by CID; absent after cancel."""
         cid = ClientOrderId(_unique("E88"))
         live_exec.driver.initial.append(
             limit(OrderSide.BUY, below, TimeInForce.GTC, client_order_id=cid.value)
@@ -566,12 +563,7 @@ class TestReconciliation:
         live_exec.wait_for_venue_outcome(
             "OrderAccepted", timeout=45, client_order_id=cid
         )
-        if _venue_route_broken(live_exec):
-            pytest.skip(
-                "venue completes every order with 'No such route exists.' "
-                "(Rithmic Test routing broken 2026-08-22) — nothing rests, "
-                "drain proof impossible; see ops-runbook skipped-spec"
-            )
+        _skip_if_route_broken(live_exec, "nothing rests, drain proof impossible")
 
         working = [
             r
@@ -602,36 +594,10 @@ class TestReconciliation:
     def test_tc_e89_my043_canary_no_engine_warn_regressions(
         self, exec_front_month_instrument, capfd
     ):
-        """TC-E89 — P5 canary: place→accept→cancel leaves NO MY043 WARNs.
-
-        Runs the node at INFO so the engine log is guaranteed non-empty
-        (positive control: this run's client_order_id or ExecClient label),
-        captures stdout at fd level via ``capfd`` (see
-        ``test_tc_e89_logging_capture_mechanics`` for why not the file sink),
-        and asserts the MY043 signatures closed 2026-08-21:
-
-        - ``avg_px was None`` must never appear (cache-backed status query).
-        - Adapter-fed ``InvalidStateTrigger: CANCELED -> ACCEPTED`` is
-          suppressed by ``_row_stale_reason``; a *single* hit right after
-          cancel is the documented engine-internal residual (ops-runbook) —
-          fail only on repeats.
-        """
+        """TC-E89 — place→accept→cancel: no MY043 WARNs; ≤1 InvalidStateTrigger."""
         cid = ClientOrderId(_unique("E89"))
 
-        @contextmanager
-        def info_node():
-            gen = _make_live_exec(
-                exec_front_month_instrument,
-                log_level="INFO",
-            )
-            harness = next(gen)
-            try:
-                yield harness
-            finally:
-                with contextlib.suppress(StopIteration):
-                    next(gen)  # generator finally → full shutdown + dispose
-
-        with info_node() as live_exec:
+        with _info_live_exec(exec_front_month_instrument) as live_exec:
             live_exec.driver.initial.append(
                 limit(OrderSide.BUY, below, TimeInForce.GTC, client_order_id=cid.value)
             )
@@ -639,13 +605,7 @@ class TestReconciliation:
             live_exec.wait_for_venue_outcome(
                 "OrderAccepted", timeout=45, client_order_id=cid
             )
-            if _venue_route_broken(live_exec):
-                pytest.skip(
-                    "venue completes every order with 'No such route exists.' "
-                    "(Rithmic Test routing broken 2026-08-22) — canary flow "
-                    "meaningless; see ops-runbook skipped-spec"
-                )
-            # Drive BOTH query paths the MY043 warnings came from.
+            _skip_if_route_broken(live_exec, "canary flow meaningless")
             report = live_exec.order_status_report(cid)
             assert report is not None, "no status report for the order query"
             live_exec.driver.cancel_order(live_exec.cache.order(cid))
@@ -653,9 +613,6 @@ class TestReconciliation:
             live_exec.check_orders_consistency(timeout_secs=20.0)
 
         captured = capfd.readouterr().out
-        # Prefer the unique CID (INFO accept/cancel lines). Fall back to the
-        # exec-client label: the Rust logger's trader-id prefix is process-
-        # global and may stick from an earlier node in this pytest process.
         assert cid.value in captured or "ExecClient-RITHMIC" in captured, (
             f"positive control failed — node log not captured: {captured[-500:]}"
         )

@@ -134,23 +134,17 @@ def test_kind_from_notify_covers_main_paths():
     assert kind_from_notify("exchange", "NOT_CANCELLED") == "cancel_rejected"
     assert kind_from_notify("rithmic", "COMPLETE", "CANCELLED") == "canceled"
     assert kind_from_notify("rithmic", "COMPLETE", "FILLED") is None
+    assert kind_from_notify("exchange", "UNKNOWN") is None
 
 
 def test_kind_from_notify_complete_with_text_is_terminal_reject():
-    """Live-proven (Rithmic Test 2026-08-22): route failures arrive as
-    rithmic COMPLETE/status='complete' with the reason in text. Without the
-    rejected mapping the row is dropped and a tracked order stays ACCEPTED
-    locally while dead at the venue."""
     assert (
         kind_from_notify("rithmic", "COMPLETE", "complete", "No such route exists.")
         == "rejected"
     )
-    # Bare completes (no text / whitespace) stay unclassified.
     assert kind_from_notify("rithmic", "COMPLETE", "complete") is None
     assert kind_from_notify("rithmic", "COMPLETE", "complete", "  ") is None
-    # Cancel-completion still wins over text.
     assert kind_from_notify("rithmic", "COMPLETE", "CANCELLED", "x") == "canceled"
-    assert kind_from_notify("exchange", "UNKNOWN") is None
 
 
 def test_notification_action_accept_reject_fill_cancel():
