@@ -2,20 +2,21 @@
 """Plant-bracket spike harness — no place unless --place.
 
   uv run python scripts/spike_bracket_order.py
-  uv run python scripts/spike_bracket_order.py --place --stop-ticks 40 --qty 1
+  uv run python scripts/spike_bracket_order.py --place --far-ticks 20 --qty 1
 
 --place requires RITHMIC_BRACKETS=1 and RITHMIC_ENABLE_TRADING=1.
 RITHMIC_CONNECT_MODE is required by SessionConfig.from_env (direct|gateway).
 
 P2 proof flow (gap-closure plan):
 
-1. ACCEPT  — far LIMIT entry (``--limit-price``, never marketable) or the
-   legacy market entry; parent + bracket legs must come back acknowledged.
-2. SURVIVE — drop the order plant, re-subscribe both intents (order updates
-   + bracket updates), then require bracket notifications for our basket to
-   RESUME and the legs to still be working in a ``load_orders`` drain.
-3. CLEANUP — cancel by basket id (identity, never cancel_all) and verify
-   the drain stops reporting the basket working.
+1. ACCEPT  — far LIMIT entry derived from live BBO (BUY = bid - N ticks,
+   SELL = ask + N ticks). Optional ``--limit-price`` must still be far.
+   Explicit ``--market-entry`` only (never implicit MARKET).
+2. SURVIVE — drop the order plant, re-subscribe both intents, nudge via
+   ``adjust_bracket_stop``, require a bracket/modify-path notification, and
+   confirm the basket is still working in a ``load_orders`` drain.
+3. CLEANUP — cancel by basket id (identity, never cancel_all) and require an
+   explicit terminal drain row.
 
 Exit codes: 0 ok · 1 place rejected · 2 gate refusal · 3 inconclusive ·
 4 survival failed · 5 cleanup incomplete.
@@ -29,6 +30,7 @@ import os
 import sys
 import time
 import uuid
+from decimal import Decimal
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -43,6 +45,14 @@ _RC_CLEANUP = 5
 
 _TERMINAL_STATUSES = {"complete", "canceled", "cancelled", "expired", "filled"}
 _REJECT_TOKENS = ("reject", "denied", "fail", "error")
+# Front-month DTO has no tick_size; known CME equity-index roots used by this spike.
+_KNOWN_TICK_SIZE: dict[str, float] = {
+    "NQ": 0.25,
+    "MNQ": 0.25,
+    "ES": 0.25,
+    "MES": 0.25,
+}
+_DEFAULT_FAR_TICKS = 20
 
 
 def _poll_for(
@@ -98,10 +108,17 @@ def _event_is_bracket_path(ev: dict) -> bool:
     return "modif" in blob or "bracket" in blob
 
 
+def _size_ok(size: object) -> bool:
+    try:
+        return size is not None and int(size) >= 1
+    except (TypeError, ValueError):
+        return False
+
+
 def _wait_bbo(
     session, symbol: str, exchange: str, *, seconds: float = 8.0
 ) -> tuple[float, float] | None:
-    """Subscribe ticker and wait for a two-sided BBO; None if timed out."""
+    """Two-sided BBO with size ≥ 1 on both sides; None if timed out / invalid."""
     session.subscribe(symbol, exchange)
     deadline = time.monotonic() + max(0.0, seconds)
     bid = ask = None
@@ -113,20 +130,75 @@ def _wait_bbo(
                 continue
             if ev.get("type") != "bbo":
                 continue
-            if ev.get("bid_price") is not None:
+            if ev.get("bid_price") is not None and _size_ok(ev.get("bid_size")):
                 bid = float(ev["bid_price"])
-            if ev.get("ask_price") is not None:
+            else:
+                bid = None
+            if ev.get("ask_price") is not None and _size_ok(ev.get("ask_size")):
                 ask = float(ev["ask_price"])
-            if bid is not None and ask is not None:
-                return bid, ask
+            else:
+                ask = None
+            if bid is None or ask is None:
+                continue
+            if bid <= 0 or ask <= 0 or bid > ask:
+                bid = ask = None
+                continue
+            return bid, ask
     finally:
         with contextlib.suppress(Exception):
             session.unsubscribe(symbol, exchange)
     return None
 
 
-def _limit_is_far(side: str, limit_price: float, bid: float, ask: float) -> bool:
-    """BUY must sit below ask; SELL above bid — never marketable."""
+def _resolve_tick_size(
+    root: str, *, tick_size: float | None, front_raw: dict | None
+) -> float | None:
+    if tick_size is not None and tick_size > 0:
+        return float(tick_size)
+    raw = front_raw or {}
+    raw_tick = raw.get("tick_size")
+    if raw_tick is not None:
+        try:
+            t = float(raw_tick)
+            if t > 0:
+                return t
+        except (TypeError, ValueError):
+            pass
+    return _KNOWN_TICK_SIZE.get(root.upper())
+
+
+def _derive_far_limit(
+    side: str, bid: float, ask: float, tick: float, far_ticks: int
+) -> float:
+    """BUY = bid - N*tick; SELL = ask + N*tick (Decimal, tick-aligned)."""
+    t = Decimal(str(tick))
+    n = Decimal(int(far_ticks))
+    if side == "Buy":
+        return float(Decimal(str(bid)) - t * n)
+    return float(Decimal(str(ask)) + t * n)
+
+
+def _limit_is_far_enough(
+    side: str,
+    limit_price: float,
+    bid: float,
+    ask: float,
+    tick: float,
+    far_ticks: int,
+) -> bool:
+    """True when limit is at least N ticks outside the near side (TOCTOU cushion)."""
+    t = Decimal(str(tick))
+    n = Decimal(int(far_ticks))
+    limit = Decimal(str(limit_price))
+    if side == "Buy":
+        return limit <= Decimal(str(bid)) - t * n
+    return limit >= Decimal(str(ask)) + t * n
+
+
+def _limit_not_marketable(
+    side: str, limit_price: float, bid: float, ask: float
+) -> bool:
+    """Last-line defense: BUY < ask, SELL > bid."""
     if side == "Buy":
         return limit_price < ask
     return limit_price > bid
@@ -185,11 +257,27 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--target-ticks", type=int, default=None)
     p.add_argument("--side", default="Buy", choices=("Buy", "Sell"))
     p.add_argument(
+        "--far-ticks",
+        type=int,
+        default=_DEFAULT_FAR_TICKS,
+        help="ticks outside bid/ask for derived far LIMIT (default %(default)s)",
+    )
+    p.add_argument(
+        "--tick-size",
+        type=float,
+        default=None,
+        help="instrument tick; default from known root map (NQ/MNQ/ES/MES=0.25)",
+    )
+    p.add_argument(
         "--limit-price",
         type=float,
         default=None,
-        help="far LIMIT entry price (BUY below / SELL above market; resting, "
-        "never marketable). Omit for the legacy MARKET entry.",
+        help="optional exact LIMIT override; must still be >= --far-ticks outside BBO",
+    )
+    p.add_argument(
+        "--market-entry",
+        action="store_true",
+        help="explicit MARKET entry (not for P2 resting-bracket evidence)",
     )
     p.add_argument("--seconds", type=float, default=8.0, help="poll window per phase")
     args = p.parse_args(argv)
@@ -217,6 +305,17 @@ def main(argv: list[str] | None = None) -> int:
         )
         return _RC_REFUSED
 
+    if args.market_entry and args.limit_price is not None:
+        print(
+            "REFUSE: --market-entry and --limit-price are mutually exclusive",
+            file=sys.stderr,
+        )
+        return _RC_REFUSED
+
+    if args.far_ticks < 1:
+        print("REFUSE: --far-ticks must be >= 1", file=sys.stderr)
+        return _RC_REFUSED
+
     cfg = SessionConfig.from_env()
     session = create_session(cfg)
     session.connect()
@@ -226,10 +325,24 @@ def main(argv: list[str] | None = None) -> int:
         front = resolve_front_month(session, args.root, args.exchange)
         session.subscribe_order_updates()
         session.subscribe_bracket_updates()
-        entry_desc = "MARKET"
-        kwargs = {}
-        if args.limit_price is not None:
-            limit_px = float(args.limit_price)
+
+        if args.market_entry:
+            entry_desc = "MARKET"
+            price_type = "Market"
+            place_kwargs: dict = {}
+        else:
+            front_raw = front.get("raw")
+            tick = _resolve_tick_size(
+                args.root,
+                tick_size=args.tick_size,
+                front_raw=front_raw if isinstance(front_raw, dict) else None,
+            )
+            if tick is None:
+                print(
+                    f"REFUSE: unknown tick for root={args.root!r}; pass --tick-size",
+                    file=sys.stderr,
+                )
+                return _RC_REFUSED
             bbo = _wait_bbo(
                 session,
                 front["trading_symbol"],
@@ -238,24 +351,43 @@ def main(argv: list[str] | None = None) -> int:
             )
             if bbo is None:
                 print(
-                    "INCONCLUSIVE: no BBO to validate --limit-price is far",
+                    "INCONCLUSIVE: no usable two-sided BBO (size>=1) for far LIMIT",
                     file=sys.stderr,
                 )
                 return _RC_INCONCLUSIVE
             bid, ask = bbo
-            if not _limit_is_far(args.side, limit_px, bid, ask):
+            if args.limit_price is not None:
+                limit_px = float(args.limit_price)
+                source = "override"
+            else:
+                limit_px = _derive_far_limit(
+                    args.side, bid, ask, tick, int(args.far_ticks)
+                )
+                source = "derived"
+            if not _limit_is_far_enough(
+                args.side, limit_px, bid, ask, tick, int(args.far_ticks)
+            ):
                 print(
-                    f"REFUSE --limit-price {limit_px}: marketable vs "
-                    f"bid={bid} ask={ask} (BUY must be < ask, SELL > bid)",
+                    f"REFUSE --limit-price {limit_px}: not >= {args.far_ticks} ticks "
+                    f"outside bid={bid} ask={ask} tick={tick}",
                     file=sys.stderr,
                 )
                 return _RC_REFUSED
-            print(f"far-limit ok: {args.side} {limit_px} vs bid={bid} ask={ask}")
+            if not _limit_not_marketable(args.side, limit_px, bid, ask):
+                print(
+                    f"REFUSE --limit-price {limit_px}: marketable vs "
+                    f"bid={bid} ask={ask}",
+                    file=sys.stderr,
+                )
+                return _RC_REFUSED
+            print(
+                f"far-limit {source}: {args.side} {limit_px} "
+                f"(bid={bid} ask={ask} tick={tick} far_ticks={args.far_ticks})"
+            )
             entry_desc = f"LIMIT {limit_px}"
-            kwargs["price"] = limit_px
             price_type = "Limit"
-        else:
-            price_type = "Market"
+            place_kwargs = {"price": limit_px}
+
         session.place_bracket_order(
             symbol=front["trading_symbol"],
             exchange=front["trading_exchange"],
@@ -266,7 +398,7 @@ def main(argv: list[str] | None = None) -> int:
             duration="DAY",
             stop_ticks=int(args.stop_ticks),
             target_ticks=None if args.target_ticks is None else int(args.target_ticks),
-            **kwargs,
+            **place_kwargs,
         )
         print(
             f"PLACE sent front={front['trading_symbol']}.{front['trading_exchange']} "

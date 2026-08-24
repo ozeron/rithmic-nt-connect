@@ -110,10 +110,83 @@ def test_event_is_bracket_path() -> None:
     )
 
 
-def test_limit_is_far_vs_bbo() -> None:
-    assert spike._limit_is_far("Buy", 100.0, bid=101.0, ask=102.0) is True
-    assert spike._limit_is_far("Buy", 102.0, bid=101.0, ask=102.0) is False
-    assert spike._limit_is_far("Buy", 102.5, bid=101.0, ask=102.0) is False
-    assert spike._limit_is_far("Sell", 103.0, bid=101.0, ask=102.0) is True
-    assert spike._limit_is_far("Sell", 101.0, bid=101.0, ask=102.0) is False
-    assert spike._limit_is_far("Sell", 100.5, bid=101.0, ask=102.0) is False
+def test_derive_far_limit() -> None:
+    # bid=101 ask=102 tick=0.25 far=20 → BUY=96.0 SELL=107.0
+    assert spike._derive_far_limit("Buy", 101.0, 102.0, 0.25, 20) == 96.0
+    assert spike._derive_far_limit("Sell", 101.0, 102.0, 0.25, 20) == 107.0
+
+
+def test_limit_is_far_enough() -> None:
+    bid, ask, tick, n = 101.0, 102.0, 0.25, 20
+    assert spike._limit_is_far_enough("Buy", 96.0, bid, ask, tick, n) is True
+    assert spike._limit_is_far_enough("Buy", 96.25, bid, ask, tick, n) is False
+    assert spike._limit_is_far_enough("Sell", 107.0, bid, ask, tick, n) is True
+    assert spike._limit_is_far_enough("Sell", 106.75, bid, ask, tick, n) is False
+
+
+def test_limit_not_marketable_defense() -> None:
+    assert spike._limit_not_marketable("Buy", 100.0, bid=101.0, ask=102.0) is True
+    assert spike._limit_not_marketable("Buy", 102.0, bid=101.0, ask=102.0) is False
+    assert spike._limit_not_marketable("Sell", 103.0, bid=101.0, ask=102.0) is True
+    assert spike._limit_not_marketable("Sell", 101.0, bid=101.0, ask=102.0) is False
+
+
+def test_resolve_tick_size() -> None:
+    assert spike._resolve_tick_size("NQ", tick_size=None, front_raw=None) == 0.25
+    assert spike._resolve_tick_size("CL", tick_size=None, front_raw=None) is None
+    assert spike._resolve_tick_size("CL", tick_size=0.01, front_raw=None) == 0.01
+    assert (
+        spike._resolve_tick_size("CL", tick_size=None, front_raw={"tick_size": 0.01})
+        == 0.01
+    )
+
+
+def test_size_ok() -> None:
+    assert spike._size_ok(1) is True
+    assert spike._size_ok(0) is False
+    assert spike._size_ok(None) is False
+    assert spike._size_ok("x") is False
+
+
+def test_wait_bbo_requires_size() -> None:
+    class _Sess:
+        def __init__(self) -> None:
+            self._events = [
+                {
+                    "type": "bbo",
+                    "bid_price": 101.0,
+                    "ask_price": 102.0,
+                    "bid_size": 0,
+                    "ask_size": 5,
+                },
+                {
+                    "type": "bbo",
+                    "bid_price": 101.0,
+                    "ask_price": 102.0,
+                    "bid_size": 3,
+                    "ask_size": 0,
+                },
+                {
+                    "type": "bbo",
+                    "bid_price": 101.0,
+                    "ask_price": 102.0,
+                    "bid_size": 2,
+                    "ask_size": 4,
+                },
+            ]
+            self._i = 0
+
+        def subscribe(self, *_a, **_k) -> None:
+            return None
+
+        def unsubscribe(self, *_a, **_k) -> None:
+            return None
+
+        def poll_event(self):
+            if self._i >= len(self._events):
+                return None
+            ev = self._events[self._i]
+            self._i += 1
+            return ev
+
+    assert spike._wait_bbo(_Sess(), "NQU6", "CME", seconds=1.0) == (101.0, 102.0)
