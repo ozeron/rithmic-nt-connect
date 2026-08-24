@@ -127,6 +127,8 @@ def test_tc_e89_logging_capture_mechanics(capfd):
     from nautilus_trader.live.node import TradingNode
     from nautilus_trader.model.identifiers import TraderId
 
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
     node = TradingNode(
         config=TradingNodeConfig(
             trader_id=TraderId("TESTER-001"),
@@ -135,9 +137,11 @@ def test_tc_e89_logging_capture_mechanics(capfd):
     )
     node.build()
     node.dispose()
-    out = capfd.readouterr().out
-    assert "No `data_clients` configuration found" in out, (
-        f"Nautilus WARN lines not captured on stdout: {out[-500:]}"
+    time.sleep(0.05)
+    out, err = capfd.readouterr()
+    combined = out + err
+    assert "No `data_clients` configuration found" in combined, (
+        f"Nautilus WARN lines not captured on stdout: {combined[-500:]}"
     )
 
 
