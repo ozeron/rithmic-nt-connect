@@ -35,20 +35,21 @@ holder disconnects (so a stopped node no longer blocks a separate process).
 
 ### LucidTrading override (explicit operator act)
 
-Live proofs that only LucidTrading can host (e.g. TC-D40 bar delivery,
-ticker resync — the Rithmic Test plants stream no incremental data) require
-an explicit process-env override on top of a production-system env file:
+Use only for proofs that still need LucidTrading (or market-hours
+rollover) — not for ticker resync. Resync is already proven on Rithmic
+Test (`tests/e2e/test_reconnect_live.py`, 2026-08-24). Remaining
+Lucid-preferred cases: TC-D40 15m/1h/1d first-payload (Test 1m PASSED;
+slower periods often skip within 65s), and optional TC-D54 re-eval.
 
 ```bash
 # Refused without the flag; a flag inside the dotenv file is ignored.
 RITHMIC_TEST_DOTENV=/secure/local/lucid.env RITHMIC_ALLOW_LUCID_E2E=1 \
-uv run pytest tests/e2e/test_reconnect_live.py -v
+uv run pytest tests/e2e/test_data_client_live.py -k tc_d40 -v
 ```
 
 The adapter prints a loud WARNING to stderr when the override is active.
-Set it only with MotiveWave / R|Trader closed — it is the same one-login
-system. The override widens nothing else: unknown system names stay refused.
-Known venue gaps are tracked in the skipped-spec register below.
+Set it only with MotiveWave / R|Trader closed — same one-login system.
+Unknown system names stay refused. Venue gaps: skipped-spec below.
 
 ## Skipped-spec register
 
@@ -60,7 +61,7 @@ entry names what would unblock it. Phase 7 deliverable (gap-closure plan P3).
 | TC-D10 L2 book | LucidTrading denies book permission (`[13] permission denied`) | FCM/account with book entitlement |
 | TC-D31/D41/D42 history empty | LucidTrading history plant transiently returns empty windows | Retry at market hours; no code change |
 | TC-D40 15m/1h/1d on Rithmic Test | `D40[1m]` PASSED 2026-08-24; slower periods SKIPPED (no first payload in 65s — likely need rollover or Lucid) | LucidTrading via `RITHMIC_ALLOW_LUCID_E2E=1`, or longer poll / roll-boundary runs |
-| TC-D54 full-node bar parity | Dropped: Rithmic Test ticker plant silent + stale synthetic snapshots while its bar plant runs (off-hours / prior Test state) | Re-evaluate at market hours; or Lucid |
+| TC-D54 full-node bar parity | Dropped: under some Test off-hours states ticker can go quiet while bars still run — INTERNAL==EXTERNAL parity not a reliable Test host | Re-evaluate at market hours; or Lucid |
 | P1 exec e2e self-skip | Tests still self-skip on venue signature `COMPLETE` + `No such route exists.` (historical 2026-08-22 routing outage). Routing healthy again 2026-08-24 (E88/E89 PASSED). | Keep skip for future regressions; no action when routing is healthy |
 | A4 client-order-id validation | OQ1: Rithmic `user_tag` length/format constraint unsourced | Vendor answer from Rithmic support |
 
