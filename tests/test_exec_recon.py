@@ -1152,10 +1152,7 @@ def test_resync_without_latch_restores_live() -> None:
 
 
 def test_resync_reissues_both_order_plant_intents() -> None:
-    """Direct/gateway parity drift guard (AGENTS): the order plant carries
-    TWO venue subscription flags — order updates AND bracket updates — and a
-    reconnect must re-issue both. Dropping the bracket flag is how bracket
-    notifications went silent after plant reconnects historically."""
+    """Reconnect must re-subscribe order updates and bracket updates."""
     client = _client()
     client._order_plant = OrderPlantPolicy(OrderPlantState.LIVE)
     calls: list[str] = []

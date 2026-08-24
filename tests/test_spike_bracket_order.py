@@ -1,9 +1,4 @@
-"""Unit pins for spike_bracket_order proof harness.
-
-Fail-closed policy: missing / weak evidence is never success. Drain terminal
-proof requires an explicit status in the closed terminal set (not substring
-matching on venue text — ``cancel rejected`` must stay non-terminal).
-"""
+"""Unit pins for spike_bracket_order proof classification and FarLimit domain."""
 
 from __future__ import annotations
 

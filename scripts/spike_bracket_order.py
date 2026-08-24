@@ -7,36 +7,9 @@
 --place requires RITHMIC_BRACKETS=1 and RITHMIC_ENABLE_TRADING=1.
 RITHMIC_CONNECT_MODE is required by SessionConfig.from_env (direct|gateway).
 
-Proof policy (fail-closed):
-  • Each phase needs *positive* evidence — missing / weak signal is not OK.
-  • Illegal states are unrepresentable (``Accepted`` needs a basket id;
-    ``FarLimit`` only constructs under the closed domain below; ``Cleaned``
-    needs an explicit terminal drain status).
-  • Cleanup always runs once a basket id is known (identity cancel, never
-    cancel_all), independent of survival.
-
-FarLimit closed domain (anything else is REFUSED before place):
-  1. tick finite and > 0
-  2. BBO finite, bid > 0, ask > 0, bid <= ask (sizes >= 1 at ingest)
-  3. price finite and > 0
-  4. price tick-aligned (Decimal exact)
-  5. far_ticks >= 1
-  6. price >= N ticks outside the near side
-  7. not marketable (BUY < ask, SELL > bid)
-
-Out of scope for this spike (venue / operator):
-  exchange price bands, margin, position left by a filled entry, plant
-  substring false-positives beyond the survival ack gate, gateway vs
-  direct transport differences.
-
-P2 phases:
-
-1. ACCEPT  — far LIMIT from live sized BBO (BUY = bid - N ticks), or
-   explicit ``--market-entry``. Optional ``--limit-price`` must still clear
-   the far rule.
-2. SURVIVE — plant redial + ``adjust_bracket_stop``; require a non-reject
-   bracket/modify-path ack *and* a working-status drain row.
-3. CLEANUP — cancel by basket id; require explicit terminal drain row.
+Fail-closed: positive evidence per phase; FarLimit only for finite positive
+tick-aligned prices N ticks outside sized BBO and not marketable; cleanup
+always runs once a basket id is known (identity cancel, never cancel_all).
 
 Exit codes: 0 ok · 1 place rejected · 2 gate refusal · 3 inconclusive ·
 4 survival failed · 5 cleanup incomplete.
@@ -60,8 +33,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "python"))
 
-# Exact status tokens only — ``cancel_rejected`` / ``modify_rejected`` stay
-# non-terminal (order still live). Venue ``text`` is never used for this.
+# Exact status tokens — cancel_rejected / modify_rejected stay non-terminal.
 _TERMINAL_STATUSES = frozenset(
     {
         "complete",
@@ -95,8 +67,6 @@ _DEFAULT_FAR_TICKS = 20
 
 
 class Outcome(Enum):
-    """Closed-set phase / script result — never a bare bool."""
-
     OK = 0
     REJECTED = 1
     REFUSED = 2
@@ -106,15 +76,10 @@ class Outcome(Enum):
 
 
 class ProofError(Exception):
-    """Abort the current phase with a typed outcome (not a silent skip)."""
-
     def __init__(self, outcome: Outcome, message: str) -> None:
         super().__init__(message)
         self.outcome = outcome
         self.message = message
-
-
-# --- classifiers (closed fields; venue text is diagnostic only) -------------
 
 
 def is_rejection(ev: dict) -> bool:
@@ -123,7 +88,6 @@ def is_rejection(ev: dict) -> bool:
 
 
 def is_bracket_path(ev: dict) -> bool:
-    """MODIFY_* / bracket adjust ack — plain OPEN must not satisfy survival."""
     notify = str(ev.get("notify_type_name") or "").upper()
     if "MODIFY" in notify or "BRACKET" in notify:
         return True
@@ -133,7 +97,6 @@ def is_bracket_path(ev: dict) -> bool:
 
 
 def is_survival_ack(ev: dict) -> bool:
-    """Bracket-path notification that is not a reject/fail token row."""
     return is_bracket_path(ev) and not is_rejection(ev)
 
 
@@ -193,13 +156,8 @@ def resolve_tick_size(
     return known if known is not None and finite_positive(known) else None
 
 
-# --- constructed evidence ---------------------------------------------------
-
-
 @dataclass(frozen=True)
 class SizedBbo:
-    """Two-sided quote with size ≥ 1 on both sides."""
-
     bid: float
     ask: float
 
@@ -224,8 +182,6 @@ class SizedBbo:
 
 @dataclass(frozen=True)
 class FarLimit:
-    """LIMIT under the module docstring closed domain (or ProofError)."""
-
     side: str
     price: float
     bid: float
@@ -284,19 +240,7 @@ class FarLimit:
         if not finite_positive(price):
             raise ProofError(
                 Outcome.REFUSED,
-                f"non-finite or non-positive limit price={price} "
-                f"(far_ticks={far_ticks} may push BUY below zero)",
-            )
-        if not (
-            math.isfinite(bbo.bid)
-            and math.isfinite(bbo.ask)
-            and bbo.bid > 0
-            and bbo.ask > 0
-            and bbo.bid <= bbo.ask
-        ):
-            raise ProofError(
-                Outcome.REFUSED,
-                f"invalid BBO bid={bbo.bid} ask={bbo.ask}",
+                f"non-finite or non-positive limit price={price}",
             )
         if not tick_aligned(price, tick):
             raise ProofError(
@@ -357,7 +301,7 @@ class FarLimit:
 
 @dataclass(frozen=True)
 class Entry:
-    price_type: str  # "Limit" | "Market"
+    price_type: str
     price: float | None
     desc: str
 
@@ -379,24 +323,18 @@ class Entry:
 
 @dataclass(frozen=True)
 class Accepted:
-    """Place phase succeeded only with a venue basket id."""
-
     basket_id: str
     localid: str
 
 
 @dataclass(frozen=True)
 class Survived:
-    """Survival needs survival-ack *and* a working-status drain row."""
-
     ack: dict
     drain_status: str
 
 
 @dataclass(frozen=True)
 class Cleaned:
-    """Cleanup needs an explicit terminal drain status (empty ≠ clean)."""
-
     drain_status: str
 
 
@@ -413,12 +351,7 @@ class DrainRow:
     text: str
 
 
-# --- proof I/O façade -------------------------------------------------------
-
-
 class ProofIO:
-    """Session ops with sized-BBO / ours-poll / latest-drain rules in one place."""
-
     def __init__(self, session: Any, *, seconds: float, localid: str) -> None:
         self._session = session
         self.seconds = max(0.0, seconds)
@@ -518,9 +451,6 @@ class ProofIO:
                 f"basket {basket} not terminal after cancel (status={row.status!r})",
             )
         return Cleaned(drain_status=row.status)
-
-
-# --- phases -----------------------------------------------------------------
 
 
 def build_entry(
@@ -665,7 +595,6 @@ def phase_cleanup(*, session: Any, io: ProofIO, basket_id: str) -> Cleaned:
 
 
 def _refuse_cli(args: argparse.Namespace) -> str | None:
-    """Return a refusal message for invalid CLI domain, else None."""
     if args.market_entry and args.limit_price is not None:
         return "--market-entry and --limit-price are mutually exclusive"
     if args.far_ticks < 1:
@@ -818,17 +747,6 @@ def main(argv: list[str] | None = None) -> int:
     return run_place(args).value
 
 
-# --- test aliases (stable names for unit pins) ------------------------------
-
-_event_is_rejection = is_rejection
-_event_is_bracket_path = is_bracket_path
-_size_ok = size_ok
-_resolve_tick_size = resolve_tick_size
-_derive_far_limit = FarLimit._derive_price
-_limit_is_far_enough = FarLimit._far_enough
-_limit_not_marketable = FarLimit._not_marketable
-
-
 def _wait_bbo(session, symbol: str, exchange: str, *, seconds: float = 8.0):
     bbo = ProofIO(session, seconds=seconds, localid="").wait_sized_bbo(
         symbol, exchange, seconds=seconds
@@ -837,18 +755,13 @@ def _wait_bbo(session, symbol: str, exchange: str, *, seconds: float = 8.0):
 
 
 def _drain_basket_working(session, basket: str) -> bool:
-    io = ProofIO(session, seconds=0.0, localid="")
-    row = io.latest_drain(basket)
-    if row is None:
-        print(f"drain: basket {basket} not present (no rows)")
-        return False
-    return is_working_status(row.status)
+    row = ProofIO(session, seconds=0.0, localid="").latest_drain(basket)
+    return row is not None and is_working_status(row.status)
 
 
 def _drain_basket_terminal(session, basket: str) -> bool:
-    io = ProofIO(session, seconds=0.0, localid="")
     try:
-        io.require_terminal(basket)
+        ProofIO(session, seconds=0.0, localid="").require_terminal(basket)
     except ProofError:
         return False
     return True
