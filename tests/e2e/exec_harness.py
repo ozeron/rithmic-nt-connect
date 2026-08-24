@@ -25,7 +25,7 @@ _VENUE_CONDITIONAL_MARKERS = (
     "market is closed",
     "permission denied",
     "not entitled",
-    "no such route exists",  # Rithmic Test routing reject — nothing rests
+    "no such route exists",  # nothing rests
 )
 
 

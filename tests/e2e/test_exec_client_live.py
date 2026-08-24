@@ -438,9 +438,7 @@ class TestOrderCancellation:
 
 
 _ROUTE_BROKEN_SKIP = (
-    "venue completes every order with 'No such route exists.' "
-    "(Rithmic Test routing broken 2026-08-22) — {detail}; "
-    "see ops-runbook skipped-spec"
+    "venue COMPLETE + 'No such route exists.' — {detail}; see ops-runbook skipped-spec"
 )
 
 
