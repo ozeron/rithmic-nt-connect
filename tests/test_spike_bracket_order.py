@@ -108,3 +108,12 @@ def test_event_is_bracket_path() -> None:
         )
         is True
     )
+
+
+def test_limit_is_far_vs_bbo() -> None:
+    assert spike._limit_is_far("Buy", 100.0, bid=101.0, ask=102.0) is True
+    assert spike._limit_is_far("Buy", 102.0, bid=101.0, ask=102.0) is False
+    assert spike._limit_is_far("Buy", 102.5, bid=101.0, ask=102.0) is False
+    assert spike._limit_is_far("Sell", 103.0, bid=101.0, ask=102.0) is True
+    assert spike._limit_is_far("Sell", 101.0, bid=101.0, ask=102.0) is False
+    assert spike._limit_is_far("Sell", 100.5, bid=101.0, ask=102.0) is False

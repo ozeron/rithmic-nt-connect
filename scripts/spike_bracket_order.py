@@ -24,6 +24,7 @@ Exit codes: 0 ok · 1 place rejected · 2 gate refusal · 3 inconclusive ·
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import sys
 import time
@@ -95,6 +96,40 @@ def _event_is_bracket_path(ev: dict) -> bool:
         return True
     blob = f"{status} {text}"
     return "modif" in blob or "bracket" in blob
+
+
+def _wait_bbo(
+    session, symbol: str, exchange: str, *, seconds: float = 8.0
+) -> tuple[float, float] | None:
+    """Subscribe ticker and wait for a two-sided BBO; None if timed out."""
+    session.subscribe(symbol, exchange)
+    deadline = time.monotonic() + max(0.0, seconds)
+    bid = ask = None
+    try:
+        while time.monotonic() < deadline:
+            ev = session.poll_event()
+            if ev is None:
+                time.sleep(0.05)
+                continue
+            if ev.get("type") != "bbo":
+                continue
+            if ev.get("bid_price") is not None:
+                bid = float(ev["bid_price"])
+            if ev.get("ask_price") is not None:
+                ask = float(ev["ask_price"])
+            if bid is not None and ask is not None:
+                return bid, ask
+    finally:
+        with contextlib.suppress(Exception):
+            session.unsubscribe(symbol, exchange)
+    return None
+
+
+def _limit_is_far(side: str, limit_price: float, bid: float, ask: float) -> bool:
+    """BUY must sit below ask; SELL above bid — never marketable."""
+    if side == "Buy":
+        return limit_price < ask
+    return limit_price > bid
 
 
 def _latest_basket_row(session, basket: str):
@@ -194,8 +229,30 @@ def main(argv: list[str] | None = None) -> int:
         entry_desc = "MARKET"
         kwargs = {}
         if args.limit_price is not None:
-            entry_desc = f"LIMIT {args.limit_price}"
-            kwargs["price"] = float(args.limit_price)
+            limit_px = float(args.limit_price)
+            bbo = _wait_bbo(
+                session,
+                front["trading_symbol"],
+                front["trading_exchange"],
+                seconds=max(8.0, args.seconds),
+            )
+            if bbo is None:
+                print(
+                    "INCONCLUSIVE: no BBO to validate --limit-price is far",
+                    file=sys.stderr,
+                )
+                return _RC_INCONCLUSIVE
+            bid, ask = bbo
+            if not _limit_is_far(args.side, limit_px, bid, ask):
+                print(
+                    f"REFUSE --limit-price {limit_px}: marketable vs "
+                    f"bid={bid} ask={ask} (BUY must be < ask, SELL > bid)",
+                    file=sys.stderr,
+                )
+                return _RC_REFUSED
+            print(f"far-limit ok: {args.side} {limit_px} vs bid={bid} ask={ask}")
+            entry_desc = f"LIMIT {limit_px}"
+            kwargs["price"] = limit_px
             price_type = "Limit"
         else:
             price_type = "Market"
