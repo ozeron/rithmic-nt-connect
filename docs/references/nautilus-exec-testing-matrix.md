@@ -178,7 +178,7 @@ rule. Explicit `--market-entry` only — never implicit MARKET for P2 proof.
 | TC-E86 | Reconcile open long | [~] | `test_position_status_reports_*` |
 | TC-E87 | Reconcile open short | [~] | |
 | TC-E88 (local) | Drain returns working orders by identity | [~] | `test_tc_e88_drain_reports_working_limit_by_identity` — far LIMIT drained as ACCEPTED with matching side; clears after cancel. Closes the STATUS TODO "live-venue proof that the drain returns working orders" once run live. Local id: upstream matrix ends at E87 |
-| TC-E89 (local) | MY043 canary: no engine WARN regressions | [~] | `test_tc_e89_my043_canary_no_engine_warn_regressions` — place→accept→cancel through an INFO-logging node; scans fd-captured stdout (`capfd`) for `InvalidStateTrigger`, `avg_px was None`, `CANCELED -> ACCEPTED`, with a trader-id positive control. File sink rejected: it lags stdout and loses the tail. `test_tc_e89_logging_capture_mechanics` pins the capture offline |
+| TC-E89 (local) | MY043 canary: no engine WARN regressions | [~] | `test_tc_e89_my043_canary_no_engine_warn_regressions` — place→accept→cancel through an INFO-logging node; scans fd-captured stdout (`capfd`) for `avg_px was None` (forbid) and repeated `InvalidStateTrigger`/`CANCELED -> ACCEPTED` (≤1 allowed = engine residual per ops-runbook); positive control is the run CID / ExecClient label. File sink rejected: it lags stdout and loses the tail. `test_tc_e89_logging_capture_mechanics` pins the capture offline |
 
 Recon honesty caveat (trading): the `load_orders` drain is best-effort and *not*
 provably complete — an empty result means "no working orders seen", not "venue has
