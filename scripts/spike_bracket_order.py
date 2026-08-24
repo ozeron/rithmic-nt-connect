@@ -91,6 +91,23 @@ def _event_is_rejection(ev: dict) -> bool:
     return any(tok in low.lower() for tok in _REJECT_TOKENS)
 
 
+def _event_is_bracket_path(ev: dict) -> bool:
+    """True if the notification is a bracket-adjust / modify-path ack.
+
+    Rithmic does not expose a separate poll for bracket updates; adjust_stop
+    acks arrive as order_notification with MODIFY_* notify types (or status
+    text containing modify/bracket). Plain OPEN/STATUS rows from place must
+    not satisfy survival after redial.
+    """
+    notify = str(ev.get("notify_type_name") or "").upper()
+    status = str(ev.get("status") or "").lower()
+    text = str(ev.get("text") or ev.get("report_text") or "").lower()
+    if "MODIFY" in notify or "BRACKET" in notify:
+        return True
+    blob = f"{status} {text}"
+    return "modif" in blob or "bracket" in blob
+
+
 def _latest_basket_row(session, basket: str):
     """Newest history row for the basket from a bounded load_orders drain.
 
@@ -237,52 +254,53 @@ def main(argv: list[str] | None = None) -> int:
         session.disconnect_order_plant()
         session.subscribe_order_updates()
         session.subscribe_bracket_updates()
-        # A far resting LIMIT is silent after redial; nudge so a notification
-        # must ride the restored order/bracket streams (plan: notifications
-        # resume). One tick further from market keeps the entry non-marketable.
-        if args.limit_price is not None:
-            tick = 0.25  # CME NQ/MNQ increment; spike roots are equity-index futures
-            delta = -tick if args.side == "Buy" else tick
-            nudge_px = float(args.limit_price) + delta
-            session.modify_order(
-                basket_id,
-                front["trading_symbol"],
-                front["trading_exchange"],
-                int(args.qty),
-                "Limit",
-                price=nudge_px,
+        # Bracket-path nudge (not plain modify_order): proves the restored
+        # bracket subscribe + order plant can carry an adjust. Rithmic surfaces
+        # the ack as order_notification MODIFY_*; level=0 is required on Test.
+        # A far LIMIT parent may then report Modification Failed — the
+        # notification itself is the survival signal; legs stay working.
+        nudge_ticks = int(args.stop_ticks) + 1
+        try:
+            session.adjust_bracket_stop(basket_id, nudge_ticks, 0)
+        except Exception as exc:
+            print(
+                f"SURVIVAL FAILED: adjust_bracket_stop rejected: {exc}",
+                file=sys.stderr,
             )
-            print(f"SURVIVAL: modify_order price={nudge_px} (post-redial nudge)")
+            survived_event = None
+            still_working = _drain_basket_working(session, basket_id)
+            survival_ok = False
         else:
-            nudge_ticks = int(args.stop_ticks) + 1
-            session.adjust_bracket_stop(basket_id, nudge_ticks)
             print(
-                f"SURVIVAL: adjust_bracket_stop ticks={nudge_ticks} (post-redial nudge)"
+                f"SURVIVAL: adjust_bracket_stop ticks={nudge_ticks} level=0 "
+                "(post-redial bracket nudge)"
             )
-        survived_event, _ = _poll_for(
-            session,
-            seconds=args.seconds,
-            want_basket=basket_id,
-            localid=smoke_localid,
-        )
-        still_working = _drain_basket_working(session, basket_id)
-        survival_ok = survived_event is not None and still_working
+            survived_event, _ = _poll_for(
+                session,
+                seconds=args.seconds,
+                want_basket=basket_id,
+                localid=smoke_localid,
+            )
+            still_working = _drain_basket_working(session, basket_id)
+            survival_ok = (
+                survived_event is not None
+                and _event_is_bracket_path(survived_event)
+                and still_working
+            )
         if not survival_ok:
-            missing = "no notification after redial" if survived_event is None else ""
-            state = " and ".join(
-                part
-                for part in (
-                    missing,
-                    "" if still_working else "legs not working in drain",
-                )
-                if part
-            )
+            missing = []
+            if survived_event is None:
+                missing.append("no notification after redial")
+            elif not _event_is_bracket_path(survived_event):
+                missing.append("post-redial event was not a bracket/modify path ack")
+            if not still_working:
+                missing.append("legs not working in drain")
             print(
-                f"SURVIVAL FAILED: {state or 'unknown'}",
+                f"SURVIVAL FAILED: {' and '.join(missing) or 'unknown'}",
                 file=sys.stderr,
             )
         else:
-            print("SURVIVAL OK: notifications resumed and legs still working")
+            print("SURVIVAL OK: bracket-path notifications resumed; legs working")
 
         # --- Phase 3: CLEANUP (identity cancel, never cancel_all) ----------
         # Always cancel once a basket is known — survival failure must not

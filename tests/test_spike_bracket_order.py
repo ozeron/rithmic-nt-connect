@@ -92,3 +92,22 @@ def test_event_rejection_detection() -> None:
     assert (
         spike._event_is_rejection({"status": "Open", "text": "working order"}) is False
     )
+
+
+def test_event_is_bracket_path() -> None:
+    assert (
+        spike._event_is_bracket_path(
+            {"notify_type_name": "MODIFY_RCVD_FROM_CLNT", "status": ""}
+        )
+        is True
+    )
+    assert (
+        spike._event_is_bracket_path({"notify_type_name": "OPEN", "status": "open"})
+        is False
+    )
+    assert (
+        spike._event_is_bracket_path(
+            {"notify_type_name": "", "status": "Modification Failed"}
+        )
+        is True
+    )
