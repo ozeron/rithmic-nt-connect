@@ -218,6 +218,28 @@ def main(argv: list[str] | None = None) -> int:
         session.disconnect_order_plant()
         session.subscribe_order_updates()
         session.subscribe_bracket_updates()
+        # A far resting LIMIT is silent after redial; nudge so a notification
+        # must ride the restored order/bracket streams (plan: notifications
+        # resume). One tick further from market keeps the entry non-marketable.
+        if args.limit_price is not None:
+            tick = 0.25  # CME NQ/MNQ increment; spike roots are equity-index futures
+            delta = -tick if args.side == "Buy" else tick
+            nudge_px = float(args.limit_price) + delta
+            session.modify_order(
+                basket_id,
+                front["trading_symbol"],
+                front["trading_exchange"],
+                int(args.qty),
+                "Limit",
+                price=nudge_px,
+            )
+            print(f"SURVIVAL: modify_order price={nudge_px} (post-redial nudge)")
+        else:
+            nudge_ticks = int(args.stop_ticks) + 1
+            session.adjust_bracket_stop(basket_id, nudge_ticks)
+            print(
+                f"SURVIVAL: adjust_bracket_stop ticks={nudge_ticks} (post-redial nudge)"
+            )
         survived_event, _ = _poll_for(
             session,
             seconds=args.seconds,
@@ -225,7 +247,8 @@ def main(argv: list[str] | None = None) -> int:
             localid=smoke_localid,
         )
         still_working = _drain_basket_working(session, basket_id)
-        if survived_event is None or not still_working:
+        survival_ok = survived_event is not None and still_working
+        if not survival_ok:
             missing = "no notification after redial" if survived_event is None else ""
             state = " and ".join(
                 part
@@ -239,10 +262,12 @@ def main(argv: list[str] | None = None) -> int:
                 f"SURVIVAL FAILED: {state or 'unknown'}",
                 file=sys.stderr,
             )
-            return _RC_SURVIVAL
-        print("SURVIVAL OK: notifications resumed and legs still working")
+        else:
+            print("SURVIVAL OK: notifications resumed and legs still working")
 
         # --- Phase 3: CLEANUP (identity cancel, never cancel_all) ----------
+        # Always cancel once a basket is known — survival failure must not
+        # leave a live far LIMIT at the venue.
         session.cancel_order(basket_id)
         print(f"cancel_order sent basket_id={basket_id}")
         _poll_for(
@@ -259,7 +284,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             return _RC_CLEANUP
         print("CLEANUP OK: basket no longer working at venue")
-        return _RC_OK
+        return _RC_OK if survival_ok else _RC_SURVIVAL
     finally:
         try:
             session.disconnect()
