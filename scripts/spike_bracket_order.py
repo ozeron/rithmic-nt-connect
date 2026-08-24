@@ -10,18 +10,32 @@ RITHMIC_CONNECT_MODE is required by SessionConfig.from_env (direct|gateway).
 Proof policy (fail-closed):
   • Each phase needs *positive* evidence — missing / weak signal is not OK.
   • Illegal states are unrepresentable (``Accepted`` needs a basket id;
-    ``FarLimit`` only constructs when far + not marketable; ``Cleaned``
+    ``FarLimit`` only constructs under the closed domain below; ``Cleaned``
     needs an explicit terminal drain status).
   • Cleanup always runs once a basket id is known (identity cancel, never
     cancel_all), independent of survival.
+
+FarLimit closed domain (anything else is REFUSED before place):
+  1. tick finite and > 0
+  2. BBO finite, bid > 0, ask > 0, bid <= ask (sizes >= 1 at ingest)
+  3. price finite and > 0
+  4. price tick-aligned (Decimal exact)
+  5. far_ticks >= 1
+  6. price >= N ticks outside the near side
+  7. not marketable (BUY < ask, SELL > bid)
+
+Out of scope for this spike (venue / operator):
+  exchange price bands, margin, position left by a filled entry, plant
+  substring false-positives beyond the survival ack gate, gateway vs
+  direct transport differences.
 
 P2 phases:
 
 1. ACCEPT  — far LIMIT from live sized BBO (BUY = bid - N ticks), or
    explicit ``--market-entry``. Optional ``--limit-price`` must still clear
    the far rule.
-2. SURVIVE — plant redial + ``adjust_bracket_stop``; require bracket-path
-   ack *and* working drain row.
+2. SURVIVE — plant redial + ``adjust_bracket_stop``; require a non-reject
+   bracket/modify-path ack *and* a working-status drain row.
 3. CLEANUP — cancel by basket id; require explicit terminal drain row.
 
 Exit codes: 0 ok · 1 place rejected · 2 gate refusal · 3 inconclusive ·
@@ -38,7 +52,7 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -118,6 +132,11 @@ def is_bracket_path(ev: dict) -> bool:
     return "modif" in low or "bracket" in low
 
 
+def is_survival_ack(ev: dict) -> bool:
+    """Bracket-path notification that is not a reject/fail token row."""
+    return is_bracket_path(ev) and not is_rejection(ev)
+
+
 def is_terminal_status(status: str | None) -> bool:
     return status is not None and status.strip().lower() in _TERMINAL_STATUSES
 
@@ -141,6 +160,14 @@ def size_ok(size: object) -> bool:
         except ValueError:
             return False
     return False
+
+
+def tick_aligned(price: float, tick: float) -> bool:
+    try:
+        q = Decimal(str(price)) / Decimal(str(tick))
+    except (InvalidOperation, ZeroDivisionError):
+        return False
+    return q == q.to_integral_value()
 
 
 def resolve_tick_size(
@@ -197,7 +224,7 @@ class SizedBbo:
 
 @dataclass(frozen=True)
 class FarLimit:
-    """LIMIT that is ≥ N ticks outside the near side and not marketable."""
+    """LIMIT under the module docstring closed domain (or ProofError)."""
 
     side: str
     price: float
@@ -248,19 +275,33 @@ class FarLimit:
         far_ticks: int,
         source: str,
     ) -> FarLimit:
+        if far_ticks < 1:
+            raise ProofError(
+                Outcome.REFUSED, f"far_ticks must be >= 1, got {far_ticks}"
+            )
         if not finite_positive(tick):
             raise ProofError(Outcome.REFUSED, f"non-finite or non-positive tick={tick}")
-        if not math.isfinite(price):
-            raise ProofError(Outcome.REFUSED, f"non-finite --limit-price {price}")
+        if not finite_positive(price):
+            raise ProofError(
+                Outcome.REFUSED,
+                f"non-finite or non-positive limit price={price} "
+                f"(far_ticks={far_ticks} may push BUY below zero)",
+            )
         if not (
             math.isfinite(bbo.bid)
             and math.isfinite(bbo.ask)
             and bbo.bid > 0
             and bbo.ask > 0
+            and bbo.bid <= bbo.ask
         ):
             raise ProofError(
                 Outcome.REFUSED,
-                f"non-finite or non-positive BBO bid={bbo.bid} ask={bbo.ask}",
+                f"invalid BBO bid={bbo.bid} ask={bbo.ask}",
+            )
+        if not tick_aligned(price, tick):
+            raise ProofError(
+                Outcome.REFUSED,
+                f"limit price {price} not aligned to tick={tick}",
             )
         if not cls._far_enough(side, price, bbo.bid, bbo.ask, tick, far_ticks):
             raise ProofError(
@@ -346,7 +387,7 @@ class Accepted:
 
 @dataclass(frozen=True)
 class Survived:
-    """Survival needs bracket-path ack *and* a non-terminal drain row."""
+    """Survival needs survival-ack *and* a working-status drain row."""
 
     ack: dict
     drain_status: str
@@ -578,9 +619,12 @@ def phase_survive(
     stop_ticks: int,
 ) -> Survived:
     print("SURVIVAL: dropping order plant and re-subscribing both intents…")
-    session.disconnect_order_plant()
-    session.subscribe_order_updates()
-    session.subscribe_bracket_updates()
+    try:
+        session.disconnect_order_plant()
+        session.subscribe_order_updates()
+        session.subscribe_bracket_updates()
+    except Exception as exc:
+        raise ProofError(Outcome.SURVIVAL, f"order-plant redial failed: {exc}") from exc
     nudge_ticks = int(stop_ticks) + 1
     try:
         session.adjust_bracket_stop(accepted.basket_id, nudge_ticks, 0)
@@ -595,10 +639,10 @@ def phase_survive(
     snap = io.poll_ours(want_basket=accepted.basket_id)
     if snap.last is None:
         raise ProofError(Outcome.SURVIVAL, "no notification after redial")
-    if not is_bracket_path(snap.last):
+    if not is_survival_ack(snap.last):
         raise ProofError(
             Outcome.SURVIVAL,
-            "post-redial event was not a bracket/modify path ack",
+            "post-redial event was not a clean bracket/modify path ack",
         )
     drain_status = io.require_working(accepted.basket_id)
     print("SURVIVAL OK: bracket-path notifications resumed; legs working")
@@ -620,6 +664,27 @@ def phase_cleanup(*, session: Any, io: ProofIO, basket_id: str) -> Cleaned:
     return cleaned
 
 
+def _refuse_cli(args: argparse.Namespace) -> str | None:
+    """Return a refusal message for invalid CLI domain, else None."""
+    if args.market_entry and args.limit_price is not None:
+        return "--market-entry and --limit-price are mutually exclusive"
+    if args.far_ticks < 1:
+        return "--far-ticks must be >= 1"
+    if int(args.qty) < 1:
+        return "--qty must be >= 1"
+    if int(args.stop_ticks) < 1:
+        return "--stop-ticks must be >= 1"
+    if args.target_ticks is not None and int(args.target_ticks) < 1:
+        return "--target-ticks must be >= 1 when set"
+    if not math.isfinite(float(args.seconds)) or float(args.seconds) < 0:
+        return "--seconds must be finite and >= 0"
+    if args.tick_size is not None and not finite_positive(float(args.tick_size)):
+        return "--tick-size must be finite and > 0"
+    if args.limit_price is not None and not finite_positive(float(args.limit_price)):
+        return "--limit-price must be finite and > 0"
+    return None
+
+
 def run_place(args: argparse.Namespace) -> Outcome:
     from rithmic_nt_connect import env_truthy, load_dotenv_files
     from rithmic_nt_connect.config import SessionConfig
@@ -637,15 +702,9 @@ def run_place(args: argparse.Namespace) -> Outcome:
         )
         return Outcome.REFUSED
 
-    if args.market_entry and args.limit_price is not None:
-        print(
-            "REFUSE: --market-entry and --limit-price are mutually exclusive",
-            file=sys.stderr,
-        )
-        return Outcome.REFUSED
-
-    if args.far_ticks < 1:
-        print("REFUSE: --far-ticks must be >= 1", file=sys.stderr)
+    refused = _refuse_cli(args)
+    if refused is not None:
+        print(f"REFUSE: {refused}", file=sys.stderr)
         return Outcome.REFUSED
 
     cfg = SessionConfig.from_env()

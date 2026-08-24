@@ -7,6 +7,7 @@ matching on venue text — ``cancel rejected`` must stay non-terminal).
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import sys
 from pathlib import Path
@@ -126,6 +127,58 @@ def test_reject_inf_tick_and_prices() -> None:
     with pytest.raises(spike.ProofError) as ei:
         spike.FarLimit.override("Buy", float("inf"), bbo, tick=0.25, far_ticks=20)
     assert ei.value.outcome is spike.Outcome.REFUSED
+
+
+def test_far_limit_refuses_non_positive_price() -> None:
+    bbo = spike.SizedBbo(bid=101.0, ask=102.0)
+    with pytest.raises(spike.ProofError) as ei:
+        spike.FarLimit.derive("Buy", bbo, tick=0.25, far_ticks=500)
+    assert ei.value.outcome is spike.Outcome.REFUSED
+    with pytest.raises(spike.ProofError) as ei2:
+        spike.FarLimit.override("Buy", 0.0, bbo, tick=0.25, far_ticks=20)
+    assert ei2.value.outcome is spike.Outcome.REFUSED
+
+
+def test_far_limit_refuses_off_tick() -> None:
+    bbo = spike.SizedBbo(bid=101.0, ask=102.0)
+    with pytest.raises(spike.ProofError) as ei:
+        # 95.9 is far enough for N=20 but not on a 0.25 grid from 101.
+        spike.FarLimit.override("Buy", 95.9, bbo, tick=0.25, far_ticks=20)
+    assert ei.value.outcome is spike.Outcome.REFUSED
+
+
+def test_survival_ack_rejects_modify_failed() -> None:
+    assert (
+        spike.is_survival_ack(
+            {"notify_type_name": "MODIFY_RCVD_FROM_CLNT", "status": "", "text": ""}
+        )
+        is True
+    )
+    assert (
+        spike.is_survival_ack(
+            {"notify_type_name": "", "status": "Modification Failed", "text": ""}
+        )
+        is False
+    )
+
+
+def test_refuse_cli_domain() -> None:
+    ns = argparse.Namespace(
+        market_entry=False,
+        limit_price=None,
+        far_ticks=20,
+        qty=1,
+        stop_ticks=40,
+        target_ticks=None,
+        seconds=8.0,
+        tick_size=None,
+    )
+    assert spike._refuse_cli(ns) is None
+    ns.qty = 0
+    assert spike._refuse_cli(ns) is not None
+    ns.qty = 1
+    ns.far_ticks = 0
+    assert spike._refuse_cli(ns) is not None
 
 
 def test_other_baskets_ignored() -> None:
