@@ -59,11 +59,18 @@ entry names what would unblock it. Phase 7 deliverable (gap-closure plan P3).
 | --- | --- | --- |
 | TC-D10 L2 book | LucidTrading denies book permission (`[13] permission denied`) | FCM/account with book entitlement |
 | TC-D31/D41/D42 history empty | LucidTrading history plant transiently returns empty windows | Retry at market hours; no code change |
-| TC-D40 on Rithmic Test | Test history plant streams **zero** `time_bar` events for any period (probed 2026-08-22: 75s silence, all event types) | LucidTrading run via `RITHMIC_ALLOW_LUCID_E2E=1`, or Rithmic fixing Test streaming |
-| TC-D54 full-node bar parity | Dropped: Rithmic Test ticker plant silent + stale synthetic snapshots while its bar plant runs | Same as TC-D40 row |
-| P0.2 resync proof | Needs live `last_trade`/`bbo`; only LucidTrading streams them | `RITHMIC_ALLOW_LUCID_E2E=1` + MotiveWave closed |
-| P1 exec e2e on Rithmic Test (TC-E84/E88/E89) | Test order routing currently rejects **every** order: lifecycle is `ORDER_RCVD_FROM_CLNT` → `COMPLETE` "No such route exists." (probed 2026-08-22, baskets 183261261-63; drain permanently empty because nothing ever rests) | Rithmic fixing Test routing, or LucidTrading run via `RITHMIC_ALLOW_LUCID_E2E=1`; the E88/E89 tests skip themselves when this signature appears |
+| TC-D40 15m/1h/1d on Rithmic Test | `D40[1m]` PASSED 2026-08-24; slower periods SKIPPED (no first payload in 65s — likely need rollover or Lucid) | LucidTrading via `RITHMIC_ALLOW_LUCID_E2E=1`, or longer poll / roll-boundary runs |
+| TC-D54 full-node bar parity | Dropped: Rithmic Test ticker plant silent + stale synthetic snapshots while its bar plant runs (off-hours / prior Test state) | Re-evaluate at market hours; or Lucid |
+| P1 exec e2e self-skip | Tests still self-skip on venue signature `COMPLETE` + `No such route exists.` (historical 2026-08-22 routing outage). Routing healthy again 2026-08-24 (E88/E89 PASSED). | Keep skip for future regressions; no action when routing is healthy |
 | A4 client-order-id validation | OQ1: Rithmic `user_tag` length/format constraint unsourced | Vendor answer from Rithmic support |
+
+Closed (kept for archaeology — do not re-open without new venue evidence):
+
+| Closed | When | Note |
+| --- | --- | --- |
+| TC-D40 all-periods silent on Test | 2026-08-24 | Superseded: 1m streams; row above covers slower periods |
+| P0.2 resync blocked on silent ticker | 2026-08-24 | `test_reconnect_live.py` PASSED; `[8] already exists` tolerated in `replay_subscription_intent` |
+| P1 E88/E89 blocked on Test routing | 2026-08-24 | Drain + MY043 canary PASSED on Test |
 
 ## Building a self-contained wheel
 

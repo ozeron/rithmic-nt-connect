@@ -207,24 +207,28 @@ offline suites after, since they have no scheduling constraint. Each slice
 lands as its own PR with its own STATUS/scoreboard update; no slice may flip
 a mark without the artifact or test named in this plan.
 
-## Execution status (2026-08-22, end of day)
+## Execution status (2026-08-24)
 
-All code deliverables for P0–P2 are landed and green; live evidence is the
-remainder and is externally blocked (ops-runbook skipped-spec register):
+Live evidence on Rithmic Test (markets open). Code still on #33/#34/#35 pending
+Alex re-review / merge.
 
 | Slice | Code | Evidence |
 | --- | --- | --- |
-| P0.1 bars | done — TC-D40 parametrized 1m/15m/1h/1d (#33) | BLOCKED: Test bar plant streams zero events; needs Lucid env file + `RITHMIC_ALLOW_LUCID_E2E=1` |
-| P0.2 resync | done — `tests/e2e/test_reconnect_live.py` (#33) | BLOCKED: same (needs live last_trade/bbo) |
-| P1 drain E88 | done (#35) | BLOCKED: Test order routing rejects every order (`COMPLETE` "No such route exists.", probed 3×); self-skips cleanly now |
-| P1 canary E89 | done — capfd mechanics pinned offline (#35) | BLOCKED: same routing state |
-| P1 cancel_all decision | **DONE** — N/A-for-line documented, scoreboard check green (#35) | none needed |
-| P2 pre-check | **DONE** — direct lacked bracket intent; parity fix landed (#34) | none needed |
-| P2 vehicle | done — spike accept/survive/cleanup rework + review fixes + 7 unit pins (#34) | BLOCKED: same routing state |
+| P0.1 bars | done — TC-D40 parametrized 1m/15m/1h/1d (#33) | **PARTIAL:** Test `D40[1m] PASSED` 2026-08-24; `15m/1h/1d` SKIPPED (no payload in 65s — register). Full four-period close still wants Lucid or longer waits. |
+| P0.2 resync | done + `[8]` idempotent replay (#33) | **DONE** 2026-08-24 — `test_reconnect_live.py` PASSED on Test (ticker+book+bars after `resync_ticker_session`) |
+| P1 drain E88 | done (#35) | **DONE** 2026-08-24 — far LIMIT drain by identity + post-cancel clear |
+| P1 canary E89 | done + canary residual align (#35) | **DONE** 2026-08-24 — no `avg_px was None`; ≤1 engine-residual `InvalidStateTrigger` |
+| P1 cancel_all decision | **DONE** — N/A-for-line (#35) | none needed |
+| P2 pre-check | **DONE** — direct bracket intent restore (#34) | none needed |
+| P2 vehicle | done + post-redial nudge + always-cleanup (#34) | **DONE** 2026-08-24 — accept+survive+cleanup on **direct** and **gateway** (far LIMIT, `scripts/spike_bracket_order.py`) |
 
-Unblock paths, in preference order:
+Historical blockers (2026-08-22 EOD) that cleared on 2026-08-24:
 
-1. Provide a LucidTrading env file (outside repo) → run `RITHMIC_TEST_DOTENV=<file>
-   RITHMIC_ALLOW_LUCID_E2E=1 uv run pytest tests/e2e -v` with MotiveWave closed.
-2. Rithmic repairs Test streaming/routing → re-run on `.env` as-is.
-3. Reviews/merges of #33/#34/#35 gate any STATUS mark flips that follow.
+1. Test order routing — orders now reach exchange (`OPEN_PENDING` → `SENT_TO_EXCH`); keep CME-band prices.
+2. Test MD/bars — 1m EXTERNAL + last_trade/bbo flow during market hours; slower bar periods still skip.
+3. Resync `[8] already exists` — history-plant bars survive `reset_ticker`; replay treats `[8]` as success.
+
+Still open:
+
+1. LucidTrading env for full P0.1 (15m/1h/1d) and Lucid-hosted proofs — `RITHMIC_ALLOW_LUCID_E2E=1`, MotiveWave closed.
+2. Reviews/merges of #33/#34/#35.
