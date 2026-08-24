@@ -51,9 +51,11 @@ def _poll_for(
     want_basket: str | None,
     localid: str,
 ):
+    """Return ``(last_matching_event, basket_id, saw_rejection)``."""
     deadline = time.monotonic() + max(0.0, seconds)
     basket: str | None = want_basket
     last = None
+    saw_rejection = False
     while time.monotonic() < deadline:
         ev = session.poll_order_event()
         if ev is None:
@@ -65,6 +67,8 @@ def _poll_for(
         if not ours:
             continue
         last = ev
+        if _event_is_rejection(ev):
+            saw_rejection = True
         if ev_basket and basket is None:
             basket = str(ev_basket)
             print(f"basket identified: {basket}")
@@ -74,7 +78,7 @@ def _poll_for(
             f"order_event: status={status!r} basket={ev_basket} "
             f"tag={tag!r} text={text!r}"
         )
-    return last, basket
+    return last, basket, saw_rejection
 
 
 def _event_is_rejection(ev: dict) -> bool:
@@ -211,10 +215,10 @@ def main(argv: list[str] | None = None) -> int:
             f"PLACE sent front={front['trading_symbol']}.{front['trading_exchange']} "
             f"entry={entry_desc} localid={smoke_localid}; polling {args.seconds}s…"
         )
-        ack_event, basket_id = _poll_for(
+        _, basket_id, place_rejected = _poll_for(
             session, seconds=args.seconds, want_basket=None, localid=smoke_localid
         )
-        if ack_event is not None and _event_is_rejection(ack_event):
+        if place_rejected:
             print("PLACE rejected by venue/plant", file=sys.stderr)
             return _RC_REJECTED
 
@@ -243,7 +247,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"SURVIVAL: adjust_bracket_stop ticks={nudge_ticks} level=0 "
                 "(post-redial bracket nudge)"
             )
-            survived_event, _ = _poll_for(
+            survived_event, _, _ = _poll_for(
                 session,
                 seconds=args.seconds,
                 want_basket=basket_id,
@@ -270,7 +274,15 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print("SURVIVAL OK: bracket-path notifications resumed; legs working")
 
-        session.cancel_order(basket_id)
+        try:
+            session.cancel_order(basket_id)
+        except Exception as exc:
+            print(
+                f"CLEANUP INCOMPLETE: cancel_order failed: {exc} — "
+                "close the basket manually at the venue",
+                file=sys.stderr,
+            )
+            return _RC_CLEANUP
         print(f"cancel_order sent basket_id={basket_id}")
         _poll_for(
             session,
