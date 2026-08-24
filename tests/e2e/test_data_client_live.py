@@ -281,6 +281,7 @@ class TestBars:
             exchange=exchange,
             bar_type=bar_type,
             price_precision=int(inst.price_precision),
+            ts_init=int(datetime.now(UTC).timestamp() * 1_000_000_000),
         )
         assert len(converted) == len(raw)
         for i, (r, c) in enumerate(zip(raw, converted, strict=True)):

@@ -6,7 +6,7 @@ windowing / retry / dedup stay in the Rust session.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from nautilus_trader.model.data import Bar, BarType, TradeTick
 from nautilus_trader.model.instruments import FuturesContract
@@ -63,12 +63,13 @@ def load_trade_ticks(
         instrument_id=str(instrument.id),
     )
     raw = session.load_ticks(symbol, exchange, _unix_sec(start), _unix_sec(end))
+    ts_init = int(datetime.now(UTC).timestamp() * 1_000_000_000)
     return payloads_to_trade_ticks(
         list(raw or []),
         symbol=symbol,
         exchange=exchange,
         price_precision=int(instrument.price_precision),
-        ts_init=None,
+        ts_init=ts_init,
     )
 
 
@@ -93,11 +94,12 @@ def load_time_bars(
         rithmic_bar_type,
         period,
     )
+    ts_init = int(datetime.now(UTC).timestamp() * 1_000_000_000)
     return payloads_to_bars(
         list(raw or []),
         symbol=symbol,
         exchange=exchange,
         bar_type=bar_type,
         price_precision=int(instrument.price_precision),
-        ts_init=None,
+        ts_init=ts_init,
     )

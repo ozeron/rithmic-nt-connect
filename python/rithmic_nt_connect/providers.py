@@ -100,7 +100,11 @@ def future_from_reference(
     # 0 = tradable for any backtest window. "now" rejects historical orders
     # ("Contract not yet active").
     act_ns = 0 if activation_ns is None else int(activation_ns)
-    instrument_id = InstrumentId(Symbol(symbol_s), nautilus_venue())
+    from rithmic_nt_connect._convert import instrument_id_from_symbol
+
+    instrument_id = InstrumentId.from_str(
+        instrument_id_from_symbol(symbol_s, exchange_s)
+    )
     return FuturesContract(
         instrument_id=instrument_id,
         raw_symbol=Symbol(symbol_s),

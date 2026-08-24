@@ -36,8 +36,16 @@ def _ts_ns(d: Mapping[str, Any]) -> int | None:
 
 
 def instrument_id_from_symbol(symbol: str, exchange: str | None = None) -> str:
-    """Build a Nautilus-style instrument id string (symbol.VENUE)."""
-    _ = exchange  # exchange retained for callers; venue is constant for Phase 1
+    """Build a Nautilus-style instrument id string.
+
+    Exchange is encoded in the symbol component to keep distinct venue
+    instruments distinct (e.g. NQU6.CME vs NQU6.CBOT). Venue remains ``RITHMIC``.
+    Format: ``{symbol}-{exchange}.RITHMIC`` when exchange is present, else
+    ``{symbol}.RITHMIC``.
+    """
+    if exchange is not None and str(exchange).strip():
+        exch = str(exchange).strip()
+        return f"{symbol}-{exch}.{VENUE}"
     return f"{symbol}.{VENUE}"
 
 
@@ -190,9 +198,8 @@ def order_book_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
         raise ConvertError(
             f"ask_price/ask_size length mismatch: {len(ask_price)} vs {len(ask_size)}"
         )
-    if not bid_price and not ask_price:
-        raise ConvertError("order book has no bid/ask levels")
-
+    # Empty snapshot (both sides empty) is venue-valid (off-hours) → levels=[].
+    # The Nautilus converter emits a single Clear with F_SNAPSHOT|F_LAST.
     levels: list[dict[str, Any]] = []
     for i, price in enumerate(bid_price):
         size = bid_size[i]

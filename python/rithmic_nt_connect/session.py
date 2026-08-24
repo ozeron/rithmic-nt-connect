@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import threading
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
@@ -157,7 +158,8 @@ def _session_cache_key(session: SessionConfig) -> str:
     """Credential fingerprint for the direct-session singleton.
 
     Matches the flock identity (``user`` / ``system_name`` / ``url`` / ``env``)
-    plus the account triple, so a Live node and a Demo history session can never
+    plus the account triple and endpoint variants (``beta_url``, ``app_name``,
+    ``app_version``), so a Live node and a Demo history session can never
     share, while data/exec factories built from the same env always do.
     Password is deliberately absent: it is not part of the login identity and
     must never appear in keys / reprs / logs.
@@ -165,7 +167,7 @@ def _session_cache_key(session: SessionConfig) -> str:
     return (
         f"{session.connect_mode}:{session.user}:{session.system_name}:{session.url}:"
         f"{session.env}:{session.account_id}:{session.fcm_id}:{session.ib_id}:"
-        f"{session.gateway_listen}"
+        f"{session.gateway_listen}:{session.beta_url}:{session.app_name}:{session.app_version}"
     )
 
 
@@ -205,30 +207,39 @@ def create_rust_session(
 
     session_lock = _load_session_lock()
 
-    lock = session_lock.try_acquire(
-        session.user, session.system_name, session.url, session.env
-    )
-    inner = Session(
-        user=session.user,
-        password=session.password,
-        system_name=session.system_name,
-        url=session.url,
-        app_name=session.app_name,
-        app_version=session.app_version,
-        env=session.env,
-        account_id=session.account_id,
-        fcm_id=session.fcm_id,
-        ib_id=session.ib_id,
-        beta_url=session.beta_url,
-        plants=plants,
-    )
-    # ``_FlockedDirectSession`` delegates the full facade via ``__getattr__``,
-    # so a checker cannot see its protocol conformance; the Rust ``Session``
-    # itself is verified against ``WireSession`` above (it is the ``inner``
-    # argument's declared type).
-    wrapped = _FlockedDirectSession(inner, lock, cache_key=key)
-    _SESSION_CACHE[key] = wrapped
-    return wrapped
+    lock = None
+    try:
+        lock = session_lock.try_acquire(
+            session.user, session.system_name, session.url, session.env
+        )
+        inner = Session(
+            user=session.user,
+            password=session.password,
+            system_name=session.system_name,
+            url=session.url,
+            app_name=session.app_name,
+            app_version=session.app_version,
+            env=session.env,
+            account_id=session.account_id,
+            fcm_id=session.fcm_id,
+            ib_id=session.ib_id,
+            beta_url=session.beta_url,
+            plants=plants,
+        )
+        # ``_FlockedDirectSession`` delegates the full facade via ``__getattr__``,
+        # so a checker cannot see its protocol conformance; the Rust ``Session``
+        # itself is verified against ``WireSession`` above (it is the ``inner``
+        # argument's declared type).
+        wrapped = _FlockedDirectSession(inner, lock, cache_key=key)
+        _SESSION_CACHE[key] = wrapped
+        return wrapped
+    except Exception:
+        if lock is not None:
+            with contextlib.suppress(Exception):
+                close = getattr(lock, "close", None)
+                if callable(close):
+                    close()
+        raise
 
 
 class _FlockedDirectSession:

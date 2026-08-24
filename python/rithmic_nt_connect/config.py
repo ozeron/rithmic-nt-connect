@@ -289,6 +289,24 @@ _ENV_SOURCES = (
         alt_url_keys=("RITHMIC_LIVE_ALT_URL",),
     ),
     _EnvSource(
+        env="Test",
+        user_keys=("RITHMIC_TEST_USER",),
+        password_keys=("RITHMIC_TEST_PW", "RITHMIC_TEST_PASSWORD"),
+        system_keys=(
+            "RITHMIC_TEST_SYSTEM_NAME",
+            "RITHMIC_SYSTEM_NAME",
+            "RITHMIC_SYSTEM",
+        ),
+        url_keys=("RITHMIC_TEST_URL", "RITHMIC_GATEWAY"),
+        account_keys=("RITHMIC_TEST_ACCOUNT_ID", "RITHMIC_ACCOUNT_ID"),
+        fcm_keys=("RITHMIC_TEST_FCM_ID", "RITHMIC_FCM_ID"),
+        ib_keys=("RITHMIC_TEST_IB_ID", "RITHMIC_IB_ID"),
+        symbol_keys=("RITHMIC_SYMBOL", "SYMBOL"),
+        exchange_keys=("RITHMIC_EXCHANGE", "EXCHANGE"),
+        system_default="Rithmic Test",
+        alt_url_keys=("RITHMIC_TEST_ALT_URL",),
+    ),
+    _EnvSource(
         env="Demo",
         user_keys=("RITHMIC_DEMO_USER",),
         password_keys=("RITHMIC_DEMO_PW",),
@@ -390,10 +408,14 @@ class SessionConfig:
         Priority:
         1. ``RITHMIC_USER`` / ``RITHMIC_PASSWORD`` (MY046)
         2. ``RITHMIC_LIVE_*``
-        3. ``RITHMIC_DEMO_*``
+        3. ``RITHMIC_TEST_*``
+        4. ``RITHMIC_DEMO_*``
 
         When ``prefer_lucid`` is true (default), the MY046 path uses
         ``LucidTrading`` system + production gateway defaults unless overridden.
+        For MY046, the resolved system_name is classified via ``system_kind``:
+        Test-like names never inherit the Lucid production default and become
+        ``Test`` (or ``Demo`` when DEMO marker present).
         """
         env = environ if environ is not None else os.environ
         app_name = _env_first(env, "RITHMIC_APP_NAME") or DEFAULT_APP_NAME
@@ -423,6 +445,31 @@ class SessionConfig:
                 url = DEFAULT_GATEWAY_URL if lucid else source.url_default
             if url is None:
                 raise ConfigError(f"missing {' / '.join(source.url_keys)}")
+            # MY046 Lucid path must not silently produce Live when system is Test/Demo.
+            env_value = source.env
+            if lucid and source.lucid_defaults:
+                kind = system_kind(system_name)
+                if kind == "test":
+                    upper = system_name.upper()
+                    if "DEMO" in upper or "PAPER" in upper:
+                        env_value = "Demo"
+                    else:
+                        env_value = "Test"
+                    has_explicit_url = _env_first(
+                        env, *source.url_keys
+                    ) is not None or (
+                        bool(source.legacy_url_keys)
+                        and _env_first(env, *source.legacy_url_keys) is not None
+                    )
+                    if not has_explicit_url and url == DEFAULT_GATEWAY_URL:
+                        # Production default is mixing for Test/Demo; require explicit gateway.  # noqa: E501
+                        if source.url_default is None:
+                            raise ConfigError(
+                                "missing RITHMIC_GATEWAY for Test/Demo environment; set RITHMIC_GATEWAY"  # noqa: E501
+                            )
+                        url = source.url_default
+                elif kind == "production":
+                    env_value = "Live"
             return cls(
                 user=user,
                 password=password,
@@ -431,7 +478,7 @@ class SessionConfig:
                 beta_url=_env_first(env, *source.alt_url_keys) or url,
                 app_name=app_name,
                 app_version=app_version,
-                env=source.env,
+                env=env_value,
                 account_id=_env_first(env, *source.account_keys),
                 fcm_id=_env_first(env, *source.fcm_keys),
                 ib_id=_env_first(env, *source.ib_keys),
@@ -464,9 +511,15 @@ class RithmicDataClientConfig:
     def from_env(
         cls, environ: Mapping[str, str] | None = None
     ) -> RithmicDataClientConfig:
+        from rithmic_nt_connect._convert import instrument_id_from_symbol
+
         session = SessionConfig.from_env(environ)
         instrument_ids: list[str] = []
         if session.symbol and session.exchange:
+            instrument_ids.append(
+                instrument_id_from_symbol(session.symbol, session.exchange)
+            )
+        elif session.symbol:
             instrument_ids.append(f"{session.symbol}.{VENUE}")
         return cls(session=session, instrument_ids=instrument_ids)
 

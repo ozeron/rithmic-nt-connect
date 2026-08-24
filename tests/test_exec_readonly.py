@@ -68,7 +68,7 @@ def test_instrument_pnl_to_position_fields():
     )
     assert fields["position_side"] == "SHORT"
     assert fields["quantity"] == 2
-    assert fields["instrument_id"] == "NQU6.RITHMIC"
+    assert fields["instrument_id"] == "NQU6-CME.RITHMIC"
     assert fields["avg_px_open"] == pytest.approx(21000.5)
 
 

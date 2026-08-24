@@ -63,9 +63,20 @@ def _instrument():
 
 
 def _ticks(payloads: list[dict]) -> list:
-    return payloads_to_trade_ticks(
-        payloads, symbol="NQU6", exchange="CME", price_precision=2
-    )
+    # Each tick's ts_init must be >= its ts_event; use per-tick event time
+    # to keep TimeBarAggregator historical mode correct (clock ~ event).
+    ticks = []
+    for p in payloads:
+        ssboe = int(p.get("ssboe", _MINUTE_NS))
+        usecs = int(p.get("usecs", 0))
+        ts_event = ssboe * 1_000_000_000 + usecs * 1_000
+        ticks.extend(
+            payloads_to_trade_ticks(
+                [p], symbol="NQU6", exchange="CME", price_precision=2, ts_init=ts_event
+            )
+        )
+    ticks.sort(key=lambda t: t.ts_event)
+    return ticks
 
 
 def _internal_bars(ticks: list) -> list[Bar]:
@@ -83,7 +94,7 @@ def _internal_bars(ticks: list) -> list[Bar]:
 
     aggregator = TimeBarAggregator(
         instrument,
-        BarType.from_str("NQU6.RITHMIC-1-MINUTE-LAST-INTERNAL"),
+        BarType.from_str("NQU6-CME.RITHMIC-1-MINUTE-LAST-INTERNAL"),
         handler,
         TestClock(),
         timestamp_on_close=False,
@@ -101,8 +112,9 @@ def _external_bars(payloads: list[dict]) -> list[Bar]:
         payloads,
         symbol="NQU6",
         exchange="CME",
-        bar_type=BarType.from_str("NQU6.RITHMIC-1-MINUTE-LAST-EXTERNAL"),
+        bar_type=BarType.from_str("NQU6-CME.RITHMIC-1-MINUTE-LAST-EXTERNAL"),
         price_precision=2,
+        ts_init=1_800_000_000_000_000_000,
     )
 
 

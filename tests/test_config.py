@@ -136,7 +136,7 @@ def test_data_and_exec_config_from_env() -> None:
     data = RithmicDataClientConfig.from_env(env)
     exec_cfg = RithmicExecClientConfig.from_env(env)
     assert data.venue == VENUE
-    assert data.instrument_ids == [f"NQ.{VENUE}"]
+    assert data.instrument_ids == [f"NQ-CME.{VENUE}"]
     assert exec_cfg.session.user == "alice"
     assert "pw" not in repr(data)
     assert "pw" not in repr(exec_cfg)

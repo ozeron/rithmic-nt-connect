@@ -67,7 +67,7 @@ ORDER_BOOK_FIXTURE = {
 
 def test_last_trade_fixture_to_trade_fields() -> None:
     fields = last_trade_to_fields(LAST_TRADE_FIXTURE)
-    assert fields["instrument_id"] == f"NQU6.{VENUE}"
+    assert fields["instrument_id"] == f"NQU6-CME.{VENUE}"
     assert fields["price"] == pytest.approx(21012.5)
     assert fields["size"] == pytest.approx(1.0)
     assert fields["ts_event"] == 1_700_000_000 * 1_000_000_000 + 123456 * 1_000
@@ -77,7 +77,7 @@ def test_last_trade_fixture_to_trade_fields() -> None:
 def test_bbo_fixture_to_quote_fields() -> None:
     fields = bbo_to_fields(BBO_FIXTURE)
     assert fields is not None
-    assert fields["instrument_id"] == f"NQU6.{VENUE}"
+    assert fields["instrument_id"] == f"NQU6-CME.{VENUE}"
     assert fields["bid_price"] == pytest.approx(21012.0)
     assert fields["ask_price"] == pytest.approx(21012.25)
     assert fields["bid_size"] == pytest.approx(3.0)
@@ -136,7 +136,7 @@ def test_one_sided_bbo_merges_into_two_sided_quote() -> None:
         state,
     )
     assert fields is not None
-    assert fields["instrument_id"] == f"NQU6.{VENUE}"
+    assert fields["instrument_id"] == f"NQU6-CME.{VENUE}"
     assert fields["bid_price"] == pytest.approx(21012.0)
     assert fields["ask_price"] == pytest.approx(21012.25)
     assert fields["bid_size"] == pytest.approx(3.0)
@@ -161,7 +161,7 @@ def test_account_pnl_defaults_currency_and_zero_balance() -> None:
 
 def test_order_book_fixture_to_fields() -> None:
     fields = order_book_to_fields(ORDER_BOOK_FIXTURE)
-    assert fields["instrument_id"] == f"NQU6.{VENUE}"
+    assert fields["instrument_id"] == f"NQU6-CME.{VENUE}"
     assert fields["type"] == "order_book"
     assert len(fields["levels"]) == 4
     assert fields["levels"][0]["side"] == "BUY"
@@ -171,12 +171,15 @@ def test_order_book_fixture_to_fields() -> None:
 
 
 def test_order_book_empty_levels_raises() -> None:
-    with pytest.raises(ConvertError):
-        order_book_to_fields(
-            {
-                "symbol": "NQU6",
-                "bid_price": [],
-                "ask_price": [],
-                "ssboe": 1,
-            }
-        )
+    # Empty snapshot is venue-valid (off-hours) → levels=[] and Clear snapshot.
+    fields = order_book_to_fields(
+        {
+            "symbol": "NQU6",
+            "bid_price": [],
+            "ask_price": [],
+            "ssboe": 1,
+        }
+    )
+    assert fields["type"] == "order_book"
+    assert fields["levels"] == []
+    assert fields["instrument_id"] == f"NQU6.{VENUE}"

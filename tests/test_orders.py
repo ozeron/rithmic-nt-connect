@@ -114,7 +114,7 @@ def test_order_notification_fields_and_kind():
             "usecs": 0,
         }
     )
-    assert fields["instrument_id"] == "NQU6.RITHMIC"
+    assert fields["instrument_id"] == "NQU6-CME.RITHMIC"
     assert fields["kind"] == "filled"
     assert fields["ts_event"] == 1_700_000_000 * 1_000_000_000
 

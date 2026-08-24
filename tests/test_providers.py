@@ -25,7 +25,7 @@ COMPLETE_REF = {
 
 def test_future_from_reference_uses_tick_size_and_underlying():
     instrument = future_from_reference(COMPLETE_REF)
-    assert str(instrument.id) == "NQU6.RITHMIC"
+    assert str(instrument.id) == "NQU6-CME.RITHMIC"
     assert instrument.underlying == "NQ"
     assert instrument.price_precision == 2
     assert float(instrument.price_increment) == pytest.approx(0.25)

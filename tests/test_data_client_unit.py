@@ -30,7 +30,7 @@ def test_last_trade_fields_to_trade_tick():
     }
     fields = last_trade_to_fields(raw)
     tick = fields_to_trade_tick(fields, ts_init=1_700_000_000_000_000_001)
-    assert str(tick.instrument_id) == "NQU6.RITHMIC"
+    assert str(tick.instrument_id) == "NQU6-CME.RITHMIC"
     assert float(tick.price) == pytest.approx(20000.25)
 
 
@@ -111,7 +111,7 @@ def test_order_book_fields_to_deltas():
     }
     fields = order_book_to_fields(raw)
     deltas = fields_to_order_book_deltas(fields, ts_init=1)
-    assert str(deltas.instrument_id) == "NQU6.RITHMIC"
+    assert str(deltas.instrument_id) == "NQU6-CME.RITHMIC"
     # CLEAR + 2 ADD levels
     assert len(deltas.deltas) == 3
     assert deltas.deltas[0].action == BookAction.CLEAR
@@ -337,7 +337,7 @@ def test_bbo_state_cleared_on_quote_unsubscribe_and_resync() -> None:
     client._bar_types = {}
     client._resync_generation = 0
     client._resync_lock = asyncio.Lock()
-    client._instrument_routes = {"NQU6.RITHMIC": ("NQU6", "CME")}
+    client._instrument_routes = {"NQU6-CME.RITHMIC": ("NQU6", "CME")}
 
     class Sess(WireSessionStub):
         def reset_ticker(self) -> None:
@@ -359,7 +359,7 @@ def test_bbo_state_cleared_on_quote_unsubscribe_and_resync() -> None:
 
     client._session = Sess()
     cmd = UnsubscribeQuoteTicks(
-        InstrumentId.from_str("NQU6.RITHMIC"),
+        InstrumentId.from_str("NQU6-CME.RITHMIC"),
         ClientId("test"),
         Venue("RITHMIC"),
         UUID4(),

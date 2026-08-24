@@ -1868,10 +1868,88 @@ class RithmicExecutionClient(LiveExecutionClient):
         except Exception as exc:
             self._mark_order_plant_failed("place_order", exc)
 
+    def _is_bracket_order_list(self, orders: list) -> bool:
+        # Heuristic: bracket is 3 linked orders (entry + stop + target) with
+        # parent linkage or mixed sides. Non-bracket lists (e.g. 2 independent
+        # orders) fall through to independent legs.
+        if len(orders) != 3:
+            return False
+        # Check parent_order_id linkage or contingency
+        try:
+            cids = {str(o.client_order_id) for o in orders}
+            for o in orders:
+                parent = getattr(o, "parent_order_id", None)
+                if parent is not None and str(parent) in cids:
+                    return True
+                linked = getattr(o, "linked_order_ids", None)
+                if linked:
+                    for lid in linked:
+                        if str(lid) in cids:
+                            return True
+        except Exception:
+            pass
+        # Fallback: mixed sides (entry BUY + exits SELL or vice versa)
+        try:
+            sides = {o.side for o in orders}
+            if len(sides) > 1:
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _bracket_ticks(
+        self, entry: Any, stop: Any | None, target: Any | None
+    ) -> tuple[int | None, int | None]:
+        # Compute stop/target ticks from absolute prices via tick_size.
+        # Rithmic bracket exits are ticks from fill; we derive from entry price.
+        try:
+            instrument = self._cache.instrument(entry.instrument_id)
+            if instrument is None:
+                return None, None
+            tick_size = float(instrument.price_increment)
+            if tick_size <= 0:
+                return None, None
+            entry_price = (
+                float(entry.price)
+                if getattr(entry, "has_price", False) and entry.has_price
+                else None
+            )
+            if entry_price is None:
+                return None, None
+            stop_ticks = None
+            target_ticks = None
+            if (
+                stop is not None
+                and getattr(stop, "has_trigger_price", False)
+                and stop.has_trigger_price
+            ):
+                sp = float(stop.trigger_price)
+                stop_ticks = round(abs(entry_price - sp) / tick_size)
+                if stop_ticks <= 0:
+                    stop_ticks = None
+            elif (
+                stop is not None
+                and getattr(stop, "has_price", False)
+                and stop.has_price
+            ):
+                sp = float(stop.price)
+                stop_ticks = round(abs(entry_price - sp) / tick_size)
+                if stop_ticks <= 0:
+                    stop_ticks = None
+            if (
+                target is not None
+                and getattr(target, "has_price", False)
+                and target.has_price
+            ):
+                tp = float(target.price)
+                target_ticks = round(abs(tp - entry_price) / tick_size)
+                if target_ticks <= 0:
+                    target_ticks = None
+            return stop_ticks, target_ticks
+        except Exception:
+            return None, None
+
     async def _submit_order_list(self, command: SubmitOrderList) -> None:
-        # NOTE: this loops independent legs — NOT a Rithmic plant bracket.
-        # Plant brackets use place_bracket_order (stop_ticks/target_ticks) via
-        # rithmic-plants; see docs/STATUS.md Brackets / OCO Partial.
         if not self.enable_trading:
             self._log_trading_disabled("submit_order_list")
             for order in command.order_list.orders:
@@ -1883,7 +1961,132 @@ class RithmicExecutionClient(LiveExecutionClient):
                     self._clock.timestamp_ns(),
                 )
             return
-        for order in command.order_list.orders:
+        orders = list(command.order_list.orders)
+        # Bracket path: try to map 3-leg OrderList to single plant bracket.
+        if self._is_bracket_order_list(orders):
+            import os
+
+            if not os.environ.get("RITHMIC_BRACKETS") and not getattr(
+                self, "_allow_brackets", False
+            ):
+                # Brackets are spike-only (docs/STATUS.md); deny rather than
+                # silently decomposing into 3 independent orders.
+                for order in orders:
+                    self.generate_order_denied(
+                        order.strategy_id,
+                        order.instrument_id,
+                        order.client_order_id,
+                        "Rithmic brackets not enabled (RITHMIC_BRACKETS=1 required)",
+                        self._clock.timestamp_ns(),
+                    )
+                return
+            # Identify entry (no parent) vs exits (with parent)
+            entry = None
+            exits: list[Any] = []
+            for o in orders:
+                parent = getattr(o, "parent_order_id", None)
+                if parent is None:
+                    if entry is None:
+                        entry = o
+                    else:
+                        exits.append(o)
+                else:
+                    exits.append(o)
+            if entry is None:
+                entry = orders[0]
+                exits = orders[1:]
+            # Classify exits into stop vs target via order type
+            stop = None
+            target = None
+            for e in exits:
+                try:
+                    if e.order_type in (OrderType.STOP_MARKET, OrderType.STOP_LIMIT):
+                        stop = e
+                    else:
+                        target = e
+                except Exception:
+                    target = e
+            stop_ticks, target_ticks = self._bracket_ticks(entry, stop, target)
+            if stop_ticks is None and target_ticks is None:
+                for order in orders:
+                    self.generate_order_denied(
+                        order.strategy_id,
+                        order.instrument_id,
+                        order.client_order_id,
+                        "bracket not losslessly representable as stop_ticks/target_ticks (need entry limit price + stop/target absolute prices)",  # noqa: E501
+                        self._clock.timestamp_ns(),
+                    )
+                return
+            # Single plant bracket: localid = entry client_order_id
+            try:
+                symbol, exchange = self._route(entry.instrument_id)
+                side = nautilus_side_to_rithmic(entry.side)
+                price_type = nautilus_order_type_to_rithmic(entry.order_type)
+                duration = nautilus_tif_to_rithmic(entry.time_in_force)
+                price = float(entry.price) if entry.has_price else None
+                trigger = (
+                    float(entry.trigger_price) if entry.has_trigger_price else None
+                )
+                qty = int(entry.quantity)
+                localid = entry.client_order_id.value
+            except ValueError as exc:
+                for order in orders:
+                    self.generate_order_denied(
+                        order.strategy_id,
+                        order.instrument_id,
+                        order.client_order_id,
+                        str(exc),
+                        self._clock.timestamp_ns(),
+                    )
+                return
+            if getattr(self._session, "trading_enabled", True) is False:
+                self._log_trading_disabled(
+                    "submit_order_list (bracket, parent gateway)"
+                )
+                for order in orders:
+                    self.generate_order_denied(
+                        order.strategy_id,
+                        order.instrument_id,
+                        order.client_order_id,
+                        "Rithmic parent gateway trading disabled",
+                        self._clock.timestamp_ns(),
+                    )
+                return
+            if not self._order_plant.allow_submit():
+                for order in orders:
+                    self.generate_order_denied(
+                        order.strategy_id,
+                        order.instrument_id,
+                        order.client_order_id,
+                        self._order_plant.reject_reason("submit"),
+                        self._clock.timestamp_ns(),
+                    )
+                return
+            self.generate_order_submitted(
+                entry.strategy_id,
+                entry.instrument_id,
+                entry.client_order_id,
+                self._clock.timestamp_ns(),
+            )
+            try:
+                await asyncio.to_thread(
+                    self._session.place_bracket_order,
+                    symbol,
+                    exchange,
+                    side,
+                    price_type,
+                    qty,
+                    localid,
+                    price,
+                    trigger,
+                    duration,
+                    stop_ticks,
+                    target_ticks,
+                )
+            except Exception as exc:
+                self._mark_order_plant_failed("place_bracket_order", exc)
+            return
+        for order in orders:
             await self._submit_order(
                 SubmitOrder(
                     trader_id=command.trader_id,
@@ -2316,17 +2519,17 @@ class RithmicExecutionClient(LiveExecutionClient):
         start_sec, end_sec = self._recon_window_sec(command.start, command.end)
         events = await self._load_orders_events(start_sec, end_sec)
         if not events:
-            # Best-effort drain returned nothing. This is advisory, not proof the
-            # venue is empty: a quiet or lossy channel looks identical. With
-            # Nautilus' open-order consistency check, a cached order missing from
-            # an empty drain is canceled only when open_check_open_only=False, so
-            # the operator must keep open_check_open_only=True (the 1.231.x
-            # replacement for the removed death_policy=trust_stop) to stay safe.
-            self._log.warning(
-                "order recon returned no working orders from the best-effort "
-                "drain; advisory, not an authoritative venue-empty. Keep "
-                "open_check_open_only=True so Nautilus does not cancel tracked "
-                "open orders on an empty recon."
+            # Best-effort drain is not a snapshot: empty does not prove venue
+            # has no working orders (no end-of-list, 10k cap, quiet channel).
+            # Returning [] would let Nautilus cancel tracked opens when
+            # open_check_open_only=False. Fail closed instead — the engine
+            # treats VenueQueryUnavailable as unavailable, not as venue-empty,
+            # so no tracked open is canceled. Operator must keep
+            # open_check_open_only=True regardless.
+            raise VenueQueryUnavailable(
+                "Rithmic order recon unavailable: best-effort drain returned "
+                "no working orders (empty does not prove venue empty; no "
+                "provably complete snapshot API)"
             )
         reports: list[OrderStatusReport] = []
         for row in self._latest_drain_rows(

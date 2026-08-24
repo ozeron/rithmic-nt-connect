@@ -151,7 +151,7 @@ def payloads_to_trade_ticks(
     symbol: str,
     exchange: str,
     price_precision: int,
-    ts_init: int | None = None,
+    ts_init: int,
 ) -> list[TradeTick]:
     """Convert venue history/live dicts to ``TradeTick`` (one convert boundary)."""
     ticks: list[TradeTick] = []
@@ -163,11 +163,10 @@ def payloads_to_trade_ticks(
         if payload.get("exchange") is None:
             payload["exchange"] = exchange
         fields = last_trade_to_fields(payload)
-        event_ts = int(fields["ts_event"])
         ticks.append(
             fields_to_trade_tick(
                 fields,
-                ts_init=event_ts if ts_init is None else ts_init,
+                ts_init=ts_init,
                 price_precision=price_precision,
             )
         )
@@ -182,7 +181,7 @@ def payloads_to_bars(
     exchange: str,
     bar_type: BarType,
     price_precision: int,
-    ts_init: int | None = None,
+    ts_init: int,
 ) -> list[Bar]:
     """Convert venue history/live dicts to ``Bar`` (one convert boundary)."""
     bars: list[Bar] = []
@@ -200,12 +199,11 @@ def payloads_to_bars(
         if payload.get("exchange") is None:
             payload["exchange"] = exchange
         fields = time_bar_to_fields(payload)
-        event_ts = int(fields["ts_event"])
         bars.append(
             fields_to_bar(
                 fields,
                 bar_type,
-                event_ts if ts_init is None else ts_init,
+                ts_init,
                 price_precision=price_precision,
             )
         )
@@ -593,6 +591,7 @@ class RithmicDataClient(LiveMarketDataClient):
         self._poll_task: asyncio.Task | None = None
         self._poll_closing = False
         self._subscriptions: set[tuple[str, str]] = set()
+        self._ticker_intents: dict[tuple[str, str], set[str]] = {}
         self._book_subscriptions: set[tuple[str, str]] = set()
         # Wire key → one or more Nautilus BarTypes (60-MINUTE and 1-HOUR share
         # a key; each BarType is registered under BOTH the native period and
@@ -631,9 +630,12 @@ class RithmicDataClient(LiveMarketDataClient):
         # fresh post-reconnect stream would publish stale-mixed QuoteTicks —
         # and restart the history poll when EXTERNAL bars are registered (the
         # disconnect cancelled it and only _subscribe_bars re-creates it).
+        ticker_keys = set(getattr(self, "_ticker_intents", {}).keys())
+        if not ticker_keys:
+            ticker_keys = set(getattr(self, "_subscriptions", set()))
         await replay_subscription_intent(
             self._session,
-            set(self._subscriptions),
+            ticker_keys,
             set(self._book_subscriptions),
             bar_resync_subscriptions(self._bar_types),
         )
@@ -684,9 +686,12 @@ class RithmicDataClient(LiveMarketDataClient):
             # re-sends fresh bid/ask sides, and merging them with pre-reset
             # state would publish a QuoteTick mixing stale + fresh sides.
             self._bbo_state.clear()
+            ticker_keys = set(getattr(self, "_ticker_intents", {}).keys())
+            if not ticker_keys:
+                ticker_keys = set(getattr(self, "_subscriptions", set()))
             await resync_ticker_session(
                 self._session,
-                set(self._subscriptions),
+                ticker_keys,
                 set(self._book_subscriptions),
                 bar_resync_subscriptions(self._bar_types),
             )
@@ -845,28 +850,79 @@ class RithmicDataClient(LiveMarketDataClient):
         return bar_types_for_event(self._bar_types, event)
 
     async def _subscribe_trade_ticks(self, command: SubscribeTradeTicks) -> None:
-        await self._subscribe_symbol(command.instrument_id)
+        await self._add_ticker_intent(command.instrument_id, "trade")
 
     async def _subscribe_quote_ticks(self, command: SubscribeQuoteTicks) -> None:
-        await self._subscribe_symbol(command.instrument_id)
+        await self._add_ticker_intent(command.instrument_id, "quote")
+
+    async def _add_ticker_intent(self, instrument_id: Any, kind: str) -> None:
+        if not hasattr(self, "_ticker_intents"):
+            self._ticker_intents = {}
+        if not hasattr(self, "_subscriptions"):
+            self._subscriptions = set()
+        symbol, exchange = self._route(instrument_id)
+        key = (symbol, exchange)
+        intents = self._ticker_intents.setdefault(key, set())
+        if kind in intents:
+            return
+        needs_subscribe = key not in self._subscriptions
+        intents.add(kind)
+        if needs_subscribe:
+            try:
+                await asyncio.to_thread(self._session.subscribe, symbol, exchange)
+                self._subscriptions.add(key)
+            except Exception:
+                intents.discard(kind)
+                if not intents:
+                    del self._ticker_intents[key]
+                raise
 
     async def _subscribe_symbol(self, instrument_id: Any) -> None:
         symbol, exchange = self._route(instrument_id)
-        await asyncio.to_thread(self._session.subscribe, symbol, exchange)
-        self._subscriptions.add((symbol, exchange))
+        key = (symbol, exchange)
+        if key not in self._subscriptions:
+            await asyncio.to_thread(self._session.subscribe, symbol, exchange)
+            self._subscriptions.add(key)
 
     async def _unsubscribe_trade_ticks(self, command: UnsubscribeTradeTicks) -> None:
-        symbol, exchange = self._route(command.instrument_id)
-        await asyncio.to_thread(self._session.unsubscribe, symbol, exchange)
-        self._subscriptions.discard((symbol, exchange))
+        await self._remove_ticker_intent(command.instrument_id, "trade")
 
     async def _unsubscribe_quote_ticks(self, command: UnsubscribeQuoteTicks) -> None:
-        symbol, exchange = self._route(command.instrument_id)
-        await asyncio.to_thread(self._session.unsubscribe, symbol, exchange)
-        self._subscriptions.discard((symbol, exchange))
-        # Drop the one-sided BBO accumulator so a later resubscribe waits for
-        # both sides instead of merging with pre-unsubscribe state.
-        self._bbo_state.pop(f"{symbol}:{exchange}", None)
+        await self._remove_ticker_intent(command.instrument_id, "quote", clear_bbo=True)
+
+    async def _remove_ticker_intent(
+        self, instrument_id: Any, kind: str, *, clear_bbo: bool = False
+    ) -> None:
+        if not hasattr(self, "_ticker_intents"):
+            self._ticker_intents = {}
+        if not hasattr(self, "_subscriptions"):
+            self._subscriptions = set()
+        if not hasattr(self, "_bbo_state"):
+            self._bbo_state = {}
+        symbol, exchange = self._route(instrument_id)
+        key = (symbol, exchange)
+        if clear_bbo:
+            self._bbo_state.pop(f"{symbol}:{exchange}", None)
+        intents = self._ticker_intents.get(key)
+        if intents is None or kind not in intents:
+            # Legacy fallback: if tests set _subscriptions directly, honour it.
+            if key in self._subscriptions:
+                try:
+                    await asyncio.to_thread(self._session.unsubscribe, symbol, exchange)
+                    self._subscriptions.discard(key)
+                except Exception:
+                    raise
+            return
+        intents.discard(kind)
+        if not intents:
+            del self._ticker_intents[key]
+            if key in self._subscriptions:
+                try:
+                    await asyncio.to_thread(self._session.unsubscribe, symbol, exchange)
+                    self._subscriptions.discard(key)
+                except Exception:
+                    self._ticker_intents[key] = {kind}
+                    raise
 
     async def _subscribe_order_book_deltas(self, command: SubscribeOrderBook) -> None:
         symbol, exchange = self._route(command.instrument_id)
@@ -912,6 +968,11 @@ class RithmicDataClient(LiveMarketDataClient):
             return
         symbol, exchange = self._route(bar_type.instrument_id)
         rtype, period = bar_type_to_rithmic(bar_type)
+        # Save for rollback
+        saved: dict[tuple[str, str, int, int], set] = {}
+        for p in bar_wire_period_keys(bar_type):
+            key = (symbol, exchange, rtype, p)
+            saved[key] = set(self._bar_types.get(key, set()))
         for p in bar_wire_period_keys(bar_type):
             key = (symbol, exchange, rtype, p)
             mapped = self._bar_types.get(key)
@@ -924,9 +985,18 @@ class RithmicDataClient(LiveMarketDataClient):
             for k in self._bar_types
         )
         if not still_registered:
-            await asyncio.to_thread(
-                self._session.unsubscribe_time_bars, symbol, exchange, rtype, period
-            )
+            try:
+                await asyncio.to_thread(
+                    self._session.unsubscribe_time_bars, symbol, exchange, rtype, period
+                )
+            except Exception:
+                # Rollback
+                for k, v in saved.items():
+                    if v:
+                        self._bar_types[k] = v
+                    else:
+                        self._bar_types.pop(k, None)
+                raise
 
     async def _request_trade_ticks(self, request: RequestTradeTicks) -> None:
         symbol, exchange = self._route(request.instrument_id)

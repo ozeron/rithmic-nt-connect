@@ -353,6 +353,7 @@ def test_payloads_to_bars_rejects_wire_symbol_mismatch():
             exchange="CME",
             bar_type=_M1_BAR_TYPE,
             price_precision=2,
+            ts_init=1_700_000_000_000_000_000,
         )
 
 
@@ -364,6 +365,7 @@ def test_payloads_to_bars_rejects_wire_exchange_mismatch():
             exchange="CME",
             bar_type=_M1_BAR_TYPE,
             price_precision=2,
+            ts_init=1_700_000_000_000_000_000,
         )
 
 
@@ -375,6 +377,7 @@ def test_payloads_to_bars_rejects_wire_bar_type_mismatch():
             exchange="CME",
             bar_type=_M1_BAR_TYPE,
             price_precision=2,
+            ts_init=1_700_000_000_000_000_000,
         )
 
 
@@ -392,6 +395,7 @@ def test_payloads_to_bars_rejects_non_integral_wire_bar_type(bad_type: object) -
             exchange="CME",
             bar_type=_M1_BAR_TYPE,
             price_precision=2,
+            ts_init=1_700_000_000_000_000_000,
         )
 
 
@@ -405,6 +409,7 @@ def test_payloads_to_bars_fills_missing_symbol_and_exchange():
         exchange="CME",
         bar_type=_M1_BAR_TYPE,
         price_precision=2,
+        ts_init=1_700_000_000_000_000_000,
     )
     assert len(bars) == 1
     assert str(bars[0].bar_type.instrument_id) == "NQU6.RITHMIC"
@@ -419,6 +424,7 @@ def test_payloads_to_bars_does_not_validate_wire_period():
         exchange="CME",
         bar_type=_M1_BAR_TYPE,
         price_precision=2,
+        ts_init=1_700_000_000_000_000_000,
     )
     assert len(bars) == 1
 
@@ -440,6 +446,7 @@ def test_payloads_to_trade_ticks_rejects_wire_symbol_mismatch():
             symbol="NQU6",
             exchange="CME",
             price_precision=2,
+            ts_init=1_700_000_000_000_000_000,
         )
 
 
@@ -456,6 +463,7 @@ def test_payloads_to_trade_ticks_fills_missing_symbol_and_exchange():
         symbol="NQU6",
         exchange="CME",
         price_precision=2,
+        ts_init=1_700_000_000_000_000_000,
     )
     assert len(ticks) == 1
-    assert str(ticks[0].instrument_id) == "NQU6.RITHMIC"
+    assert str(ticks[0].instrument_id) == "NQU6-CME.RITHMIC"

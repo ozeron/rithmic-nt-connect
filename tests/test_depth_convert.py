@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import pytest
-from rithmic_nt_connect._convert import ConvertError, order_book_to_fields
+from rithmic_nt_connect._convert import order_book_to_fields
 from rithmic_nt_connect.constants import VENUE
 from rithmic_nt_connect.data import fields_to_order_book_deltas
 
@@ -22,7 +21,7 @@ ORDER_BOOK_SUMMARY = {
 
 def test_order_book_summary_to_delta_fields() -> None:
     fields = order_book_to_fields(ORDER_BOOK_SUMMARY)
-    assert fields["instrument_id"] == f"NQU6.{VENUE}"
+    assert fields["instrument_id"] == f"NQU6-CME.{VENUE}"
     assert len(fields["levels"]) == 5
     assert fields["levels"][0]["side"] == "BUY"
     assert fields["levels"][-1]["side"] == "SELL"
@@ -35,20 +34,22 @@ def test_order_book_fields_to_nautilus_deltas() -> None:
     deltas = fields_to_order_book_deltas(fields, ts_init=1)
     # CLEAR + 5 ADD
     assert len(deltas.deltas) == 6
-    assert str(deltas.instrument_id) == f"NQU6.{VENUE}"
+    assert str(deltas.instrument_id) == f"NQU6-CME.{VENUE}"
     assert int(deltas.deltas[-1].flags) == int(
         RecordFlag.F_SNAPSHOT.value | RecordFlag.F_LAST.value
     )
 
 
 def test_depth_entitlement_style_empty_book_is_explicit() -> None:
-    with pytest.raises(ConvertError) as exc:
-        order_book_to_fields(
-            {
-                "symbol": "NQU6",
-                "bid_price": [],
-                "ask_price": [],
-                "ssboe": 1,
-            }
-        )
-    assert "no bid/ask levels" in str(exc.value)
+    # Empty snapshot is venue-valid (off-hours) → levels=[] and Clear snapshot.
+    fields = order_book_to_fields(
+        {
+            "symbol": "NQU6",
+            "bid_price": [],
+            "ask_price": [],
+            "ssboe": 1,
+        }
+    )
+    assert fields["type"] == "order_book"
+    assert fields["levels"] == []
+    assert fields["instrument_id"] == f"NQU6.{VENUE}"

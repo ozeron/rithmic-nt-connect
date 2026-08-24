@@ -63,17 +63,18 @@ def test_payloads_to_trade_ticks_sorts_and_fills_route() -> None:
         symbol="NQU6",
         exchange="CME",
         price_precision=2,
-        ts_init=None,
+        ts_init=1_700_000_099_000_000_000,
     )
     assert len(ticks) == 2
     assert ticks[0].ts_event < ticks[1].ts_event
-    assert str(ticks[0].instrument_id) == "NQU6.RITHMIC"
-    assert ticks[0].ts_init == ticks[0].ts_event
+    assert str(ticks[0].instrument_id) == "NQU6-CME.RITHMIC"
+    assert ticks[0].ts_init == 1_700_000_099_000_000_000
+    assert ticks[0].ts_init != ticks[0].ts_event
 
 
 def test_load_front_month_instrument() -> None:
     instrument = load_front_month_instrument(_FakeSession(), "NQ", "CME")
-    assert str(instrument.id) == "NQU6.RITHMIC"
+    assert str(instrument.id) == "NQU6-CME.RITHMIC"
     assert instrument.info["rithmic_symbol"] == "NQU6"
 
 
