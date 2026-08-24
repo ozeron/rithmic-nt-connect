@@ -21,7 +21,12 @@ from nautilus_trader.model.enums import OrderStatus
 from nautilus_trader.model.identifiers import ClientOrderId
 from nautilus_trader.trading.strategy import Strategy, StrategyConfig
 
-_VENUE_CONDITIONAL_MARKERS = ("market is closed", "permission denied", "not entitled")
+_VENUE_CONDITIONAL_MARKERS = (
+    "market is closed",
+    "permission denied",
+    "not entitled",
+    "no such route exists",  # nothing rests
+)
 
 
 def venue_conditional_reason(event) -> str | None:

@@ -402,6 +402,7 @@ fn order_kind(
     source: &str,
     notify_type_name: Option<&str>,
     status: Option<&str>,
+    text: Option<&str>,
 ) -> Option<String> {
     let name = notify_type_name?.to_ascii_uppercase();
     let kind = match (source, name.as_str()) {
@@ -417,6 +418,8 @@ fn order_kind(
             let status_u = status.unwrap_or("").to_ascii_uppercase();
             if status_u == "CANCELLED" || status_u == "CANCELED" {
                 "canceled"
+            } else if text.is_some_and(|t| !t.trim().is_empty()) {
+                "rejected"
             } else {
                 return None;
             }
@@ -511,7 +514,12 @@ impl From<&RithmicResponse> for PlantEvent {
                         .ok()
                         .map(|t| t.as_str_name().to_string())
                 });
-                let kind = order_kind("rithmic", notify_type_name.as_deref(), n.status.as_deref());
+                let kind = order_kind(
+                    "rithmic",
+                    notify_type_name.as_deref(),
+                    n.status.as_deref(),
+                    n.text.as_deref(),
+                );
                 Self::OrderNotification(OrderNotificationDto {
                     source: "rithmic".into(),
                     kind,
@@ -551,7 +559,12 @@ impl From<&RithmicResponse> for PlantEvent {
                         .ok()
                         .map(|t| t.as_str_name().to_string())
                 });
-                let kind = order_kind("exchange", notify_type_name.as_deref(), n.status.as_deref());
+                let kind = order_kind(
+                    "exchange",
+                    notify_type_name.as_deref(),
+                    n.status.as_deref(),
+                    n.text.as_deref(),
+                );
                 Self::OrderNotification(OrderNotificationDto {
                     source: "exchange".into(),
                     kind,
@@ -804,12 +817,44 @@ mod order_kind_tests {
         // Live-proven (Rithmic Test 2026-08-21): resting STOP_MARKET orders
         // never receive OPEN; TRIGGER_PENDING is their working state.
         assert_eq!(
-            order_kind("rithmic", Some("TRIGGER_PENDING"), None).as_deref(),
+            order_kind("rithmic", Some("TRIGGER_PENDING"), None, None).as_deref(),
             Some("accepted")
         );
         assert_eq!(
-            order_kind("rithmic", Some("OPEN_PENDING"), None).as_deref(),
+            order_kind("rithmic", Some("OPEN_PENDING"), None, None).as_deref(),
             None
+        );
+    }
+
+    #[test]
+    fn complete_with_text_is_terminal_reject() {
+        assert_eq!(
+            order_kind(
+                "rithmic",
+                Some("COMPLETE"),
+                Some("complete"),
+                Some("No such route exists."),
+            )
+            .as_deref(),
+            Some("rejected")
+        );
+        assert_eq!(
+            order_kind("rithmic", Some("COMPLETE"), Some("complete"), None).as_deref(),
+            None
+        );
+        assert_eq!(
+            order_kind("rithmic", Some("COMPLETE"), Some("complete"), Some("  ")).as_deref(),
+            None
+        );
+        assert_eq!(
+            order_kind(
+                "rithmic",
+                Some("COMPLETE"),
+                Some("CANCELLED"),
+                Some("whatever"),
+            )
+            .as_deref(),
+            Some("canceled")
         );
     }
 }

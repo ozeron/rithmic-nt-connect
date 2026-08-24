@@ -146,7 +146,10 @@ def order_notification_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
     kind = d.get("kind")
     if kind is None and d.get("notify_type_name") is not None:
         kind = kind_from_notify(
-            str(source), str(d.get("notify_type_name")), d.get("status")
+            str(source),
+            str(d.get("notify_type_name")),
+            d.get("status"),
+            d.get("text"),
         )
     return {
         "type": "order_notification",
@@ -200,6 +203,7 @@ def kind_from_notify(
     source: str,
     notify_type_name: str,
     status: Any | None = None,
+    text: Any | None = None,
 ) -> str | None:
     """Map plant notify_type_name to a canonical action kind (also set in Rust)."""
     name = notify_type_name.upper()
@@ -221,6 +225,8 @@ def kind_from_notify(
             status_u = str(status or "").upper()
             if status_u in {"CANCELLED", "CANCELED"}:
                 return "canceled"
+            if str(text or "").strip():
+                return "rejected"
             return None
         return None
     if source == "exchange":

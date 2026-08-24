@@ -137,6 +137,16 @@ def test_kind_from_notify_covers_main_paths():
     assert kind_from_notify("exchange", "UNKNOWN") is None
 
 
+def test_kind_from_notify_complete_with_text_is_terminal_reject():
+    assert (
+        kind_from_notify("rithmic", "COMPLETE", "complete", "No such route exists.")
+        == "rejected"
+    )
+    assert kind_from_notify("rithmic", "COMPLETE", "complete") is None
+    assert kind_from_notify("rithmic", "COMPLETE", "complete", "  ") is None
+    assert kind_from_notify("rithmic", "COMPLETE", "CANCELLED", "x") == "canceled"
+
+
 def test_notification_action_accept_reject_fill_cancel():
     order = _order()
     accepted = notification_action({"kind": "accepted"}, order)
