@@ -126,7 +126,30 @@ class TestQuotes:
         """Subscribe BBO — receive QuoteTick with bid < ask."""
         _, symbol, exchange = live_front_month
         live_session.subscribe(symbol, exchange)
-        ev = wait_for_event(live_session.poll_event, "bbo", timeout_sec=20)
+        # BBOs are one-sided (presence bits); wait for a full quote.
+        deadline = time.monotonic() + 20
+        ev = None
+        while time.monotonic() < deadline:
+            cand = live_session.poll_event()
+            if cand is None or cand.get("type") != "bbo":
+                time.sleep(0.05)
+                continue
+            if cand.get("bid_price") is None or cand.get("ask_price") is None:
+                time.sleep(0.05)
+                continue
+            bid_v = float(cand["bid_price"])
+            ask_v = float(cand["ask_price"])
+            bid_sz = int(cand.get("bid_size") or 0)
+            ask_sz = int(cand.get("ask_size") or 0)
+            if bid_v <= 0 or ask_v <= 0 or bid_sz < 1 or ask_sz < 1:
+                time.sleep(0.05)
+                continue
+            if bid_v >= ask_v:
+                time.sleep(0.05)
+                continue
+            ev = cand
+            break
+        assert ev is not None, "no complete two-sided bbo within 20s"
         bid, ask = float(ev["bid_price"]), float(ev["ask_price"])
         assert bid < ask, f"bid {bid} < ask {ask}"
         assert int(ev["bid_size"]) >= 1, "positive bid size"
