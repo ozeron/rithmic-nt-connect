@@ -77,6 +77,55 @@ def test_cleanup_requires_explicit_terminal_row() -> None:
         )
         is True
     )
+    assert (
+        spike._drain_basket_terminal(
+            _DrainSession([{"basket_id": "B1", "status": "REJECTED"}]), "B1"
+        )
+        is True
+    )
+    # Operation-rejection tokens are not place-terminal.
+    assert (
+        spike._drain_basket_terminal(
+            _DrainSession([{"basket_id": "B1", "status": "cancel_rejected"}]),
+            "B1",
+        )
+        is False
+    )
+
+
+def test_unknown_status_is_not_working() -> None:
+    assert (
+        spike._drain_basket_working(
+            _DrainSession([{"basket_id": "B1", "status": ""}]), "B1"
+        )
+        is False
+    )
+    assert (
+        spike._drain_basket_working(
+            _DrainSession([{"basket_id": "B1", "status": "mystery"}]), "B1"
+        )
+        is False
+    )
+
+
+def test_reject_inf_tick_and_prices() -> None:
+    assert spike.resolve_tick_size("NQ", tick_size=float("inf"), front_raw=None) is None
+    assert (
+        spike.SizedBbo.from_event(
+            {
+                "type": "bbo",
+                "bid_price": float("nan"),
+                "ask_price": 102.0,
+                "bid_size": 1,
+                "ask_size": 1,
+            }
+        )
+        is None
+    )
+    bbo = spike.SizedBbo(bid=101.0, ask=102.0)
+    with pytest.raises(spike.ProofError) as ei:
+        spike.FarLimit.override("Buy", float("inf"), bbo, tick=0.25, far_ticks=20)
+    assert ei.value.outcome is spike.Outcome.REFUSED
 
 
 def test_other_baskets_ignored() -> None:

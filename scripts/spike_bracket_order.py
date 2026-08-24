@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import math
 import os
 import sys
 import time
@@ -45,8 +46,29 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "python"))
 
+# Exact status tokens only — ``cancel_rejected`` / ``modify_rejected`` stay
+# non-terminal (order still live). Venue ``text`` is never used for this.
 _TERMINAL_STATUSES = frozenset(
-    {"complete", "canceled", "cancelled", "expired", "filled"}
+    {
+        "complete",
+        "canceled",
+        "cancelled",
+        "expired",
+        "filled",
+        "rejected",
+    }
+)
+_WORKING_STATUSES = frozenset(
+    {
+        "open",
+        "working",
+        "accepted",
+        "submitted",
+        "partial",
+        "partially filled",
+        "triggered",
+        "new",
+    }
 )
 _REJECT_TOKENS = ("reject", "denied", "fail", "error")
 _KNOWN_TICK_SIZE: dict[str, float] = {
@@ -100,6 +122,14 @@ def is_terminal_status(status: str | None) -> bool:
     return status is not None and status.strip().lower() in _TERMINAL_STATUSES
 
 
+def is_working_status(status: str | None) -> bool:
+    return status is not None and status.strip().lower() in _WORKING_STATUSES
+
+
+def finite_positive(value: float) -> bool:
+    return math.isfinite(value) and value > 0
+
+
 def size_ok(size: object) -> bool:
     if isinstance(size, bool):
         return False
@@ -116,17 +146,24 @@ def size_ok(size: object) -> bool:
 def resolve_tick_size(
     root: str, *, tick_size: float | None, front_raw: dict | None
 ) -> float | None:
-    if tick_size is not None and tick_size > 0:
-        return float(tick_size)
+    if tick_size is not None:
+        try:
+            t = float(tick_size)
+        except (TypeError, ValueError):
+            return None
+        if finite_positive(t):
+            return t
+        return None
     raw_tick = (front_raw or {}).get("tick_size")
     if raw_tick is not None:
         try:
             t = float(raw_tick)
-            if t > 0:
+            if finite_positive(t):
                 return t
         except (TypeError, ValueError):
             pass
-    return _KNOWN_TICK_SIZE.get(root.upper())
+    known = _KNOWN_TICK_SIZE.get(root.upper())
+    return known if known is not None and finite_positive(known) else None
 
 
 # --- constructed evidence ---------------------------------------------------
@@ -151,6 +188,8 @@ class SizedBbo:
         ):
             return None
         bid, ask = float(ev["bid_price"]), float(ev["ask_price"])
+        if not (math.isfinite(bid) and math.isfinite(ask)):
+            return None
         if bid <= 0 or ask <= 0 or bid > ask:
             return None
         return cls(bid=bid, ask=ask)
@@ -209,6 +248,20 @@ class FarLimit:
         far_ticks: int,
         source: str,
     ) -> FarLimit:
+        if not finite_positive(tick):
+            raise ProofError(Outcome.REFUSED, f"non-finite or non-positive tick={tick}")
+        if not math.isfinite(price):
+            raise ProofError(Outcome.REFUSED, f"non-finite --limit-price {price}")
+        if not (
+            math.isfinite(bbo.bid)
+            and math.isfinite(bbo.ask)
+            and bbo.bid > 0
+            and bbo.ask > 0
+        ):
+            raise ProofError(
+                Outcome.REFUSED,
+                f"non-finite or non-positive BBO bid={bbo.bid} ask={bbo.ask}",
+            )
         if not cls._far_enough(side, price, bbo.bid, bbo.ask, tick, far_ticks):
             raise ProofError(
                 Outcome.REFUSED,
@@ -403,7 +456,7 @@ class ProofIO:
             raise ProofError(
                 Outcome.SURVIVAL, f"legs not working in drain (no rows for {basket})"
             )
-        if is_terminal_status(row.status):
+        if not is_working_status(row.status):
             raise ProofError(
                 Outcome.SURVIVAL,
                 f"legs not working in drain (status={row.status!r})",
@@ -730,7 +783,7 @@ def _drain_basket_working(session, basket: str) -> bool:
     if row is None:
         print(f"drain: basket {basket} not present (no rows)")
         return False
-    return not is_terminal_status(row.status)
+    return is_working_status(row.status)
 
 
 def _drain_basket_terminal(session, basket: str) -> bool:
