@@ -357,6 +357,21 @@ def fields_to_order_book_deltas(
     return OrderBookDeltas(instrument_id=instrument_id, deltas=deltas)
 
 
+def _is_duplicate_subscribe_error(exc: BaseException) -> bool:
+    """True for venue ``[8] already exists`` (intent survived ticker reset)."""
+    msg = str(exc).lower()
+    return "[8]" in msg and "already exists" in msg
+
+
+async def _subscribe_replay(call: Any, *args: Any) -> None:
+    try:
+        await asyncio.to_thread(call, *args)
+    except Exception as exc:
+        if _is_duplicate_subscribe_error(exc):
+            return
+        raise
+
+
 async def replay_subscription_intent(
     session: WireSession,
     subscriptions: set[tuple[str, str]],
@@ -365,17 +380,16 @@ async def replay_subscription_intent(
 ) -> None:
     """Replay ticker + book + EXTERNAL bar intent on an already-connected wire.
 
-    Idempotent re-subscribe (the venue treats a duplicate subscribe as a
-    refresh, not an error). Every path that re-establishes the wire must go
-    through this single boundary so the client can never reconnect with live
-    plants but zero subscriptions.
+    Every path that re-establishes the wire must go through this single
+    boundary so the client can never reconnect with live plants but zero
+    subscriptions.
     """
     for symbol, exchange in subscriptions:
-        await asyncio.to_thread(session.subscribe, symbol, exchange)
+        await _subscribe_replay(session.subscribe, symbol, exchange)
     for symbol, exchange in book_subscriptions:
-        await asyncio.to_thread(session.subscribe_order_book_summary, symbol, exchange)
+        await _subscribe_replay(session.subscribe_order_book_summary, symbol, exchange)
     for symbol, exchange, rtype, period in bar_subscriptions or ():
-        await asyncio.to_thread(
+        await _subscribe_replay(
             session.subscribe_time_bars, symbol, exchange, rtype, period
         )
 

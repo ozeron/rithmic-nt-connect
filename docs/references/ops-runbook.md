@@ -33,6 +33,46 @@ fingerprint: the data factory, exec factory, and `connect_market_data_session`
 all share one login, and the credential flock is released when the **last**
 holder disconnects (so a stopped node no longer blocks a separate process).
 
+### LucidTrading override (explicit operator act)
+
+Use only for proofs that still need LucidTrading (or market-hours
+rollover) — not for ticker resync. Resync is already proven on Rithmic
+Test (`tests/e2e/test_reconnect_live.py`, 2026-08-24). Remaining
+Lucid-preferred cases: TC-D40 15m/1h/1d first-payload (Test 1m PASSED;
+slower periods often skip within 65s), and optional TC-D54 re-eval.
+
+```bash
+# Refused without the flag; a flag inside the dotenv file is ignored.
+RITHMIC_TEST_DOTENV=/secure/local/lucid.env RITHMIC_ALLOW_LUCID_E2E=1 \
+uv run pytest tests/e2e/test_data_client_live.py -k tc_d40 -v
+```
+
+The adapter prints a loud WARNING to stderr when the override is active.
+Set it only with MotiveWave / R|Trader closed — same one-login system.
+Unknown system names stay refused. Venue gaps: skipped-spec below.
+
+## Skipped-spec register
+
+Known test skips that are venue/environment facts, not adapter bugs. Each
+entry names what would unblock it. Phase 7 deliverable (gap-closure plan P3).
+
+| Skip | Reason | Unblock |
+| --- | --- | --- |
+| TC-D10 L2 book | LucidTrading denies book permission (`[13] permission denied`) | FCM/account with book entitlement |
+| TC-D31/D41/D42 history empty | LucidTrading history plant transiently returns empty windows | Retry at market hours; no code change |
+| TC-D40 15m/1h/1d on Rithmic Test | `D40[1m]` PASSED 2026-08-24; slower periods SKIPPED (no first payload in 65s — likely need rollover or Lucid) | LucidTrading via `RITHMIC_ALLOW_LUCID_E2E=1`, or longer poll / roll-boundary runs |
+| TC-D54 full-node bar parity | Dropped: under some Test off-hours states ticker can go quiet while bars still run — INTERNAL==EXTERNAL parity not a reliable Test host | Re-evaluate at market hours; or Lucid |
+| P1 exec e2e self-skip | Tests still self-skip on venue signature `COMPLETE` + `No such route exists.` (historical 2026-08-22 routing outage). Routing healthy again 2026-08-24 (E88/E89 PASSED). | Keep skip for future regressions; no action when routing is healthy |
+| A4 client-order-id validation | OQ1: Rithmic `user_tag` length/format constraint unsourced | Vendor answer from Rithmic support |
+
+Closed (kept for archaeology — do not re-open without new venue evidence):
+
+| Closed | When | Note |
+| --- | --- | --- |
+| TC-D40 all-periods silent on Test | 2026-08-24 | Superseded: 1m streams; row above covers slower periods |
+| P0.2 resync blocked on silent ticker | 2026-08-24 | `test_reconnect_live.py` PASSED; `[8] already exists` tolerated in `replay_subscription_intent` |
+| P1 E88/E89 blocked on Test routing | 2026-08-24 | Drain + MY043 canary PASSED on Test |
+
 ## Building a self-contained wheel
 
 The wheel carries the adapter, the `rithmic_gateway` pure-Python client, **and** the

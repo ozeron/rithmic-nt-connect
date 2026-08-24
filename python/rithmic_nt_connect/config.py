@@ -8,6 +8,7 @@ production R|Protocol URL. Passwords are never included in ``repr`` or error tex
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -189,9 +190,20 @@ def explicit_test_env(environ: Mapping[str, str] | None = None) -> dict[str, str
         # A gateway test env must name its endpoint; a direct env never uses one.
         raise ConfigError("explicit test env file is missing RITHMIC_GATEWAY")
     kind = system_kind(values["RITHMIC_SYSTEM_NAME"])
-    if kind == "production":
+    # Lucid/production only if RITHMIC_ALLOW_LUCID_E2E=1 is in process env.
+    allow_production = kind == "production" and env_truthy(
+        _env_first(source_env, "RITHMIC_ALLOW_LUCID_E2E")
+    )
+    if allow_production:
+        print(
+            f"WARNING: RITHMIC_ALLOW_LUCID_E2E=1 — running live tests against "
+            f"production system {values['RITHMIC_SYSTEM_NAME']!r}; close "
+            f"MotiveWave / R|Trader or the credential login will conflict",
+            file=sys.stderr,
+        )
+    elif kind == "production":
         raise ConfigError("explicit test env resolves to a production Rithmic system")
-    if kind != "test":
+    elif kind != "test":
         raise ConfigError("explicit test env system is not recognized as test/demo")
     trading = _env_first(source_env, "RITHMIC_ENABLE_TRADING")
     if trading is not None:
