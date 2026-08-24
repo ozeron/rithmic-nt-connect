@@ -1,8 +1,8 @@
-"""Unit pins for spike_bracket_order's drain-row / event classification.
+"""Unit pins for spike_bracket_order proof harness.
 
-The review High that motivated this file: substring matching classified a
-``cancel rejected`` drain row as closed, so cleanup reported success while
-the bracket was still live at the venue.
+Fail-closed policy: missing / weak evidence is never success. Drain terminal
+proof requires an explicit status in the closed terminal set (not substring
+matching on venue text — ``cancel rejected`` must stay non-terminal).
 """
 
 from __future__ import annotations
@@ -10,6 +10,8 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
+
+import pytest
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "spike_bracket_order.py"
 _spec = importlib.util.spec_from_file_location("spike_bracket_order", _SCRIPT)
@@ -85,67 +87,83 @@ def test_other_baskets_ignored() -> None:
 
 
 def test_event_rejection_detection() -> None:
-    assert spike._event_is_rejection({"status": "", "text": "order rejected"}) is True
-    assert (
-        spike._event_is_rejection({"status": "Open", "text": "working order"}) is False
-    )
+    assert spike.is_rejection({"status": "", "text": "order rejected"}) is True
+    assert spike.is_rejection({"status": "Open", "text": "working order"}) is False
 
 
 def test_event_is_bracket_path() -> None:
     assert (
-        spike._event_is_bracket_path(
+        spike.is_bracket_path(
             {"notify_type_name": "MODIFY_RCVD_FROM_CLNT", "status": ""}
         )
         is True
     )
     assert (
-        spike._event_is_bracket_path({"notify_type_name": "OPEN", "status": "open"})
-        is False
+        spike.is_bracket_path({"notify_type_name": "OPEN", "status": "open"}) is False
     )
     assert (
-        spike._event_is_bracket_path(
-            {"notify_type_name": "", "status": "Modification Failed"}
-        )
+        spike.is_bracket_path({"notify_type_name": "", "status": "Modification Failed"})
         is True
     )
 
 
-def test_derive_far_limit() -> None:
-    # bid=101 ask=102 tick=0.25 far=20 → BUY=96.0 SELL=107.0
-    assert spike._derive_far_limit("Buy", 101.0, 102.0, 0.25, 20) == 96.0
-    assert spike._derive_far_limit("Sell", 101.0, 102.0, 0.25, 20) == 107.0
+def test_far_limit_derive() -> None:
+    bbo = spike.SizedBbo(bid=101.0, ask=102.0)
+    far = spike.FarLimit.derive("Buy", bbo, tick=0.25, far_ticks=20)
+    assert far.price == 96.0
+    assert far.source == "derived"
+    far_s = spike.FarLimit.derive("Sell", bbo, tick=0.25, far_ticks=20)
+    assert far_s.price == 107.0
 
 
-def test_limit_is_far_enough() -> None:
-    bid, ask, tick, n = 101.0, 102.0, 0.25, 20
-    assert spike._limit_is_far_enough("Buy", 96.0, bid, ask, tick, n) is True
-    assert spike._limit_is_far_enough("Buy", 96.25, bid, ask, tick, n) is False
-    assert spike._limit_is_far_enough("Sell", 107.0, bid, ask, tick, n) is True
-    assert spike._limit_is_far_enough("Sell", 106.75, bid, ask, tick, n) is False
+def test_far_limit_override_refuses_not_far() -> None:
+    bbo = spike.SizedBbo(bid=101.0, ask=102.0)
+    with pytest.raises(spike.ProofError) as ei:
+        spike.FarLimit.override("Buy", 96.25, bbo, tick=0.25, far_ticks=20)
+    assert ei.value.outcome is spike.Outcome.REFUSED
 
 
-def test_limit_not_marketable_defense() -> None:
-    assert spike._limit_not_marketable("Buy", 100.0, bid=101.0, ask=102.0) is True
-    assert spike._limit_not_marketable("Buy", 102.0, bid=101.0, ask=102.0) is False
-    assert spike._limit_not_marketable("Sell", 103.0, bid=101.0, ask=102.0) is True
-    assert spike._limit_not_marketable("Sell", 101.0, bid=101.0, ask=102.0) is False
+def test_derived_far_limit_is_not_marketable() -> None:
+    bbo = spike.SizedBbo(bid=101.0, ask=102.0)
+    buy = spike.FarLimit.derive("Buy", bbo, tick=0.25, far_ticks=20)
+    sell = spike.FarLimit.derive("Sell", bbo, tick=0.25, far_ticks=20)
+    assert spike.FarLimit._not_marketable(buy.side, buy.price, buy.bid, buy.ask)
+    assert spike.FarLimit._not_marketable(sell.side, sell.price, sell.bid, sell.ask)
+    assert spike.FarLimit._not_marketable("Buy", 102.0, 101.0, 102.0) is False
+
+
+def test_sized_bbo_from_event_requires_size() -> None:
+    assert (
+        spike.SizedBbo.from_event(
+            {
+                "type": "bbo",
+                "bid_price": 101.0,
+                "ask_price": 102.0,
+                "bid_size": 0,
+                "ask_size": 5,
+            }
+        )
+        is None
+    )
+    assert spike.SizedBbo.from_event(
+        {
+            "type": "bbo",
+            "bid_price": 101.0,
+            "ask_price": 102.0,
+            "bid_size": 2,
+            "ask_size": 4,
+        }
+    ) == spike.SizedBbo(bid=101.0, ask=102.0)
 
 
 def test_resolve_tick_size() -> None:
-    assert spike._resolve_tick_size("NQ", tick_size=None, front_raw=None) == 0.25
-    assert spike._resolve_tick_size("CL", tick_size=None, front_raw=None) is None
-    assert spike._resolve_tick_size("CL", tick_size=0.01, front_raw=None) == 0.01
+    assert spike.resolve_tick_size("NQ", tick_size=None, front_raw=None) == 0.25
+    assert spike.resolve_tick_size("CL", tick_size=None, front_raw=None) is None
+    assert spike.resolve_tick_size("CL", tick_size=0.01, front_raw=None) == 0.01
     assert (
-        spike._resolve_tick_size("CL", tick_size=None, front_raw={"tick_size": 0.01})
+        spike.resolve_tick_size("CL", tick_size=None, front_raw={"tick_size": 0.01})
         == 0.01
     )
-
-
-def test_size_ok() -> None:
-    assert spike._size_ok(1) is True
-    assert spike._size_ok(0) is False
-    assert spike._size_ok(None) is False
-    assert spike._size_ok("x") is False
 
 
 def test_wait_bbo_requires_size() -> None:
@@ -190,3 +208,10 @@ def test_wait_bbo_requires_size() -> None:
             return ev
 
     assert spike._wait_bbo(_Sess(), "NQU6", "CME", seconds=1.0) == (101.0, 102.0)
+
+
+def test_cleaned_requires_terminal_via_proof_io() -> None:
+    io = spike.ProofIO(_DrainSession([]), seconds=0.0, localid="")
+    with pytest.raises(spike.ProofError) as ei:
+        io.require_terminal("B1")
+    assert ei.value.outcome is spike.Outcome.CLEANUP
