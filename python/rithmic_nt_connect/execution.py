@@ -60,10 +60,12 @@ from nautilus_trader.model.objects import (
 from nautilus_trader.model.orders import Order
 
 from rithmic_nt_connect._convert import (
+    ConvertError,
     account_pnl_to_fields,
     format_price_str,
     instrument_pnl_to_fields,
     rithmic_route_from_info,
+    symbol_and_exchange_from_instrument_id,
 )
 from rithmic_nt_connect._order_plant import OrderPlantPolicy, OrderPlantState
 from rithmic_nt_connect._orders import (
@@ -2412,11 +2414,17 @@ class RithmicExecutionClient(LiveExecutionClient):
         want = str(instrument_id)
         if event_inst == want:
             return True
-        root = want.split(".")[0]
-        ev_root = event_inst.split(".")[0]
-        return bool(
-            root and ev_root and (ev_root.startswith(root) or root.startswith(ev_root))
-        )
+        # Exact symbol; bare vs exchange-encoded same-symbol still matches.
+        try:
+            want_sym, want_exch = symbol_and_exchange_from_instrument_id(want)
+            ev_sym, ev_exch = symbol_and_exchange_from_instrument_id(event_inst)
+        except ConvertError:
+            return False
+        if want_sym != ev_sym:
+            return False
+        if want_exch is None or ev_exch is None:
+            return True
+        return want_exch == ev_exch
 
     def _order_type_from_event(self, fields: dict[str, Any]) -> OrderType:
         return order_type_from_fields(fields)

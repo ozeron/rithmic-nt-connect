@@ -455,17 +455,16 @@ class SessionConfig:
                         env_value = "Demo"
                     else:
                         env_value = "Test"
-                    has_explicit_url = _env_first(
-                        env, *source.url_keys
-                    ) is not None or (
-                        bool(source.legacy_url_keys)
-                        and _env_first(env, *source.legacy_url_keys) is not None
+                    # Only keys that can set url for this source waive the guard.
+                    has_explicit_url = any(
+                        _env_first(env, k) is not None
+                        for k in (*source.url_keys, *source.legacy_url_keys)
                     )
                     if not has_explicit_url and url == DEFAULT_GATEWAY_URL:
-                        # Production default is mixing for Test/Demo; require explicit gateway.  # noqa: E501
+                        # Silent production default mixes Test/Demo.
                         if source.url_default is None:
                             raise ConfigError(
-                                "missing RITHMIC_GATEWAY for Test/Demo environment; set RITHMIC_GATEWAY"  # noqa: E501
+                                f"missing {' / '.join(source.url_keys)} for Test/Demo environment; set RITHMIC_GATEWAY"  # noqa: E501
                             )
                         url = source.url_default
                 elif kind == "production":

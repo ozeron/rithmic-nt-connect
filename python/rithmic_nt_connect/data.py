@@ -877,13 +877,6 @@ class RithmicDataClient(LiveMarketDataClient):
                     del self._ticker_intents[key]
                 raise
 
-    async def _subscribe_symbol(self, instrument_id: Any) -> None:
-        symbol, exchange = self._route(instrument_id)
-        key = (symbol, exchange)
-        if key not in self._subscriptions:
-            await asyncio.to_thread(self._session.subscribe, symbol, exchange)
-            self._subscriptions.add(key)
-
     async def _unsubscribe_trade_ticks(self, command: UnsubscribeTradeTicks) -> None:
         await self._remove_ticker_intent(command.instrument_id, "trade")
 

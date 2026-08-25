@@ -35,6 +35,12 @@ def _ts_ns(d: Mapping[str, Any]) -> int | None:
     return int(ssboe) * 1_000_000_000 + usecs_i * 1_000
 
 
+def _require_safe_id_part(value: str, label: str) -> str:
+    if "-" in value or "." in value:
+        raise ConvertError(f"{label} must not contain '-' or '.': {value!r}")
+    return value
+
+
 def instrument_id_from_symbol(symbol: str, exchange: str | None = None) -> str:
     """Build a Nautilus-style instrument id string.
 
@@ -42,11 +48,43 @@ def instrument_id_from_symbol(symbol: str, exchange: str | None = None) -> str:
     instruments distinct (e.g. NQU6.CME vs NQU6.CBOT). Venue remains ``RITHMIC``.
     Format: ``{symbol}-{exchange}.RITHMIC`` when exchange is present, else
     ``{symbol}.RITHMIC``.
+
+    The hyphen is the exchange encoding separator; ``symbol`` and ``exchange``
+    must not contain ``-`` or ``.``.
     """
+    sym = _require_safe_id_part(str(symbol).strip(), "symbol")
+    if not sym:
+        raise ConvertError("symbol must be non-empty")
     if exchange is not None and str(exchange).strip():
-        exch = str(exchange).strip()
-        return f"{symbol}-{exch}.{VENUE}"
-    return f"{symbol}.{VENUE}"
+        exch = _require_safe_id_part(str(exchange).strip().upper(), "exchange")
+        return f"{sym}-{exch}.{VENUE}"
+    return f"{sym}.{VENUE}"
+
+
+def symbol_and_exchange_from_instrument_id(
+    instrument_id: str,
+) -> tuple[str, str | None]:
+    """Reverse of ``instrument_id_from_symbol``.
+
+    Returns ``(symbol, exchange)`` where ``exchange`` is ``None`` when the
+    instrument id has no encoded exchange.
+    """
+    raw = str(instrument_id).strip()
+    venue_suffix = f".{VENUE}"
+    if not raw.endswith(venue_suffix):
+        raise ConvertError(f"instrument_id must end with {venue_suffix!r}: {raw!r}")
+    sym_exch = raw[: -len(venue_suffix)]
+    if not sym_exch:
+        raise ConvertError(f"instrument_id symbol component is empty: {raw!r}")
+    if "-" in sym_exch:
+        sym, exch = sym_exch.split("-", 1)
+        if not sym or not exch:
+            raise ConvertError(f"invalid instrument_id hyphen encoding: {raw!r}")
+        # sym cannot contain '-' after split("-", 1); still reject '.'.
+        if "." in sym:
+            raise ConvertError(f"symbol must not contain '-' or '.': {sym!r}")
+        return sym, _require_safe_id_part(exch.upper(), "exchange")
+    return _require_safe_id_part(sym_exch, "symbol"), None
 
 
 def format_price_str(value: float | Decimal | str) -> str:
