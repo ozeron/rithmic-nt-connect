@@ -7,8 +7,10 @@ from rithmic_nt_connect._convert import (
     ConvertError,
     account_pnl_to_fields,
     bbo_to_fields,
+    instrument_id_from_symbol,
     last_trade_to_fields,
     order_book_to_fields,
+    symbol_and_exchange_from_instrument_id,
 )
 from rithmic_nt_connect.constants import VENUE
 
@@ -183,3 +185,26 @@ def test_order_book_empty_levels_raises() -> None:
     assert fields["type"] == "order_book"
     assert fields["levels"] == []
     assert fields["instrument_id"] == f"NQU6.{VENUE}"
+
+
+def test_instrument_id_round_trip_with_exchange() -> None:
+    encoded = instrument_id_from_symbol("NQU6", "cme")
+    assert encoded == f"NQU6-CME.{VENUE}"
+    assert symbol_and_exchange_from_instrument_id(encoded) == ("NQU6", "CME")
+
+
+def test_instrument_id_round_trip_without_exchange() -> None:
+    encoded = instrument_id_from_symbol("NQU6")
+    assert encoded == f"NQU6.{VENUE}"
+    assert symbol_and_exchange_from_instrument_id(encoded) == ("NQU6", None)
+
+
+def test_instrument_id_rejects_hyphen_or_dot_in_parts() -> None:
+    with pytest.raises(ConvertError, match="symbol"):
+        instrument_id_from_symbol("NQ-U6", "CME")
+    with pytest.raises(ConvertError, match="exchange"):
+        instrument_id_from_symbol("NQU6", "CM.E")
+    with pytest.raises(ConvertError, match=r"hyphen|empty|symbol|exchange"):
+        symbol_and_exchange_from_instrument_id(f"NQU6-.{VENUE}")
+    with pytest.raises(ConvertError, match="symbol"):
+        symbol_and_exchange_from_instrument_id(f"NQ.U6.{VENUE}")

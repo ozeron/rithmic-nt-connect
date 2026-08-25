@@ -52,6 +52,46 @@ def test_my046_defaults_system_and_gateway() -> None:
     assert cfg.app_name == DEFAULT_APP_NAME == "rithmic-nt-connect"
 
 
+def test_my046_test_system_requires_explicit_gateway() -> None:
+    with pytest.raises(ConfigError, match="Test/Demo"):
+        SessionConfig.from_env(
+            {
+                "RITHMIC_USER": "alice",
+                "RITHMIC_PASSWORD": "pw",
+                "RITHMIC_SYSTEM": "Rithmic Test",
+                "RITHMIC_CONNECT_MODE": "direct",
+            }
+        )
+
+
+def test_my046_test_system_leftover_test_url_does_not_waive_gateway() -> None:
+    """RITHMIC_TEST_URL is not a MY046 url key; must not skip the anti-mix raise."""
+    with pytest.raises(ConfigError, match="Test/Demo"):
+        SessionConfig.from_env(
+            {
+                "RITHMIC_USER": "alice",
+                "RITHMIC_PASSWORD": "pw",
+                "RITHMIC_SYSTEM": "Rithmic Test",
+                "RITHMIC_TEST_URL": "wss://test.example:443",
+                "RITHMIC_CONNECT_MODE": "direct",
+            }
+        )
+
+
+def test_my046_test_system_with_explicit_gateway() -> None:
+    cfg = SessionConfig.from_env(
+        {
+            "RITHMIC_USER": "alice",
+            "RITHMIC_PASSWORD": "pw",
+            "RITHMIC_SYSTEM": "Rithmic Test",
+            "RITHMIC_GATEWAY": "wss://test.example:443",
+            "RITHMIC_CONNECT_MODE": "direct",
+        }
+    )
+    assert cfg.env == "Test"
+    assert cfg.url == "wss://test.example:443"
+
+
 def test_live_rs_style_env() -> None:
     cfg = SessionConfig.from_env(
         {

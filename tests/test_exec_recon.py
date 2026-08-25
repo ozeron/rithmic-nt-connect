@@ -2063,3 +2063,19 @@ def test_closed_order_contradictions_remain_visible() -> None:
         )
     assert any("could not be built" in m for m in log.messages)
     assert not any("benign bare COMPLETE" in m for m in log.debugs)
+
+
+# --------------------------------------------------------------------------- #
+# _matches_instrument
+# --------------------------------------------------------------------------- #
+
+
+def test_matches_instrument_exact_and_legacy_bare() -> None:
+    client = _client()
+    match = MethodType(RithmicExecutionClient._matches_instrument, client)
+    assert match({"instrument_id": "NQU6-CME.RITHMIC"}, "NQU6-CME.RITHMIC", None)
+    assert match({"instrument_id": "NQU6-CME.RITHMIC"}, "NQU6.RITHMIC", None)
+    assert match({"instrument_id": "NQU6.RITHMIC"}, "NQU6-CME.RITHMIC", None)
+    assert not match({"instrument_id": "NQU6-CME.RITHMIC"}, "NQ-CME.RITHMIC", None)
+    assert not match({"instrument_id": "NQU6-CME.RITHMIC"}, "NQU6-CBOT.RITHMIC", None)
+    assert not match({"instrument_id": "ESH6-CME.RITHMIC"}, "ES-CME.RITHMIC", None)
