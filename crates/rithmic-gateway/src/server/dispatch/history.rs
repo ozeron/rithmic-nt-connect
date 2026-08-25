@@ -4,6 +4,11 @@
 //! While continuous MD intents (ticker / book / live time bars) are live,
 //! `Load*` / probe RPCs are refused so the event pump is not starved
 //! (2026-08-25 MY043 incident RC2.3 — live XOR heavy ingest).
+//!
+//! Admission is synchronized with live MD subscribe via
+//! [`GatewayState::md_history_gate`]: the refuse check, session-lock
+//! acquisition, and the load itself all run under that gate so a concurrent
+//! subscribe cannot sneak live intent in between check and lock.
 
 use rithmic_plants::history::parse_time_bar_type;
 
@@ -18,15 +23,12 @@ pub(crate) const HISTORY_DENIED_LIVE_MD: &str = "history_denied_live_md";
 const HISTORY_DENIED_LIVE_MD_MSG: &str = "history Load* refused while live ticker/book/time-bar \
 intents are active; use a separate gateway or stop live MD (live XOR heavy ingest)";
 
-async fn refuse_if_live_md(state: &GatewayState, request_id: u64) -> Option<Frame> {
-    if state.reconnect.has_live_md_intents().await {
-        return Some(error_frame(
-            request_id,
-            HISTORY_DENIED_LIVE_MD,
-            HISTORY_DENIED_LIVE_MD_MSG,
-        ));
-    }
-    None
+fn live_md_denied_frame(request_id: u64) -> Frame {
+    error_frame(
+        request_id,
+        HISTORY_DENIED_LIVE_MD,
+        HISTORY_DENIED_LIVE_MD_MSG,
+    )
 }
 
 pub(super) async fn load_ticks(
@@ -34,8 +36,9 @@ pub(super) async fn load_ticks(
     request_id: u64,
     req: pb::LoadTicksRequest,
 ) -> Frame {
-    if let Some(denied) = refuse_if_live_md(state, request_id).await {
-        return denied;
+    let _md_gate = state.md_history_gate.lock().await;
+    if state.reconnect.has_live_md_intents().await {
+        return live_md_denied_frame(request_id);
     }
     let Some(session) = &state.session else {
         return no_session_frame(request_id);
@@ -101,8 +104,9 @@ pub(super) async fn probe_time_bars(
 }
 
 async fn run_time_bar_op(state: &GatewayState, request_id: u64, op: TimeBarOp) -> Frame {
-    if let Some(denied) = refuse_if_live_md(state, request_id).await {
-        return denied;
+    let _md_gate = state.md_history_gate.lock().await;
+    if state.reconnect.has_live_md_intents().await {
+        return live_md_denied_frame(request_id);
     }
     let Some(session) = &state.session else {
         return no_session_frame(request_id);

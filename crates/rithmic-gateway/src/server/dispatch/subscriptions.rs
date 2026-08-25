@@ -234,6 +234,10 @@ pub(super) async fn subscribe_topic(
     if intent.client_has(client) {
         return ack_frame(request_id);
     }
+    // Hold md_history_gate across note + venue join so history cannot pass
+    // its live-MD check then acquire session while we are creating intent
+    // (RC2.3 race). Lock order: md_history_gate → topic_lock → session.
+    let _md_gate = state.md_history_gate.lock().await;
     let lock = topic_lock(state, &key).await;
     let _guard = lock.lock().await;
     let had_forwarder = attach_shared_topic(state, client, &key).await;
@@ -270,6 +274,9 @@ pub(super) async fn unsubscribe_topic(
     if !intent.client_has(client) {
         return ack_frame(request_id);
     }
+    // Same gate as subscribe/history so a failed leave re-note cannot race
+    // a history admission check (RC2.3).
+    let _md_gate = state.md_history_gate.lock().await;
     // Hold topic_lock across forget + venue teardown so a concurrent
     // first-peer Subscribe cannot have its venue join undone.
     let lock = topic_lock(state, &key).await;

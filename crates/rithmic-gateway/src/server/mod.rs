@@ -58,6 +58,11 @@ pub struct GatewayState {
     /// Kept separate from the session lock so the drain can run without
     /// blocking the event pump.
     pub recon_lock: Arc<TokioMutex<()>>,
+    /// Serializes history admission vs live MD intent creation (ticker /
+    /// book / time bars). Held from history refuse-check through session-lock
+    /// acquisition (and for the whole Load*), and across MD subscribe note +
+    /// venue join, so history cannot race a concurrent subscribe (RC2.3).
+    pub md_history_gate: Arc<TokioMutex<()>>,
     /// Ready peer count + optional idle-exit after last client.
     pub idle: IdleExit,
 }

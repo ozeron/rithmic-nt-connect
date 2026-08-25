@@ -254,6 +254,7 @@ pub(super) fn test_state(gates: ParentGates, hub: SharedFanout) -> GatewayState 
         reconnect: Arc::new(ReconnectController::new(hub)),
         topic_locks: TokioMutex::new(HashMap::new()),
         recon_lock: Arc::new(TokioMutex::new(())),
+        md_history_gate: Arc::new(TokioMutex::new(())),
         idle: IdleExit::new(IdleExitPolicy::Never),
     }
 }

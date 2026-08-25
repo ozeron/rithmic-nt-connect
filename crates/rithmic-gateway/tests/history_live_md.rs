@@ -1,4 +1,8 @@
 //! RC2.3: history Load* refused while live ticker intents are active.
+//!
+//! Admission shares ``md_history_gate`` with MD subscribe (note + venue join)
+//! so a concurrent subscribe cannot race between the refuse check and
+//! session-lock acquisition.
 
 use rithmic_gateway::pb::frame::Body;
 use rithmic_gateway::pb::{LoadTicksRequest, LoadTimeBarsRequest, ProbeTimeBarsRequest};
