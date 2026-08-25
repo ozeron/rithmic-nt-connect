@@ -91,6 +91,7 @@ from rithmic_nt_connect.errors import (
     CHANNEL_ERRORS,
     ReconciliationUnavailableError,
     VenueQueryUnavailable,
+    is_reconnectable_poll_error,
 )
 from rithmic_nt_connect.providers import RithmicInstrumentProvider
 from rithmic_nt_connect.session import WireSession
@@ -934,6 +935,8 @@ class RithmicExecutionClient(LiveExecutionClient):
         except CHANNEL_ERRORS:
             raise
         except Exception as exc:
+            if is_reconnectable_poll_error(exc):
+                raise
             self._log.warning(f"poll transient error: {exc}")
             raise _PollTransientError(str(exc)) from exc
 

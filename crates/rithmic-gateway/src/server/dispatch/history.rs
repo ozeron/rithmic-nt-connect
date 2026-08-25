@@ -1,18 +1,42 @@
 //! History loads: ticks, time-bar windows (plant slices internally), and
 //! time-bar probes. All take the session lock for the duration of the load.
+//!
+//! While continuous MD intents (ticker / book / live time bars) are live,
+//! `Load*` / probe RPCs are refused so the event pump is not starved
+//! (2026-08-25 MY043 incident RC2.3 — live XOR heavy ingest).
 
 use rithmic_plants::history::parse_time_bar_type;
 
 use crate::convert::{history_bar_to_pb, history_tick_to_pb, time_bar_probe_row_to_pb};
 use crate::pb::{self, frame::Body, Frame};
 
-use super::{err_to_frame, no_session_frame, GatewayState};
+use super::{err_to_frame, error_frame, no_session_frame, GatewayState};
+
+/// Error code returned to lake / qgw when history would mute live MD.
+pub(crate) const HISTORY_DENIED_LIVE_MD: &str = "history_denied_live_md";
+
+const HISTORY_DENIED_LIVE_MD_MSG: &str = "history Load* refused while live ticker/book/time-bar \
+intents are active; use a separate gateway or stop live MD (live XOR heavy ingest)";
+
+async fn refuse_if_live_md(state: &GatewayState, request_id: u64) -> Option<Frame> {
+    if state.reconnect.has_live_md_intents().await {
+        return Some(error_frame(
+            request_id,
+            HISTORY_DENIED_LIVE_MD,
+            HISTORY_DENIED_LIVE_MD_MSG,
+        ));
+    }
+    None
+}
 
 pub(super) async fn load_ticks(
     state: &GatewayState,
     request_id: u64,
     req: pb::LoadTicksRequest,
 ) -> Frame {
+    if let Some(denied) = refuse_if_live_md(state, request_id).await {
+        return denied;
+    }
     let Some(session) = &state.session else {
         return no_session_frame(request_id);
     };
@@ -77,6 +101,9 @@ pub(super) async fn probe_time_bars(
 }
 
 async fn run_time_bar_op(state: &GatewayState, request_id: u64, op: TimeBarOp) -> Frame {
+    if let Some(denied) = refuse_if_live_md(state, request_id).await {
+        return denied;
+    }
     let Some(session) = &state.session else {
         return no_session_frame(request_id);
     };

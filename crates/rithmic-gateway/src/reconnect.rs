@@ -155,6 +155,13 @@ impl IntentStore {
             + usize::from(self.order > 0)
             + usize::from(self.brackets > 0)
     }
+
+    /// Continuous MD joins that need the event pump (ticker / book / time bars).
+    /// History `Load*` must not run while any of these are live — the session
+    /// mutex would starve the pump (2026-08-25 MY043 RC2.3).
+    pub fn has_live_md_intents(&self) -> bool {
+        !self.ticker.is_empty() || !self.book.is_empty() || !self.time_bars.is_empty()
+    }
 }
 
 /// Reconnect controller — typed intent + hub fan-out bookkeeping.
@@ -246,6 +253,11 @@ impl ReconnectController {
         self.intent.lock().await.remembered_count()
     }
 
+    /// True when ticker, book, or live time-bar intents are present.
+    pub async fn has_live_md_intents(&self) -> bool {
+        self.intent.lock().await.has_live_md_intents()
+    }
+
     /// Test/helper: hub + ticker intent in one call (0→1 hub when first).
     pub async fn on_subscribe(&self, key: SubKey) -> bool {
         let first_ticker = self.note_ticker(key.clone()).await;
@@ -328,5 +340,36 @@ mod tests {
         assert!(!ctl.forget_ticker(&key).await);
         assert!(ctl.forget_ticker(&key).await);
         assert!(ctl.restore_plan().await.ticker.is_empty());
+    }
+
+    #[tokio::test]
+    async fn has_live_md_intents_tracks_ticker_book_time_bars_not_pnl() {
+        let hub = Arc::new(FanoutHub::new(16));
+        let ctl = ReconnectController::new(hub);
+        assert!(!ctl.has_live_md_intents().await);
+        ctl.note_pnl().await;
+        assert!(
+            !ctl.has_live_md_intents().await,
+            "pnl alone is not continuous MD for history refuse"
+        );
+        let key = SubKey {
+            symbol: "MNQ".into(),
+            exchange: "CME".into(),
+        };
+        ctl.note_ticker(key.clone()).await;
+        assert!(ctl.has_live_md_intents().await);
+        ctl.forget_ticker(&key).await;
+        assert!(!ctl.has_live_md_intents().await);
+        ctl.note_book(key.clone()).await;
+        assert!(ctl.has_live_md_intents().await);
+        ctl.forget_book(&key).await;
+        ctl.note_time_bar(TimeBarIntent {
+            symbol: "MNQ".into(),
+            exchange: "CME".into(),
+            bar_type: 2,
+            period: 1,
+        })
+        .await;
+        assert!(ctl.has_live_md_intents().await);
     }
 }

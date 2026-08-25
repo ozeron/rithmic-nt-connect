@@ -26,7 +26,9 @@ use crate::subscriptions::{ClientId, FanoutHub, ParentGates, SharedFanout, SubKe
 mod dispatch;
 pub mod pump;
 use dispatch::TopicIntent;
-pub use dispatch::{gate_rpc_for_test, rpc_sequence_with_gates};
+pub use dispatch::{
+    gate_rpc_for_test, history_rpc_with_live_ticker_intent_for_test, rpc_sequence_with_gates,
+};
 
 /// Shared gateway runtime state, held for the process lifetime.
 pub struct GatewayState {

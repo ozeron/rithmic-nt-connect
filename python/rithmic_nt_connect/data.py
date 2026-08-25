@@ -52,22 +52,14 @@ from rithmic_nt_connect._convert import (
 )
 from rithmic_nt_connect.config import RithmicDataClientConfig
 from rithmic_nt_connect.constants import ADAPTER_NAME, VENUE
-from rithmic_nt_connect.errors import CHANNEL_ERRORS
+from rithmic_nt_connect.errors import is_reconnectable_poll_error
 from rithmic_nt_connect.providers import RithmicInstrumentProvider
 from rithmic_nt_connect.session import WireSession
 
 
 def _reconnectable_poll_error(exc: BaseException) -> bool:
-    if isinstance(exc, CHANNEL_ERRORS):
-        return True
-    text = str(exc).lower()
-    return (
-        "forced logout" in text
-        or "connection closed" in text
-        or "not connected" in text
-        or "channel closed" in text
-        or "channel lagged" in text
-    )
+    """Compat wrapper — prefer ``is_reconnectable_poll_error``."""
+    return is_reconnectable_poll_error(exc)
 
 
 _F_SNAPSHOT = int(RecordFlag.F_SNAPSHOT.value)
