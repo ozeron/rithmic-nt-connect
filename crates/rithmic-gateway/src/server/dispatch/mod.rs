@@ -254,6 +254,7 @@ pub(super) fn test_state(gates: ParentGates, hub: SharedFanout) -> GatewayState 
         reconnect: Arc::new(ReconnectController::new(hub)),
         topic_locks: TokioMutex::new(HashMap::new()),
         recon_lock: Arc::new(TokioMutex::new(())),
+        md_history_gate: Arc::new(TokioMutex::new(())),
         idle: IdleExit::new(IdleExitPolicy::Never),
     }
 }
@@ -279,5 +280,31 @@ pub fn rpc_sequence_with_gates(
         }
         let plan = state.reconnect.restore_plan().await;
         (out, plan)
+    })
+}
+
+/// Note a ticker intent then dispatch a history body (no plant session).
+/// Used to prove Load* is refused while live MD intents are active (RC2.3).
+pub fn history_rpc_with_live_ticker_intent_for_test(body: Body) -> Body {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("current-thread runtime");
+    rt.block_on(async {
+        let hub: SharedFanout = Arc::new(FanoutHub::new(8));
+        let state = test_state(ParentGates::default(), hub);
+        state
+            .reconnect
+            .note_ticker(SubKey {
+                symbol: "MNQU6".into(),
+                exchange: "CME".into(),
+            })
+            .await;
+        let (out_tx, _out_rx) = mpsc::channel::<OutMsg>(8);
+        let mut client = ClientCtx::new(out_tx);
+        dispatch(&state, &mut client, 1, body)
+            .await
+            .body
+            .expect("body")
     })
 }

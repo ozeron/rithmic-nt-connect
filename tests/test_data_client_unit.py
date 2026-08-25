@@ -133,13 +133,23 @@ def test_subscribe_contract_is_callable_on_mock_session():
 
 
 def test_reconnectable_poll_error() -> None:
+    from rithmic_gateway.client import GatewayError
     from rithmic_nt_connect.data import _reconnectable_poll_error
+    from rithmic_nt_connect.errors import is_reconnectable_poll_error
 
     assert _reconnectable_poll_error(
         RuntimeError("rithmic error: forced logout: forced logout from server")
     )
     assert _reconnectable_poll_error(RuntimeError("rithmic error: connection closed"))
     assert not _reconnectable_poll_error(RuntimeError("parse failed"))
+
+    # RC2.1: GatewayError uses underscore code — must not stay transient.
+    gw = GatewayError("not_connected", "call connect() first")
+    assert is_reconnectable_poll_error(gw)
+    assert _reconnectable_poll_error(gw)
+    assert is_reconnectable_poll_error(GatewayError("eof", "gateway closed connection"))
+    assert is_reconnectable_poll_error(GatewayError("shutting_down", "idle-exit"))
+    assert not is_reconnectable_poll_error(GatewayError("protocol", "bad frame"))
 
 
 def test_bar_wire_period_keys_cover_venue_seconds_echo() -> None:

@@ -129,6 +129,23 @@ cargo run -p rithmic-gateway --bin rithmic-gateway
 #
 # Wide history: GatewayClient.load_time_bars_range chunks calendar windows
 # (~4h for 1m bars) so each unix RPC stays within timeout/frame limits.
+#
+# --- Live XOR heavy history ingest (2026-08-25 MY043 / RC2) ---
+# Do NOT run multi-year catalog ingest (or other long LoadTicks/LoadTimeBars)
+# on the same gateway process that serves live ticker/book/time-bar clients.
+# History RPCs hold the plant session mutex for the whole load; the event pump
+# cannot drain ticker while the lock is held → silent live MD, then lag.
+# The gateway refuses Load*/probe with error code `history_denied_live_md`
+# while any ticker/book/time-bar intent is live — lake/qgw must use a
+# separate gateway (or stop live MD) for heavy history.
+#
+# Daemonize a long-lived live parent (agent shells / nohup without a new
+# session die on SIGHUP when the parent Cursor/tool shell exits):
+#   python -c "import os,subprocess; os.environ.setdefault('RITHMIC_GATEWAY_IDLE_EXIT_SEC','-1'); \
+#     subprocess.Popen([os.environ['RITHMIC_GATEWAY_BIN']], start_new_session=True, ...)"
+# Or: setsid / systemd / launchd with RITHMIC_GATEWAY_IDLE_EXIT_SEC=-1.
+# Auto-spawn already uses start_new_session=True but injects IDLE_EXIT_SEC=5
+# unless you set -1 first — prefer an explicit warm parent for live.
 ```
 
 If a second direct/parent process hits the same `user|system|url|env` flock, it fails locally before a second Rithmic login. Default sock/lock paths live under `XDG_RUNTIME_DIR` or a private `$TMPDIR/rgw-$UID/` directory (short names so macOS `sockaddr_un` fits); oversized paths clamp to `/tmp/rgw-$UID/<hash8>.sock` (private dir, not a bare sticky `/tmp` file).

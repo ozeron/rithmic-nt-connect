@@ -47,3 +47,36 @@ CHANNEL_ERRORS: tuple[type[BaseException], ...] = (
     NotConnectedError,
     ChannelError,
 )
+
+# Gateway unix-client codes that mean the parent sock / session is gone or
+# not usable — must take the reconnect/resync path, not "transient" spam.
+_RECONNECTABLE_GATEWAY_CODES = frozenset(
+    {
+        "not_connected",
+        "eof",
+        "shutting_down",
+    }
+)
+
+
+def is_reconnectable_poll_error(exc: BaseException) -> bool:
+    """True when a poll failure should resync / reconnect, not soft-retry.
+
+    ``GatewayError`` uses code ``not_connected`` (underscore). Matching only
+    the spaced phrase ``not connected`` left gateway-mode clients in a
+    half-dead transient loop (2026-08-25 MY043 incident RC2.1).
+    """
+    if isinstance(exc, CHANNEL_ERRORS):
+        return True
+    code = getattr(exc, "code", None)
+    if isinstance(code, str) and code.lower() in _RECONNECTABLE_GATEWAY_CODES:
+        return True
+    text = str(exc).lower()
+    return (
+        "forced logout" in text
+        or "connection closed" in text
+        or "not connected" in text
+        or "not_connected" in text
+        or "channel closed" in text
+        or "channel lagged" in text
+    )
