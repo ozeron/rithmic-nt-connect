@@ -26,7 +26,11 @@ from rithmic_gateway.history_window import (
     bar_slice_secs,
     window_slices,
 )
-from rithmic_gateway.spawn import resolve_gateway_bin, spawn_gateway
+from rithmic_gateway.spawn import (
+    resolve_gateway_bin,
+    spawn_gateway,
+    wait_for_parent_socket,
+)
 
 __all__ = [
     "BAR_TYPE_DAILY",
@@ -42,6 +46,7 @@ __all__ = [
     "resolve_gateway_bin",
     "session_flock_held",
     "spawn_gateway",
+    "wait_for_parent_socket",
     "window_slices",
 ]
 

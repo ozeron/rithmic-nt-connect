@@ -218,13 +218,19 @@ def test_resolve_gateway_bin_missing_mentions_env(
         resolve_gateway_bin()
 
 
-def test_window_slices_1m_four_hour() -> None:
-    assert bar_slice_secs(BAR_TYPE_MINUTE, 1) == 4 * 60 * 60
-    slices = window_slices(0, 12 * 3600, bar_slice_secs(BAR_TYPE_MINUTE, 1))
-    assert len(slices) >= 3
-    assert slices[0] == (0, 4 * 3600)
-    # Adjacent slices share boundary.
-    assert slices[0][1] == slices[1][0]
+def test_window_slices_1m_month_sized() -> None:
+    # Plant *_all paginates past 10k — 40d covers a month task + window padding.
+    step = 40 * 24 * 60 * 60
+    assert bar_slice_secs(BAR_TYPE_MINUTE, 1) == step
+    # One month-ish window is a single client RPC.
+    slices = window_slices(0, 32 * 24 * 3600, step)
+    assert len(slices) == 1
+    assert slices[0] == (0, 32 * 24 * 3600)
+
+
+def test_bar_slice_1m_covers_month_task() -> None:
+    step = bar_slice_secs(BAR_TYPE_MINUTE, 1)
+    assert step >= 32 * 24 * 60 * 60
 
 
 def test_window_slices_daily_single() -> None:
@@ -281,12 +287,13 @@ def test_load_time_bars_range_chunks(monkeypatch: pytest.MonkeyPatch) -> None:
         ]
 
     monkeypatch.setattr(client, "load_time_bars", _fake_load)
+    step = 40 * 24 * 3600  # matches bar_slice_secs(1m)
     start = 0
-    end = 12 * 3600
+    end = 3 * step
     bars = client.load_time_bars_range(
         "NQU6", "CME", start, end, bar_type=2, period=1, max_workers=1
     )
-    assert len(calls) >= 3
+    assert len(calls) == 3
     markers = [b["marker"] for b in bars]
     assert markers == sorted(set(markers))
 

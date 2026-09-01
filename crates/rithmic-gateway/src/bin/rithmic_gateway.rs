@@ -126,7 +126,7 @@ async fn run() -> Result<(), String> {
         let _ = std::fs::remove_file(&path);
         return Err(format!("rithmic connect: {e}"));
     }
-    eprintln!("rithmic-gateway: plants connected ({plants:?})");
+    eprintln!("rithmic-gateway: plants connected ({plants:?}; history ready)");
 
     let gates = ParentGates::from_env();
     let hub = Arc::new(FanoutHub::new(DEFAULT_QUEUE_CAP));
