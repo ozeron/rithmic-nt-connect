@@ -15,14 +15,14 @@ from google.protobuf.json_format import MessageToDict
 from rithmic_gateway.config import GatewayConfig
 from rithmic_gateway.flock import session_flock_held
 from rithmic_gateway.framing import MAX_FRAME_LEN, encode_frame
-from rithmic_gateway.spawn import SpawnError, spawn_gateway
+from rithmic_gateway.spawn import SpawnError, spawn_gateway, wait_for_parent_socket
 from rithmic_gateway.types import AccountRmsInfo, ProductRmsInfo
 from rithmic_gateway.v1 import session_pb2 as pb
 
 # Default dial + RPC socket timeout (seconds). Stuck parent must not hang forever.
 DEFAULT_RPC_TIMEOUT_SEC = 30.0
 # Per-chunk history RPC timeout — one plant slice can exceed the dial default.
-DEFAULT_HISTORY_RPC_TIMEOUT_SEC = 120.0
+DEFAULT_HISTORY_RPC_TIMEOUT_SEC = 300.0
 
 _ORDER_EVENT_TYPES = frozenset({"order_notification"})
 _PNL_EVENT_TYPES = frozenset({"account_pnl", "instrument_pnl"})
@@ -105,25 +105,37 @@ class GatewayClient:
             return
         with self._io_lock:
             path = self._config.socket_path
+            cfg = self._config
             try:
                 self._dial(path)
             except OSError:
-                if not self._config.auto_spawn:
+                if not cfg.auto_spawn:
                     raise
-                try:
-                    self._spawned = spawn_gateway(self._config)
-                except SpawnError as spawn_exc:
-                    # Lost race: another process may have bound the socket.
-                    # Convert any dial-side error back into ``SpawnError`` so
-                    # the caller sees the spawn failure, not a local socket
-                    # hiccup (covers OSError plus any unexpected encoding
-                    # issue from the just-spawned gateway).
+                if session_flock_held(cfg.user, cfg.system_name, cfg.url, cfg.env):
+                    # Manual or peer-spawned parent already owns this login.
+                    wait_for_parent_socket(cfg)
                     try:
                         self._dial(path)
-                    except (OSError, RuntimeError, ValueError):
-                        raise spawn_exc from None
+                    except OSError as retry_exc:
+                        raise SpawnError(
+                            "credential flock held but dial failed after wait — "
+                            "check RITHMIC_GATEWAY_LISTEN matches the running parent"
+                        ) from retry_exc
                 else:
-                    self._dial(path)
+                    try:
+                        self._spawned = spawn_gateway(cfg)
+                    except SpawnError as spawn_exc:
+                        # Lost race: another process may have bound the socket.
+                        # Convert any dial-side error back into ``SpawnError`` so
+                        # the caller sees the spawn failure, not a local socket
+                        # hiccup (covers OSError plus any unexpected encoding
+                        # issue from the just-spawned gateway).
+                        try:
+                            self._dial(path)
+                        except (OSError, RuntimeError, ValueError):
+                            raise spawn_exc from None
+                    else:
+                        self._dial(path)
             self._require_parent_flock()
             # Parent may bind before plants are Ready (path claim); retry not_ready.
             deadline = time.monotonic() + float(self._config.spawn_timeout_sec)

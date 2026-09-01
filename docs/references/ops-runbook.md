@@ -115,6 +115,10 @@ cargo run -p rithmic-gateway --bin rithmic-gateway
 # Env aliases (WSS URL): RITHMIC_GATEWAY or RITHMIC_URL
 # Listen socket:        RITHMIC_GATEWAY_LISTEN=unix://…  (never use as WSS URL)
 # Optional: RITHMIC_GATEWAY_AUTO_SPAWN=1, RITHMIC_GATEWAY_BIN=…
+# When a manual/systemd/Kamal gateway accessory is already running, set
+# RITHMIC_GATEWAY_AUTO_SPAWN=0 on book/lake clients so they dial-only attach
+# (never Popen a second parent). Auto-spawn still waits for an existing parent
+# when the credential flock is held before starting a child.
 # Trading / cancel_all are parent-gated (independent toggles):
 #   RITHMIC_ENABLE_TRADING=1          # place / modify / cancel / order updates
 #   RITHMIC_GATEWAY_CANCEL_ALL=1      # plant-wide cancel_all panic button (does not require trading)
@@ -139,6 +143,19 @@ cargo run -p rithmic-gateway --bin rithmic-gateway
 # while any ticker/book/time-bar intent is live — lake/qgw must use a
 # separate gateway (or stop live MD) for heavy history.
 #
+# --- History Ready ≠ plants connected (2026-08-31 MY043 / RC4) ---
+# History plant login can still leave Load* silent until rithmic-rs
+# DEFAULT_REQUEST_TIMEOUT (30s → `request timed out`). The parent now proves a
+# tiny 1m Load* inside `RithmicSession::connect` before advertising Ready /
+# "plants connected (...; history ready)". Production Load* also retries
+# RequestTimeout (transient). Override probe with
+# RITHMIC_HISTORY_READY_SYMBOL / RITHMIC_HISTORY_READY_EXCHANGE (else
+# RITHMIC_SYMBOL / RITHMIC_EXCHANGE, else ES/CME). RC2.3 refuse-under-live-MD
+# is unchanged — a failed mid-session hydrate still cannot retry Load* while
+# live ticker intents are up; qgw fail-closes empty mid-session lookback (no
+# arm). Optional: raise RITHMIC_REQUEST_TIMEOUT_SECS only if cold plant needs
+# >30s before first byte (global; slows every plant).
+#
 # Daemonize a long-lived live parent (agent shells / nohup without a new
 # session die on SIGHUP when the parent Cursor/tool shell exits):
 #   python -c "import os,subprocess; os.environ.setdefault('RITHMIC_GATEWAY_IDLE_EXIT_SEC','-1'); \
@@ -148,7 +165,7 @@ cargo run -p rithmic-gateway --bin rithmic-gateway
 # unless you set -1 first — prefer an explicit warm parent for live.
 ```
 
-If a second direct/parent process hits the same `user|system|url|env` flock, it fails locally before a second Rithmic login. Default sock/lock paths live under `XDG_RUNTIME_DIR` or a private `$TMPDIR/rgw-$UID/` directory (short names so macOS `sockaddr_un` fits); oversized paths clamp to `/tmp/rgw-$UID/<hash8>.sock` (private dir, not a bare sticky `/tmp` file).
+If a second direct/parent process hits the same `user|system|url|env` flock, it fails locally before a second Rithmic login. **Attach path:** dial fail + flock held → wait for existing parent socket (no second `Popen`); dial fail + flock free → auto-spawn. **Wrong listen path** (`RITHMIC_GATEWAY_LISTEN` ≠ running parent) looks like flock held but dial never succeeds — align paths on both sides. Default sock/lock paths live under `XDG_RUNTIME_DIR` or a private `$TMPDIR/rgw-$UID/` directory (short names so macOS `sockaddr_un` fits); oversized paths clamp to `/tmp/rgw-$UID/<hash8>.sock` (private dir, not a bare sticky `/tmp` file).
 
 Remote / Docker / TLS: [`gateway-remote.md`](gateway-remote.md) (v1 local unix; v1.5 tunnel recipe; v2 TLS not implemented).
 

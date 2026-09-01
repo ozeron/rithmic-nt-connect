@@ -16,8 +16,11 @@ BAR_TYPE_MINUTE = 2
 BAR_TYPE_DAILY = 3
 BAR_TYPE_WEEKLY = 4
 
-DEFAULT_TICK_SLICE_SECS = 15 * 60
-DEFAULT_BAR_SLICE_SECS = 4 * 60 * 60
+# Keep in sync with crates/rithmic-plants/src/history.rs.
+# Plant load_time_bars_all paginates past the ~10k silent row cap, so 1m
+# slices are month-sized (one unary RPC per queue month task).
+DEFAULT_TICK_SLICE_SECS = 2 * 60 * 60  # 1s bars: keep bounded
+DEFAULT_BAR_SLICE_SECS = 40 * 24 * 60 * 60  # 1m: month + window_utc padding
 
 
 def bar_slice_secs(bar_type: int, period: int) -> int:
@@ -29,9 +32,9 @@ def bar_slice_secs(bar_type: int, period: int) -> int:
         return (2**31 - 1) // 4
     if bar_type == BAR_TYPE_MINUTE:
         if period >= 60:
-            return 24 * 60 * 60
+            return 180 * 24 * 60 * 60
         if period >= 15:
-            return 12 * 60 * 60
+            return 90 * 24 * 60 * 60
         return DEFAULT_BAR_SLICE_SECS
     if bar_type == BAR_TYPE_SECOND:
         return DEFAULT_TICK_SLICE_SECS

@@ -14,6 +14,7 @@ import pytest
 from rithmic_gateway.client import GatewayClient
 from rithmic_gateway.config import GatewayConfig
 from rithmic_gateway.framing import encode_frame
+from rithmic_gateway.spawn import spawn_gateway
 from rithmic_gateway.v1 import session_pb2 as pb
 
 
@@ -37,9 +38,11 @@ def _send(conn: socket.socket, frame: pb.Frame) -> None:
     conn.sendall(encode_frame(frame.SerializeToString()))
 
 
-def _serve_shared_md_parent(sock_path: Path, *, clients: int = 2) -> threading.Thread:
-    """Mock parent: N clients Handshake→Ready; Subscribe Ack; fan-out
-    LastTrade by symbol.
+def _serve_shared_md_parent(sock_path: Path, *, clients: int = 4) -> threading.Thread:
+    """Mock parent: N clients Handshake→Ready; Subscribe Ack; fan-out LastTrade.
+
+    Default ``clients=4`` leaves headroom for ``wait_for_parent_socket`` probe
+    dials (each connect+close consumes an accept slot briefly).
     """
     if sock_path.exists():
         sock_path.unlink()
@@ -229,6 +232,103 @@ def test_second_connect_dials_existing_socket_without_spawn(
         first.disconnect()
         second.disconnect()
     finally:
+        if sock.exists():
+            sock.unlink()
+
+
+def test_connect_waits_for_parent_when_flock_held_before_socket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dial fail + flock held must attach to the existing parent, not spawn."""
+    from rithmic_gateway.flock import SessionLock
+
+    sock = Path(f"/tmp/rgw-flockwait-{os.getpid()}.sock")
+    spawn_calls: list[object] = []
+
+    def _boom(_cfg: GatewayConfig) -> object:
+        spawn_calls.append(1)
+        raise AssertionError("spawn_gateway must not run when flock is held")
+
+    monkeypatch.setattr("rithmic_gateway.client.spawn_gateway", _boom)
+
+    lock = SessionLock.try_acquire(
+        "u-flockwait", "LucidTrading", "wss://example", "Live"
+    )
+    try:
+        assert not sock.exists()
+
+        def _late_parent() -> None:
+            time.sleep(0.15)
+            # Extra accept slots: wait_for_parent_socket probe dials consume one.
+            _serve_shared_md_parent(sock, clients=3)
+
+        threading.Thread(target=_late_parent, daemon=True).start()
+        cfg = GatewayConfig(
+            user="u-flockwait",
+            system_name="LucidTrading",
+            url="wss://example",
+            env="Live",
+            listen=f"unix://{sock}",
+            auto_spawn=True,
+            attest_flock=False,
+            spawn_timeout_sec=3.0,
+        )
+        client = GatewayClient(cfg, rpc_timeout_sec=5.0)
+        client.connect()
+        assert spawn_calls == []
+        client.disconnect()
+    finally:
+        lock.close()
+        if sock.exists():
+            sock.unlink()
+
+
+def test_spawn_gateway_skips_popen_when_flock_held(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """spawn_gateway must wait for socket only when flock is already held."""
+    from rithmic_gateway.flock import SessionLock
+
+    sock = Path(f"/tmp/rgw-spawn-skip-{os.getpid()}.sock")
+    popen_calls: list[object] = []
+
+    def _boom(*_a: object, **_k: object) -> object:
+        popen_calls.append(1)
+        raise AssertionError("Popen must not run when flock is held")
+
+    monkeypatch.setattr("rithmic_gateway.spawn.subprocess.Popen", _boom)
+
+    lock = SessionLock.try_acquire(
+        "u-spawn-skip", "LucidTrading", "wss://example", "Live"
+    )
+    try:
+
+        def _late_parent() -> None:
+            time.sleep(0.15)
+            # Extra accept slots: wait_for_parent_socket probe dials consume one.
+            _serve_shared_md_parent(sock, clients=3)
+
+        threading.Thread(target=_late_parent, daemon=True).start()
+        cfg = GatewayConfig(
+            user="u-spawn-skip",
+            system_name="LucidTrading",
+            url="wss://example",
+            env="Live",
+            listen=f"unix://{sock}",
+            spawn_timeout_sec=3.0,
+        )
+        proc = spawn_gateway(
+            cfg,
+            wait_socket=True,
+            environ={
+                "RITHMIC_USER": "u-spawn-skip",
+                "RITHMIC_PASSWORD": "unit-test-secret-zz9",
+            },
+        )
+        assert proc is None
+        assert popen_calls == []
+    finally:
+        lock.close()
         if sock.exists():
             sock.unlink()
 

@@ -1,8 +1,9 @@
 //! History-window helpers: slice long ranges, retry, sort, dedup.
 //!
-//! rithmic-rs `*_all` lifts the silent 10_000-record cap per request, but a full
-//! session is still too large for one call. Slice ticks (default 15 minutes) and
-//! time bars (default 4 hours). Boundary overlaps are removed by dedup.
+//! Plant `load_time_bars_all` paginates past the ~10k silent row cap, so 1m
+//! slices can be calendar-month sized (one unary RPC per month task). Keep
+//! shorter windows for 1s bars where a month would be huge on the wire.
+//! Boundary overlaps are removed by dedup.
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -12,18 +13,21 @@ use rithmic_rs::TimeBarType;
 use crate::dto::{HistoryBarDto, HistoryTickDto};
 use crate::error::{Error, Result};
 
-/// Default tick replay slice (seconds). Matches Lucid / example windowing.
-pub const DEFAULT_TICK_SLICE_SECS: i32 = 15 * 60;
-/// Default time-bar replay slice (seconds) for 1-minute bars.
-pub const DEFAULT_BAR_SLICE_SECS: i32 = 4 * 60 * 60;
+/// Default tick / 1-second bar replay slice (seconds). ≤10k rows at 1s
+/// without relying on pagination (seconds are denser / noisier).
+pub const DEFAULT_TICK_SLICE_SECS: i32 = 2 * 60 * 60;
+/// Default 1-minute bar replay slice (seconds). 40 calendar days covers a
+/// month task plus ``window_utc`` ±6h padding as one paginated plant RPC.
+pub const DEFAULT_BAR_SLICE_SECS: i32 = 40 * 24 * 60 * 60;
 
 /// Slice length for a time-bar replay. Daily/weekly must be one (or few) wide
-/// windows: 4-hour slices miss end-of-day markers and retry-empty for minutes.
+/// windows: short slices miss end-of-day markers and retry-empty for minutes.
 pub fn bar_slice_secs(bar_type: TimeBarType, period: i32) -> i32 {
     match bar_type {
         TimeBarType::DailyBar | TimeBarType::WeeklyBar => i32::MAX / 4,
-        TimeBarType::MinuteBar if period >= 60 => 24 * 60 * 60,
-        TimeBarType::MinuteBar if period >= 15 => 12 * 60 * 60,
+        // 60m / 15m: plant paginates; keep multi-month client chunks modest.
+        TimeBarType::MinuteBar if period >= 60 => 180 * 24 * 60 * 60,
+        TimeBarType::MinuteBar if period >= 15 => 90 * 24 * 60 * 60,
         TimeBarType::MinuteBar => DEFAULT_BAR_SLICE_SECS,
         TimeBarType::SecondBar => DEFAULT_TICK_SLICE_SECS,
         _ => DEFAULT_BAR_SLICE_SECS,
@@ -177,8 +181,25 @@ pub fn parse_time_bar_type(bar_type: i32) -> Result<TimeBarType> {
     }
 }
 
-/// Connection / plant-down errors that are safe to retry on a read-only replay.
+/// True when the plant stayed silent until rithmic-rs request timeout
+/// (usually 30s via `RITHMIC_REQUEST_TIMEOUT_SECS`) — cold / raced history
+/// plant after login (RC4). Maps from `RithmicError::RequestTimeout`
+/// display text `"request timed out"`.
+pub fn is_request_timeout(err: &Error) -> bool {
+    match err {
+        Error::Rithmic(text) | Error::Session(text) => {
+            text.to_ascii_lowercase().contains("request timed out")
+        }
+        _ => false,
+    }
+}
+
+/// Connection / plant-down / request-timeout errors safe to retry on a
+/// read-only history replay (RC4: RequestTimeout often clears on the next try).
 pub fn is_transient(err: &Error) -> bool {
+    if is_request_timeout(err) {
+        return true;
+    }
     match err {
         Error::NotConnected { .. } | Error::ChannelClosed { .. } | Error::ChannelLagged { .. } => {
             true
@@ -194,6 +215,25 @@ pub fn is_transient(err: &Error) -> bool {
         }
         _ => false,
     }
+}
+
+/// Root + exchange for the post-connect history Ready probe (RC4).
+///
+/// Override with `RITHMIC_HISTORY_READY_SYMBOL` / `RITHMIC_HISTORY_READY_EXCHANGE`,
+/// else `RITHMIC_SYMBOL` / `RITHMIC_EXCHANGE`, else `ES` / `CME`.
+pub fn history_ready_probe_root() -> (String, String) {
+    let symbol = std::env::var("RITHMIC_HISTORY_READY_SYMBOL")
+        .or_else(|_| std::env::var("RITHMIC_SYMBOL"))
+        .unwrap_or_else(|_| "ES".to_string());
+    let exchange = std::env::var("RITHMIC_HISTORY_READY_EXCHANGE")
+        .or_else(|_| std::env::var("RITHMIC_EXCHANGE"))
+        .unwrap_or_else(|_| "CME".to_string());
+    (symbol, exchange)
+}
+
+/// True when `symbol` looks like a listed contract (`ESU6`) rather than a root.
+pub fn looks_like_listed_contract(symbol: &str) -> bool {
+    symbol.chars().any(|c| c.is_ascii_digit())
 }
 
 pub(crate) async fn load_sliced<T, F, Fut>(
@@ -314,6 +354,49 @@ mod tests {
     fn transient_classifies_connection_text() {
         assert!(is_transient(&Error::Rithmic("Forced logout".into())));
         assert!(!is_transient(&Error::Config("missing".into())));
+    }
+
+    #[test]
+    fn request_timeout_is_transient() {
+        let err = Error::Rithmic("request timed out".into());
+        assert!(is_request_timeout(&err));
+        assert!(is_transient(&err));
+    }
+
+    #[test]
+    fn listed_contract_heuristic() {
+        assert!(looks_like_listed_contract("ESU6"));
+        assert!(looks_like_listed_contract("MNQU6"));
+        assert!(!looks_like_listed_contract("ES"));
+        assert!(!looks_like_listed_contract("MNQ"));
+    }
+
+    #[tokio::test]
+    async fn load_retries_request_timeout_then_ok() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let n = AtomicU32::new(0);
+        let out = load_sliced(
+            1,
+            1,
+            60,
+            |_s, _e| {
+                let n = &n;
+                async move {
+                    let attempt = n.fetch_add(1, Ordering::SeqCst) + 1;
+                    if attempt < 2 {
+                        Err(Error::Rithmic("request timed out".into()))
+                    } else {
+                        Ok(vec![42u64])
+                    }
+                }
+            },
+            |x| *x,
+            |v| v,
+        )
+        .await
+        .expect("retry then ok");
+        assert_eq!(out, vec![42]);
+        assert_eq!(n.load(Ordering::SeqCst), 2);
     }
 
     #[test]

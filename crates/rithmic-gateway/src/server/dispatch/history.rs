@@ -5,6 +5,11 @@
 //! `Load*` / probe RPCs are refused so the event pump is not starved
 //! (2026-08-25 MY043 incident RC2.3 — live XOR heavy ingest).
 //!
+//! Cold history plant after login can stay silent until rithmic-rs request
+//! timeout (RC4 / 2026-08-31): `RithmicSession::connect` proves a tiny Load*
+//! before Ready, and plant-side slice retries treat `request timed out` as
+//! transient. Do not weaken RC2.3 for hydrate retries.
+//!
 //! Admission is synchronized with live MD subscribe via
 //! [`GatewayState::md_history_gate`]: the refuse check, session-lock
 //! acquisition, and the load itself all run under that gate so a concurrent

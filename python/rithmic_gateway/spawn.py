@@ -210,6 +210,50 @@ def _build_child_env(
     return env
 
 
+def _socket_listening(sock: Path) -> bool:
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(0.2)
+        s.connect(str(sock))
+        s.close()
+        return True
+    except OSError:
+        return False
+
+
+def _config_flock_held(config: GatewayConfig) -> bool:
+    """True when another live process holds the credential flock."""
+    from rithmic_gateway.flock import session_flock_held
+
+    return session_flock_held(config.user, config.system_name, config.url, config.env)
+
+
+def wait_for_parent_socket(config: GatewayConfig) -> None:
+    """Block until an existing parent holds flock and the dial path accepts.
+
+    Used when auto-spawn must attach to a manual or peer-spawned gateway
+    instead of starting a second parent.
+
+    Raises ``SpawnError`` on timeout or if the flock is released before the
+    socket comes up (no healthy parent).
+    """
+    deadline = time.monotonic() + float(config.spawn_timeout_sec)
+    sock = Path(config.socket_path)
+    while time.monotonic() < deadline:
+        if _socket_listening(sock) and _config_flock_held(config):
+            return
+        if not _config_flock_held(config):
+            raise SpawnError(
+                "credential flock not held while waiting for existing parent — "
+                "no gateway is starting"
+            )
+        time.sleep(0.05)
+    raise SpawnError(
+        f"timed out waiting for existing gateway parent at {sock} "
+        f"(flock held — check RITHMIC_GATEWAY_LISTEN matches the running parent)"
+    )
+
+
 def _wait_for_socket(
     proc: subprocess.Popen[bytes],
     config: GatewayConfig,
@@ -222,32 +266,14 @@ def _wait_for_socket(
     deadline = time.monotonic() + float(config.spawn_timeout_sec)
     sock = Path(config.socket_path)
 
-    def _listening() -> bool:
-        try:
-            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            s.settimeout(0.2)
-            s.connect(str(sock))
-            s.close()
-            return True
-        except OSError:
-            return False
-
-    def _session_flock_held() -> bool:
-        """True when another live process holds the credential flock."""
-        from rithmic_gateway.flock import session_flock_held
-
-        return session_flock_held(
-            config.user, config.system_name, config.url, config.env
-        )
-
     while time.monotonic() < deadline:
         # Socket alone is not proof — require the credential flock too.
-        if _listening() and _session_flock_held():
+        if _socket_listening(sock) and _config_flock_held(config):
             return
         if proc.poll() is not None:
-            if _listening() and _session_flock_held():
+            if _socket_listening(sock) and _config_flock_held(config):
                 return
-            if _session_flock_held():
+            if _config_flock_held(config):
                 # Lost the flock race: another client's gateway won and is
                 # still binding its socket (plants connect after bind). Keep
                 # waiting for that socket instead of failing the caller on a
@@ -289,18 +315,42 @@ def _start_stderr_drain(proc: subprocess.Popen[bytes]) -> None:
     threading.Thread(target=_drain_stderr, name="gw-stderr", daemon=True).start()
 
 
+_SPAWN_MUTEXES: dict[str, threading.Lock] = {}
+_SPAWN_MUTEXES_GUARD = threading.Lock()
+
+
+def _spawn_mutex(config: GatewayConfig) -> threading.Lock:
+    """Serialize cold-start spawns for one credential fingerprint."""
+    from rithmic_gateway.flock import lock_path
+
+    key = str(lock_path(config.user, config.system_name, config.url, config.env))
+    with _SPAWN_MUTEXES_GUARD:
+        lock = _SPAWN_MUTEXES.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _SPAWN_MUTEXES[key] = lock
+        return lock
+
+
 def spawn_gateway(
     config: GatewayConfig,
     *,
     environ: Mapping[str, str] | None = None,
     wait_socket: bool = True,
-) -> subprocess.Popen[bytes]:
+) -> subprocess.Popen[bytes] | None:
     """Start ``rithmic-gateway`` detached enough for the client to dial.
 
-    Password is only forwarded via curated env, never argv.
+    When the credential flock is already held, waits for the existing parent
+    socket instead of ``Popen`` (returns ``None``). Password is only forwarded
+    via curated env, never argv.
     """
     listen = config.listen or ""
     _validate_listen(listen)
+
+    if _config_flock_held(config):
+        if wait_socket:
+            wait_for_parent_socket(config)
+        return None
 
     bin_path = resolve_gateway_bin(config.gateway_bin)
     argv = spawn_argv(bin_path)
@@ -315,19 +365,27 @@ def spawn_gateway(
 
     env = _build_child_env(config, environ)
 
-    proc = subprocess.Popen(  # nosec B603 - argv allowlisted; env curated
-        argv,
-        env=env,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        start_new_session=True,
-    )
+    with _spawn_mutex(config):
+        # Re-check after mutex: a peer may have won the flock race while we
+        # waited for the lock.
+        if _config_flock_held(config):
+            if wait_socket:
+                wait_for_parent_socket(config)
+            return None
 
-    if wait_socket:
-        _wait_for_socket(proc, config)
-    _start_stderr_drain(proc)
-    return proc
+        proc = subprocess.Popen(  # nosec B603 - argv allowlisted; env curated
+            argv,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+
+        if wait_socket:
+            _wait_for_socket(proc, config)
+        _start_stderr_drain(proc)
+        return proc
 
 
 def assert_no_password_in_argv(argv: Sequence[str], password: str) -> None:

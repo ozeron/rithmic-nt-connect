@@ -27,8 +27,8 @@ use crate::dto::{
 };
 use crate::error::{Error, Result};
 use crate::history::{
-    bar_replay_index, bar_slice_secs, dedup_bars, dedup_ticks, load_sliced, parse_time_bar_type,
-    DEFAULT_TICK_SLICE_SECS,
+    bar_replay_index, bar_slice_secs, dedup_bars, dedup_ticks, history_ready_probe_root,
+    load_sliced, looks_like_listed_contract, parse_time_bar_type, DEFAULT_TICK_SLICE_SECS,
 };
 use crate::plants::PlantSet;
 
@@ -178,6 +178,9 @@ impl RithmicSession {
     /// Uses [`ConnectStrategy::Retry`]. The order plant is **not** connected here —
     /// call [`Self::ensure_order_plant`] (or any place/cancel/subscribe order API).
     /// Partial failure disconnects whatever already logged in.
+    ///
+    /// When the history plant is selected, [`Self::prove_history_ready`] runs
+    /// before this returns (RC4): login alone is not enough to advertise Ready.
     pub async fn connect(&mut self) -> Result<()> {
         if self.ticker.is_some() || self.history.is_some() || self.pnl.is_some() {
             return Err(Error::AlreadyConnected);
@@ -193,6 +196,10 @@ impl RithmicSession {
         if self.plants.history {
             self.connect_or_rollback(connect_history(&rc), |s, p| s.history = Some(p))
                 .await?;
+            if let Err(err) = self.prove_history_ready().await {
+                let _ = self.disconnect().await;
+                return Err(err);
+            }
         }
 
         if self.plants.pnl {
@@ -203,6 +210,44 @@ impl RithmicSession {
         }
 
         self.order = None;
+        Ok(())
+    }
+
+    /// RC4: prove the history plant can serve a tiny Load* before advertising
+    /// connected / accepting production hydrate RPCs.
+    ///
+    /// Empty rows are success (plant answered). `RequestTimeout` retries via
+    /// [`crate::history::is_transient`]. Probe root defaults to ES/CME (env
+    /// overrides — see [`history_ready_probe_root`]).
+    pub async fn prove_history_ready(&self) -> Result<()> {
+        if self.history.is_none() {
+            return Ok(());
+        }
+        let (root, exchange) = history_ready_probe_root();
+        let (symbol, exchange) = if looks_like_listed_contract(&root) {
+            (root, exchange)
+        } else if self.ticker.is_some() {
+            let fm = self.get_front_month(&root, &exchange).await?;
+            let symbol = fm.trading_symbol.or(fm.symbol).ok_or_else(|| {
+                Error::Protocol(format!(
+                    "history ready probe: front-month missing trading_symbol for {root}/{exchange}"
+                ))
+            })?;
+            let exchange = fm.trading_exchange.unwrap_or(exchange);
+            (symbol, exchange)
+        } else {
+            (root, exchange)
+        };
+
+        let end = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i32)
+            .unwrap_or(0);
+        let start = end.saturating_sub(120);
+        // Tiny 1m window — Ok([]) means the plant answered (not silent).
+        let _ = self
+            .load_time_bars_all(&symbol, &exchange, TimeBarType::MinuteBar, 1, start, end)
+            .await?;
         Ok(())
     }
 
