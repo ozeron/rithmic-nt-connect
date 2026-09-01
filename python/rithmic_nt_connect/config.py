@@ -79,8 +79,12 @@ def _connect_mode_fields(env: Mapping[str, str]) -> dict[str, Any]:
             "missing RITHMIC_CONNECT_MODE; set to 'direct' (in-process plants) "
             "or 'gateway' (shared rithmic-gateway)"
         )
-    auto_raw = env.get("RITHMIC_GATEWAY_AUTO_SPAWN")
-    auto = True if auto_raw is None else env_truthy(auto_raw, default=True)
+    from rithmic_gateway.config import parse_spawn_policy
+    from rithmic_gateway.runtime import parse_gateway_client_mode
+
+    spawn_policy = parse_spawn_policy(env)
+    auto = spawn_policy != "never"
+    client_mode = parse_gateway_client_mode(env)
     try:
         mode = parse_connect_mode(raw)
     except ConfigError as exc:
@@ -91,6 +95,8 @@ def _connect_mode_fields(env: Mapping[str, str]) -> dict[str, Any]:
         "connect_mode": mode,
         "gateway_listen": _env_first(env, "RITHMIC_GATEWAY_LISTEN"),
         "gateway_auto_spawn": auto,
+        "gateway_spawn_policy": spawn_policy,
+        "gateway_client_mode": client_mode,
         "gateway_auth_token": _env_first(env, "RITHMIC_GATEWAY_AUTH_TOKEN") or "",
         "gateway_bin": _env_first(env, "RITHMIC_GATEWAY_BIN"),
     }
@@ -344,6 +350,8 @@ class SessionConfig:
     exchange: str | None = None
     gateway_listen: str | None = None
     gateway_auto_spawn: bool = True
+    gateway_spawn_policy: str = "if_missing"
+    gateway_client_mode: str = "mux"
     gateway_auth_token: str = ""
     gateway_bin: str | None = None
 
@@ -393,6 +401,8 @@ class SessionConfig:
             "connect_mode": self.connect_mode.value,
             "gateway_listen": self.gateway_listen,
             "gateway_auto_spawn": self.gateway_auto_spawn,
+            "gateway_spawn_policy": self.gateway_spawn_policy,
+            "gateway_client_mode": self.gateway_client_mode,
         }
         return _redact_secrets(data) if redact else data
 

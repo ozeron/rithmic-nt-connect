@@ -114,11 +114,13 @@ cargo run -p rithmic-gateway --bin rithmic-gateway
 #   # or: PYTHONPATH=<repo>/python  +  pip install 'protobuf>=5'
 # Env aliases (WSS URL): RITHMIC_GATEWAY or RITHMIC_URL
 # Listen socket:        RITHMIC_GATEWAY_LISTEN=unix://…  (never use as WSS URL)
-# Optional: RITHMIC_GATEWAY_AUTO_SPAWN=1, RITHMIC_GATEWAY_BIN=…
+# Optional: RITHMIC_GATEWAY_SPAWN_POLICY=if_missing (local dev) or never (Kamal/live)
+# RITHMIC_GATEWAY_CLIENT_MODE=mux (default) or dual (rollback)
+# RITHMIC_GATEWAY_AUTO_SPAWN=0 is an alias for SPAWN_POLICY=never
 # When a manual/systemd/Kamal gateway accessory is already running, set
-# RITHMIC_GATEWAY_AUTO_SPAWN=0 on book/lake clients so they dial-only attach
-# (never Popen a second parent). Auto-spawn still waits for an existing parent
-# when the credential flock is held before starting a child.
+# RITHMIC_GATEWAY_SPAWN_POLICY=never (or RITHMIC_GATEWAY_AUTO_SPAWN=0) on book/lake
+# clients so they dial-only attach (never Popen a second parent). if_missing still
+# waits for an existing parent when the credential flock is held before spawning.
 # Trading / cancel_all are parent-gated (independent toggles):
 #   RITHMIC_ENABLE_TRADING=1          # place / modify / cancel / order updates
 #   RITHMIC_GATEWAY_CANCEL_ALL=1      # plant-wide cancel_all panic button (does not require trading)

@@ -59,6 +59,7 @@ def test_connect_mode_from_env() -> None:
     assert cfg.connect_mode is ConnectMode.GATEWAY
     assert cfg.gateway_listen == "unix:///tmp/rgw.sock"
     assert cfg.gateway_auto_spawn is False
+    assert cfg.gateway_spawn_policy == "never"
 
 
 def test_connect_mode_missing_from_env() -> None:
@@ -210,11 +211,26 @@ def test_gateway_wire_forwards_rms_fetches() -> None:
     ]
 
 
-def test_gateway_wire_reset_ticker_detaches_and_redials_client_only() -> None:
-    """Gateway ``reset_ticker`` recovers THIS client's ticker stream by
-    detach + re-dial, never tearing down parent plants for peers."""
+def test_gateway_wire_reset_ticker_prefers_plant_rpc() -> None:
+    """Gateway ``reset_ticker`` uses plant RPC (L2) before transport reconnect."""
     inner = _RecordingGatewayClient()
     session = GatewayWireSession(inner)  # type: ignore[arg-type]
+
+    session.reset_ticker()
+
+    assert inner.calls == [("reset_ticker_plant", ())]
+
+
+def test_gateway_wire_reset_ticker_falls_back_to_transport_on_plant_error() -> None:
+    inner = _RecordingGatewayClient()
+    session = GatewayWireSession(inner)  # type: ignore[arg-type]
+
+    def _boom() -> None:
+        from rithmic_gateway.client import GatewayError
+
+        raise GatewayError("plant_reset_failed", "mock plant reset failure")
+
+    inner.reset_ticker_plant = _boom  # type: ignore[method-assign]
 
     session.reset_ticker()
 

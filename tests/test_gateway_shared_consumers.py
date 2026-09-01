@@ -213,7 +213,7 @@ def test_second_connect_dials_existing_socket_without_spawn(
         spawn_calls.append(1)
         raise AssertionError("spawn_gateway should not run when socket exists")
 
-    monkeypatch.setattr("rithmic_gateway.client.spawn_gateway", _boom)
+    monkeypatch.setattr("rithmic_gateway.spawn.spawn_gateway", _boom)
     try:
         _serve_shared_md_parent(sock, clients=2)
         cfg = GatewayConfig(
@@ -245,11 +245,11 @@ def test_connect_waits_for_parent_when_flock_held_before_socket(
     sock = Path(f"/tmp/rgw-flockwait-{os.getpid()}.sock")
     spawn_calls: list[object] = []
 
-    def _boom(_cfg: GatewayConfig) -> object:
+    def _boom(_cfg: GatewayConfig, **_k: object) -> object:
         spawn_calls.append(1)
         raise AssertionError("spawn_gateway must not run when flock is held")
 
-    monkeypatch.setattr("rithmic_gateway.client.spawn_gateway", _boom)
+    monkeypatch.setattr("rithmic_gateway.spawn.spawn_gateway", _boom)
 
     lock = SessionLock.try_acquire(
         "u-flockwait", "LucidTrading", "wss://example", "Live"

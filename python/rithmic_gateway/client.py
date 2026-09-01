@@ -5,17 +5,20 @@ from __future__ import annotations
 import contextlib
 import socket
 import struct
+import subprocess
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from typing import Any, cast
 
 from google.protobuf.json_format import MessageToDict
 
+from rithmic_gateway.attach import GatewayAttachCoordinator
 from rithmic_gateway.config import GatewayConfig
 from rithmic_gateway.flock import session_flock_held
 from rithmic_gateway.framing import MAX_FRAME_LEN, encode_frame
-from rithmic_gateway.spawn import SpawnError, spawn_gateway, wait_for_parent_socket
+from rithmic_gateway.spawn import SpawnError
 from rithmic_gateway.types import AccountRmsInfo, ProductRmsInfo
 from rithmic_gateway.v1 import session_pb2 as pb
 
@@ -28,6 +31,18 @@ _ORDER_EVENT_TYPES = frozenset({"order_notification"})
 _PNL_EVENT_TYPES = frozenset({"account_pnl", "instrument_pnl"})
 _HISTORY_EVENT_TYPES = frozenset({"time_bar"})
 _NON_MD_EVENT_TYPES = _ORDER_EVENT_TYPES | _PNL_EVENT_TYPES | _HISTORY_EVENT_TYPES
+
+_CAPABILITY_DENIED_WIRE_CODES = frozenset({"history_denied_live_md"})
+
+
+def _normalize_error_code(code: str) -> str:
+    if code in _CAPABILITY_DENIED_WIRE_CODES:
+        return "capability_denied"
+    return code
+
+
+def _wire_error(code: str, message: str) -> GatewayError:
+    return GatewayError(_normalize_error_code(code), message)
 
 
 def _is_md_event(evt: dict[str, Any]) -> bool:
@@ -62,6 +77,60 @@ _CONNECT_FIRST = "call connect() first"
 _NOT_CONNECTED = "not_connected"
 
 
+def _dial_with_attach(
+    config: GatewayConfig, dial: Callable[[str], None]
+) -> subprocess.Popen[bytes] | None:
+    """Dial the listen path; on failure run attach coordinator if allowed."""
+    path = config.socket_path
+    try:
+        dial(path)
+        return None
+    except OSError:
+        if not config.auto_spawn:
+            raise
+        try:
+            attached = GatewayAttachCoordinator.resolve_dial_failure(config)
+        except SpawnError as spawn_exc:
+            try:
+                dial(path)
+            except (OSError, RuntimeError, ValueError):
+                raise spawn_exc from None
+            return None
+        try:
+            dial(path)
+        except OSError as retry_exc:
+            raise SpawnError(
+                "credential flock held but dial failed after wait — "
+                "check RITHMIC_GATEWAY_LISTEN matches the running parent"
+            ) from retry_exc
+        return attached.spawned_proc
+
+
+def _handshake_until_ready(
+    config: GatewayConfig,
+    *,
+    dial: Callable[[str], None],
+    handshake: Callable[[], None],
+    require_flock: Callable[[], None],
+    close_sock: Callable[[], None],
+) -> None:
+    """Handshake, retrying ``not_ready`` until spawn timeout."""
+    path = config.socket_path
+    deadline = time.monotonic() + float(config.spawn_timeout_sec)
+    while True:
+        try:
+            handshake()
+            return
+        except GatewayError as exc:
+            if exc.code != "not_ready" or time.monotonic() >= deadline:
+                close_sock()
+                raise
+            close_sock()
+            time.sleep(0.1)
+            dial(path)
+            require_flock()
+
+
 class GatewayClient:
     """Attach to a parent ``rithmic-gateway`` and issue plant-semantic RPCs.
 
@@ -85,6 +154,8 @@ class GatewayClient:
         self._trading_enabled = False
         self._cancel_all_enabled = False
         self._spawned = None
+        self._gateway_instance_id = 0
+        self._transport_generation = 0
         self._pending: deque[dict[str, Any]] = deque()
         self._io_lock = threading.RLock()
 
@@ -100,57 +171,28 @@ class GatewayClient:
     def cancel_all_enabled(self) -> bool:
         return self._cancel_all_enabled
 
+    @property
+    def gateway_instance_id(self) -> int:
+        return self._gateway_instance_id
+
+    @property
+    def transport_generation(self) -> int:
+        return self._transport_generation
+
     def connect(self) -> None:
         if self._sock is not None:
             return
         with self._io_lock:
-            path = self._config.socket_path
             cfg = self._config
-            try:
-                self._dial(path)
-            except OSError:
-                if not cfg.auto_spawn:
-                    raise
-                if session_flock_held(cfg.user, cfg.system_name, cfg.url, cfg.env):
-                    # Manual or peer-spawned parent already owns this login.
-                    wait_for_parent_socket(cfg)
-                    try:
-                        self._dial(path)
-                    except OSError as retry_exc:
-                        raise SpawnError(
-                            "credential flock held but dial failed after wait — "
-                            "check RITHMIC_GATEWAY_LISTEN matches the running parent"
-                        ) from retry_exc
-                else:
-                    try:
-                        self._spawned = spawn_gateway(cfg)
-                    except SpawnError as spawn_exc:
-                        # Lost race: another process may have bound the socket.
-                        # Convert any dial-side error back into ``SpawnError`` so
-                        # the caller sees the spawn failure, not a local socket
-                        # hiccup (covers OSError plus any unexpected encoding
-                        # issue from the just-spawned gateway).
-                        try:
-                            self._dial(path)
-                        except (OSError, RuntimeError, ValueError):
-                            raise spawn_exc from None
-                    else:
-                        self._dial(path)
+            self._spawned = _dial_with_attach(cfg, self._dial)
             self._require_parent_flock()
-            # Parent may bind before plants are Ready (path claim); retry not_ready.
-            deadline = time.monotonic() + float(self._config.spawn_timeout_sec)
-            while True:
-                try:
-                    self._handshake()
-                    return
-                except GatewayError as exc:
-                    if exc.code != "not_ready" or time.monotonic() >= deadline:
-                        self._close_sock()
-                        raise
-                    self._close_sock()
-                    time.sleep(0.1)
-                    self._dial(path)
-                    self._require_parent_flock()
+            _handshake_until_ready(
+                cfg,
+                dial=self._dial,
+                handshake=self._handshake,
+                require_flock=self._require_parent_flock,
+                close_sock=self._close_sock,
+            )
 
     def _require_parent_flock(self) -> None:
         """Refuse Ready from a dialable impostor that does not hold the flock."""
@@ -416,16 +458,13 @@ class GatewayClient:
             return dedupe_bars_by_marker(merged)
 
         # Ensure parent is up on this client first (auto-spawn / warm attach).
-        if self._sock is None:
-            self.connect()
+        self.connect()
 
         def _fetch_slice(window: tuple[int, int]) -> list[dict[str, Any]]:
             slice_start, slice_end = window
-            peer = GatewayClient(
-                self._config,
-                rpc_timeout_sec=self._rpc_timeout_sec,
-                history_rpc_timeout_sec=self._history_rpc_timeout_sec,
-            )
+            from rithmic_gateway.runtime import create_gateway_client
+
+            peer = create_gateway_client(self._config)
             peer.connect()
             try:
                 return peer.load_time_bars(
@@ -710,12 +749,14 @@ class GatewayClient:
         which = ready_frame.WhichOneof("body")
         if which != "ready":
             if which == "error":
-                raise GatewayError(ready_frame.error.code, ready_frame.error.message)
+                raise _wire_error(ready_frame.error.code, ready_frame.error.message)
             raise GatewayError("protocol", f"expected Ready, got {which}")
         ready = ready_frame.ready
         self._scopes = list(ready.scopes)
         self._trading_enabled = bool(ready.trading_enabled)
         self._cancel_all_enabled = bool(ready.cancel_all_enabled)
+        self._gateway_instance_id = int(ready.gateway_instance_id)
+        self._transport_generation = int(ready.transport_generation)
 
     def _rpc(self, frame: pb.Frame, *, timeout_sec: float | None = None) -> pb.Frame:
         with self._io_lock:
@@ -749,7 +790,7 @@ class GatewayClient:
                             f"waiting for {rid}: "
                             f"{resp.error.code}: {resp.error.message}",
                         )
-                    raise GatewayError(resp.error.code, resp.error.message)
+                    raise _wire_error(resp.error.code, resp.error.message)
                 if resp.request_id == rid:
                     return resp
                 # Uncorrelated non-event frame — treat as protocol error.

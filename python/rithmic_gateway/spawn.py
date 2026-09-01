@@ -5,13 +5,18 @@ from __future__ import annotations
 import contextlib
 import os
 import shutil
-import socket
 import subprocess  # nosec B404 - auto-spawn requires launching the gateway binary
 import threading
 import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+from rithmic_gateway.attach import (
+    AttachError,
+    _socket_listening,
+    config_flock_held,
+    wait_for_parent_socket,
+)
 from rithmic_gateway.config import GatewayConfig, GatewayConfigError, parse_listen_url
 
 # Env keys forwarded to the parent process (password stays in env, never argv).
@@ -36,8 +41,11 @@ _CURATED_ENV_KEYS = (
 )
 
 
-class SpawnError(RuntimeError):
+class SpawnError(AttachError):
     """Failed to locate or start the gateway binary."""
+
+    def __init__(self, message: str, *, code: str = "spawn_failed") -> None:
+        super().__init__(code, message)
 
 
 # Cargo emits ``rithmic-gateway.exe`` on Windows and ``rithmic-gateway`` elsewhere.
@@ -210,50 +218,6 @@ def _build_child_env(
     return env
 
 
-def _socket_listening(sock: Path) -> bool:
-    try:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(0.2)
-        s.connect(str(sock))
-        s.close()
-        return True
-    except OSError:
-        return False
-
-
-def _config_flock_held(config: GatewayConfig) -> bool:
-    """True when another live process holds the credential flock."""
-    from rithmic_gateway.flock import session_flock_held
-
-    return session_flock_held(config.user, config.system_name, config.url, config.env)
-
-
-def wait_for_parent_socket(config: GatewayConfig) -> None:
-    """Block until an existing parent holds flock and the dial path accepts.
-
-    Used when auto-spawn must attach to a manual or peer-spawned gateway
-    instead of starting a second parent.
-
-    Raises ``SpawnError`` on timeout or if the flock is released before the
-    socket comes up (no healthy parent).
-    """
-    deadline = time.monotonic() + float(config.spawn_timeout_sec)
-    sock = Path(config.socket_path)
-    while time.monotonic() < deadline:
-        if _socket_listening(sock) and _config_flock_held(config):
-            return
-        if not _config_flock_held(config):
-            raise SpawnError(
-                "credential flock not held while waiting for existing parent — "
-                "no gateway is starting"
-            )
-        time.sleep(0.05)
-    raise SpawnError(
-        f"timed out waiting for existing gateway parent at {sock} "
-        f"(flock held — check RITHMIC_GATEWAY_LISTEN matches the running parent)"
-    )
-
-
 def _wait_for_socket(
     proc: subprocess.Popen[bytes],
     config: GatewayConfig,
@@ -268,12 +232,12 @@ def _wait_for_socket(
 
     while time.monotonic() < deadline:
         # Socket alone is not proof — require the credential flock too.
-        if _socket_listening(sock) and _config_flock_held(config):
+        if _socket_listening(sock) and config_flock_held(config):
             return
         if proc.poll() is not None:
-            if _socket_listening(sock) and _config_flock_held(config):
+            if _socket_listening(sock) and config_flock_held(config):
                 return
-            if _config_flock_held(config):
+            if config_flock_held(config):
                 # Lost the flock race: another client's gateway won and is
                 # still binding its socket (plants connect after bind). Keep
                 # waiting for that socket instead of failing the caller on a
@@ -283,9 +247,10 @@ def _wait_for_socket(
             err = b""
             if proc.stderr is not None:
                 err = proc.stderr.read() or b""
-            raise SpawnError(
+            raise AttachError(
+                "spawn_race_failed",
                 f"gateway exited early (code={proc.returncode}): "
-                f"{err.decode(errors='replace')}"
+                f"{err.decode(errors='replace')}",
             )
         time.sleep(0.05)
     # Reap the orphan so it cannot keep the flock / bind later.
@@ -297,7 +262,9 @@ def _wait_for_socket(
         proc.kill()
         with contextlib.suppress(subprocess.TimeoutExpired):
             proc.wait(timeout=2.0)
-    raise SpawnError(f"timed out waiting for gateway socket {sock}")
+    raise AttachError(
+        "spawn_race_failed", f"timed out waiting for gateway socket {sock}"
+    )
 
 
 def _start_stderr_drain(proc: subprocess.Popen[bytes]) -> None:
@@ -319,7 +286,8 @@ _SPAWN_MUTEXES: dict[str, threading.Lock] = {}
 _SPAWN_MUTEXES_GUARD = threading.Lock()
 
 
-def _spawn_mutex(config: GatewayConfig) -> threading.Lock:
+@contextlib.contextmanager
+def _spawn_election(config: GatewayConfig):
     """Serialize cold-start spawns for one credential fingerprint."""
     from rithmic_gateway.flock import lock_path
 
@@ -329,7 +297,14 @@ def _spawn_mutex(config: GatewayConfig) -> threading.Lock:
         if lock is None:
             lock = threading.Lock()
             _SPAWN_MUTEXES[key] = lock
-        return lock
+    lock.acquire()
+    try:
+        yield
+    finally:
+        lock.release()
+        with _SPAWN_MUTEXES_GUARD:
+            if _SPAWN_MUTEXES.get(key) is lock and not lock.locked():
+                _SPAWN_MUTEXES.pop(key, None)
 
 
 def spawn_gateway(
@@ -347,7 +322,13 @@ def spawn_gateway(
     listen = config.listen or ""
     _validate_listen(listen)
 
-    if _config_flock_held(config):
+    if config.spawn_policy == "never" and not config_flock_held(config):
+        raise AttachError(
+            "dial_failed_spawn_disabled",
+            "spawn policy is never and credential flock is free — start the parent",
+        )
+
+    if config_flock_held(config):
         if wait_socket:
             wait_for_parent_socket(config)
         return None
@@ -365,10 +346,10 @@ def spawn_gateway(
 
     env = _build_child_env(config, environ)
 
-    with _spawn_mutex(config):
+    with _spawn_election(config):
         # Re-check after mutex: a peer may have won the flock race while we
         # waited for the lock.
-        if _config_flock_held(config):
+        if config_flock_held(config):
             if wait_socket:
                 wait_for_parent_socket(config)
             return None

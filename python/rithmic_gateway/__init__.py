@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from rithmic_gateway.attach import wait_for_parent_socket
 from rithmic_gateway.config import GatewayConfig
 from rithmic_gateway.flock import SessionLock, SessionLockError, session_flock_held
 from rithmic_gateway.history_window import (
@@ -29,7 +30,6 @@ from rithmic_gateway.history_window import (
 from rithmic_gateway.spawn import (
     resolve_gateway_bin,
     spawn_gateway,
-    wait_for_parent_socket,
 )
 
 __all__ = [

@@ -94,17 +94,14 @@ def test_flocked_session_forwards_resolved_account() -> None:
 def test_gateway_create_session_returns_fresh_wire_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Gateway mode never shares: each Nautilus client gets its own
-    ``GatewayClient`` (the parent owns the single login). Pins the contract at
-    the factory boundary so an accidental cache cannot be introduced.
-    """
+    """Gateway mode returns distinct wire facades; mux shares runtime underneath."""
     import rithmic_nt_connect.gateway_wire as gw
     from rithmic_nt_connect.config import ConnectMode, SessionConfig
     from rithmic_nt_connect.session import create_session
 
     created: list[object] = []
 
-    def _fake_gateway(cfg):
+    def _fake_gateway(session):
         obj = object()
         created.append(obj)
         return obj
@@ -114,11 +111,36 @@ def test_gateway_create_session_returns_fresh_wire_session(
         user="u",
         password="p",
         connect_mode=ConnectMode.GATEWAY,
+        gateway_client_mode="mux",
     )
     a = create_session(cfg)
     b = create_session(cfg)
     assert a is not b
     assert len(created) == 2
+
+
+def test_gateway_dual_mode_create_session_isolated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from rithmic_gateway.runtime import GatewayRuntimeRegistry
+    from rithmic_nt_connect.config import ConnectMode, SessionConfig
+    from rithmic_nt_connect.session import create_session
+
+    GatewayRuntimeRegistry.reset_for_tests()
+    monkeypatch.delenv("RITHMIC_GATEWAY_CLIENT_MODE", raising=False)
+    cfg = SessionConfig(
+        user="u-dual-factory",
+        password="p",
+        connect_mode=ConnectMode.GATEWAY,
+        gateway_listen=f"unix:///tmp/rgw-dual-factory-{id(object())}.sock",
+        gateway_auto_spawn=False,
+        gateway_client_mode="dual",
+    )
+    a = create_session(cfg)
+    b = create_session(cfg)
+    assert a is not b
+    assert a._client is not b._client
+    GatewayRuntimeRegistry.reset_for_tests()
 
 
 def test_connect_once_swallows_only_typed_already_connected() -> None:

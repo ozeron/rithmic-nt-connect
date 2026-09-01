@@ -5,7 +5,7 @@
 //! peer leaves (see [`crate::idle_exit`]).
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -29,6 +29,17 @@ use dispatch::TopicIntent;
 pub use dispatch::{
     gate_rpc_for_test, history_rpc_with_live_ticker_intent_for_test, rpc_sequence_with_gates,
 };
+
+/// Metadata advertised in every ``Ready`` frame for this parent process.
+pub fn boot_gateway_metadata() -> (u64, AtomicU64) {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+        ^ (std::process::id() as u64);
+    (id, AtomicU64::new(1))
+}
 
 /// Shared gateway runtime state, held for the process lifetime.
 pub struct GatewayState {
@@ -65,6 +76,10 @@ pub struct GatewayState {
     pub md_history_gate: Arc<TokioMutex<()>>,
     /// Ready peer count + optional idle-exit after last client.
     pub idle: IdleExit,
+    /// Stable for the parent process lifetime (advertised in Ready).
+    pub gateway_instance_id: u64,
+    /// Bumps when plants / transport epoch is recreated (advertised in Ready).
+    pub transport_generation: AtomicU64,
 }
 
 /// Credential fingerprint advertised/checked at Handshake (consistency
@@ -474,6 +489,8 @@ async fn handle_client(mut stream: UnixStream, state: Arc<GatewayState>) -> Resu
                 scopes: state.gates.scopes(),
                 trading_enabled: state.gates.trading_enabled,
                 cancel_all_enabled: state.gates.cancel_all_enabled,
+                gateway_instance_id: state.gateway_instance_id,
+                transport_generation: state.transport_generation.load(Ordering::Relaxed),
             })),
         },
     )

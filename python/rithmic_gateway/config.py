@@ -8,6 +8,9 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
+
+SpawnPolicy = Literal["never", "if_missing"]
 
 
 class GatewayConfigError(ValueError):
@@ -123,6 +126,30 @@ def _clamp_unix_path(path: str, hash_u64: int) -> str:
     return str(short)
 
 
+def parse_spawn_policy(env: Mapping[str, str]) -> SpawnPolicy:
+    """Resolve spawn policy from env (``never`` = dial-only attach)."""
+    explicit = env.get("RITHMIC_GATEWAY_SPAWN_POLICY")
+    if explicit is not None and str(explicit).strip():
+        key = str(explicit).strip().lower()
+        if key == "never":
+            return "never"
+        if key in {"if_missing", "auto", "default"}:
+            return "if_missing"
+        raise GatewayConfigError(
+            f"invalid RITHMIC_GATEWAY_SPAWN_POLICY {explicit!r}; "
+            f"expected never or if_missing"
+        )
+    auto_raw = env.get("RITHMIC_GATEWAY_AUTO_SPAWN")
+    if auto_raw is not None and str(auto_raw).strip().lower() in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
+        return "never"
+    return "if_missing"
+
+
 def default_unix_path(user: str, system_name: str, url: str, env: str = "Live") -> str:
     """Match Rust ``default_unix_path`` FNV-1a under the private runtime dir."""
     base = runtime_base_dir()
@@ -149,6 +176,7 @@ class GatewayConfig:
     auth_token: str = field(default="", repr=False)
     listen: str | None = None
     auto_spawn: bool = True
+    spawn_policy: SpawnPolicy | None = None
     gateway_bin: str | None = None
     spawn_timeout_sec: float = 30.0
     #: Extra env merged into auto-spawn child (e.g. RITHMIC_PASSWORD). Never logged.
@@ -168,6 +196,10 @@ class GatewayConfig:
         else:
             # validate early
             parse_listen_url(str(self.listen))
+        if self.spawn_policy is None:
+            self.spawn_policy = "if_missing" if self.auto_spawn else "never"
+        else:
+            self.auto_spawn = self.spawn_policy != "never"
 
     @property
     def socket_path(self) -> str:
@@ -199,7 +231,6 @@ class GatewayConfig:
             ib_id=_env_first(env, "RITHMIC_IB_ID") or "",
             auth_token=_env_first(env, "RITHMIC_GATEWAY_AUTH_TOKEN") or "",
             listen=_env_first(env, "RITHMIC_GATEWAY_LISTEN"),
-            auto_spawn=(env.get("RITHMIC_GATEWAY_AUTO_SPAWN") or "1").strip().lower()
-            not in {"0", "false", "no", "off"},
+            spawn_policy=parse_spawn_policy(env),
             gateway_bin=_env_first(env, "RITHMIC_GATEWAY_BIN"),
         )

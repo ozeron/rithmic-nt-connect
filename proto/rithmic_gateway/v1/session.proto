@@ -46,6 +46,11 @@ message Ready {
   // Parent-configured gates, advertised read-only (clients cannot elevate).
   bool trading_enabled = 2;
   bool cancel_all_enabled = 3;
+
+  // Process-local parent identity; stable until gateway parent exits.
+  uint64 gateway_instance_id = 4;
+  // Bumps when the parent recreates plants / transport epoch (L3 recovery).
+  uint64 transport_generation = 5;
 }
 
 // ---------------------------------------------------------------------------

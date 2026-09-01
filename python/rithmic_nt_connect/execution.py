@@ -553,6 +553,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         # from before the drop is not proof of current exposure.
         self._pnl_snapshot_observed.clear()
         await asyncio.to_thread(ensure_connected, self._session)
+        self._wire_gateway_transport_listener()
         self._log.info("Rithmic exec session ready (shared with data client)")
 
         # Whether the PnL poll loop is running for THIS connect: the re-arm
@@ -707,6 +708,21 @@ class RithmicExecutionClient(LiveExecutionClient):
         self._account_seeded = True
         self._log.info(
             f"seeded account {self.account_id} currency={DEFAULT_ACCOUNT_CURRENCY}"
+        )
+
+    def _wire_gateway_transport_listener(self) -> None:
+        register = getattr(
+            self._session, "register_transport_generation_listener", None
+        )
+        if register is None:
+            return
+        register(self._on_gateway_transport_generation_bump)
+
+    def _on_gateway_transport_generation_bump(self, generation: int) -> None:
+        self._order_plant.latch()
+        self._log.error(
+            f"gateway transport generation bumped to {generation}; "
+            "order plant disarmed until reconnect re-arm"
         )
 
     async def _resync_order_subscription(self) -> None:
