@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import threading
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -28,7 +29,7 @@ _serve_shared_md_parent = _shared_mod._serve_shared_md_parent
 
 
 @pytest.fixture(autouse=True)
-def _reset_registry() -> None:
+def _reset_registry() -> Iterator[None]:
     GatewayRuntimeRegistry.reset_for_tests()
     yield
     GatewayRuntimeRegistry.reset_for_tests()
@@ -87,8 +88,16 @@ def test_acquire_rolls_back_holder_on_connect_failure(
     monkeypatch.setattr(runtime.mux, "connect", _boom)
 
     with pytest.raises(GatewayError, match="dial_failed"):
-        runtime.acquire()
+        GatewayRuntimeRegistry.attach(cfg)
     assert runtime._holders == 0
+    assert runtime_registry_key_missing(cfg)
+
+
+def runtime_registry_key_missing(cfg: GatewayConfig) -> bool:
+    from rithmic_gateway.runtime import runtime_registry_key
+
+    key = runtime_registry_key(cfg)
+    return key not in GatewayRuntimeRegistry._runtimes
 
 
 def test_reconnect_resolves_fresh_runtime_after_registry_drop(
@@ -120,6 +129,7 @@ def test_reconnect_resolves_fresh_runtime_after_registry_drop(
             spawn_timeout_sec=3.0,
         )
         client = create_gateway_client(cfg, mode="mux")
+        assert isinstance(client, MuxGatewayClient)
         stale_runtime = client._runtime
         client.connect()
         client.disconnect()
@@ -130,6 +140,22 @@ def test_reconnect_resolves_fresh_runtime_after_registry_drop(
     finally:
         if sock.exists():
             sock.unlink()
+
+
+def test_detached_mux_client_rejects_rpc() -> None:
+    from rithmic_gateway.v1 import session_pb2 as pb
+
+    cfg = GatewayConfig(
+        user="u-detached-rpc",
+        system_name="LucidTrading",
+        url="wss://example",
+        auto_spawn=False,
+        attest_flock=False,
+    )
+    client = create_gateway_client(cfg, mode="mux")
+    assert isinstance(client, MuxGatewayClient)
+    with pytest.raises(GatewayError, match=r"not_connected|connect"):
+        client._rpc(pb.Frame())
 
 
 def test_ten_concurrent_acquire_single_dial(

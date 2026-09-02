@@ -235,7 +235,8 @@ pub fn gate_rpc_for_test(gates: &ParentGates, body: Body) -> Body {
 }
 
 pub(super) fn test_state(gates: ParentGates, hub: SharedFanout) -> GatewayState {
-    let (gateway_instance_id, transport_generation) = super::boot_gateway_metadata();
+    let (gateway_instance_id, transport_generation, transport_epoch) =
+        super::boot_gateway_metadata();
     GatewayState {
         gates,
         hub: hub.clone(),
@@ -259,6 +260,7 @@ pub(super) fn test_state(gates: ParentGates, hub: SharedFanout) -> GatewayState 
         idle: IdleExit::new(IdleExitPolicy::Never),
         gateway_instance_id,
         transport_generation,
+        transport_epoch,
     }
 }
 

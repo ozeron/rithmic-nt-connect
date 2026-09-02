@@ -122,6 +122,8 @@ def test_gateway_create_session_returns_fresh_wire_session(
 def test_gateway_dual_mode_create_session_isolated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from typing import Any, cast
+
     from rithmic_gateway.runtime import GatewayRuntimeRegistry
     from rithmic_nt_connect.config import ConnectMode, SessionConfig
     from rithmic_nt_connect.session import create_session
@@ -139,7 +141,7 @@ def test_gateway_dual_mode_create_session_isolated(
     a = create_session(cfg)
     b = create_session(cfg)
     assert a is not b
-    assert a._client is not b._client
+    assert cast(Any, a)._client is not cast(Any, b)._client
     GatewayRuntimeRegistry.reset_for_tests()
 
 

@@ -221,7 +221,9 @@ def test_gateway_wire_reset_ticker_prefers_plant_rpc() -> None:
     assert inner.calls == [("reset_ticker_plant", ())]
 
 
-def test_gateway_wire_reset_ticker_falls_back_to_transport_on_plant_error() -> None:
+def test_gateway_wire_reset_ticker_falls_back_to_transport_on_plant_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     inner = _RecordingGatewayClient()
     session = GatewayWireSession(inner)  # type: ignore[arg-type]
 
@@ -230,7 +232,7 @@ def test_gateway_wire_reset_ticker_falls_back_to_transport_on_plant_error() -> N
 
         raise GatewayError("plant_reset_failed", "mock plant reset failure")
 
-    inner.reset_ticker_plant = _boom  # type: ignore[method-assign]
+    monkeypatch.setattr(inner, "reset_ticker_plant", _boom)
 
     session.reset_ticker()
 

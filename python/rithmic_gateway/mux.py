@@ -10,6 +10,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any
 
 from rithmic_gateway.client import (
@@ -32,18 +33,70 @@ from rithmic_gateway.framing import MAX_FRAME_LEN, encode_frame
 from rithmic_gateway.v1 import session_pb2 as pb
 
 DEFAULT_RPC_TIMEOUT_SEC = 30.0
-_MD_QUEUE_CAP = 4096
+_EVENT_QUEUE_CAP = 4096
+_OVERFLOW_TYPE = "queue_overflow"
+
+
+@dataclass
+class _SubscriberQueues:
+    """Per-facade event buffers (fan-out from the shared drain)."""
+
+    md: deque[dict[str, Any]] = field(default_factory=deque)
+    order: deque[dict[str, Any]] = field(default_factory=deque)
+    pnl: deque[dict[str, Any]] = field(default_factory=deque)
+    history: deque[dict[str, Any]] = field(default_factory=deque)
+
+    def queues(self) -> tuple[deque[dict[str, Any]], ...]:
+        return (self.order, self.pnl, self.history, self.md)
+
+    def clear(self) -> None:
+        for q in self.queues():
+            q.clear()
+
+
+def _append_bounded(
+    target: deque[dict[str, Any]], evt: dict[str, Any], *, stream: str
+) -> None:
+    """Append with capacity; on overflow drop oldest and inject a gap marker."""
+    if len(target) >= _EVENT_QUEUE_CAP:
+        target.popleft()
+        marker = {"type": _OVERFLOW_TYPE, "dropped": True, "stream": stream}
+        if not target or target[0].get("type") != _OVERFLOW_TYPE:
+            target.appendleft(marker)
+            if len(target) >= _EVENT_QUEUE_CAP:
+                while len(target) >= _EVENT_QUEUE_CAP:
+                    if len(target) == 1 and target[0].get("type") == _OVERFLOW_TYPE:
+                        break
+                    if target[0].get("type") == _OVERFLOW_TYPE and len(target) > 1:
+                        target.pop()
+                    else:
+                        target.popleft()
+    target.append(evt)
+
+
+_STREAM_SAMPLES: dict[str, dict[str, Any]] = {
+    "order": {"type": "order_notification"},
+    "pnl": {"type": "account_pnl"},
+    "history": {"type": "time_bar"},
+    "md": {"type": "last_trade"},
+}
 
 
 class GatewayMux:
     """Owns the unix fd and demuxes frames to RPC waiters and typed queues."""
 
-    def __init__(self, config: GatewayConfig) -> None:
+    def __init__(
+        self,
+        config: GatewayConfig,
+        *,
+        rpc_timeout_sec: float = DEFAULT_RPC_TIMEOUT_SEC,
+    ) -> None:
         self._config = config
-        self._rpc_timeout_sec = DEFAULT_RPC_TIMEOUT_SEC
+        self._rpc_timeout_sec = float(rpc_timeout_sec)
         self._sock: socket.socket | None = None
         self._spawned = None
         self._next_id = 1
+        self._next_sub_id = 1
         self._scopes: list[str] = []
         self._trading_enabled = False
         self._cancel_all_enabled = False
@@ -52,10 +105,7 @@ class GatewayMux:
         self._write_lock = threading.Lock()
         self._state_lock = threading.RLock()
         self._rpc_waiters: dict[int, queue.Queue[Any]] = {}
-        self._md_events: deque[dict[str, Any]] = deque()
-        self._order_events: deque[dict[str, Any]] = deque()
-        self._pnl_events: deque[dict[str, Any]] = deque()
-        self._history_events: deque[dict[str, Any]] = deque()
+        self._subscribers: dict[int, _SubscriberQueues] = {}
         self._generation_listeners: list[Callable[[int], None]] = []
         self._stop = threading.Event()
         self._drain_thread: threading.Thread | None = None
@@ -87,6 +137,18 @@ class GatewayMux:
     def add_generation_listener(self, callback: Callable[[int], None]) -> None:
         self._generation_listeners.append(callback)
 
+    def register_subscriber(self) -> int:
+        """Allocate a per-facade event buffer; returns subscriber id."""
+        with self._state_lock:
+            sub_id = self._next_sub_id
+            self._next_sub_id += 1
+            self._subscribers[sub_id] = _SubscriberQueues()
+            return sub_id
+
+    def unregister_subscriber(self, sub_id: int) -> None:
+        with self._state_lock:
+            self._subscribers.pop(sub_id, None)
+
     def connect(self) -> None:
         with self._state_lock:
             if self.is_connected():
@@ -94,15 +156,23 @@ class GatewayMux:
             if self._sock is not None:
                 self._close_sock()
             cfg = self._config
-            self._spawned = _dial_with_attach(cfg, self._dial)
-            self._require_parent_flock()
-            _handshake_until_ready(
-                cfg,
-                dial=self._dial,
-                handshake=self._handshake,
-                require_flock=self._require_parent_flock,
-                close_sock=self._close_sock,
-            )
+            # Hold the write lock across dial+handshake so a peer RPC cannot
+            # interleave bytes on a half-ready socket (Macroscope).
+            with self._write_lock:
+                self._spawned = _dial_with_attach(cfg, self._dial)
+                self._require_parent_flock()
+                # Keep the dial timeout through handshake so a silent parent
+                # cannot hang acquire()/connect forever.
+                _handshake_until_ready(
+                    cfg,
+                    dial=self._dial,
+                    handshake=self._handshake,
+                    require_flock=self._require_parent_flock,
+                    close_sock=self._close_sock,
+                )
+                if self._sock is not None:
+                    # Idle drain uses a short read timeout so stop/reconnect wake.
+                    self._sock.settimeout(1.0)
             self._stop.clear()
             self._drain_thread = threading.Thread(
                 target=self._drain_loop, name="gateway-mux-drain", daemon=True
@@ -111,15 +181,18 @@ class GatewayMux:
 
     def disconnect(self) -> None:
         with self._state_lock:
-            if self._sock is None:
+            if self._sock is None and self._drain_thread is None:
                 return
             self._stop.set()
-            with contextlib.suppress(Exception):
-                self._write_frame(pb.Frame(disconnect=pb.DisconnectRequest()))
+            # Close the socket first so a blocked read/write unblocks the drain.
+            with self._write_lock:
+                with contextlib.suppress(Exception):
+                    if self._sock is not None:
+                        self._write_frame(pb.Frame(disconnect=pb.DisconnectRequest()))
+                self._close_sock()
             if self._drain_thread is not None:
                 self._drain_thread.join(timeout=2.0)
                 self._drain_thread = None
-            self._close_sock()
             self._clear_queues()
             self._fail_pending_rpcs(GatewayError("eof", "gateway disconnected"))
 
@@ -127,10 +200,16 @@ class GatewayMux:
         """L3 transport recovery: DISARM peers, then re-dial + handshake."""
         with self._state_lock:
             self._stop.set()
+            with self._write_lock:
+                self._close_sock()
             if self._drain_thread is not None:
                 self._drain_thread.join(timeout=2.0)
+                if self._drain_thread.is_alive():
+                    raise GatewayError(
+                        "drain_stuck",
+                        "previous mux drain thread did not stop; abort reconnect",
+                    )
                 self._drain_thread = None
-            self._close_sock()
             self._clear_queues()
             self._fail_pending_rpcs(
                 GatewayError("transport_reset", "gateway transport reconnecting")
@@ -145,6 +224,8 @@ class GatewayMux:
             raise GatewayError(_NOT_CONNECTED, _CONNECT_FIRST)
         effective = self._rpc_timeout_sec if timeout_sec is None else float(timeout_sec)
         with self._write_lock:
+            if self._sock is None:
+                raise GatewayError(_NOT_CONNECTED, _CONNECT_FIRST)
             rid = self._next_id
             self._next_id += 1
             waiter: queue.Queue[Any] = queue.Queue(maxsize=1)
@@ -162,14 +243,31 @@ class GatewayMux:
             raise resp
         return resp
 
-    def poll_filtered(self, timeout_ms: int, predicate: Any) -> dict[str, Any] | None:
+    def poll_filtered(
+        self, sub_id: int, timeout_ms: int, predicate: Any
+    ) -> dict[str, Any] | None:
         deadline = (
             time.monotonic() + max(timeout_ms, 0) / 1000.0 if timeout_ms else None
         )
         while True:
             with self._state_lock:
-                for q in self._event_queues():
+                queues = self._subscribers.get(sub_id)
+                if queues is None:
+                    return None
+                for q, stream in (
+                    (queues.order, "order"),
+                    (queues.pnl, "pnl"),
+                    (queues.history, "history"),
+                    (queues.md, "md"),
+                ):
+                    sample = _STREAM_SAMPLES[stream]
+                    wants_stream = bool(predicate(sample))
                     for idx, evt in enumerate(q):
+                        if evt.get("type") == _OVERFLOW_TYPE:
+                            if wants_stream:
+                                del q[idx]
+                                return evt
+                            continue
                         if predicate(evt):
                             del q[idx]
                             return evt
@@ -190,7 +288,6 @@ class GatewayMux:
                     self._notify_generation_listeners()
                 return
             except TimeoutError:
-                # Idle read timeout must not kill the drain; connect clears timeout.
                 continue
             except Exception:
                 self._close_sock()
@@ -206,25 +303,26 @@ class GatewayMux:
         if which == "event":
             evt = _event_to_dict(frame.event)
             with self._state_lock:
-                if _is_order_event(evt):
-                    self._order_events.append(evt)
-                elif _is_pnl_event(evt):
-                    self._pnl_events.append(evt)
-                elif _is_history_event(evt):
-                    self._history_events.append(evt)
-                elif _is_md_event(evt):
-                    if len(self._md_events) >= _MD_QUEUE_CAP:
-                        self._md_events.popleft()
-                    self._md_events.append(evt)
+                for queues in self._subscribers.values():
+                    if _is_order_event(evt):
+                        _append_bounded(queues.order, evt, stream="order")
+                    elif _is_pnl_event(evt):
+                        _append_bounded(queues.pnl, evt, stream="pnl")
+                    elif _is_history_event(evt):
+                        _append_bounded(queues.history, evt, stream="history")
+                    elif _is_md_event(evt):
+                        _append_bounded(queues.md, evt, stream="md")
             return
         rid = frame.request_id
         waiter = self._rpc_waiters.pop(rid, None)
         if waiter is None:
             return
         if which == "error":
-            waiter.put(_wire_error(frame.error.code, frame.error.message))
+            payload: Any = _wire_error(frame.error.code, frame.error.message)
         else:
-            waiter.put(frame)
+            payload = frame
+        with contextlib.suppress(queue.Full):
+            waiter.put_nowait(payload)
 
     def _notify_generation_listeners(self) -> None:
         gen = self._transport_generation
@@ -236,26 +334,19 @@ class GatewayMux:
         waiters = list(self._rpc_waiters.values())
         self._rpc_waiters.clear()
         for waiter in waiters:
-            with contextlib.suppress(Exception):
-                waiter.put(exc)
+            with contextlib.suppress(queue.Full, Exception):
+                waiter.put_nowait(exc)
 
     def _clear_queues(self) -> None:
-        for q in self._event_queues():
-            q.clear()
-
-    def _event_queues(self) -> tuple[deque[dict[str, Any]], ...]:
-        return (
-            self._order_events,
-            self._pnl_events,
-            self._history_events,
-            self._md_events,
-        )
+        with self._state_lock:
+            for queues in self._subscribers.values():
+                queues.clear()
 
     def _dial(self, path: str) -> None:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(self._rpc_timeout_sec)
         sock.connect(path)
-        sock.settimeout(None)
+        # Leave the timeout set through handshake; connect() adjusts for drain.
         self._sock = sock
 
     def _require_parent_flock(self) -> None:
@@ -304,6 +395,8 @@ class GatewayMux:
     def _write_frame(self, frame: pb.Frame) -> None:
         if self._sock is None:
             raise GatewayError(_NOT_CONNECTED, _CONNECT_FIRST)
+        # Ensure writes cannot hang forever if the parent stops reading.
+        self._sock.settimeout(self._rpc_timeout_sec)
         payload = frame.SerializeToString()
         self._sock.sendall(encode_frame(payload))
 

@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any, ClassVar, Literal
 
-from rithmic_gateway.client import GatewayClient
+from rithmic_gateway.client import GatewayClient, GatewayError
 from rithmic_gateway.config import GatewayConfig
-from rithmic_gateway.mux import GatewayMux
+from rithmic_gateway.mux import DEFAULT_RPC_TIMEOUT_SEC, GatewayMux
 
 GatewayClientMode = Literal["dual", "mux"]
 
@@ -22,7 +23,7 @@ def runtime_registry_key(config: GatewayConfig) -> str:
 
 
 def parse_gateway_client_mode(
-    env: dict[str, str] | None = None,
+    env: Mapping[str, str] | None = None,
     *,
     default: GatewayClientMode = "mux",
 ) -> GatewayClientMode:
@@ -43,30 +44,21 @@ def parse_gateway_client_mode(
 class GatewayRuntime:
     """One mux + refcount for a credential fingerprint within a process."""
 
-    def __init__(self, config: GatewayConfig) -> None:
+    def __init__(
+        self,
+        config: GatewayConfig,
+        *,
+        rpc_timeout_sec: float = DEFAULT_RPC_TIMEOUT_SEC,
+    ) -> None:
         self.config = config
-        self.mux = GatewayMux(config)
+        self.mux = GatewayMux(config, rpc_timeout_sec=rpc_timeout_sec)
         self._holders = 0
         self._lock = threading.Lock()
 
-    def acquire(self) -> None:
+    def _connect_if_needed(self) -> None:
         with self._lock:
-            self._holders += 1
-            if self._holders == 1 or not self.mux.is_connected():
-                try:
-                    self.mux.connect()
-                except Exception:
-                    self._holders -= 1
-                    raise
-
-    def release(self) -> None:
-        with self._lock:
-            if self._holders <= 0:
-                return
-            self._holders -= 1
-            if self._holders == 0:
-                self.mux.disconnect()
-                GatewayRuntimeRegistry._drop(runtime_registry_key(self.config))
+            if not self.mux.is_connected():
+                self.mux.connect()
 
 
 class MuxGatewayClient(GatewayClient):
@@ -75,10 +67,14 @@ class MuxGatewayClient(GatewayClient):
     shared_runtime = True
 
     def __init__(self, runtime: GatewayRuntime) -> None:
-        super().__init__(runtime.config)
+        super().__init__(
+            runtime.config,
+            rpc_timeout_sec=runtime.mux._rpc_timeout_sec,
+        )
         self._runtime = runtime
         self._mux = runtime.mux
         self._attached = False
+        self._sub_id: int | None = None
 
     def register_transport_generation_listener(
         self, callback: Callable[[int], None]
@@ -87,17 +83,19 @@ class MuxGatewayClient(GatewayClient):
 
     def connect(self) -> None:
         with self._io_lock:
-            runtime = GatewayRuntimeRegistry._get_or_create(self._config)
-            self._runtime = runtime
-            self._mux = runtime.mux
             if self._attached:
                 if self._mux.is_connected():
                     self._sync_ready_state()
                     return
-                self._mux.connect()
+                self._runtime._connect_if_needed()
                 self._sync_ready_state()
                 return
-            runtime.acquire()
+            runtime = GatewayRuntimeRegistry.attach(
+                self._config, rpc_timeout_sec=self._rpc_timeout_sec
+            )
+            self._runtime = runtime
+            self._mux = runtime.mux
+            self._sub_id = self._mux.register_subscriber()
             self._attached = True
             self._sync_ready_state()
 
@@ -105,12 +103,17 @@ class MuxGatewayClient(GatewayClient):
         with self._io_lock:
             if not self._attached:
                 return
-            self._runtime.release()
+            if self._sub_id is not None:
+                self._mux.unregister_subscriber(self._sub_id)
+                self._sub_id = None
+            GatewayRuntimeRegistry.detach(self._runtime)
             self._attached = False
             self._pending.clear()
 
     def reconnect_transport(self) -> None:
         with self._io_lock:
+            if not self._attached:
+                raise GatewayError("not_connected", "call connect() first")
             self._mux.reconnect()
             self._sync_ready_state()
 
@@ -121,13 +124,21 @@ class MuxGatewayClient(GatewayClient):
         self._gateway_instance_id = self._mux.gateway_instance_id
         self._transport_generation = self._mux.transport_generation
 
+    def _require_attached(self) -> None:
+        if not self._attached:
+            raise GatewayError("not_connected", "call connect() first")
+
     def _rpc(self, frame: Any, *, timeout_sec: float | None = None) -> Any:
         with self._io_lock:
+            self._require_attached()
             return self._mux.rpc_unlocked(frame, timeout_sec=timeout_sec)
 
     def _poll_filtered(self, timeout_ms: int, predicate: Any) -> dict[str, Any] | None:
         with self._io_lock:
-            return self._mux.poll_filtered(timeout_ms, predicate)
+            self._require_attached()
+            if self._sub_id is None:
+                return None
+            return self._mux.poll_filtered(self._sub_id, timeout_ms, predicate)
 
 
 class GatewayRuntimeRegistry:
@@ -135,7 +146,53 @@ class GatewayRuntimeRegistry:
     _guard: ClassVar[threading.Lock] = threading.Lock()
 
     @classmethod
+    def attach(
+        cls,
+        config: GatewayConfig,
+        *,
+        rpc_timeout_sec: float = DEFAULT_RPC_TIMEOUT_SEC,
+    ) -> GatewayRuntime:
+        """Get-or-create + hold under one lock so release cannot drop mid-attach."""
+        key = runtime_registry_key(config)
+        with cls._guard:
+            runtime = cls._runtimes.get(key)
+            if runtime is None:
+                runtime = GatewayRuntime(config, rpc_timeout_sec=rpc_timeout_sec)
+                cls._runtimes[key] = runtime
+            runtime._holders += 1
+            need_connect = runtime._holders == 1 or not runtime.mux.is_connected()
+        if need_connect:
+            try:
+                runtime._connect_if_needed()
+            except Exception:
+                with cls._guard:
+                    runtime._holders = max(0, runtime._holders - 1)
+                    drop = runtime._holders == 0
+                    if drop:
+                        cls._runtimes.pop(key, None)
+                if drop:
+                    with contextlib.suppress(Exception):
+                        runtime.mux.disconnect()
+                raise
+        return runtime
+
+    @classmethod
+    def detach(cls, runtime: GatewayRuntime) -> None:
+        key = runtime_registry_key(runtime.config)
+        disconnect = False
+        with cls._guard:
+            if runtime._holders <= 0:
+                return
+            runtime._holders -= 1
+            if runtime._holders == 0:
+                cls._runtimes.pop(key, None)
+                disconnect = True
+        if disconnect:
+            runtime.mux.disconnect()
+
+    @classmethod
     def _get_or_create(cls, config: GatewayConfig) -> GatewayRuntime:
+        """Return registry entry without attaching a holder (tests / factory)."""
         key = runtime_registry_key(config)
         with cls._guard:
             runtime = cls._runtimes.get(key)
@@ -145,8 +202,19 @@ class GatewayRuntimeRegistry:
             return runtime
 
     @classmethod
-    def create_client(cls, config: GatewayConfig) -> MuxGatewayClient:
-        return MuxGatewayClient(cls._get_or_create(config))
+    def create_client(
+        cls,
+        config: GatewayConfig,
+        *,
+        rpc_timeout_sec: float = DEFAULT_RPC_TIMEOUT_SEC,
+    ) -> MuxGatewayClient:
+        key = runtime_registry_key(config)
+        with cls._guard:
+            runtime = cls._runtimes.get(key)
+            if runtime is None:
+                runtime = GatewayRuntime(config, rpc_timeout_sec=rpc_timeout_sec)
+                cls._runtimes[key] = runtime
+            return MuxGatewayClient(runtime)
 
     @classmethod
     def _drop(cls, key: str) -> None:
@@ -165,6 +233,8 @@ def create_gateway_client(
     config: GatewayConfig,
     *,
     mode: GatewayClientMode | str | None = None,
+    rpc_timeout_sec: float = DEFAULT_RPC_TIMEOUT_SEC,
+    history_rpc_timeout_sec: float | None = None,
 ) -> GatewayClient:
     resolved: GatewayClientMode
     if mode == "dual":
@@ -174,5 +244,8 @@ def create_gateway_client(
     else:
         resolved = parse_gateway_client_mode()
     if resolved == "dual":
-        return GatewayClient(config)
-    return GatewayRuntimeRegistry.create_client(config)
+        kwargs: dict[str, Any] = {"rpc_timeout_sec": rpc_timeout_sec}
+        if history_rpc_timeout_sec is not None:
+            kwargs["history_rpc_timeout_sec"] = history_rpc_timeout_sec
+        return GatewayClient(config, **kwargs)
+    return GatewayRuntimeRegistry.create_client(config, rpc_timeout_sec=rpc_timeout_sec)

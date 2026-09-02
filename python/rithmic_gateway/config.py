@@ -198,7 +198,17 @@ class GatewayConfig:
             parse_listen_url(str(self.listen))
         if self.spawn_policy is None:
             self.spawn_policy = "if_missing" if self.auto_spawn else "never"
+        elif self.spawn_policy not in {"never", "if_missing"}:
+            raise GatewayConfigError(
+                f"invalid spawn_policy {self.spawn_policy!r}; "
+                f"expected never or if_missing"
+            )
+        elif not self.auto_spawn:
+            # Explicit dial-only wins over a default/forwarded "if_missing"
+            # (SessionConfig / gateway_wire may pass both).
+            self.spawn_policy = "never"
         else:
+            # Explicit policy is authoritative when auto_spawn was left enabled.
             self.auto_spawn = self.spawn_policy != "never"
 
     @property

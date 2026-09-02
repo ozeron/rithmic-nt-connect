@@ -464,7 +464,11 @@ class GatewayClient:
             slice_start, slice_end = window
             from rithmic_gateway.runtime import create_gateway_client
 
-            peer = create_gateway_client(self._config)
+            peer = create_gateway_client(
+                self._config,
+                rpc_timeout_sec=self._rpc_timeout_sec,
+                history_rpc_timeout_sec=timeout,
+            )
             peer.connect()
             try:
                 return peer.load_time_bars(

@@ -12,7 +12,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{broadcast, mpsc, Mutex as TokioMutex};
+use tokio::sync::{broadcast, mpsc, watch, Mutex as TokioMutex};
 use tokio::task::JoinHandle;
 
 use rithmic_plants::RithmicSession;
@@ -31,14 +31,19 @@ pub use dispatch::{
 };
 
 /// Metadata advertised in every ``Ready`` frame for this parent process.
-pub fn boot_gateway_metadata() -> (u64, AtomicU64) {
+///
+/// Returns `(gateway_instance_id, transport_generation, transport_epoch)`.
+/// `transport_epoch` notifies live clients when generation bumps so they
+/// re-handshake instead of keeping a stale Ready generation.
+pub fn boot_gateway_metadata() -> (u64, AtomicU64, watch::Sender<u64>) {
     use std::time::{SystemTime, UNIX_EPOCH};
     let id = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0)
         ^ (std::process::id() as u64);
-    (id, AtomicU64::new(1))
+    let (epoch_tx, _) = watch::channel(1u64);
+    (id, AtomicU64::new(1), epoch_tx)
 }
 
 /// Shared gateway runtime state, held for the process lifetime.
@@ -80,6 +85,9 @@ pub struct GatewayState {
     pub gateway_instance_id: u64,
     /// Bumps when plants / transport epoch is recreated (advertised in Ready).
     pub transport_generation: AtomicU64,
+    /// Notifies connected clients when [`Self::transport_generation`] bumps so
+    /// they drop and re-handshake (otherwise they keep a stale Ready frame).
+    pub transport_epoch: watch::Sender<u64>,
 }
 
 /// Credential fingerprint advertised/checked at Handshake (consistency
@@ -507,10 +515,18 @@ async fn handle_client(mut stream: UnixStream, state: Arc<GatewayState>) -> Resu
 
     let (out_tx, mut out_rx) = mpsc::channel::<OutMsg>(crate::subscriptions::DEFAULT_QUEUE_CAP);
     let mut client = ClientCtx::new(out_tx);
+    let mut epoch_rx = state.transport_epoch.subscribe();
+    // Ignore the current value; only react to subsequent generation bumps.
+    epoch_rx.borrow_and_update();
 
     let loop_result: Result<(), String> = loop {
         tokio::select! {
             biased;
+            _ = epoch_rx.changed() => {
+                // Plants rebuilt — force re-handshake so Ready carries the new
+                // transport_generation (Macroscope).
+                break Ok(());
+            }
             frame = read_frame_bytes(&mut stream) => {
                 match frame {
                     Ok(Some(payload)) => {

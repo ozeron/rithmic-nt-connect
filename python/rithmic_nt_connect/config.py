@@ -367,6 +367,17 @@ class SessionConfig:
             raise ConfigError(f"invalid env {env!r}; expected Live, Demo, or Test")
         self.env = env
         self.connect_mode = parse_connect_mode(self.connect_mode)
+        if self.gateway_spawn_policy not in {"never", "if_missing"}:
+            raise ConfigError(
+                f"invalid gateway_spawn_policy {self.gateway_spawn_policy!r}; "
+                f"expected never or if_missing"
+            )
+        # Explicit auto_spawn=False must disable spawn even when the dataclass
+        # default spawn_policy is still "if_missing".
+        if not self.gateway_auto_spawn:
+            self.gateway_spawn_policy = "never"
+        elif self.gateway_spawn_policy == "never":
+            self.gateway_auto_spawn = False
         if self.beta_url is None or not str(self.beta_url).strip():
             self.beta_url = self.url
 

@@ -65,6 +65,34 @@ def test_from_env_auto_spawn_zero_sets_never() -> None:
     assert cfg.auto_spawn is False
 
 
+def test_spawn_policy_typo_raises() -> None:
+    from typing import Any, cast
+
+    from rithmic_gateway.config import GatewayConfigError
+
+    with pytest.raises(GatewayConfigError, match="spawn_policy"):
+        GatewayConfig(
+            user="u-typo",
+            system_name="LucidTrading",
+            url="wss://example",
+            spawn_policy=cast(Any, "nevver"),
+            attest_flock=False,
+        )
+
+
+def test_auto_spawn_false_beats_default_if_missing_policy() -> None:
+    cfg = GatewayConfig(
+        user="u-legacy-dial",
+        system_name="LucidTrading",
+        url="wss://example",
+        auto_spawn=False,
+        spawn_policy="if_missing",
+        attest_flock=False,
+    )
+    assert cfg.spawn_policy == "never"
+    assert cfg.auto_spawn is False
+
+
 def test_flock_held_socket_late_zero_popen(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
