@@ -8,6 +8,8 @@ from __future__ import annotations
 from typing import Any
 
 from rithmic_gateway import GatewayClient, GatewayConfig
+from rithmic_gateway.client import GatewayError
+from rithmic_gateway.runtime import create_gateway_client
 from rithmic_gateway.types import AccountRmsInfo, ProductRmsInfo
 
 
@@ -35,15 +37,16 @@ class GatewayWireSession:
         self._client.disconnect()
 
     def reset_ticker(self) -> None:
-        """Recover this client's ticker stream (detach + re-dial).
+        """Prefer plant RPC; dual mode falls back to detach + re-dial."""
+        from rithmic_gateway.client import GatewayError
 
-        Parent plants are untouched for peer consumers: the gateway keeps the
-        single Rithmic login and re-issues intents on handshake, so a client
-        channel error needs no plant-level reset — unlike the direct path,
-        where the shared in-process session resets its ticker plant only.
-        """
-        self._client.disconnect()
-        self._client.connect()
+        try:
+            self._client.reset_ticker_plant()
+        except GatewayError:
+            if getattr(self._client, "shared_runtime", False):
+                raise
+            self._client.disconnect()
+            self._client.connect()
 
     def reset_ticker_plant(self) -> None:
         """Plant-level ticker reset RPC (direct/gateway surface parity).
@@ -69,6 +72,9 @@ class GatewayWireSession:
 
     def get_front_month(self, symbol: str, exchange: str) -> Any:
         return self._client.get_front_month(symbol, exchange)
+
+    def get_live_md_state(self) -> dict[str, Any]:
+        return self._client.get_live_md_state()
 
     def get_reference_data(self, symbol: str, exchange: str) -> Any:
         return self._client.get_reference_data(symbol, exchange)
@@ -271,6 +277,46 @@ class GatewayWireSession:
     def request_plants(self, plants: str) -> None:
         self._client.request_plants(plants)
 
+    def register_transport_generation_listener(self, callback: Any) -> None:
+        fn = getattr(self._client, "register_transport_generation_listener", None)
+        if fn is not None:
+            fn(callback)
+
+    def subscribe_transport_events(self, listener: Any) -> Any:
+        fn = getattr(self._client, "subscribe_transport_events", None)
+        if fn is None:
+            return lambda: None
+        return fn(listener)
+
+    def ensure_transport_live(self) -> int:
+        fn = getattr(self._client, "ensure_transport_live", None)
+        if fn is not None:
+            return int(fn())
+        fn2 = getattr(self._client, "reconnect_transport", None)
+        if fn2 is not None:
+            fn2()
+        return int(getattr(self._client, "transport_generation", 0) or 0)
+
+    def reconnect_transport(self) -> None:
+        """Demand L3 recovery via runtime (mux); dual clients re-dial."""
+        fn = getattr(self._client, "reconnect_transport", None)
+        if fn is None:
+            raise GatewayError(
+                "not_supported",
+                "reconnect_transport requires mux gateway client",
+            )
+        fn()
+
+    def gateway_transport_connected(self) -> bool:
+        """True when the shared mux socket is up (False for dual / unknown)."""
+        mux = getattr(self._client, "_mux", None)
+        if mux is None:
+            return True
+        is_connected = getattr(mux, "is_connected", None)
+        if not callable(is_connected):
+            return True
+        return bool(is_connected())
+
 
 def gateway_config_from_session(session: Any) -> GatewayConfig:
     """Build ``GatewayConfig`` fingerprint from adapter ``SessionConfig``."""
@@ -284,6 +330,7 @@ def gateway_config_from_session(session: Any) -> GatewayConfig:
         ib_id=session.ib_id or "",
         auth_token=getattr(session, "gateway_auth_token", None) or "",
         listen=getattr(session, "gateway_listen", None),
+        spawn_policy=getattr(session, "gateway_spawn_policy", None),
         auto_spawn=bool(getattr(session, "gateway_auto_spawn", True)),
         gateway_bin=getattr(session, "gateway_bin", None),
     )
@@ -291,5 +338,7 @@ def gateway_config_from_session(session: Any) -> GatewayConfig:
 
 def create_gateway_wire_session(session: Any) -> GatewayWireSession:
     """Lazy-import safe constructor used by ``create_session``."""
-    client = GatewayClient(gateway_config_from_session(session))
+    config = gateway_config_from_session(session)
+    mode = getattr(session, "gateway_client_mode", None)
+    client = create_gateway_client(config, mode=mode)
     return GatewayWireSession(client)

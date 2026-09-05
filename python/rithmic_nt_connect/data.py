@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import itertools
+import os
 import time
 from typing import Any
 
@@ -55,6 +56,44 @@ from rithmic_nt_connect.constants import ADAPTER_NAME, VENUE
 from rithmic_nt_connect.errors import is_reconnectable_poll_error
 from rithmic_nt_connect.providers import RithmicInstrumentProvider
 from rithmic_nt_connect.session import WireSession
+
+# Last RequestBars failure reason for qgw hydrate fail-closed messaging.
+# ``hydrate_blocked_live_md`` = RC2.3 capability_denied after bounded wait.
+_last_request_bars_error: str | None = None
+
+
+def take_last_request_bars_error() -> str | None:
+    """Return and clear the last RequestBars error tag (or None)."""
+    global _last_request_bars_error
+    out = _last_request_bars_error
+    _last_request_bars_error = None
+    return out
+
+
+def _is_live_md_history_denied(exc: BaseException) -> bool:
+    code = str(getattr(exc, "code", "") or "")
+    msg = str(exc)
+    return (
+        code == "capability_denied"
+        or "history_denied_live_md" in msg
+        or "capability_denied" in msg
+    )
+
+
+def _history_live_md_wait_sec() -> float:
+    raw = os.environ.get("RITHMIC_HISTORY_LIVE_MD_WAIT_SEC", "45").strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 45.0
+
+
+def _history_live_md_retry_sec() -> float:
+    raw = os.environ.get("RITHMIC_HISTORY_LIVE_MD_RETRY_SEC", "2").strip()
+    try:
+        return max(0.2, float(raw))
+    except ValueError:
+        return 2.0
 
 
 def _reconnectable_poll_error(exc: BaseException) -> bool:
@@ -593,16 +632,22 @@ class RithmicDataClient(LiveMarketDataClient):
         self._history_poll_task: asyncio.Task | None = None
         self._resync_lock = asyncio.Lock()
         self._resync_generation = 0
+        # Single-flight MD replay after TRANSPORT_UP (dedupe on transport gen).
+        self._l3_md_recovery_task: asyncio.Task | None = None
+        self._last_replayed_transport_gen = 0
         # One-sided BestBidOffer merge state, keyed by symbol[:exchange].
         self._bbo_state: dict[str, dict[str, Any]] = {}
         # Rate-limited skip diagnostics (Rithmic push feed is presence-bit based).
         self._skip_counts: dict[str, int] = {}
         self._skip_last_flush = 0.0
 
+    _L3_MD_REPLAY_MAX_ATTEMPTS = 5
+
     async def _connect(self) -> None:
         from rithmic_nt_connect.session import ensure_connected
 
         await asyncio.to_thread(ensure_connected, self._session)
+        self._wire_gateway_transport_listener()
         await self._instrument_provider.initialize()
         for instrument in self._instrument_provider.list_all():
             self._handle_data(instrument)
@@ -658,6 +703,99 @@ class RithmicDataClient(LiveMarketDataClient):
         if exc is not None:
             self._log.error(f"{name} died: {exc}")
 
+    def _wire_gateway_transport_listener(self) -> None:
+        subscribe = getattr(self._session, "subscribe_transport_events", None)
+        if callable(subscribe):
+            subscribe(self._on_transport_event)
+            return
+        register = getattr(
+            self._session, "register_transport_generation_listener", None
+        )
+        if register is None:
+            return
+        register(self._on_gateway_transport_generation_bump)
+
+    def _on_transport_event(self, event: object) -> None:
+        from rithmic_gateway.transport_recovery import (
+            RecoveryFailed,
+            TransportDown,
+            TransportUp,
+        )
+
+        if isinstance(event, TransportDown):
+            self._log.warning(
+                f"gateway TRANSPORT_DOWN gen={event.gen} "
+                f"fault={event.fault.kind.value}; pausing MD trust"
+            )
+            return
+        if isinstance(event, TransportUp):
+            self._log.warning(
+                f"gateway TRANSPORT_UP gen={event.gen}; scheduling MD replay"
+            )
+            self._schedule_md_replay_after_transport_up(event.gen)
+            return
+        if isinstance(event, RecoveryFailed):
+            self._log.error(
+                f"gateway TRANSPORT recovery failed gen={event.gen} "
+                f"attempts={event.attempts}: {event.cause}"
+            )
+
+    def _on_gateway_transport_generation_bump(self, generation: int) -> None:
+        self._log.warning(
+            f"gateway transport generation bumped to {generation}; "
+            "scheduling MD subscription replay"
+        )
+        self._schedule_md_replay_after_transport_up(generation)
+
+    def _schedule_md_replay_after_transport_up(self, generation: int) -> None:
+        loop = getattr(self, "_loop", None)
+        if loop is None:
+            self._log.error("MD replay not scheduled: data client loop missing")
+            return
+
+        def _start() -> None:
+            if generation <= self._last_replayed_transport_gen:
+                return
+            task = self._l3_md_recovery_task
+            if task is not None and not task.done():
+                return
+            self._l3_md_recovery_task = loop.create_task(
+                self._replay_md_after_transport_up(generation),
+                name="rithmic_l3_md_replay",
+            )
+
+        try:
+            loop.call_soon_threadsafe(_start)
+        except Exception as exc:
+            self._log.error(f"MD replay schedule failed: {exc}")
+
+    async def _replay_md_after_transport_up(self, generation: int) -> None:
+        """Transport is LIVE; replay ticker/book/bar intents (L0-L2)."""
+        if generation <= self._last_replayed_transport_gen:
+            return
+        backoff = 0.5
+        last_exc: BaseException | None = None
+        for attempt in range(1, self._L3_MD_REPLAY_MAX_ATTEMPTS + 1):
+            try:
+                await self._resync_ticker_subscription()
+                if self._bar_types:
+                    self._ensure_history_poll_task()
+                self._last_replayed_transport_gen = generation
+                self._log.warning(
+                    f"L3 MD replayed subscriptions "
+                    f"(generation={generation}, attempt={attempt})"
+                )
+                return
+            except Exception as exc:
+                last_exc = exc
+                self._log.error(
+                    f"L3 MD replay attempt {attempt}/"
+                    f"{self._L3_MD_REPLAY_MAX_ATTEMPTS} failed: {exc}"
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2.0, 8.0)
+        self._log.error(f"L3 MD replay exhausted (generation={generation}): {last_exc}")
+
     async def _disconnect(self) -> None:
         self._poll_closing = True
         for attr in ("_poll_task", "_history_poll_task"):
@@ -678,6 +816,9 @@ class RithmicDataClient(LiveMarketDataClient):
             # re-sends fresh bid/ask sides, and merging them with pre-reset
             # state would publish a QuoteTick mixing stale + fresh sides.
             self._bbo_state.clear()
+            ensure = getattr(self._session, "ensure_transport_live", None)
+            if callable(ensure):
+                await asyncio.to_thread(ensure)
             ticker_keys = set(getattr(self, "_ticker_intents", {}).keys())
             if not ticker_keys:
                 ticker_keys = set(getattr(self, "_subscriptions", set()))
@@ -1088,27 +1229,53 @@ class RithmicDataClient(LiveMarketDataClient):
             f"history {bar_type} → rithmic type={rithmic_type} period={period} "
             f"(not 1s/1m unless that is the requested type)"
         )
-        try:
-            bars_raw = await asyncio.to_thread(
-                self._session.load_time_bars,
-                symbol,
-                exchange,
-                start,
-                end,
-                rithmic_type,
-                period,
-            )
-        except Exception as exc:
-            self._log.error(f"Error requesting bars for {bar_type}: {exc}")
-            self._handle_bars(
-                bar_type,
-                [],
-                request.id,
-                request.start,
-                request.end,
-                request.params,
-            )
-            return
+        global _last_request_bars_error
+        _last_request_bars_error = None
+        wait_budget = _history_live_md_wait_sec()
+        retry_every = _history_live_md_retry_sec()
+        deadline = time.monotonic() + wait_budget
+        attempt = 0
+        bars_raw: list[Any]
+        while True:
+            try:
+                bars_raw = await asyncio.to_thread(
+                    self._session.load_time_bars,
+                    symbol,
+                    exchange,
+                    start,
+                    end,
+                    rithmic_type,
+                    period,
+                )
+                break
+            except Exception as exc:
+                if _is_live_md_history_denied(exc) and time.monotonic() < deadline:
+                    attempt += 1
+                    self._log.warning(
+                        f"history {bar_type} blocked by live MD intents "
+                        f"(attempt={attempt}); retrying for up to "
+                        f"{wait_budget:.0f}s (RC2.3)"
+                    )
+                    await asyncio.sleep(retry_every)
+                    continue
+                if _is_live_md_history_denied(exc):
+                    _last_request_bars_error = "hydrate_blocked_live_md"
+                    self._log.error(
+                        f"HYDRATE_BLOCKED_LIVE_MD: Error requesting bars for "
+                        f"{bar_type} after {wait_budget:.0f}s wait: {exc}"
+                    )
+                else:
+                    _last_request_bars_error = "history_error"
+                    self._log.error(f"Error requesting bars for {bar_type}: {exc}")
+                self._handle_bars(
+                    bar_type,
+                    [],
+                    request.id,
+                    request.start,
+                    request.end,
+                    request.params,
+                )
+                return
 
         ts_init = self._clock.timestamp_ns()
         try:

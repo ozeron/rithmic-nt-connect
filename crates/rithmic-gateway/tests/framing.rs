@@ -40,6 +40,8 @@ fn ready_advertises_scopes() {
         scopes: vec!["md".into(), "history".into()],
         trading_enabled: false,
         cancel_all_enabled: false,
+        gateway_instance_id: 42,
+        transport_generation: 1,
     };
     let frame = Frame {
         request_id: 0,
@@ -52,6 +54,8 @@ fn ready_advertises_scopes() {
         Some(Body::Ready(r)) => {
             assert_eq!(r.scopes, vec!["md", "history"]);
             assert!(!r.trading_enabled);
+            assert_eq!(r.gateway_instance_id, 42);
+            assert_eq!(r.transport_generation, 1);
         }
         other => panic!("expected Ready, got {other:?}"),
     }

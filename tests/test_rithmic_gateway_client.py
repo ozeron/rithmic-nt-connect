@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from rithmic_gateway.attach import AttachError
 from rithmic_gateway.client import GatewayClient, GatewayError
 from rithmic_gateway.config import (
     GatewayConfig,
@@ -340,7 +341,7 @@ def test_spawn_happy_path_requires_flock_not_just_listen(
         spawn_timeout_sec=0.4,
     )
     try:
-        with pytest.raises(SpawnError, match="timed out"):
+        with pytest.raises(AttachError, match="timed out"):
             spawn_gateway(
                 cfg,
                 wait_socket=True,
@@ -1146,6 +1147,77 @@ def test_client_resolved_account_none_when_unresolved() -> None:
         client = _resolved_account_client(sock)
         client.connect()
         assert client.resolved_account() is None
+        client.disconnect()
+    finally:
+        if sock.exists():
+            sock.unlink()
+
+
+def test_history_denied_live_md_maps_to_capability_denied() -> None:
+    sock = Path(f"/tmp/rgw-hist-deny-{os.getpid()}.sock")
+    if sock.exists():
+        sock.unlink()
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(sock))
+    server.listen(1)
+
+    def _run() -> None:
+        try:
+            conn, _ = server.accept()
+        except Exception:
+            server.close()
+            return
+        with conn:
+            header = conn.recv(4)
+            (n,) = struct.unpack("!I", header)
+            conn.recv(n)
+            conn.sendall(
+                encode_frame(
+                    pb.Frame(
+                        ready=pb.Ready(
+                            scopes=["md", "history"],
+                            trading_enabled=False,
+                            cancel_all_enabled=False,
+                            gateway_instance_id=99,
+                            transport_generation=3,
+                        )
+                    ).SerializeToString()
+                )
+            )
+            header = conn.recv(4)
+            (n,) = struct.unpack("!I", header)
+            req = pb.Frame()
+            req.ParseFromString(conn.recv(n))
+            conn.sendall(
+                encode_frame(
+                    pb.Frame(
+                        request_id=req.request_id,
+                        error=pb.ErrorResponse(
+                            code="history_denied_live_md",
+                            message="live md active",
+                        ),
+                    ).SerializeToString()
+                )
+            )
+        server.close()
+
+    threading.Thread(target=_run, daemon=True).start()
+    try:
+        cfg = GatewayConfig(
+            user="u",
+            system_name="LucidTrading",
+            url="wss://example",
+            listen=f"unix://{sock}",
+            auto_spawn=False,
+            attest_flock=False,
+        )
+        client = GatewayClient(cfg, rpc_timeout_sec=2.0)
+        client.connect()
+        assert client.gateway_instance_id == 99
+        assert client.transport_generation == 3
+        with pytest.raises(GatewayError) as ei:
+            client.load_time_bars("NQ", "CME", 1, 2)
+        assert ei.value.code == "capability_denied"
         client.disconnect()
     finally:
         if sock.exists():

@@ -61,3 +61,20 @@ fn probe_time_bars_denied_when_ticker_intent_live() {
         }),
     ));
 }
+
+#[test]
+fn get_live_md_state_reports_ticker_intent() {
+    use rithmic_gateway::pb::GetLiveMdStateRequest;
+
+    match history_rpc_with_live_ticker_intent_for_test(Body::GetLiveMdState(
+        GetLiveMdStateRequest {},
+    )) {
+        Body::GetLiveMdStateResponse(s) => {
+            assert!(s.live_md);
+            assert!(s.ticker_intents >= 1);
+            assert_eq!(s.book_intents, 0);
+            assert_eq!(s.time_bar_intents, 0);
+        }
+        other => panic!("expected GetLiveMdStateResponse, got {other:?}"),
+    }
+}

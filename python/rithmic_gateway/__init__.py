@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from rithmic_gateway.attach import wait_for_parent_socket
 from rithmic_gateway.config import GatewayConfig
 from rithmic_gateway.flock import SessionLock, SessionLockError, session_flock_held
 from rithmic_gateway.history_window import (
@@ -26,10 +27,10 @@ from rithmic_gateway.history_window import (
     bar_slice_secs,
     window_slices,
 )
+from rithmic_gateway.live_md import wait_until_live_md_clear
 from rithmic_gateway.spawn import (
     resolve_gateway_bin,
     spawn_gateway,
-    wait_for_parent_socket,
 )
 
 __all__ = [
@@ -47,6 +48,7 @@ __all__ = [
     "session_flock_held",
     "spawn_gateway",
     "wait_for_parent_socket",
+    "wait_until_live_md_clear",
     "window_slices",
 ]
 

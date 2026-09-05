@@ -135,6 +135,9 @@ async fn run() -> Result<(), String> {
     // Ready only after plants are up (KTD5).
     let ready = AtomicBool::new(true);
 
+    let (gateway_instance_id, transport_generation, transport_epoch) =
+        rithmic_gateway::server::boot_gateway_metadata();
+
     let state = Arc::new(GatewayState {
         gates,
         hub: hub.clone(),
@@ -156,6 +159,9 @@ async fn run() -> Result<(), String> {
         recon_lock: Arc::new(TokioMutex::new(())),
         md_history_gate: Arc::new(TokioMutex::new(())),
         idle: IdleExit::new(idle_policy),
+        gateway_instance_id,
+        transport_generation,
+        transport_epoch,
     });
 
     let pump = tokio::spawn(run_event_pump(

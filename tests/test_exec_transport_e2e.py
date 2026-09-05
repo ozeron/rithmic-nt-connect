@@ -621,6 +621,9 @@ class _ConnectSession(WireSessionStub):
     def disconnect_order_plant(self) -> None:
         self.calls.append("disconnect_order_plant")
 
+    def disconnect_pnl_plant(self) -> None:
+        self.calls.append("disconnect_pnl_plant")
+
     def poll_order_event(self) -> dict[str, object] | None:
         return None
 
@@ -690,6 +693,49 @@ def test_reconnect_ream_requires_successful_drain(
     assert not client._order_plant.latched
     assert client._order_plant.state is OrderPlantState.LIVE
     assert client._order_plant.allow_submit()
+
+
+def test_transport_generation_bump_schedules_l3_rearm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TRANSPORT_UP must restore plants (TransportRecovery owns dial)."""
+    session = _ConnectSession(fail_load_orders=False)
+    client = _connect_client(session, monkeypatch)
+    client._order_plant = OrderPlantPolicy(OrderPlantState.LIVE)
+    client._pnl_connected = True
+    client._l3_recovery_task = None
+    client._order_poll_task = None
+    client._poll_task = None
+    client._L3_PLANT_RESTORE_MAX_ATTEMPTS = 1
+
+    async def _run() -> None:
+        loop = asyncio.get_running_loop()
+        client._loop = loop  # type: ignore[attr-defined]
+        from rithmic_gateway.transport_recovery import (
+            TransportDown,
+            TransportFault,
+            TransportFaultKind,
+            TransportUp,
+        )
+
+        client._on_transport_event(
+            TransportDown(
+                gen=1,
+                fault=TransportFault(kind=TransportFaultKind.UNIX_EOF, observed_gen=1),
+            )
+        )
+        assert client._order_plant.state is OrderPlantState.LATCHED
+        client._on_transport_event(TransportUp(gen=2))
+        await asyncio.sleep(0)
+        task = client._l3_recovery_task
+        assert task is not None
+        await task
+        assert client._order_plant.state is OrderPlantState.LIVE
+        assert client._order_plant.allow_submit()
+
+    asyncio.run(_run())
+    assert "subscribe_order_updates" in session.calls
+    assert "load_orders" in session.calls
 
 
 def test_unlatched_reconnect_still_runs_rearm_barrier(

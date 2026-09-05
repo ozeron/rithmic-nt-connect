@@ -565,9 +565,10 @@ def create_session(
     Direct is a process-wide singleton per credential fingerprint (see
     ``create_rust_session``): the data factory, exec factory, and
     ``connect_market_data_session`` share one in-process Rithmic login.
-    Gateway dials ``rithmic-gateway`` and never opens plants locally; each
-    call returns a **fresh** ``GatewayClient`` — the parent owns the single
-    login, and sharing one client would interleave tick and order polls.
+    Gateway dials ``rithmic-gateway`` and never opens plants locally. Each
+    call returns a **fresh** ``GatewayWireSession`` facade. In ``mux`` mode
+    (default) data and exec factories share one ``GatewayRuntime`` socket;
+    ``dual`` mode gives each factory its own ``GatewayClient`` unix peer.
     """
     if session.connect_mode == ConnectMode.GATEWAY:
         from rithmic_nt_connect.gateway_wire import create_gateway_wire_session

@@ -200,6 +200,7 @@ pub(super) async fn dispatch(
         Body::GetFrontMonth(req) => info::get_front_month(state, request_id, req).await,
         Body::GetReferenceData(req) => info::get_reference_data(state, request_id, req).await,
         Body::ResolvedAccount(_) => info::resolved_account(state, request_id).await,
+        Body::GetLiveMdState(_) => info::get_live_md_state(state, request_id).await,
         Body::LoadOrders(_req) => orders::load_orders(state, request_id).await,
         Body::LoadProductRmsInfo(_) => orders::load_product_rms_info(state, request_id).await,
         Body::LoadAccountRmsInfo(_) => orders::load_account_rms_info(state, request_id).await,
@@ -235,6 +236,8 @@ pub fn gate_rpc_for_test(gates: &ParentGates, body: Body) -> Body {
 }
 
 pub(super) fn test_state(gates: ParentGates, hub: SharedFanout) -> GatewayState {
+    let (gateway_instance_id, transport_generation, transport_epoch) =
+        super::boot_gateway_metadata();
     GatewayState {
         gates,
         hub: hub.clone(),
@@ -256,6 +259,9 @@ pub(super) fn test_state(gates: ParentGates, hub: SharedFanout) -> GatewayState 
         recon_lock: Arc::new(TokioMutex::new(())),
         md_history_gate: Arc::new(TokioMutex::new(())),
         idle: IdleExit::new(IdleExitPolicy::Never),
+        gateway_instance_id,
+        transport_generation,
+        transport_epoch,
     }
 }
 

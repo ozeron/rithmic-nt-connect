@@ -123,6 +123,8 @@ async fn reconnect_loop(
                 "rithmic-gateway: restore attempt {attempt}: {restored}/{attempted} subscriptions"
             );
             if restored == attempted {
+                let next = state.transport_generation.fetch_add(1, Ordering::SeqCst) + 1;
+                let _ = state.transport_epoch.send(next);
                 state.ready.store(true, Ordering::SeqCst);
                 return;
             }

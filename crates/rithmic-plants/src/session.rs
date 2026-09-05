@@ -239,10 +239,13 @@ impl RithmicSession {
             (root, exchange)
         };
 
-        let end = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i32)
-            .unwrap_or(0);
+        let end = i32::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| Error::Protocol(format!("history ready probe clock: {e}")))?
+                .as_secs(),
+        )
+        .map_err(|_| Error::Protocol("history ready probe timestamp exceeds i32 range".into()))?;
         let start = end.saturating_sub(120);
         // Tiny 1m window — Ok([]) means the plant answered (not silent).
         let _ = self

@@ -46,6 +46,11 @@ message Ready {
   // Parent-configured gates, advertised read-only (clients cannot elevate).
   bool trading_enabled = 2;
   bool cancel_all_enabled = 3;
+
+  // Process-local parent identity; stable until gateway parent exits.
+  uint64 gateway_instance_id = 4;
+  // Bumps when the parent recreates plants / transport epoch (L3 recovery).
+  uint64 transport_generation = 5;
 }
 
 // ---------------------------------------------------------------------------
@@ -222,6 +227,16 @@ message LoadProductRmsInfoRequest {}
 // Mirrors `rithmic_plants::load_account_rms_info`; read-only venue config.
 message LoadAccountRmsInfoRequest {}
 
+// Read-only: whether live MD intents block history Load* (RC2.3 barrier).
+message GetLiveMdStateRequest {}
+
+message GetLiveMdStateResponse {
+  bool live_md = 1;
+  uint32 ticker_intents = 2;
+  uint32 book_intents = 3;
+  uint32 time_bar_intents = 4;
+  uint32 ready_peers = 5;
+}
 // ---------------------------------------------------------------------------
 // Responses (Gateway -> Client, correlated to a Request by request_id)
 // ---------------------------------------------------------------------------
@@ -531,6 +546,7 @@ message Frame {
     LoadProductRmsInfoRequest load_product_rms_info = 39;
     LoadAccountRmsInfoRequest load_account_rms_info = 40;
     ResetTickerPlantRequest reset_ticker_plant = 41;
+    GetLiveMdStateRequest get_live_md_state = 42;
 
     Ack ack = 50;
     ErrorResponse error = 51;
@@ -543,6 +559,7 @@ message Frame {
     ResolvedAccountResponse resolved_account_response = 58;
     LoadProductRmsInfoResponse load_product_rms_info_response = 59;
     LoadAccountRmsInfoResponse load_account_rms_info_response = 60;
+    GetLiveMdStateResponse get_live_md_state_response = 61;
 
     Event event = 90;
   }

@@ -100,6 +100,19 @@ class WireSessionStub:
     def request_plants(self, *args: Any, **kwargs: Any) -> None:
         raise NotImplementedError
 
+    def register_transport_generation_listener(
+        self, callback: Callable[..., Any], *args: Any, **kwargs: Any
+    ) -> None:
+        pass
+
+    def subscribe_transport_events(
+        self, listener: Callable[..., Any], *args: Any, **kwargs: Any
+    ) -> Callable[[], None]:
+        return lambda: None
+
+    def ensure_transport_live(self, *args: Any, **kwargs: Any) -> int:
+        return 0
+
     def subscribe_pnl(self, *args: Any, **kwargs: Any) -> None:
         raise NotImplementedError
 
@@ -204,6 +217,11 @@ class FaultInjectingSession(WireSessionStub):
 
     def connect(self) -> None:
         self.calls.append("connect")
+
+    def register_transport_generation_listener(
+        self, callback: Callable[..., Any]
+    ) -> None:
+        self.calls.append("register_transport_generation_listener")
 
     def subscribe_pnl(self) -> None:
         self.calls.append("subscribe_pnl")

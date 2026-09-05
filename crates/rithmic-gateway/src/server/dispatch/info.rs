@@ -81,3 +81,20 @@ pub(super) async fn resolved_account(state: &GatewayState, request_id: u64) -> F
         body: Some(body),
     }
 }
+
+/// RC2.3 barrier snapshot — no plant lock; safe while live MD is active.
+pub(super) async fn get_live_md_state(state: &GatewayState, request_id: u64) -> Frame {
+    let (ticker, book, time_bars) = state.reconnect.live_md_intent_counts().await;
+    let live_md = ticker > 0 || book > 0 || time_bars > 0;
+    let ready_peers = state.idle.peer_count().await as u32;
+    Frame {
+        request_id,
+        body: Some(Body::GetLiveMdStateResponse(pb::GetLiveMdStateResponse {
+            live_md,
+            ticker_intents: ticker,
+            book_intents: book,
+            time_bar_intents: time_bars,
+            ready_peers,
+        })),
+    }
+}

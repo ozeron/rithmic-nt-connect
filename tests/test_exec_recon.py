@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections import OrderedDict
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from types import MethodType, SimpleNamespace
 from typing import Any, cast
@@ -1618,6 +1619,31 @@ def test_status_reports_raises_when_trading_source_unavailable():
         asyncio.run(client.generate_order_status_reports(_status_cmd()))
 
 
+def test_status_reports_empty_drain_raises_for_full_recon():
+    """open_only=False (startup mass-status): empty drain must raise, not []."""
+    client = _trading_client(session=_LoadOrdersSession([]))
+    with pytest.raises(VenueQueryUnavailable, match="best-effort drain"):
+        asyncio.run(client.generate_order_status_reports(_status_cmd()))
+
+
+def test_status_reports_empty_drain_returns_empty_for_open_only():
+    """open_only=True continuous check: [] avoids ExecEngine ERROR spam when flat.
+
+    Operator must keep ``open_check_open_only=True`` so missing cached opens
+    stay advisory (not canceled).
+    """
+    client = _trading_client(session=_LoadOrdersSession([]))
+    cmd = GenerateOrderStatusReports(
+        instrument_id=None,
+        start=None,
+        end=None,
+        open_only=True,
+        command_id=UUID4(),
+        ts_init=1,
+    )
+    assert asyncio.run(client.generate_order_status_reports(cmd)) == []
+
+
 def test_status_reports_cache_backed_for_read_only(monkeypatch: pytest.MonkeyPatch):
     # A read-only client legitimately reports only its locally cached orders
     # (never claims venue authority); it must not raise.
@@ -1645,6 +1671,335 @@ def test_load_orders_events_does_not_retry_unavailable_error():
     with pytest.raises(ReconciliationUnavailableError, match="unavailable"):
         asyncio.run(client._load_orders_events(1, 2))
     assert calls["n"] == 1
+
+
+def test_generate_mass_status_soft_completes_when_order_drain_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Aug-17 RC-5 fix: empty order drain must not abort startup mass status.
+
+    Nautilus TradingNode refuses to start the trader when ``generate_mass_status``
+    returns ``None``. Empty best-effort drains raise from
+    ``generate_order_status_reports``; the Rithmic override must still return a
+    mass status (with position reports) so MY043 can run with recon enabled.
+    """
+    from nautilus_trader.model.identifiers import ClientId, Venue
+
+    captured: dict[str, object] = {}
+
+    def _mass_factory(**kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            ts_init=kwargs.get("ts_init", 2),
+            add_order_reports=lambda reports: captured.__setitem__("orders", reports),
+            add_fill_reports=lambda reports: captured.__setitem__("fills", reports),
+            add_position_reports=lambda reports: captured.__setitem__(
+                "positions", reports
+            ),
+        )
+
+    monkeypatch.setattr(
+        "rithmic_nt_connect.execution.ExecutionMassStatus", _mass_factory
+    )
+
+    async def _orders_raise(_cmd: object) -> list[object]:
+        raise VenueQueryUnavailable("empty drain")
+
+    async def _fills_raise(_cmd: object) -> list[object]:
+        raise VenueQueryUnavailable("empty drain")
+
+    pos = [object()]
+
+    async def _positions(_cmd: object) -> list[object]:
+        return pos
+
+    # Bind the unbound method onto a plain host — Cython Component.id is
+    # read-only on real instances, which blocks constructing ExecutionMassStatus.
+    host: Any = SimpleNamespace(
+        id=ClientId("RITHMIC"),
+        venue=Venue("RITHMIC"),
+        account_id=AccountId("RITHMIC-ACC1"),
+        _log=_Log(),
+        _clock=SimpleNamespace(
+            timestamp_ns=lambda: 2,
+            utc_now=lambda: __import__("pandas").Timestamp(0, tz="UTC"),
+        ),
+        reconciliation_active=False,
+        generate_order_status_reports=_orders_raise,
+        generate_fill_reports=_fills_raise,
+        generate_position_status_reports=_positions,
+        _apply_mass_status_report_window=(
+            RithmicExecutionClient._apply_mass_status_report_window
+        ),
+    )
+    mass = asyncio.run(
+        RithmicExecutionClient.generate_mass_status(host, lookback_mins=None)
+    )
+    assert mass is not None
+    assert captured["orders"] == []
+    assert captured["fills"] == []
+    assert captured["positions"] == pos
+    assert RithmicExecutionClient.SOFT_MASS_STATUS is True
+
+
+def test_generate_mass_status_omits_fills_when_fill_drain_returns_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Soft mass-status must not attach fill reports even when the drain yields.
+
+    NT 1.231 ``_adjust_mass_status_fills`` invents ``S-`` openings from incomplete
+    fill windows vs venue position; ``generate_missing_orders=False`` does not
+    gate that path. Position reports remain the venue-qty authority.
+    """
+    from nautilus_trader.model.identifiers import ClientId, Venue
+
+    captured: dict[str, list[object]] = {}
+    window: dict[str, object] = {}
+
+    def _mass_factory(**kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            ts_init=kwargs.get("ts_init", 99),
+            add_order_reports=lambda reports: captured.__setitem__("orders", reports),
+            add_fill_reports=lambda reports: captured.__setitem__("fills", reports),
+            add_position_reports=lambda reports: captured.__setitem__(
+                "positions", reports
+            ),
+            set_report_window=lambda start, complete: window.update(
+                {"lookback_start": start, "reports_complete": complete}
+            ),
+        )
+
+    monkeypatch.setattr(
+        "rithmic_nt_connect.execution.ExecutionMassStatus", _mass_factory
+    )
+
+    order_row = object()
+    fill_row = object()
+    pos = [object()]
+
+    async def _orders(_cmd: object) -> list[object]:
+        return [order_row]
+
+    async def _fills(_cmd: object) -> list[object]:
+        return [fill_row]
+
+    async def _positions(_cmd: object) -> list[object]:
+        return pos
+
+    host: Any = SimpleNamespace(
+        id=ClientId("RITHMIC"),
+        venue=Venue("RITHMIC"),
+        account_id=AccountId("RITHMIC-ACC1"),
+        _log=_Log(),
+        _clock=SimpleNamespace(
+            timestamp_ns=lambda: 99,
+            utc_now=lambda: __import__("pandas").Timestamp(0, tz="UTC"),
+        ),
+        reconciliation_active=False,
+        generate_order_status_reports=_orders,
+        generate_fill_reports=_fills,
+        generate_position_status_reports=_positions,
+        _apply_mass_status_report_window=(
+            RithmicExecutionClient._apply_mass_status_report_window
+        ),
+    )
+    mass = asyncio.run(
+        RithmicExecutionClient.generate_mass_status(host, lookback_mins=None)
+    )
+    assert mass is not None
+    assert captured["orders"] == [order_row]
+    assert captured["fills"] == []
+    assert captured["positions"] == pos
+    assert window["reports_complete"] is False
+    assert window["lookback_start"] == 99
+
+
+def test_generate_mass_status_declares_lookback_when_lookback_mins_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When NT exposes ``set_report_window``, soft mass-status declares the bound."""
+    from nautilus_trader.model.identifiers import ClientId, Venue
+
+    window: dict[str, object] = {}
+
+    def _mass_factory(**kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            ts_init=kwargs.get("ts_init", 1),
+            add_order_reports=lambda reports: None,
+            add_fill_reports=lambda reports: None,
+            add_position_reports=lambda reports: None,
+            set_report_window=lambda start, complete: window.update(
+                {"lookback_start": start, "reports_complete": complete}
+            ),
+        )
+
+    monkeypatch.setattr(
+        "rithmic_nt_connect.execution.ExecutionMassStatus", _mass_factory
+    )
+
+    async def _empty(_cmd: object) -> list[object]:
+        return []
+
+    async def _orders_raise(_cmd: object) -> list[object]:
+        raise VenueQueryUnavailable("empty drain")
+
+    host: Any = SimpleNamespace(
+        id=ClientId("RITHMIC"),
+        venue=Venue("RITHMIC"),
+        account_id=AccountId("RITHMIC-ACC1"),
+        _log=_Log(),
+        _clock=SimpleNamespace(
+            timestamp_ns=lambda: 1,
+            utc_now=lambda: __import__("pandas").Timestamp("2026-09-02T15:00:00Z"),
+        ),
+        reconciliation_active=False,
+        generate_order_status_reports=_orders_raise,
+        generate_fill_reports=_orders_raise,
+        generate_position_status_reports=_empty,
+        _apply_mass_status_report_window=(
+            RithmicExecutionClient._apply_mass_status_report_window
+        ),
+    )
+    mass = asyncio.run(
+        RithmicExecutionClient.generate_mass_status(host, lookback_mins=60)
+    )
+    assert mass is not None
+    assert window["reports_complete"] is False
+    # 2026-09-02T14:00:00Z
+    assert window["lookback_start"] == int(
+        datetime.fromisoformat("2026-09-02T14:00:00+00:00").timestamp() * 1_000_000_000
+    )
+
+
+def test_apply_mass_status_report_window_noop_on_nt_1231_shape() -> None:
+    """Installed NT 1.231 ExecutionMassStatus has no report-window setter."""
+    from nautilus_trader.execution.reports import ExecutionMassStatus
+    from nautilus_trader.model.identifiers import ClientId, Venue
+
+    mass = ExecutionMassStatus(
+        client_id=ClientId("RITHMIC"),
+        account_id=AccountId("RITHMIC-ACC1"),
+        venue=Venue("RITHMIC"),
+        report_id=__import__("nautilus_trader.core.uuid", fromlist=["UUID4"]).UUID4(),
+        ts_init=1,
+    )
+    assert (
+        RithmicExecutionClient._apply_mass_status_report_window(
+            mass, lookback_start_ns=1, reports_complete=False
+        )
+        is False
+    )
+    assert not hasattr(mass, "lookback_start")
+    assert not hasattr(mass, "reports_complete")
+
+
+def test_augment_soft_mass_flat_for_cache_opens() -> None:
+    """Open positions in cache missing from venue must get explicit FLAT reports."""
+    from nautilus_trader.execution.reports import PositionStatusReport
+    from nautilus_trader.model.enums import PositionSide
+    from nautilus_trader.model.identifiers import InstrumentId, Venue
+    from nautilus_trader.model.objects import Quantity
+
+    instrument_id = InstrumentId.from_str("MNQZ5.GLBX")
+    account_id = AccountId("RITHMIC-ACC1")
+
+    class _Pos:
+        def __init__(self) -> None:
+            self.instrument_id = instrument_id
+
+        def signed_decimal_qty(self) -> object:
+            return __import__("decimal").Decimal(1)
+
+    cache = SimpleNamespace(
+        positions_open=lambda **_k: [_Pos()],
+        instrument=lambda _id: SimpleNamespace(size_precision=0),
+    )
+    host: Any = SimpleNamespace(
+        account_id=account_id,
+        venue=Venue("GLBX"),
+        _cache=cache,
+    )
+    reports = RithmicExecutionClient._augment_soft_mass_flat_for_cache_opens(
+        host, [], ts_init=7
+    )
+    assert len(reports) == 1
+    assert reports[0].instrument_id == instrument_id
+    assert reports[0].position_side == PositionSide.FLAT
+    assert reports[0].quantity == Quantity.from_int(0)
+    assert isinstance(reports[0], PositionStatusReport)
+
+
+def test_warn_soft_mass_cache_vs_venue_logs_flush_redis() -> None:
+    """Ghost cache vs venue flat must warn that NT will not invent closing fills."""
+    from nautilus_trader.execution.reports import PositionStatusReport
+    from nautilus_trader.model.enums import PositionSide
+    from nautilus_trader.model.identifiers import InstrumentId, Venue
+    from nautilus_trader.model.objects import Quantity
+
+    instrument_id = InstrumentId.from_str("MNQZ5.GLBX")
+    account_id = AccountId("RITHMIC-ACC1")
+    log = _CaptureLog()
+
+    class _Pos:
+        def __init__(self) -> None:
+            self.instrument_id = instrument_id
+
+        def signed_decimal_qty(self) -> object:
+            return __import__("decimal").Decimal(1)
+
+    host: Any = SimpleNamespace(
+        venue=Venue("GLBX"),
+        _log=log,
+        _cache=SimpleNamespace(positions_open=lambda **_k: [_Pos()]),
+    )
+    flat = PositionStatusReport(
+        account_id=account_id,
+        instrument_id=instrument_id,
+        position_side=PositionSide.FLAT,
+        quantity=Quantity.from_int(0),
+        report_id=__import__("nautilus_trader.core.uuid", fromlist=["UUID4"]).UUID4(),
+        ts_last=1,
+        ts_init=1,
+    )
+    RithmicExecutionClient._warn_soft_mass_cache_vs_venue(host, [flat])
+    assert any("Flush Redis" in msg for msg in log.messages)
+
+
+def test_generate_mass_status_aborts_on_unexpected_order_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unexpected order-drain failures must not soft-complete as empty."""
+    from nautilus_trader.model.identifiers import ClientId, Venue
+
+    async def _orders_boom(_cmd: object) -> list[object]:
+        raise RuntimeError("database corrupt")
+
+    async def _fills_ok(_cmd: object) -> list[object]:
+        return []
+
+    async def _positions_ok(_cmd: object) -> list[object]:
+        return []
+
+    host: Any = SimpleNamespace(
+        id=ClientId("RITHMIC"),
+        venue=Venue("RITHMIC"),
+        account_id=AccountId("RITHMIC-ACC1"),
+        _log=_Log(),
+        _clock=SimpleNamespace(
+            timestamp_ns=lambda: 2,
+            utc_now=lambda: __import__("pandas").Timestamp(0, tz="UTC"),
+        ),
+        reconciliation_active=False,
+        generate_order_status_reports=_orders_boom,
+        generate_fill_reports=_fills_ok,
+        generate_position_status_reports=_positions_ok,
+        _apply_mass_status_report_window=(
+            RithmicExecutionClient._apply_mass_status_report_window
+        ),
+    )
+    mass = asyncio.run(
+        RithmicExecutionClient.generate_mass_status(host, lookback_mins=None)
+    )
+    assert mass is None
 
 
 def test_load_orders_events_fails_once_on_transport_error():
