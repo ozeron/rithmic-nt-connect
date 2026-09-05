@@ -258,6 +258,16 @@ impl ReconnectController {
         self.intent.lock().await.has_live_md_intents()
     }
 
+    /// Intent counts for GetLiveMdState (ticker, book, time_bars).
+    pub async fn live_md_intent_counts(&self) -> (u32, u32, u32) {
+        let g = self.intent.lock().await;
+        (
+            g.ticker.len() as u32,
+            g.book.len() as u32,
+            g.time_bars.len() as u32,
+        )
+    }
+
     /// Test/helper: hub + ticker intent in one call (0→1 hub when first).
     pub async fn on_subscribe(&self, key: SubKey) -> bool {
         let first_ticker = self.note_ticker(key.clone()).await;

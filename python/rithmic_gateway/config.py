@@ -178,7 +178,7 @@ class GatewayConfig:
     auto_spawn: bool = True
     spawn_policy: SpawnPolicy | None = None
     gateway_bin: str | None = None
-    spawn_timeout_sec: float = 30.0
+    spawn_timeout_sec: float = 90.0
     #: Extra env merged into auto-spawn child (e.g. RITHMIC_PASSWORD). Never logged.
     spawn_environ: dict[str, str] | None = field(default=None, repr=False)
     #: Require credential flock held before accepting Ready (disable only for

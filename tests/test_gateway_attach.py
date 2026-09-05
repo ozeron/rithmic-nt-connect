@@ -180,12 +180,12 @@ def test_parallel_attach_at_most_one_popen(
         spawn_timeout_sec=5.0,
     )
 
-    errors: list[BaseException] = []
+    errors: list[Exception] = []
 
     def _attach() -> None:
         try:
             spawn_gateway(cfg, wait_socket=True)
-        except BaseException as exc:
+        except Exception as exc:
             errors.append(exc)
 
     threads = [threading.Thread(target=_attach) for _ in range(10)]

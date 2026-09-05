@@ -150,10 +150,15 @@ impl IdleExit {
         }
     }
 
+    /// Current Ready peer count (Handshake→Ready clients still attached).
+    pub async fn peer_count(&self) -> usize {
+        self.inner.lock().await.peers
+    }
+
     /// Test helper: current Ready peer count.
     #[cfg(test)]
     pub async fn peer_count_for_test(&self) -> usize {
-        self.inner.lock().await.peers
+        self.peer_count().await
     }
 
     /// Test helper: whether an idle deadline is armed.

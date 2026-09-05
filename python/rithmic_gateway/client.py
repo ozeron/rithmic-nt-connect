@@ -5,12 +5,14 @@ from __future__ import annotations
 import contextlib
 import socket
 import struct
-import subprocess
 import threading
 import time
 from collections import deque
 from collections.abc import Callable
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    import subprocess  # nosec B404
 
 from google.protobuf.json_format import MessageToDict
 
@@ -114,7 +116,12 @@ def _handshake_until_ready(
     require_flock: Callable[[], None],
     close_sock: Callable[[], None],
 ) -> None:
-    """Handshake, retrying ``not_ready`` until spawn timeout."""
+    """Handshake, retrying ``not_ready`` / silent-parent timeouts until deadline.
+
+    Lucid plant cold-connect often exceeds a single RPC socket timeout while the
+    parent is up but not yet ``Ready``. Treat ``TimeoutError`` like ``not_ready``
+    and keep re-dialing until ``spawn_timeout_sec`` (default 90s).
+    """
     path = config.socket_path
     deadline = time.monotonic() + float(config.spawn_timeout_sec)
     while True:
@@ -125,10 +132,14 @@ def _handshake_until_ready(
             if exc.code != "not_ready" or time.monotonic() >= deadline:
                 close_sock()
                 raise
-            close_sock()
-            time.sleep(0.1)
-            dial(path)
-            require_flock()
+        except TimeoutError:
+            if time.monotonic() >= deadline:
+                close_sock()
+                raise
+        close_sock()
+        time.sleep(0.1)
+        dial(path)
+        require_flock()
 
 
 class GatewayClient:
@@ -281,6 +292,16 @@ class GatewayClient:
                 "protocol", f"expected reference_data_response, got {which}"
             )
         return _message_to_dict(resp.reference_data_response)
+
+    def get_live_md_state(self) -> dict[str, Any]:
+        """RC2.3 barrier snapshot (safe while live MD intents are active)."""
+        resp = self._rpc(pb.Frame(get_live_md_state=pb.GetLiveMdStateRequest()))
+        which = resp.WhichOneof("body")
+        if which != "get_live_md_state_response":
+            raise GatewayError(
+                "protocol", f"expected get_live_md_state_response, got {which}"
+            )
+        return _message_to_dict(resp.get_live_md_state_response)
 
     def resolved_account(self) -> dict[str, Any] | None:
         """Resolved account triple, or None when the parent has not resolved one."""

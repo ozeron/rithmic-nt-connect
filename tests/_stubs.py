@@ -105,6 +105,14 @@ class WireSessionStub:
     ) -> None:
         pass
 
+    def subscribe_transport_events(
+        self, listener: Callable[..., Any], *args: Any, **kwargs: Any
+    ) -> Callable[[], None]:
+        return lambda: None
+
+    def ensure_transport_live(self, *args: Any, **kwargs: Any) -> int:
+        return 0
+
     def subscribe_pnl(self, *args: Any, **kwargs: Any) -> None:
         raise NotImplementedError
 

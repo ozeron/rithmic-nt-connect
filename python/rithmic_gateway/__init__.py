@@ -27,6 +27,7 @@ from rithmic_gateway.history_window import (
     bar_slice_secs,
     window_slices,
 )
+from rithmic_gateway.live_md import wait_until_live_md_clear
 from rithmic_gateway.spawn import (
     resolve_gateway_bin,
     spawn_gateway,
@@ -47,6 +48,7 @@ __all__ = [
     "session_flock_held",
     "spawn_gateway",
     "wait_for_parent_socket",
+    "wait_until_live_md_clear",
     "window_slices",
 ]
 

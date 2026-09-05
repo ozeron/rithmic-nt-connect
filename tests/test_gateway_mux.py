@@ -183,7 +183,7 @@ def test_mux_stays_connected_when_parent_is_quiet() -> None:
         mux = client._runtime.mux
         assert mux._sock is not None
         # Drain uses a short idle timeout (not blocking forever).
-        assert mux._sock.gettimeout() == 1.0
+        assert mux._sock.gettimeout() == pytest.approx(1.0)
         time.sleep(0.15)
         assert mux.is_connected()
         client.disconnect()
@@ -192,7 +192,7 @@ def test_mux_stays_connected_when_parent_is_quiet() -> None:
             sock.unlink()
 
 
-def test_mux_reconnect_clears_buffered_events_and_notifies_listeners(
+def test_mux_reconnect_notifies_listeners_without_wiping_queues(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cfg = GatewayConfig(
@@ -212,8 +212,30 @@ def test_mux_reconnect_clears_buffered_events_and_notifies_listeners(
 
     mux.reconnect()
 
-    assert not mux._subscribers[sub_id].md
+    # Queues kept so EOF→recovery does not race away buffered events.
+    assert mux._subscribers[sub_id].md
     assert notified == [3]
+
+
+def test_mux_poll_raises_eof_when_transport_down_and_queues_empty() -> None:
+    cfg = GatewayConfig(
+        user="u-mux-poll-eof",
+        system_name="LucidTrading",
+        url="wss://example",
+        auto_spawn=False,
+        attest_flock=False,
+    )
+    mux = GatewayMux(cfg)
+    sub_id = mux.register_subscriber()
+    mux._sock = None
+    mux._stop.clear()
+    with pytest.raises(GatewayError) as ei:
+        mux.poll_filtered(sub_id, 0, lambda e: e.get("type") == "last_trade")
+    assert ei.value.code == "eof"
+    # Buffered events remain readable after sock death until drained.
+    mux._subscribers[sub_id].md.append({"type": "last_trade", "symbol": "NQ"})
+    got = mux.poll_filtered(sub_id, 0, lambda e: e.get("type") == "last_trade")
+    assert got is not None and got["symbol"] == "NQ"
 
 
 def test_mux_queue_overflow_injects_gap_marker() -> None:

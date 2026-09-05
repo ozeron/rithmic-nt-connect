@@ -144,6 +144,10 @@ cargo run -p rithmic-gateway --bin rithmic-gateway
 # The gateway refuses Load*/probe with error code `history_denied_live_md`
 # while any ticker/book/time-bar intent is live — lake/qgw must use a
 # separate gateway (or stop live MD) for heavy history.
+# Read-only barrier: GatewayClient.get_live_md_state() / GetLiveMdState RPC
+# (no plant lock). Deploy handoff: wait until live_md=false before hydrate.
+# qgw RequestBars retries capability_denied for RITHMIC_HISTORY_LIVE_MD_WAIT_SEC
+# (default 45) then fail-closes as HYDRATE_BLOCKED_LIVE_MD.
 #
 # --- History Ready ≠ plants connected (2026-08-31 MY043 / RC4) ---
 # History plant login can still leave Load* silent until rithmic-rs
@@ -204,6 +208,56 @@ drain looks identical). The exec generators (`generate_order_status_reports` /
 `generate_fill_reports`) therefore return whatever the drain yields — including
 `[]` — when trading is enabled, and read-only status recon stays cache-backed
 (honest: not a venue snapshot).
+
+### Soft mass-status history contract (MY043 2026-09-02 / proof 2026-09-03)
+
+Startup `generate_mass_status` soft-completes empty/unavailable order drains so
+the TradingNode can start (RC-5). It must **not** feed that best-effort drain
+into Nautilus `LiveExecutionEngine._adjust_mass_status_fills` /
+`adjust_fills_for_partial_window`: that compatibility path invents synthetic
+`OrderFilled` events with `venue_order_id=S-…` when fills do not explain the
+venue position, and `generate_missing_orders=False` does **not** gate it (only
+later position-report repair). Warm Redis + plant claim + S- fill double-counted
+OMS on MY043 (incident `2026-09-02-002` in quant-guild-work).
+
+Adapter contract on soft mass-status:
+
+- Attach **position** reports (venue qty authority), including explicit **FLAT**
+  rows for instruments that are open in the NT cache but absent from the venue
+  PnL map (so startup recon sees Redis ghosts).
+- Attach **order** reports only when the order drain succeeded.
+- **Never** attach fill reports (empty list), even when the fill drain returned rows.
+- Call `ExecutionMassStatus.set_report_window(lookback_start, reports_complete=False)`
+  when the installed NT exposes it. **NT 1.231.x has no setter / no
+  `lookback_start` field** — fill omission is the fail-closed defense against
+  S- invent on that line. Master / 2.0.x documents the bound; Python bindings
+  may still lack the setter (Rust in-tree adapters use `set_report_window`).
+
+#### Warm Redis + plant flat (live proof 2026-09-03 ~07:36Z)
+
+With `QGW_LIVE_RECON=1`, plant flat (`working_orders=0 positions=0`), warm Redis:
+
+- Soft mass-status ran; adjust ended with `order_reports=0, fill_reports=0` (no S-).
+- Portfolio still `net_position=1` / `Initialized 1 open position` (Redis ghost).
+- Continuous check: `cached_qty=1, venue_qty=0` — NT will **not** invent a
+  closing fill when `generate_missing_orders=False`, so OMS stays wrong.
+- Strategy `trade recover freeze: orphan position` is the correct latch.
+
+**Incomplete / lookback marking does not clear Redis ghosts** on NT 1.231 with
+`generate_missing_orders=False`. Declaring `reports_complete=False` (when the
+API exists) only avoids the S- invent path; it does not wipe cache open qty.
+
+**qgw_book / operator requirement before recon-on with warm Redis:**
+
+1. Confirm plant flat (`make flatten-status` or equivalent).
+2. **Flush Redis** (or start with a cold/empty cache) so OMS cannot restore a
+   ghost open qty.
+3. Only then set `QGW_LIVE_RECON=1` / `reconciliation=True`.
+
+**Do not re-enable default `QGW_LIVE_RECON=1` until** a supervised warm-open
+after Redis flush proves: OMS net == plant net, and jsonl has no
+`Generated OrderFilled` / `S-` synthetic ids. Keep default off until that proof.
+Do not monkeypatch-drop S- fills in qgw_book.
 
 **Consumer requirement (important):** because an empty best-effort drain can
 look like "no orders", a trading consumer must run with `open_check_open_only=True`

@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 from rithmic_gateway import GatewayClient, GatewayConfig
+from rithmic_gateway.client import GatewayError
 from rithmic_gateway.runtime import create_gateway_client
 from rithmic_gateway.types import AccountRmsInfo, ProductRmsInfo
 
@@ -71,6 +72,9 @@ class GatewayWireSession:
 
     def get_front_month(self, symbol: str, exchange: str) -> Any:
         return self._client.get_front_month(symbol, exchange)
+
+    def get_live_md_state(self) -> dict[str, Any]:
+        return self._client.get_live_md_state()
 
     def get_reference_data(self, symbol: str, exchange: str) -> Any:
         return self._client.get_reference_data(symbol, exchange)
@@ -277,6 +281,41 @@ class GatewayWireSession:
         fn = getattr(self._client, "register_transport_generation_listener", None)
         if fn is not None:
             fn(callback)
+
+    def subscribe_transport_events(self, listener: Any) -> Any:
+        fn = getattr(self._client, "subscribe_transport_events", None)
+        if fn is None:
+            return lambda: None
+        return fn(listener)
+
+    def ensure_transport_live(self) -> int:
+        fn = getattr(self._client, "ensure_transport_live", None)
+        if fn is not None:
+            return int(fn())
+        fn2 = getattr(self._client, "reconnect_transport", None)
+        if fn2 is not None:
+            fn2()
+        return int(getattr(self._client, "transport_generation", 0) or 0)
+
+    def reconnect_transport(self) -> None:
+        """Demand L3 recovery via runtime (mux); dual clients re-dial."""
+        fn = getattr(self._client, "reconnect_transport", None)
+        if fn is None:
+            raise GatewayError(
+                "not_supported",
+                "reconnect_transport requires mux gateway client",
+            )
+        fn()
+
+    def gateway_transport_connected(self) -> bool:
+        """True when the shared mux socket is up (False for dual / unknown)."""
+        mux = getattr(self._client, "_mux", None)
+        if mux is None:
+            return True
+        is_connected = getattr(mux, "is_connected", None)
+        if not callable(is_connected):
+            return True
+        return bool(is_connected())
 
 
 def gateway_config_from_session(session: Any) -> GatewayConfig:

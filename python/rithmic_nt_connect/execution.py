@@ -25,6 +25,7 @@ from nautilus_trader.execution.messages import (
     SubmitOrderList,
 )
 from nautilus_trader.execution.reports import (
+    ExecutionMassStatus,
     FillReport,
     OrderStatusReport,
     PositionStatusReport,
@@ -371,6 +372,11 @@ class _DrainRowResult:
 class RithmicExecutionClient(LiveExecutionClient):
     """Rithmic execution client (PnL always; order plant when ``enable_trading``)."""
 
+    # Soft-complete startup mass-status (RC-5): empty/unavailable order drains
+    # must not abort TradingNode start. Fill economics are never attached — see
+    # ``generate_mass_status`` (MY043 2026-09-02 S- invent via NT partial-window).
+    SOFT_MASS_STATUS: bool = True
+
     def __init__(
         self,
         loop: asyncio.AbstractEventLoop,
@@ -419,6 +425,8 @@ class RithmicExecutionClient(LiveExecutionClient):
         # requires it before clearing the latch (positions ride that stream).
         self._pnl_snapshot_observed = asyncio.Event()
         self._account_seeded = False
+        # Single-flight L3 recovery after mux transport generation bumps.
+        self._l3_recovery_task: asyncio.Task | None = None
         # PnL is streamed frequently; avoid publishing identical AccountState
         # events (and making Nautilus Portfolio log each one).
         self._last_account_state_key: tuple[str, str, Decimal] | None = None
@@ -432,6 +440,7 @@ class RithmicExecutionClient(LiveExecutionClient):
     _MAX_SEEN_FILL_KEYS = 10_000
     _REARM_PNL_SNAPSHOT_TIMEOUT_S = 5.0
     _ORDER_POLL_MAX_TRANSIENT = 5
+    _L3_PLANT_RESTORE_MAX_ATTEMPTS = 5
 
     def _fill_key_seen(self, key: str) -> bool:
         if key in self._seen_fill_keys:
@@ -711,6 +720,10 @@ class RithmicExecutionClient(LiveExecutionClient):
         )
 
     def _wire_gateway_transport_listener(self) -> None:
+        subscribe = getattr(self._session, "subscribe_transport_events", None)
+        if callable(subscribe):
+            subscribe(self._on_transport_event)
+            return
         register = getattr(
             self._session, "register_transport_generation_listener", None
         )
@@ -718,11 +731,145 @@ class RithmicExecutionClient(LiveExecutionClient):
             return
         register(self._on_gateway_transport_generation_bump)
 
+    def _on_transport_event(self, event: object) -> None:
+        from rithmic_gateway.transport_recovery import (
+            RecoveryFailed,
+            TransportDown,
+            TransportUp,
+        )
+
+        if isinstance(event, TransportDown):
+            self._order_plant.latch()
+            self._log.error(
+                f"gateway TRANSPORT_DOWN gen={event.gen} "
+                f"fault={event.fault.kind.value}; order plant disarmed"
+            )
+            return
+        if isinstance(event, TransportUp):
+            self._log.warning(
+                f"gateway TRANSPORT_UP gen={event.gen}; scheduling plant restore"
+            )
+            self._schedule_plant_restore_after_transport_up(event.gen)
+            return
+        if isinstance(event, RecoveryFailed):
+            self._order_plant.latch()
+            self._log.error(
+                f"gateway TRANSPORT recovery failed gen={event.gen} "
+                f"attempts={event.attempts}: {event.cause}"
+            )
+
     def _on_gateway_transport_generation_bump(self, generation: int) -> None:
+        """Legacy dual-path bridge (DOWN+UP collapsed into gen callbacks)."""
         self._order_plant.latch()
         self._log.error(
             f"gateway transport generation bumped to {generation}; "
-            "order plant disarmed until reconnect re-arm"
+            "order plant disarmed until plant restore"
+        )
+        self._schedule_plant_restore_after_transport_up(generation)
+
+    def _schedule_plant_restore_after_transport_up(self, generation: int) -> None:
+        """Thread-safe: transport events may fire off the NT event loop."""
+        loop = getattr(self, "_loop", None)
+        if loop is None:
+            self._log.error("plant restore not scheduled: execution loop missing")
+            return
+
+        def _start() -> None:
+            task = self._l3_recovery_task
+            if task is not None and not task.done():
+                return
+            self._l3_recovery_task = self.create_task(
+                self._restore_plants_after_transport_up(generation),
+                log_msg="rithmic_l3_plant_restore",
+            )
+
+        try:
+            loop.call_soon_threadsafe(_start)
+        except Exception as exc:
+            self._log.error(f"plant restore schedule failed: {exc}")
+
+    async def _restore_plants_after_transport_up(self, generation: int) -> None:
+        """Transport is already LIVE; resubscribe plants + drain/PnL + rearm.
+
+        ``TransportRecovery`` owns dial. Mid-session plant resync never clears
+        a latch — only ``begin_connect`` + ``rearm`` after fresh observation.
+        """
+        if not self.enable_trading:
+            self._log.warning(
+                f"plant restore skipped (trading disabled) generation={generation}"
+            )
+            return
+        backoff = 0.5
+        last_exc: BaseException | None = None
+        for attempt in range(1, self._L3_PLANT_RESTORE_MAX_ATTEMPTS + 1):
+            try:
+                self._pnl_snapshot_observed.clear()
+                self._order_plant.begin_connect()
+                if self._pnl_connected:
+                    try:
+                        await asyncio.to_thread(self._session.disconnect_pnl_plant)
+                    except Exception as teardown_exc:
+                        self._log.warning(
+                            f"L3 PnL disconnect before resubscribe: {teardown_exc}"
+                        )
+                    await asyncio.to_thread(self._session.subscribe_pnl)
+                try:
+                    await asyncio.to_thread(self._session.disconnect_order_plant)
+                except Exception as teardown_exc:
+                    self._log.warning(
+                        f"L3 order disconnect before resubscribe: {teardown_exc}"
+                    )
+                await asyncio.to_thread(self._session.subscribe_order_updates)
+                await asyncio.to_thread(self._session.subscribe_bracket_updates)
+                if self._order_poll_task is None or self._order_poll_task.done():
+                    self._order_poll_task = self.create_task(
+                        self._plant_poll_loop(
+                            name="order",
+                            poll_fn=self._session.poll_order_event,
+                            on_event=self._dispatch_order_event,
+                            on_resync=self._resync_order_subscription,
+                        ),
+                        log_msg="rithmic_order_poll",
+                    )
+                if self._pnl_connected and (
+                    self._poll_task is None or self._poll_task.done()
+                ):
+                    self._poll_task = self.create_task(
+                        self._plant_poll_loop(
+                            name="pnl",
+                            poll_fn=self._session.poll_pnl_event,
+                            on_event=self._dispatch_pnl_event,
+                            on_resync=self._resync_pnl_subscription,
+                        ),
+                        log_msg="rithmic_pnl_poll",
+                    )
+                await self._rearm_after_reconnect()
+                poll_alive = self._order_poll_task is not None and not (
+                    self._order_poll_task.done()
+                )
+                if not self._order_plant.rearm(poll_alive=poll_alive):
+                    raise RuntimeError(
+                        "re-arm refused "
+                        f"(state={self._order_plant.state.value}, "
+                        f"poll_alive={poll_alive})"
+                    )
+                self._log.warning(
+                    f"L3 plant restore re-armed "
+                    f"(generation={generation}, attempt={attempt})"
+                )
+                return
+            except Exception as exc:
+                last_exc = exc
+                self._order_plant.latch()
+                self._log.error(
+                    f"L3 plant restore attempt {attempt}/"
+                    f"{self._L3_PLANT_RESTORE_MAX_ATTEMPTS} failed: {exc}"
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2.0, 8.0)
+        self._log.error(
+            f"L3 plant restore exhausted; order plant stays latched "
+            f"(generation={generation}): {last_exc}"
         )
 
     async def _resync_order_subscription(self) -> None:
@@ -2548,11 +2695,21 @@ class RithmicExecutionClient(LiveExecutionClient):
         if not events:
             # Best-effort drain is not a snapshot: empty does not prove venue
             # has no working orders (no end-of-list, 10k cap, quiet channel).
-            # Returning [] would let Nautilus cancel tracked opens when
-            # open_check_open_only=False. Fail closed instead — the engine
-            # treats VenueQueryUnavailable as unavailable, not as venue-empty,
-            # so no tracked open is canceled. Operator must keep
-            # open_check_open_only=True regardless.
+            #
+            # Continuous open-check uses ``open_only=True``. With operator
+            # ``open_check_open_only=True`` (required for Rithmic), an empty
+            # report list is advisory — NT will not cancel tracked opens. Raise
+            # would only spam ExecEngine ERROR every open_check interval when
+            # the book is flat. Return [] for open_only.
+            #
+            # Full recon (``open_only=False``, startup mass-status) still raises
+            # so soft-complete can continue without treating empty as history.
+            if bool(getattr(command, "open_only", False)):
+                self._log.debug(
+                    "order status open_only drain empty — returning [] "
+                    "(not a complete venue snapshot; keep open_check_open_only=True)"
+                )
+                return []
             raise VenueQueryUnavailable(
                 "Rithmic order recon unavailable: best-effort drain returned "
                 "no working orders (empty does not prove venue empty; no "
@@ -2670,6 +2827,253 @@ class RithmicExecutionClient(LiveExecutionClient):
             if report is not None:
                 reports.append(report)
         return reports
+
+    async def generate_mass_status(
+        self,
+        lookback_mins: int | None = None,
+    ) -> ExecutionMassStatus | None:
+        """Startup mass status that survives empty/unavailable order drains.
+
+        Nautilus base ``generate_mass_status`` aborts the whole report (returns
+        ``None``) when any child generator raises. Rithmic's best-effort order
+        drain raises ``VenueQueryUnavailable`` on empty — that used to prevent
+        the TradingNode from ever starting (Aug-17 RC-5 → MY043 ``--no-recon``).
+
+        Soft-complete known-unavailable order/fill drains; unexpected errors
+        abort (``None``). Continuous open-check stays fail-closed on empty drain.
+
+        History contract (MY043 2026-09-02 / live proof 2026-09-03):
+        Rithmic ``load_orders`` is a working-order drain, not a provably complete
+        fill window. Attaching those fills to ``ExecutionMassStatus`` feeds NT's
+        compatibility ``adjust_fills_for_partial_window`` /
+        ``AddSyntheticOpening`` path and invents ``S-…`` openings on warm Redis
+        restarts (``generate_missing_orders`` does **not** gate that path). Soft
+        mass-status therefore:
+
+        - never attaches fill reports (position reports stay venue-qty authority);
+        - clears order reports when the order drain soft-failed;
+        - declares ``lookback_start`` + ``reports_complete=False`` when the
+          installed NT exposes ``set_report_window`` (1.231 lacks it — fill
+          omission is the fail-closed defense on that line);
+        - emits explicit FLAT position reports for cache-open instruments the
+          venue did not mention, and warns that NT will **not** clear Redis/OMS
+          ghosts when ``generate_missing_orders=False`` (2026-09-03: plant flat
+          + warm Redis left ``net_position=1``). Consumers must flush Redis when
+          plant is flat before recon-on.
+        """
+        from datetime import timedelta
+
+        import pandas as pd
+
+        self._log.info("Generating ExecutionMassStatus (Rithmic soft-complete)...")
+        self.reconciliation_active = True
+        mass_status = ExecutionMassStatus(
+            client_id=self.id,
+            account_id=self.account_id,
+            venue=self.venue,
+            report_id=UUID4(),
+            ts_init=self._clock.timestamp_ns(),
+        )
+        since: pd.Timestamp | None = None
+        if lookback_mins is not None:
+            since = self._clock.utc_now() - timedelta(minutes=lookback_mins)
+
+        order_cmd = GenerateOrderStatusReports(
+            instrument_id=None,
+            start=since,
+            end=None,
+            open_only=False,
+            command_id=UUID4(),
+            ts_init=self._clock.timestamp_ns(),
+        )
+        fill_cmd = GenerateFillReports(
+            instrument_id=None,
+            venue_order_id=None,
+            start=since,
+            end=None,
+            command_id=UUID4(),
+            ts_init=self._clock.timestamp_ns(),
+        )
+        position_cmd = GeneratePositionStatusReports(
+            instrument_id=None,
+            start=None,
+            end=None,
+            command_id=UUID4(),
+            ts_init=self._clock.timestamp_ns(),
+        )
+
+        orders_incomplete = False
+        fills_incomplete = False
+
+        try:
+            orders = await self.generate_order_status_reports(order_cmd)
+        except (VenueQueryUnavailable, ReconciliationUnavailableError) as exc:
+            self._log.warning(
+                f"mass status order reports unavailable ({exc}); "
+                "continuing with positions"
+            )
+            orders = []
+            orders_incomplete = True
+        except Exception as exc:
+            self._log.exception("mass status order reports failed", exc)
+            self.reconciliation_active = False
+            return None
+
+        try:
+            # Drain may succeed with working-order fills; soft mass-status still
+            # omits them below. We still invoke the generator so unexpected
+            # transport errors abort the mass status (fail closed).
+            await self.generate_fill_reports(fill_cmd)
+        except (VenueQueryUnavailable, ReconciliationUnavailableError) as exc:
+            self._log.warning(
+                f"mass status fill reports unavailable ({exc}); "
+                "continuing with positions"
+            )
+            fills_incomplete = True
+        except Exception as exc:
+            self._log.exception("mass status fill reports failed", exc)
+            self.reconciliation_active = False
+            return None
+
+        try:
+            positions = await self.generate_position_status_reports(position_cmd)
+        except Exception as exc:
+            self._log.exception("mass status position reports failed", exc)
+            self.reconciliation_active = False
+            return None
+
+        if orders_incomplete:
+            orders = []
+        # Never feed best-effort fills into NT partial-window adjust (S- invent).
+        fills: list[FillReport] = []
+
+        lookback_start_ns = (
+            int(since.timestamp() * 1_000_000_000)
+            if since is not None
+            else int(mass_status.ts_init)
+        )
+        applied = self._apply_mass_status_report_window(
+            mass_status,
+            lookback_start_ns=lookback_start_ns,
+            reports_complete=False,
+        )
+        if orders_incomplete or fills_incomplete or not applied:
+            self._log.info(
+                "soft mass-status history incomplete "
+                f"(orders_incomplete={orders_incomplete}, "
+                f"fills_incomplete={fills_incomplete}, "
+                f"report_window_applied={applied}); "
+                "omitting fill reports so NT cannot invent S- openings"
+            )
+
+        # Cache-open instruments with no venue row → explicit FLAT so startup
+        # recon surfaces Redis ghosts (still will not clear them on NT 1.231
+        # when generate_missing_orders=False).
+        augment = getattr(self, "_augment_soft_mass_flat_for_cache_opens", None)
+        if callable(augment):
+            positions = augment(positions, ts_init=int(mass_status.ts_init))
+        warn = getattr(self, "_warn_soft_mass_cache_vs_venue", None)
+        if callable(warn):
+            warn(positions)
+
+        mass_status.add_order_reports(reports=orders)
+        mass_status.add_fill_reports(reports=fills)
+        mass_status.add_position_reports(reports=positions)
+        self.reconciliation_active = False
+        return mass_status
+
+    def _augment_soft_mass_flat_for_cache_opens(
+        self,
+        venue_reports: list[PositionStatusReport],
+        *,
+        ts_init: int,
+    ) -> list[PositionStatusReport]:
+        """Add FLAT reports for cache-open instruments the venue did not list."""
+        if self.account_id is None:
+            return venue_reports
+        reports = list(venue_reports)
+        covered = {report.instrument_id for report in reports}
+        try:
+            opens = self._cache.positions_open(
+                venue=self.venue, account_id=self.account_id
+            )
+        except TypeError:
+            opens = self._cache.positions_open(venue=self.venue)
+        for position in opens:
+            if position.instrument_id in covered:
+                continue
+            instrument = self._cache.instrument(position.instrument_id)
+            if instrument is None:
+                continue
+            reports.append(
+                PositionStatusReport.create_flat(
+                    account_id=self.account_id,
+                    instrument_id=position.instrument_id,
+                    size_precision=instrument.size_precision,
+                    ts_init=ts_init,
+                )
+            )
+        return reports
+
+    def _warn_soft_mass_cache_vs_venue(
+        self, positions: list[PositionStatusReport]
+    ) -> None:
+        """Warn: NT will not clear Redis ghosts if generate_missing_orders=False."""
+        for report in positions:
+            try:
+                opens = self._cache.positions_open(
+                    venue=None,
+                    instrument_id=report.instrument_id,
+                    account_id=report.account_id,
+                )
+            except TypeError:
+                opens = [
+                    p
+                    for p in self._cache.positions_open(venue=self.venue)
+                    if p.instrument_id == report.instrument_id
+                ]
+            cached = sum((p.signed_decimal_qty() for p in opens), Decimal(0))
+            venue_qty = report.signed_decimal_qty
+            if cached == venue_qty:
+                continue
+            self._log.warning(
+                "soft mass-status: cache open qty "
+                f"{cached} != venue {report.instrument_id} qty {venue_qty}; "
+                "NT 1.231 with generate_missing_orders=False will not invent "
+                "closing fills to clear Redis/OMS ghosts. Flush Redis (or start "
+                "cold) when plant is flat before enabling live recon."
+            )
+
+    @staticmethod
+    def _apply_mass_status_report_window(
+        mass_status: Any,
+        *,
+        lookback_start_ns: int | None,
+        reports_complete: bool,
+    ) -> bool:
+        """Declare NT mass-status history bound when the installed API allows.
+
+        NT 1.231 ``ExecutionMassStatus`` has neither ``lookback_start`` nor
+        ``set_report_window`` (those land on master / 2.0.x; Python bindings may
+        still omit the setter). Returns whether the contract was applied.
+        """
+        setter = getattr(mass_status, "set_report_window", None)
+        if callable(setter):
+            setter(lookback_start_ns, reports_complete)
+            return True
+        applied = False
+        for name, value in (
+            ("lookback_start", lookback_start_ns),
+            ("reports_complete", reports_complete),
+        ):
+            if not hasattr(mass_status, name):
+                continue
+            try:
+                setattr(mass_status, name, value)
+                applied = True
+            except (AttributeError, TypeError):
+                continue
+        return applied
 
 
 # Back-compat alias used by factories / tests.

@@ -196,8 +196,11 @@ class GatewayMux:
             self._clear_queues()
             self._fail_pending_rpcs(GatewayError("eof", "gateway disconnected"))
 
-    def reconnect(self) -> None:
-        """L3 transport recovery: DISARM peers, then re-dial + handshake."""
+    def reconnect(self, *, notify: bool = True) -> None:
+        """L3 transport recovery: close sock, then re-dial + handshake.
+
+        ``notify=False`` when ``TransportRecovery`` owns DOWN/UP fan-out.
+        """
         with self._state_lock:
             self._stop.set()
             with self._write_lock:
@@ -210,12 +213,30 @@ class GatewayMux:
                         "previous mux drain thread did not stop; abort reconnect",
                     )
                 self._drain_thread = None
-            self._clear_queues()
             self._fail_pending_rpcs(
                 GatewayError("transport_reset", "gateway transport reconnecting")
             )
+            # Do not clear subscriber queues here: drain EOF often races with
+            # already-buffered events; TransportRecovery consumers drain then
+            # restore on UP. Clearing wiped MD/order before poll (mux route flake).
             self.connect()
+            if notify:
+                self._notify_generation_listeners()
+
+    def set_transport_fault_handler(
+        self, handler: Callable[[str, int, BaseException | None], None] | None
+    ) -> None:
+        """Mux drain reports L3 faults here (code, observed_gen, cause)."""
+        self._transport_fault_handler = handler
+
+    def _report_transport_fault(
+        self, code: str, *, cause: BaseException | None = None
+    ) -> None:
+        handler = getattr(self, "_transport_fault_handler", None)
+        if handler is None:
             self._notify_generation_listeners()
+            return
+        handler(code, int(self._transport_generation), cause)
 
     def rpc_unlocked(
         self, frame: pb.Frame, *, timeout_sec: float | None = None
@@ -246,11 +267,21 @@ class GatewayMux:
     def poll_filtered(
         self, sub_id: int, timeout_ms: int, predicate: Any
     ) -> dict[str, Any] | None:
+        # After drain EOF the sock is gone but queues may still hold events.
+        # Once queues are idle, raise so NT poll loops take the reconnect path
+        # instead of returning silent ``None`` forever (MD stall / latched plant).
         deadline = (
             time.monotonic() + max(timeout_ms, 0) / 1000.0 if timeout_ms else None
         )
         while True:
             with self._state_lock:
+                if self._sock is None and not self._stop.is_set():
+                    queues = self._subscribers.get(sub_id)
+                    if queues is None:
+                        raise GatewayError(_NOT_CONNECTED, _CONNECT_FIRST)
+                    has_pending = any(len(q) > 0 for q in queues.queues())
+                    if not has_pending:
+                        raise GatewayError("eof", "gateway transport down")
                 queues = self._subscribers.get(sub_id)
                 if queues is None:
                     return None
@@ -285,16 +316,16 @@ class GatewayMux:
                 if exc.code in {"desync", "eof", "frame_too_large"}:
                     self._close_sock()
                     self._fail_pending_rpcs(exc)
-                    self._notify_generation_listeners()
+                    self._report_transport_fault(exc.code, cause=exc)
                 return
             except TimeoutError:
                 continue
-            except Exception:
+            except Exception as exc:
                 self._close_sock()
                 self._fail_pending_rpcs(
                     GatewayError("eof", "gateway drain thread failed")
                 )
-                self._notify_generation_listeners()
+                self._report_transport_fault("drain_failed", cause=exc)
                 return
             self._dispatch_frame(frame)
 

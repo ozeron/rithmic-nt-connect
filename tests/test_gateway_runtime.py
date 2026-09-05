@@ -187,12 +187,12 @@ def test_ten_concurrent_acquire_single_dial(
             spawn_timeout_sec=3.0,
         )
         clients = [create_gateway_client(cfg, mode="mux") for _ in range(10)]
-        errors: list[BaseException] = []
+        errors: list[Exception] = []
 
         def _connect(client: MuxGatewayClient) -> None:
             try:
                 client.connect()
-            except BaseException as exc:
+            except Exception as exc:
                 errors.append(exc)
 
         threads = [threading.Thread(target=_connect, args=(c,)) for c in clients]

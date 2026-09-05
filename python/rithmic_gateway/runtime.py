@@ -11,6 +11,12 @@ from typing import Any, ClassVar, Literal
 from rithmic_gateway.client import GatewayClient, GatewayError
 from rithmic_gateway.config import GatewayConfig
 from rithmic_gateway.mux import DEFAULT_RPC_TIMEOUT_SEC, GatewayMux
+from rithmic_gateway.transport_recovery import (
+    TransportEvent,
+    TransportListener,
+    TransportRecovery,
+    fault_from_gateway_code,
+)
 
 GatewayClientMode = Literal["dual", "mux"]
 
@@ -54,11 +60,35 @@ class GatewayRuntime:
         self.mux = GatewayMux(config, rpc_timeout_sec=rpc_timeout_sec)
         self._holders = 0
         self._lock = threading.Lock()
+        self.transport = TransportRecovery(
+            replace_transport=self._replace_transport,
+            is_connected=self.mux.is_connected,
+        )
+        self.mux.set_transport_fault_handler(self._on_mux_transport_fault)
+
+    def _on_mux_transport_fault(
+        self, code: str, observed_gen: int, cause: BaseException | None
+    ) -> None:
+        # Prefer recovery's live generation for staleness (mux Ready gen can
+        # stay 0/unchanged across unix drops).
+        live = self.transport.generation
+        fault = fault_from_gateway_code(
+            code, observed_gen=live if live > 0 else observed_gen, cause=cause
+        )
+        if fault is None:
+            return
+        self.transport.report_fault(fault)
+
+    def _replace_transport(self) -> None:
+        """Private L3 primitive used only by ``TransportRecovery``."""
+        self.mux.reconnect(notify=False)
 
     def _connect_if_needed(self) -> None:
         with self._lock:
             if not self.mux.is_connected():
                 self.mux.connect()
+            if self.mux.is_connected():
+                self.transport.mark_live_after_connect()
 
 
 class MuxGatewayClient(GatewayClient):
@@ -79,7 +109,23 @@ class MuxGatewayClient(GatewayClient):
     def register_transport_generation_listener(
         self, callback: Callable[[int], None]
     ) -> None:
-        self._mux.add_generation_listener(callback)
+        """Compat: DOWN→callback(gen), UP→callback(new_gen). Prefer events API."""
+
+        def _bridge(event: TransportEvent) -> None:
+            from rithmic_gateway.transport_recovery import TransportDown, TransportUp
+
+            if isinstance(event, (TransportDown, TransportUp)):
+                callback(int(event.gen))
+
+        self._runtime.transport.subscribe(_bridge)
+
+    def subscribe_transport_events(
+        self, listener: TransportListener
+    ) -> Callable[[], None]:
+        return self._runtime.transport.subscribe(listener)
+
+    def ensure_transport_live(self) -> int:
+        return self._runtime.transport.ensure_live()
 
     def connect(self) -> None:
         with self._io_lock:
@@ -111,10 +157,11 @@ class MuxGatewayClient(GatewayClient):
             self._pending.clear()
 
     def reconnect_transport(self) -> None:
+        """Demand L3 recovery via runtime (single-flight); do not dial alone."""
         with self._io_lock:
             if not self._attached:
                 raise GatewayError("not_connected", "call connect() first")
-            self._mux.reconnect()
+            self._runtime.transport.ensure_live()
             self._sync_ready_state()
 
     def _sync_ready_state(self) -> None:
@@ -122,7 +169,10 @@ class MuxGatewayClient(GatewayClient):
         self._trading_enabled = self._mux.trading_enabled
         self._cancel_all_enabled = self._mux.cancel_all_enabled
         self._gateway_instance_id = self._mux.gateway_instance_id
-        self._transport_generation = self._mux.transport_generation
+        # Prefer recovery generation (client incarnation) over Ready plant gen.
+        self._transport_generation = self._runtime.transport.generation or int(
+            self._mux.transport_generation
+        )
 
     def _require_attached(self) -> None:
         if not self._attached:
@@ -188,6 +238,7 @@ class GatewayRuntimeRegistry:
                 cls._runtimes.pop(key, None)
                 disconnect = True
         if disconnect:
+            runtime.transport.mark_stopping()
             runtime.mux.disconnect()
 
     @classmethod
