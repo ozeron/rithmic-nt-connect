@@ -72,13 +72,11 @@ from rithmic_nt_connect._orders import (
     DEFAULT_TRAIL_BY_PRICE_ID,
     FillDedupStore,
     UntrackedStatusBook,
-    VenueNotification,
     enum_int,
     fill_dedup_key,
     nautilus_order_type_to_rithmic,
     nautilus_side_to_rithmic,
     nautilus_tif_to_rithmic,
-    notification_action,
     order_notification_to_fields,
     order_side_from_notification,
     slim_order_fields,
@@ -95,6 +93,14 @@ from rithmic_nt_connect.errors import (
     ReconciliationUnavailableError,
     VenueQueryUnavailable,
 )
+from rithmic_nt_connect.notification_intake import (
+    TRIGGERABLE_ORDER_TYPES as _TRIGGERABLE_ORDER_TYPES,
+)
+from rithmic_nt_connect.notification_intake import (
+    VenueNotificationIntake,
+    intake_for,
+    is_benign_bare_complete,
+)
 from rithmic_nt_connect.polling import PlantPoller
 from rithmic_nt_connect.providers import RithmicInstrumentProvider
 from rithmic_nt_connect.session import WireSession
@@ -106,19 +112,6 @@ _POSITION_SIDE = {
 }
 
 _TRADING_DISABLED_REASON = "Rithmic trading disabled (enable_trading=False)"
-
-# Order types that support the TRIGGERED order status (Nautilus #3812, ported
-# from upstream 2f7d3947). Market-style stops (STOP_MARKET, MARKET_IF_TOUCHED,
-# TRAILING_STOP_MARKET) execute immediately on trigger and have no intermediate
-# TRIGGERED state, so a venue TRIGGER notification for them must not emit
-# OrderTriggered (the 1.231.x model rejects it).
-_TRIGGERABLE_ORDER_TYPES = frozenset(
-    {
-        OrderType.STOP_LIMIT,
-        OrderType.TRAILING_STOP_LIMIT,
-        OrderType.LIMIT_IF_TOUCHED,
-    }
-)
 
 # Rithmic price_type enum (1=Limit, 2=Market, 3=StopLimit, 4=StopMarket) -> Nautilus.
 _RITHMIC_PRICE_TYPE_TO_ORDER_TYPE: dict[int, OrderType] = {
@@ -229,11 +222,6 @@ def order_status_from_fields(fields: dict[str, Any]) -> OrderStatus:
     # Everything else defaults to working (ACCEPTED): a row that is not
     # recognizably filled/rejected/canceled/expired is an open order.
     return OrderStatus.ACCEPTED
-
-
-def is_benign_bare_complete(fields: dict[str, Any], order: Any) -> bool:
-    """Closed FILLED/CANCELED tracked leg + bare COMPLETE (no fill payload)."""
-    return VenueNotification(fields).is_benign_bare_complete(order)
 
 
 async def wait_account_in_cache(
@@ -458,6 +446,10 @@ class RithmicExecutionClient(LiveExecutionClient):
 
     def _mark_fill_key(self, key: str) -> None:
         self._seen_fill_keys.mark(key)
+
+    def _notification_intake(self) -> VenueNotificationIntake:
+        """Lazy host-backed intake (works for ``__new__`` stubs and MethodType)."""
+        return intake_for(self)
 
     async def _load_commission_rates(self) -> None:
         """Fetch venue commission rates (order-plant RMS info) at connect."""
@@ -1286,88 +1278,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         )
 
     def _handle_order_notification(self, fields: dict[str, Any]) -> None:
-        account_hint = fields.get("account_id")
-        if account_hint:
-            self._seed_account_if_needed(str(account_hint))
-        client_order_id = self._resolve_client_order_id(fields)
-        if client_order_id is None:
-            self._handle_untracked_notification(fields)
-            return
-        order = self._cache.order(client_order_id)
-        if order is None:
-            self._log.warning(
-                f"cached order missing for tracked {client_order_id}; "
-                f"notification suppressed: {slim_order_fields(fields)}"
-            )
-            return
-        ts_event = fields.get("ts_event")
-        ts_event = int(ts_event) if ts_event is not None else self._clock.timestamp_ns()
-        basket = fields.get("basket_id")
-        if basket:
-            self._bind_venue_id(client_order_id, str(basket))
-        venue_order_id = VenueOrderId(self._venue_id_for(fields, client_order_id))
-        action = notification_action(fields, order)
-        if action is None:
-            return
-        strategy_id = order.strategy_id
-        instrument_id = order.instrument_id
-        if action.kind == "accepted":
-            self._emit_accepted(order, client_order_id, venue_order_id, ts_event)
-        elif action.kind == "rejected":
-            self.generate_order_rejected(
-                strategy_id,
-                instrument_id,
-                client_order_id,
-                str(action.reason),
-                ts_event,
-            )
-        elif action.kind == "modify_rejected":
-            self.generate_order_modify_rejected(
-                strategy_id,
-                instrument_id,
-                client_order_id,
-                venue_order_id,
-                str(action.reason),
-                ts_event,
-            )
-        elif action.kind == "cancel_rejected":
-            self.generate_order_cancel_rejected(
-                strategy_id,
-                instrument_id,
-                client_order_id,
-                venue_order_id,
-                str(action.reason),
-                ts_event,
-            )
-        elif action.kind == "updated":
-            qty, price, trigger = self._resolve_updated_terms(order, action)
-            self.generate_order_updated(
-                strategy_id,
-                instrument_id,
-                client_order_id,
-                venue_order_id,
-                qty,
-                price,
-                trigger,
-                ts_event,
-            )
-        elif action.kind == "canceled":
-            self.generate_order_canceled(
-                strategy_id, instrument_id, client_order_id, venue_order_id, ts_event
-            )
-        elif action.kind == "triggered":
-            self._emit_triggered_guarded(
-                order, client_order_id, venue_order_id, ts_event
-            )
-        elif action.kind == "filled":
-            self._handle_tracked_fill(
-                order,
-                client_order_id,
-                venue_order_id,
-                fields,
-                ts_event,
-                action,
-            )
+        intake_for(self).handle_order_notification(fields)
 
     def _emit_accepted(
         self,
@@ -1376,47 +1287,14 @@ class RithmicExecutionClient(LiveExecutionClient):
         venue_order_id: VenueOrderId,
         ts_event: int,
     ) -> None:
-        """Emit OrderAccepted under the LAP-42 guard: Rithmic may defer OPEN
-        until terminal; only emit while still SUBMITTED (late OPEN after
-        ACCEPTED/advanced is noise)."""
-        if order.status is OrderStatus.SUBMITTED:
-            self.generate_order_accepted(
-                order.strategy_id,
-                order.instrument_id,
-                client_order_id,
-                venue_order_id,
-                ts_event,
-            )
-        else:
-            self._log.debug(
-                f"skipping late/duplicate OrderAccepted for {client_order_id}: "
-                f"local status={order.status}"
-            )
+        """Emit OrderAccepted under the LAP-42 guard (thin intake delegate)."""
+        intake_for(self).emit_accepted(order, client_order_id, venue_order_id, ts_event)
 
     def _resolve_updated_terms(
         self, order: Any, action: Any
     ) -> tuple[Quantity, Any, Any]:
-        """Resolve UPDATED-branch qty/price/trigger: the notification value
-        wins; else the order's own term; else None."""
-        qty = (
-            Quantity.from_int(int(action.quantity))
-            if action.quantity is not None
-            else order.quantity
-        )
-        prec = int(order.price.precision) if order.has_price else None
-        if action.price is not None:
-            price = _price(action.price, prec)
-        elif order.has_price:
-            price = order.price
-        else:
-            price = None
-        if action.trigger is not None:
-            trigger = _price(action.trigger, prec)
-        elif order.has_trigger_price:
-            trigger = order.trigger_price
-        else:
-            trigger = None
-        return qty, price, trigger
+        """Resolve UPDATED-branch qty/price/trigger (thin intake delegate)."""
+        return intake_for(self).resolve_updated_terms(order, action)
 
     def _emit_triggered_guarded(
         self,
@@ -1425,28 +1303,9 @@ class RithmicExecutionClient(LiveExecutionClient):
         venue_order_id: VenueOrderId,
         ts_event: int,
     ) -> None:
-        """Emit OrderTriggered under the #3812 producer guard: only
-        limit-style stops have a TRIGGERED state. Market-style stops go
-        straight to FILLED on trigger; emitting OrderTriggered for them is
-        rejected by the Nautilus model, which would kill the order event
-        stream. A duplicate TRIGGER for an already-TRIGGERED order is
-        suppressed too (terminal-state monotonicity). A closed order never
-        reaches this branch: ``_resolve_client_order_id`` routes it to the
-        untracked report path.
-        """
-        already_triggered = getattr(order, "status", None) is OrderStatus.TRIGGERED
-        if order.order_type not in _TRIGGERABLE_ORDER_TYPES or already_triggered:
-            self._log.debug(
-                f"skipping OrderTriggered for {order.order_type} order "
-                f"{client_order_id} (market-style stop or already triggered)"
-            )
-            return
-        self.generate_order_triggered(
-            order.strategy_id,
-            order.instrument_id,
-            client_order_id,
-            venue_order_id,
-            ts_event,
+        """Emit OrderTriggered under the #3812 guard (thin intake delegate)."""
+        intake_for(self).emit_triggered_guarded(
+            order, client_order_id, venue_order_id, ts_event
         )
 
     def _handle_tracked_fill(
@@ -1458,75 +1317,10 @@ class RithmicExecutionClient(LiveExecutionClient):
         ts_event: int,
         action: Any,
     ) -> None:
-        """Emit one venue-priced tracked fill; dedup by venue trade id.
-
-        Honesty rules enforced here (single home):
-        - an unpriceable definitive fill latches fail-closed WITHOUT consuming
-          the dedup key, so a later priced replay can recover;
-        - a unique overfill is still emitted at true size (never dropped,
-          never capped) but latches for recon;
-        - the dedup key is marked only after successful publication.
-        """
-        strategy_id = order.strategy_id
-        instrument_id = order.instrument_id
-        if action.fill_qty is None or action.trade_id is None:
-            self._log.error(f"fill action missing fields: {slim_order_fields(fields)}")
-            return
-        dedup = fill_dedup_key(fields, ts_event=ts_event)
-        if self._fill_key_seen(dedup):
-            return
-        try:
-            fill_qty = Quantity.from_int(int(action.fill_qty))
-            if action.fill_px is None:
-                raise ValueError("fill price missing (pending/sentinel)")
-            fill_px = self._price_for_instrument(instrument_id, action.fill_px)
-        except (TypeError, ValueError, OverflowError) as exc:
-            # A definitive venue fill we cannot price (absent price or the
-            # -1.0 pending-price sentinel) means local exposure is known to
-            # be incomplete. The dedup key is NOT consumed, so a later
-            # priced replay of the same fill id can still recover; the
-            # plant is latched (fail-closed) until a recon re-syncs.
-            self._latch_order_plant(
-                "fill suppressed",
-                f"tracked {client_order_id} fill unpriceable ({exc}); "
-                "exposure may be incomplete; recon will re-sync",
-            )
-            return
-        # A2: a unique venue fill beyond the local remaining qty is real
-        # (never-drop, never cap): Nautilus 1.231.x clamps ``leaves_qty``
-        # to zero and accumulates the excess in ``overfill_qty``. Latch so
-        # a recon cycle re-syncs the cache (a missed partial is usually the
-        # cause); the fill is still emitted at its true size.
-        leaves = order.leaves_qty
-        if leaves is not None and fill_qty > leaves:
-            self._latch_order_plant(
-                "overfill",
-                f"tracked {client_order_id} fill qty {fill_qty} exceeds "
-                f"leaves {leaves} by {fill_qty - leaves}; Nautilus clamps "
-                "leaves_qty and tracks overfill_qty; recon will re-sync",
-            )
-        commission = self._commission_money(
-            self._product_code_for_fill(instrument_id, fields.get("symbol")),
-            int(fill_qty),
+        """Emit one venue-priced tracked fill (thin intake delegate)."""
+        intake_for(self).handle_tracked_fill(
+            order, client_order_id, venue_order_id, fields, ts_event, action
         )
-        self.generate_order_filled(
-            strategy_id,
-            instrument_id,
-            client_order_id,
-            venue_order_id,
-            None,
-            TradeId(str(action.trade_id)),
-            order.side,
-            order.order_type,
-            fill_qty,
-            fill_px,
-            Currency.from_str("USD"),
-            commission,
-            LiquiditySide.NO_LIQUIDITY_SIDE,
-            ts_event,
-            info={"rithmic": dict(fields)},
-        )
-        self._mark_fill_key(dedup)
 
     def _instrument_id_from_order_fields(
         self, fields: dict[str, Any]
@@ -1593,96 +1387,16 @@ class RithmicExecutionClient(LiveExecutionClient):
         return is_benign_bare_complete(fields, order)
 
     def _publish_untracked_status(self, fields: dict[str, Any], ts_event: int) -> bool:
-        """Status phase of the untracked path. Returns ``False`` when the
-        caller must stop — a failed status publication also suppresses the
-        fill phase (fail-closed: no venue fill without its order
-        prerequisite)."""
-        status_report = self._drain_row_from_fields(fields, ts_event).report
-        if status_report is None:
-            # LAP-42: bare COMPLETE on a closed tracked leg is DEBUG; else WARN.
-            cid = self._basket_client_id(fields)
-            order = self._cache.order(cid) if cid is not None else None
-            if is_benign_bare_complete(fields, order):
-                self._log.debug(
-                    f"skipping benign bare COMPLETE for closed {cid}: "
-                    f"{slim_order_fields(fields)}"
-                )
-            else:
-                self._log.warning(
-                    f"untracked order status could not be built: "
-                    f"{slim_order_fields(fields)}"
-                )
-            return True
-
-        # Rithmic re-pushes order state frequently; skip an unchanged
-        # re-push of an external order (fills below are deduped separately).
-        # Include the mutable order terms — an ACCEPTED re-push that changes
-        # quantity/price/trigger must update Nautilus, not be discarded.
-        status_key = (
-            str(status_report.venue_order_id),
-            str(getattr(status_report, "order_status", "")),
-            str(getattr(status_report, "quantity", "")),
-            str(getattr(status_report, "price", "")),
-            str(getattr(status_report, "trigger_price", "")),
-            str(getattr(status_report, "filled_qty", "")),
-            str(getattr(status_report, "avg_px", "")),
-        )
-        venue_key = str(status_report.venue_order_id)
-        # ``get`` refreshes LRU on hit so a repeatedly suppressed working order
-        # is not evicted by intervening unique venue ids.
-        if self._untracked_status_keys.get(venue_key) == status_key:
-            return True
-        if not self._publish_order_status_report(
-            status_report,
-            context="untracked notification",
-        ):
-            return False
-        # Record only on success so a later re-push can retry.
-        self._untracked_status_keys.record(venue_key, status_key)
-        return True
+        """Status phase of the untracked path (thin intake delegate)."""
+        return intake_for(self).publish_untracked_status(fields, ts_event)
 
     def _publish_untracked_fill(self, fields: dict[str, Any], ts_event: int) -> None:
-        """Fill phase of the untracked path: dedupe by venue trade id and
-        publish one external FillReport."""
-        if fields.get("kind") != "filled":
-            return
-        dedup = fill_dedup_key(fields, ts_event=ts_event)
-        if self._fill_key_seen(dedup):
-            return
-        report = self._fill_report_from_fields(fields, ts_event)
-        if report is None:
-            self._log.error(
-                f"untracked fill suppressed (build failed): {slim_order_fields(fields)}"
-            )
-            return
-        self._send_fill_report(report)
-        self._mark_fill_key(dedup)
+        """Fill phase of the untracked path (thin intake delegate)."""
+        intake_for(self).publish_untracked_fill(fields, ts_event)
 
     def _handle_untracked_notification(self, fields: dict[str, Any]) -> None:
-        """Report external venue activity without assigning it to a strategy order."""
-        ts_event = fields.get("ts_event")
-        ts_event = int(ts_event) if ts_event is not None else self._clock.timestamp_ns()
-        basket = fields.get("basket_id")
-        symbol = fields.get("symbol")
-        instrument_raw = fields.get("instrument_id")
-        if not basket or not (instrument_raw or symbol):
-            self._log.warning(
-                f"untracked order notification missing identity: "
-                f"{slim_order_fields(fields)}"
-            )
-            return
-        account_raw = fields.get("account_id")
-        if account_raw:
-            self._seed_account_if_needed(str(account_raw))
-        if self.account_id is None:
-            self._log.warning(
-                f"untracked order notification missing account: "
-                f"{slim_order_fields(fields)}"
-            )
-            return
-        if not self._publish_untracked_status(fields, ts_event):
-            return
-        self._publish_untracked_fill(fields, ts_event)
+        """Report external venue activity (thin intake delegate)."""
+        intake_for(self).handle_untracked_notification(fields)
 
     def _publish_order_status_report(
         self,
@@ -1690,22 +1404,8 @@ class RithmicExecutionClient(LiveExecutionClient):
         *,
         context: str,
     ) -> bool:
-        """Publish a status report without killing the order event stream.
-
-        Returns ``False`` on publication failure. Callers that need the status
-        as a reconciliation prerequisite (fills) treat ``False`` as
-        "cannot reconcile, skip this row" — a venue fill is suppressed rather
-        than published without an order prerequisite (fail-closed, logged).
-        """
-        try:
-            self._send_order_status_report(report)
-        except Exception as exc:
-            self._log.exception(
-                f"{context}: status report publication failed; skipping stale report",
-                exc,
-            )
-            return False
-        return True
+        """Publish a status report without killing the order event stream."""
+        return intake_for(self).publish_order_status_report(report, context=context)
 
     def _venue_id_for_order(self, order: Order) -> str | None:
         """Venue id for an order: the cache mapping wins, then the order model's."""
