@@ -34,7 +34,6 @@ from nautilus_trader.model.enums import (
     AccountType,
     LiquiditySide,
     OmsType,
-    OrderSide,
     OrderStatus,
     OrderType,
     PositionSide,
@@ -72,13 +71,11 @@ from rithmic_nt_connect._orders import (
     DEFAULT_TRAIL_BY_PRICE_ID,
     FillDedupStore,
     UntrackedStatusBook,
-    fill_dedup_key,
     nautilus_order_type_to_rithmic,
     nautilus_side_to_rithmic,
     nautilus_tif_to_rithmic,
     order_notification_to_fields,
     order_side_from_notification,
-    slim_order_fields,
     trade_id_from_fill_fields,
     trailing_ticks_from_order,
 )
@@ -103,12 +100,13 @@ from rithmic_nt_connect.notification_intake import (
 from rithmic_nt_connect.polling import PlantPoller
 from rithmic_nt_connect.providers import RithmicInstrumentProvider
 from rithmic_nt_connect.recon import (
-    TERMINAL_ORDER_STATUSES as _TERMINAL_ORDER_STATUSES,
-)
-from rithmic_nt_connect.recon import (
     DrainRowResult as _DrainRowResult,
 )
-from rithmic_nt_connect.recon import WorkingOrdersDrain, drain_for
+from rithmic_nt_connect.recon import (
+    WorkingOrdersDrain,
+    apply_mass_status_report_window,
+    drain_for,
+)
 from rithmic_nt_connect.session import WireSession
 
 _POSITION_SIDE = {
@@ -1882,23 +1880,8 @@ class RithmicExecutionClient(LiveExecutionClient):
     async def _load_orders_events(
         self, start_sec: int, end_sec: int
     ) -> list[dict[str, Any]]:
-        # The gateway performs a bounded silence-window drain of the current
-        # working orders (`show_orders`). An empty result means "no working
-        # orders after the drain" and is a valid best-effort answer, not an
-        # error. One bounded attempt per barrier/query: a definitive
-        # unavailable result fails immediately, and any other failure is
-        # surfaced as unavailable — the next engine query or reconnect is the
-        # retry boundary (no hidden retry policy inside recovery paths).
-        try:
-            return await asyncio.to_thread(
-                self._session.load_orders, start_sec, end_sec
-            )
-        except Exception as exc:
-            if self._is_recon_unavailable(exc):
-                raise
-            raise VenueQueryUnavailable(
-                f"load_orders recon failed ({start_sec}..{end_sec}): {exc}"
-            ) from exc
+        """Bounded working-orders drain (thin drain delegate)."""
+        return await drain_for(self).load_orders_events(start_sec, end_sec)
 
     def _matches_instrument(
         self,
@@ -1954,69 +1937,8 @@ class RithmicExecutionClient(LiveExecutionClient):
         fields: dict[str, Any],
         ts_event: int,
     ) -> OrderStatusReport | None:
-        """Build an advisory ``OrderStatusReport`` from normalized wire fields.
-
-        Deliberately permissive: unknown closed-set fields fall back to
-        ``BUY``/``MARKET``/``GTC``/``ACCEPTED`` so one malformed row cannot
-        abort the whole recon. Whether a row is trustworthy enough to bind a
-        venue id is decided separately by ``_row_is_trustworthy`` (the drain
-        boundary), not here.
-        """
-        basket = fields.get("basket_id")
-        instrument_id = self._instrument_id_from_order_fields(fields)
-        if not basket or instrument_id is None:
-            return None
-        account_raw = fields.get("account_id")
-        if account_raw:
-            self._seed_account_if_needed(str(account_raw))
-        if self.account_id is None:
-            return None
-        try:
-            side = order_side_from_notification(fields)
-            qty = Quantity.from_int(max(0, int(fields.get("quantity") or 0)))
-            filled = Quantity.from_int(max(0, int(fields.get("total_fill_size") or 0)))
-            price_raw = fields.get("price")
-            trigger_raw = fields.get("trigger_price")
-            price = _price(price_raw) if price_raw is not None else None
-            trigger = _price(trigger_raw) if trigger_raw is not None else None
-            avg = fields.get("avg_fill_price")
-            avg_px = Decimal(str(avg)) if avg is not None else None
-            if qty <= 0:
-                # No order terms (e.g. a bare TRIGGER notification): a status
-                # report cannot be built. Skip rather than crash the handler
-                # (the constructor rejects a zero quantity).
-                return None
-            order_type = self._order_type_from_event(fields)
-            tif = self._tif_from_event(fields)
-            status = self._order_status_from_event(fields)
-            # Event-time fallback, owned HERE: the ordering ``ts_event`` is the
-            # iterator's 0-default when the venue sent no timestamp — a report
-            # published with epoch 0 could be treated as stale (e.g. a fill's
-            # order prerequisite). One policy for every report consumer.
-            report_ts = ts_event or self._clock.timestamp_ns()
-            return OrderStatusReport(
-                account_id=self.account_id,
-                instrument_id=instrument_id,
-                venue_order_id=VenueOrderId(str(basket)),
-                order_side=side or OrderSide.BUY,
-                order_type=order_type,
-                time_in_force=tif,
-                order_status=status,
-                quantity=qty,
-                filled_qty=filled,
-                report_id=UUID4(),
-                ts_accepted=report_ts,
-                ts_last=report_ts,
-                ts_init=self._clock.timestamp_ns(),
-                client_order_id=self._client_order_id_for_tag(fields.get("user_tag")),
-                price=price,
-                trigger_price=trigger,
-                trigger_type=self._trigger_type_from_event(fields),
-                avg_px=avg_px,
-            )
-        except (TypeError, ValueError, OverflowError):
-            # Skip a malformed row rather than abort the whole recon response.
-            return None
+        """Build an advisory ``OrderStatusReport`` (thin drain delegate)."""
+        return drain_for(self).order_status_report_from_fields(fields, ts_event)
 
     async def generate_order_status_reports(
         self,
@@ -2027,57 +1949,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         # reports only its locally cached orders (never claims venue authority).
         if not self.enable_trading:
             return self._cache_backed_order_status_reports(command)
-        start_sec, end_sec = self._recon_window_sec(command.start, command.end)
-        events = await self._load_orders_events(start_sec, end_sec)
-        if not events:
-            # Best-effort drain is not a snapshot: empty does not prove venue
-            # has no working orders (no end-of-list, 10k cap, quiet channel).
-            #
-            # Continuous open-check uses ``open_only=True``. With operator
-            # ``open_check_open_only=True`` (required for Rithmic), an empty
-            # report list is advisory — NT will not cancel tracked opens. Raise
-            # would only spam ExecEngine ERROR every open_check interval when
-            # the book is flat. Return [] for open_only.
-            #
-            # Full recon (``open_only=False``, startup mass-status) still raises
-            # so soft-complete can continue without treating empty as history.
-            if bool(getattr(command, "open_only", False)):
-                self._log.debug(
-                    "order status open_only drain empty — returning [] "
-                    "(not a complete venue snapshot; keep open_check_open_only=True)"
-                )
-                return []
-            raise VenueQueryUnavailable(
-                "Rithmic order recon unavailable: best-effort drain returned "
-                "no working orders (empty does not prove venue empty; no "
-                "provably complete snapshot API)"
-            )
-        reports: list[OrderStatusReport] = []
-        for row in self._latest_drain_rows(
-            events, instrument_id=command.instrument_id
-        ).values():
-            report = row.report
-            if report is None:
-                # Unreachable (the iterator skips unusable rows); narrows the
-                # type for the checker.
-                continue
-            reason = self._row_stale_reason(
-                self._drain_client_order_id(row.fields),
-                row,
-                live_stream_authoritative=False,
-            )
-            if reason is not None:
-                self._log.debug(
-                    f"suppressing stale drain row ({reason}): "
-                    f"{slim_order_fields(row.fields)}"
-                )
-                continue
-            reports.append(report)
-        if command.open_only:
-            reports = [
-                r for r in reports if r.order_status not in _TERMINAL_ORDER_STATUSES
-            ]
-        return reports
+        return await drain_for(self).generate_order_status_reports(command)
 
     async def generate_fill_reports(
         self,
@@ -2087,54 +1959,7 @@ class RithmicExecutionClient(LiveExecutionClient):
             raise VenueQueryUnavailable(
                 "Rithmic fill reconciliation unavailable (order plant not ready)"
             )
-        start_sec, end_sec = self._recon_window_sec(command.start, command.end)
-        events = await self._load_orders_events(start_sec, end_sec)
-        reports: list[FillReport] = []
-        for row in self._iter_drain_rows(events):
-            fields = row.fields
-            if fields.get("kind") != "filled":
-                continue
-            if not self._matches_instrument(
-                fields, command.instrument_id, command.venue_order_id
-            ):
-                continue
-            # Identity uses the RAW row ts (0 when the venue sent none): the
-            # fill's TradeId and dedup key must be stable across recon runs /
-            # restarts, so the clock fallback must NOT enter them. The clock
-            # fallback applies only to the report/status timestamps below.
-            raw_ts = row.ts_event
-            event_ts = raw_ts or self._clock.timestamp_ns()
-            # Share the adapter-wide fill dedup store (live path + recon) so a
-            # fill already emitted live, or duplicated across the summary/today
-            # drains, is not re-emitted as a second reconciliation fill.
-            dedup = fill_dedup_key(fields, ts_event=raw_ts)
-            if self._fill_key_seen(dedup):
-                continue
-            # The builder applies the clock fallback to the report timestamp
-            # itself; identity (TradeId) stays on the raw ts.
-            report = self._fill_report_from_fields(fields, raw_ts)
-            if report is not None:
-                # Nautilus cannot reconcile a fill without an order prerequisite.
-                # Reconciliation can discover a fill after the live order event
-                # was missed, so publish a venue status first; this may create a
-                # synthetic external order when no cached strategy order exists.
-                # Rebuild the status with the corrected ``event_ts`` (the
-                # iterator's 0-default would publish an epoch-dated
-                # prerequisite for a row without a venue timestamp — the
-                # status must share the fill's clock-fallback timestamp).
-                status = self._drain_row_from_fields(fields, event_ts).report
-                if status is None:
-                    # Unreachable (the iterator already built a report for this
-                    # row); narrows the type for the checker.
-                    continue
-                if not self._publish_order_status_report(
-                    status,
-                    context="fill reconciliation prerequisite",
-                ):
-                    continue
-                reports.append(report)
-                self._mark_fill_key(dedup)
-        return reports
+        return await drain_for(self).generate_fill_reports(command)
 
     async def generate_position_status_reports(
         self,
@@ -2325,61 +2150,16 @@ class RithmicExecutionClient(LiveExecutionClient):
         *,
         ts_init: int,
     ) -> list[PositionStatusReport]:
-        """Add FLAT reports for cache-open instruments the venue did not list."""
-        if self.account_id is None:
-            return venue_reports
-        reports = list(venue_reports)
-        covered = {report.instrument_id for report in reports}
-        try:
-            opens = self._cache.positions_open(
-                venue=self.venue, account_id=self.account_id
-            )
-        except TypeError:
-            opens = self._cache.positions_open(venue=self.venue)
-        for position in opens:
-            if position.instrument_id in covered:
-                continue
-            instrument = self._cache.instrument(position.instrument_id)
-            if instrument is None:
-                continue
-            reports.append(
-                PositionStatusReport.create_flat(
-                    account_id=self.account_id,
-                    instrument_id=position.instrument_id,
-                    size_precision=instrument.size_precision,
-                    ts_init=ts_init,
-                )
-            )
-        return reports
+        """Add FLAT reports for cache-open instruments (thin drain delegate)."""
+        return drain_for(self).augment_soft_mass_flat_for_cache_opens(
+            venue_reports, ts_init=ts_init
+        )
 
     def _warn_soft_mass_cache_vs_venue(
         self, positions: list[PositionStatusReport]
     ) -> None:
-        """Warn: NT will not clear Redis ghosts if generate_missing_orders=False."""
-        for report in positions:
-            try:
-                opens = self._cache.positions_open(
-                    venue=None,
-                    instrument_id=report.instrument_id,
-                    account_id=report.account_id,
-                )
-            except TypeError:
-                opens = [
-                    p
-                    for p in self._cache.positions_open(venue=self.venue)
-                    if p.instrument_id == report.instrument_id
-                ]
-            cached = sum((p.signed_decimal_qty() for p in opens), Decimal(0))
-            venue_qty = report.signed_decimal_qty
-            if cached == venue_qty:
-                continue
-            self._log.warning(
-                "soft mass-status: cache open qty "
-                f"{cached} != venue {report.instrument_id} qty {venue_qty}; "
-                "NT 1.231 with generate_missing_orders=False will not invent "
-                "closing fills to clear Redis/OMS ghosts. Flush Redis (or start "
-                "cold) when plant is flat before enabling live recon."
-            )
+        """Warn on cache/venue qty mismatch (thin drain delegate)."""
+        drain_for(self).warn_soft_mass_cache_vs_venue(positions)
 
     @staticmethod
     def _apply_mass_status_report_window(
@@ -2388,29 +2168,12 @@ class RithmicExecutionClient(LiveExecutionClient):
         lookback_start_ns: int | None,
         reports_complete: bool,
     ) -> bool:
-        """Declare NT mass-status history bound when the installed API allows.
-
-        NT 1.231 ``ExecutionMassStatus`` has neither ``lookback_start`` nor
-        ``set_report_window`` (those land on master / 2.0.x; Python bindings may
-        still omit the setter). Returns whether the contract was applied.
-        """
-        setter = getattr(mass_status, "set_report_window", None)
-        if callable(setter):
-            setter(lookback_start_ns, reports_complete)
-            return True
-        applied = False
-        for name, value in (
-            ("lookback_start", lookback_start_ns),
-            ("reports_complete", reports_complete),
-        ):
-            if not hasattr(mass_status, name):
-                continue
-            try:
-                setattr(mass_status, name, value)
-                applied = True
-            except (AttributeError, TypeError):
-                continue
-        return applied
+        """Declare NT mass-status history bound (thin drain delegate)."""
+        return apply_mass_status_report_window(
+            mass_status,
+            lookback_start_ns=lookback_start_ns,
+            reports_complete=reports_complete,
+        )
 
 
 # Back-compat alias used by factories / tests.

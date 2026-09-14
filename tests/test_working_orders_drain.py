@@ -42,11 +42,13 @@ def _status_report_from_fields(
 
 
 def _host(**over: Any) -> SimpleNamespace:
+    status_builder = over.pop(
+        "_order_status_report_from_fields", _status_report_from_fields
+    )
     host = SimpleNamespace(
         _log=_Log(),
         _cache=_CacheStub(),
         _matches_instrument=lambda fields, instrument_id, venue_order_id: True,
-        _order_status_report_from_fields=_status_report_from_fields,
         _drain_client_order_id=lambda fields: ClientOrderId(
             str(fields.get("user_tag") or "O-1")
         ),
@@ -58,9 +60,13 @@ def _host(**over: Any) -> SimpleNamespace:
     for key, value in over.items():
         setattr(host, key, value)
     # Iterator calls through host._drain_row_from_fields (R12 spy seam).
+    # Status builder is bound on the drain instance to avoid thin-delegate
+    # recursion once the host method points at WorkingOrdersDrain.
     if "_drain_row_from_fields" not in over:
         drain = WorkingOrdersDrain(host)
+        drain.order_status_report_from_fields = status_builder  # type: ignore[method-assign]
         host._drain_row_from_fields = drain.drain_row_from_fields
+        host._order_status_report_from_fields = status_builder
         host._working_orders_drain_inst = drain
     return host
 
@@ -134,7 +140,7 @@ def test_iter_skips_missing_basket_and_malformed() -> None:
     # Empty basket skipped by iterator; qty=0 yields report None via real builder
     # only when using the client's builder — our stub always returns a report, so
     # also stub None for zero qty.
-    def _status_or_none(fields: dict[str, Any], ts: int) -> SimpleNamespace | None:
+    def _status_or_none(fields: dict[str, Any], ts: int) -> OrderStatusReport | None:
         if int(fields.get("quantity") or 0) <= 0:
             return None
         return _status_report_from_fields(fields, ts)
