@@ -14,7 +14,6 @@ doubles to prove the execution-safety invariants that depend on wire behavior:
 from __future__ import annotations
 
 import asyncio
-from collections import OrderedDict
 from collections.abc import Callable
 from decimal import Decimal
 from types import SimpleNamespace
@@ -57,7 +56,11 @@ from nautilus_trader.model.identifiers import (
 from nautilus_trader.model.objects import Currency, Money, Price, Quantity
 from nautilus_trader.model.orders import LimitOrder
 from rithmic_nt_connect._order_plant import OrderPlantPolicy, OrderPlantState
-from rithmic_nt_connect._orders import order_notification_to_fields
+from rithmic_nt_connect._orders import (
+    FillDedupStore,
+    UntrackedStatusBook,
+    order_notification_to_fields,
+)
 from rithmic_nt_connect.errors import (
     ChannelError,
     ReconciliationUnavailableError,
@@ -91,8 +94,8 @@ def _trading_client(
     client._order_plant = OrderPlantPolicy(plant_state)
     client._pnl_snapshot_observed = asyncio.Event()
     client._session = cast(WireSession, session or FaultInjectingSession())
-    client._seen_fill_keys = OrderedDict()
-    client._untracked_status_keys = {}
+    client._seen_fill_keys = FillDedupStore()
+    client._untracked_status_keys = UntrackedStatusBook()
     client._positions = {}
     client._account_seeded = True
     client.account_id = AccountId("RITHMIC-ACC1")

@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
-from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from decimal import Decimal
 from typing import Any
@@ -71,6 +70,9 @@ from rithmic_nt_connect._convert import (
 from rithmic_nt_connect._order_plant import OrderPlantPolicy, OrderPlantState
 from rithmic_nt_connect._orders import (
     DEFAULT_TRAIL_BY_PRICE_ID,
+    FillDedupStore,
+    UntrackedStatusBook,
+    VenueNotification,
     enum_int,
     fill_dedup_key,
     nautilus_order_type_to_rithmic,
@@ -83,17 +85,17 @@ from rithmic_nt_connect._orders import (
     trade_id_from_fill_fields,
     trailing_ticks_from_order,
 )
+from rithmic_nt_connect.commission import CommissionRegistry
 from rithmic_nt_connect.config import (
     RithmicExecClientConfig,
     RithmicLiveExecClientConfig,
 )
 from rithmic_nt_connect.constants import ADAPTER_NAME, DEFAULT_ACCOUNT_CURRENCY, VENUE
 from rithmic_nt_connect.errors import (
-    CHANNEL_ERRORS,
     ReconciliationUnavailableError,
     VenueQueryUnavailable,
-    is_reconnectable_poll_error,
 )
+from rithmic_nt_connect.polling import PlantPoller
 from rithmic_nt_connect.providers import RithmicInstrumentProvider
 from rithmic_nt_connect.session import WireSession
 
@@ -231,18 +233,7 @@ def order_status_from_fields(fields: dict[str, Any]) -> OrderStatus:
 
 def is_benign_bare_complete(fields: dict[str, Any], order: Any) -> bool:
     """Closed FILLED/CANCELED tracked leg + bare COMPLETE (no fill payload)."""
-    return (
-        order is not None
-        and getattr(order, "is_closed", False)
-        and fields.get("source") == "rithmic"
-        and str(fields.get("notify_type_name") or "").upper() == "COMPLETE"
-        and str(fields.get("status") or "").lower() == "complete"
-        and fields.get("kind") is None
-        and fields.get("quantity") is None
-        and fields.get("fill_size") is None
-        and fields.get("fill_id") is None
-        and order.status in (OrderStatus.FILLED, OrderStatus.CANCELED)
-    )
+    return VenueNotification(fields).is_benign_bare_complete(order)
 
 
 async def wait_account_in_cache(
@@ -281,14 +272,6 @@ def _price(value: float | Decimal | str, precision: int | None = None) -> Price:
     if precision is None:
         return Price.from_str(format_price_str(value))
     return Price.from_str(f"{float(value):.{int(precision)}f}")
-
-
-class _PollTransientError(Exception):
-    """A transient (non-channel) poll failure: the stream may recover, so the
-    poll loop retries. The loop owns the failure streak (local state, per
-    stream lifetime) — not the client, so a transient run cannot carry across
-    a disconnect/reconnect or a successful resubscribe.
-    """
 
 
 # Canonical notification kinds that describe a real order state (see
@@ -412,12 +395,13 @@ class RithmicExecutionClient(LiveExecutionClient):
         # client_order_id.value for orders this client placed, so tracked-ness is
         # decided by whether the order is present in the cache.
         # Venue-stable fill ids; retained across reconnect so snapshot replays
-        # stay idempotent.
-        self._seen_fill_keys: OrderedDict[str, None] = OrderedDict()
+        # stay idempotent. Hit paths refresh LRU so live/recon re-sees stay.
+        self._seen_fill_keys = FillDedupStore(self._MAX_SEEN_FILL_KEYS)
         # Last published untracked-status key per venue order, so Rithmic's
         # frequent re-pushes of unchanged order state do not re-emit status
-        # reports for external orders.
-        self._untracked_status_keys: dict[str, tuple[object, ...]] = {}
+        # reports for external orders. Suppress hits must refresh LRU or hot
+        # working orders are evicted by one-shot venue-id churn.
+        self._untracked_status_keys = UntrackedStatusBook(self._MAX_SEEN_FILL_KEYS)
         self._order_plant = OrderPlantPolicy(OrderPlantState.DISCONNECTED)
         # Fresh per-connect activity gate: the PnL/account stream delivered at
         # least one parseable account/position snapshot since (re)connect. This
@@ -434,8 +418,35 @@ class RithmicExecutionClient(LiveExecutionClient):
         # connect: per-contract rate keyed by product code (e.g. ``MNQ``), plus
         # the account-level default as fallback. Empty on fetch failure — fills
         # then report zero commission (allowed to be temporarily unavailable).
-        self._commission_rates: dict[str, Decimal] = {}
-        self._default_commission: Decimal | None = None
+        self._commission_registry = CommissionRegistry()
+
+    @property
+    def _commission_registry(self) -> CommissionRegistry:
+        reg = getattr(self, "_commission_registry_inst", None)
+        if reg is None:
+            reg = CommissionRegistry()
+            self._commission_registry_inst = reg
+        return reg
+
+    @_commission_registry.setter
+    def _commission_registry(self, value: CommissionRegistry) -> None:
+        self._commission_registry_inst = value
+
+    @property
+    def _commission_rates(self) -> dict[str, Decimal]:
+        return self._commission_registry.rates
+
+    @_commission_rates.setter
+    def _commission_rates(self, value: dict[str, Decimal]) -> None:
+        self._commission_registry.rates = value
+
+    @property
+    def _default_commission(self) -> Decimal | None:
+        return self._commission_registry.default_commission
+
+    @_default_commission.setter
+    def _default_commission(self, value: Decimal | None) -> None:
+        self._commission_registry.default_commission = value
 
     _MAX_SEEN_FILL_KEYS = 10_000
     _REARM_PNL_SNAPSHOT_TIMEOUT_S = 5.0
@@ -443,112 +454,32 @@ class RithmicExecutionClient(LiveExecutionClient):
     _L3_PLANT_RESTORE_MAX_ATTEMPTS = 5
 
     def _fill_key_seen(self, key: str) -> bool:
-        if key in self._seen_fill_keys:
-            self._seen_fill_keys.move_to_end(key)
-            return True
-        return False
+        return self._seen_fill_keys.has_seen(key)
 
     def _mark_fill_key(self, key: str) -> None:
-        self._seen_fill_keys[key] = None
-        self._seen_fill_keys.move_to_end(key)
-        while len(self._seen_fill_keys) > self._MAX_SEEN_FILL_KEYS:
-            self._seen_fill_keys.popitem(last=False)
+        self._seen_fill_keys.mark(key)
 
     async def _load_commission_rates(self) -> None:
-        """Fetch venue commission rates (order-plant RMS info) at connect.
-
-        Product fill rates keyed by product code, with the account default as
-        fallback. The two fetches are independent: a failed account-default
-        fetch must NOT clear an already-loaded product table (and vice versa).
-        Best-effort: failure leaves the affected cache empty and fills report
-        zero commission (the review checklist requires commission to be allowed
-        to be temporarily unavailable without crashing). Never raises.
-        """
-        try:
-            rows = await asyncio.to_thread(self._session.load_product_rms_info)
-        except Exception as exc:
-            rows = []
-            self._log.warning(
-                f"product commission rates unavailable (0.0 fallback): {exc}"
-            )
-        rates: dict[str, Decimal] = {}
-        for row in rows:
-            code = row.get("product_code")
-            rate = row.get("commission_fill_rate")
-            if code and rate is not None:
-                rates[str(code)] = Decimal(str(rate))
-        self._commission_rates = rates
-        try:
-            account_rows = await asyncio.to_thread(self._session.load_account_rms_info)
-        except Exception as exc:
-            account_rows = []
-            self._log.warning(f"account commission default unavailable: {exc}")
-        # Only the active account's default may back unknown products; another
-        # account's schedule would mis-charge fills (best effort when the
-        # account is not yet resolvable at connect time).
+        """Fetch venue commission rates (order-plant RMS info) at connect."""
         try:
             active_account = self._account_raw()
         except Exception:
             active_account = None
-        default = next(
-            (
-                r.get("default_commission")
-                for r in account_rows
-                if (
-                    active_account is None or str(r.get("account_id")) == active_account
-                )
-                and r.get("default_commission") is not None
-            ),
-            None,
-        )
-        self._default_commission = (
-            Decimal(str(default)) if default is not None else None
-        )
-        self._log.info(
-            f"commission rates: {len(rates)} products"
-            + (
-                f", account default {self._default_commission}"
-                if self._default_commission is not None
-                else ""
-            )
+        await self._commission_registry.load(
+            self._session, active_account=active_account, log=self._log
         )
 
     def _product_code_for_fill(
         self, instrument_id: InstrumentId, symbol: str | None
     ) -> str | None:
-        """RMS product code for one fill's commission lookup.
-
-        Venue contract (verified from rithmic-rs ``MNM_SYMBOL`` tag 110100 +
-        live probe): order notifications carry the contract symbol (e.g.
-        ``MNQU6``) while RMS rates are keyed by product code (e.g. ``MNQ``).
-        The reference-data instrument knows the mapping; fall back to the raw
-        symbol for products where symbol == product code and for instruments
-        not in the cache.
-        """
-        if instrument_id is not None:
-            instrument = self._cache.instrument(instrument_id)
-            if instrument is not None:
-                code = (getattr(instrument, "info", None) or {}).get(
-                    "rithmic_product_code"
-                )
-                if code:
-                    return str(code)
-        return symbol
+        """RMS product code for one fill's commission lookup."""
+        return self._commission_registry.product_code_for_fill(
+            self._cache, instrument_id, symbol
+        )
 
     def _commission_money(self, product_code: str | None, qty: int) -> Money:
-        """Venue commission for one fill: per-contract RMS rate x qty (USD).
-
-        Unknown products fall back to the account default, then to zero.
-        """
-        if product_code is not None:
-            rate = self._commission_rates.get(product_code)
-            if rate is not None:
-                return Money(rate * Decimal(qty), Currency.from_str("USD"))
-        if self._default_commission is not None:
-            return Money(
-                self._default_commission * Decimal(qty), Currency.from_str("USD")
-            )
-        return Money(Decimal(0), Currency.from_str("USD"))
+        """Venue commission for one fill: per-contract RMS rate x qty (USD)."""
+        return self._commission_registry.commission_money(product_code, qty)
 
     @property
     def enable_trading(self) -> bool:
@@ -1085,24 +1016,6 @@ class RithmicExecutionClient(LiveExecutionClient):
                 "observed after reconnect"
             ) from None
 
-    async def _poll_session_event(
-        self,
-        poll_fn: Callable[[], dict[str, Any] | None],
-    ) -> dict[str, Any] | None:
-        """Return the next event, or None when there is none; raise
-        ``_PollTransientError`` on a transient (non-channel) failure so the
-        loop can retry (and count the streak itself); re-raise channel
-        failures for the resync path."""
-        try:
-            return await asyncio.to_thread(poll_fn)
-        except CHANNEL_ERRORS:
-            raise
-        except Exception as exc:
-            if is_reconnectable_poll_error(exc):
-                raise
-            self._log.warning(f"poll transient error: {exc}")
-            raise _PollTransientError(str(exc)) from exc
-
     async def _plant_poll_loop(
         self,
         *,
@@ -1111,94 +1024,22 @@ class RithmicExecutionClient(LiveExecutionClient):
         on_event: Callable[[dict[str, Any]], None],
         on_resync: Callable[[], Any],
     ) -> None:
-        # Stream-lifetime state, local to this loop: a new loop (reconnect)
-        # starts at zero and a successful resubscribe resets it, so a transient
-        # run can never carry across stream lifetimes (the 4-before-drop + 1-
-        # after-recovery latch class is structurally impossible).
-        backoff = 0.05
-        transient_streak = 0
-        while True:
-            outcome = await self._poll_iteration(
-                name=name,
-                poll_fn=poll_fn,
-                on_event=on_event,
-                on_resync=on_resync,
-                backoff=backoff,
-                transient_streak=transient_streak,
-            )
-            if outcome is None:
-                return
-            backoff, transient_streak = outcome
-
-    async def _poll_iteration(
-        self,
-        *,
-        name: str,
-        poll_fn: Callable[[], dict[str, Any] | None],
-        on_event: Callable[[dict[str, Any]], None],
-        on_resync: Callable[[], Any],
-        backoff: float,
-        transient_streak: int,
-    ) -> tuple[float, int] | None:
-        """Run one poll iteration; return updated ``(backoff, transient_streak)``
-        to continue, or ``None`` when the stream must stop (order latch)."""
-        try:
-            event = await self._poll_session_event(poll_fn)
-        except _PollTransientError as exc:
-            # A persistent non-channel failure on the order stream means
-            # notifications are not being processed: fail closed (latch)
-            # rather than keep polling garbage. PnL keeps transient
-            # semantics (soft-fail is the operator's escape).
-            if name == "order":
-                transient_streak += 1
-                if transient_streak >= self._ORDER_POLL_MAX_TRANSIENT:
-                    self._log.error(f"{name} poll stream failing persistently: {exc}")
-                    self._latch_order_plant("order poll stream failure", str(exc))
-                    return None
-            await asyncio.sleep(0.1)
-            return backoff, transient_streak
-        except Exception as exc:
-            self._log.error(f"{name} poll channel error: {exc}")
-            if name == "order":
-                self._order_plant.resync_start()
-            try:
-                await on_resync()
-                self._log.warning(f"{name} subscription resynced after channel error")
-                backoff = 0.05
-                if name == "order":
-                    # Fresh stream lifetime: the old transient run must not
-                    # count toward the recovered stream.
-                    transient_streak = 0
-            except Exception as resync_exc:
-                self._log.error(f"{name} subscription resync failed: {resync_exc}")
-                if name == "order":
-                    # A failed resync is a dead stream: the plant machine
-                    # moves to DISCONNECTED (or stays LATCHED), so a
-                    # concurrent reconnect re-arm barrier can never clear a
-                    # latch over it, and a later resync cannot re-arm it.
-                    self._order_plant.resync_failed()
-                backoff = min(backoff * 2, 2.0)
-            await asyncio.sleep(backoff)
-            return backoff, transient_streak
-        if event is None:
-            await asyncio.sleep(0.05)
-            return backoff, transient_streak
-        try:
-            on_event(event)
-        except Exception as exc:
-            self._log.exception(f"{name} event handler error (suppressed)", exc)
-            if name == "order":
-                # A handler failure can leave venue and cache state divergent.
-                # Stop the order stream and fail closed instead of continuing
-                # to accept commands against stale execution state. Latch
-                # (not just DISCONNECTED): the re-arm barrier (keyed on
-                # plant state) must never clear a latch over a dead stream.
-                self._latch_order_plant(
-                    "order handler failure",
-                    f"order stream stopped; venue/cache state may be divergent: {exc}",
-                )
-                return None
-        return backoff, transient_streak
+        poller = PlantPoller(
+            name=name,
+            poll_fn=poll_fn,
+            on_event=on_event,
+            on_resync=on_resync,
+            max_transient=self._ORDER_POLL_MAX_TRANSIENT,
+            on_latch=self._latch_order_plant,
+            on_resync_start=(
+                self._order_plant.resync_start if name == "order" else None
+            ),
+            on_resync_failed=(
+                self._order_plant.resync_failed if name == "order" else None
+            ),
+            log=self._log,
+        )
+        await poller.run()
 
     def _dispatch_pnl_event(self, event: dict[str, Any]) -> None:
         etype = event.get("type")
@@ -1786,10 +1627,10 @@ class RithmicExecutionClient(LiveExecutionClient):
             str(getattr(status_report, "filled_qty", "")),
             str(getattr(status_report, "avg_px", "")),
         )
-        if (
-            self._untracked_status_keys.get(str(status_report.venue_order_id))
-            == status_key
-        ):
+        venue_key = str(status_report.venue_order_id)
+        # ``get`` refreshes LRU on hit so a repeatedly suppressed working order
+        # is not evicted by intervening unique venue ids.
+        if self._untracked_status_keys.get(venue_key) == status_key:
             return True
         if not self._publish_order_status_report(
             status_report,
@@ -1797,12 +1638,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         ):
             return False
         # Record only on success so a later re-push can retry.
-        if (
-            len(self._untracked_status_keys)
-            >= RithmicExecutionClient._MAX_SEEN_FILL_KEYS
-        ):
-            self._untracked_status_keys.clear()
-        self._untracked_status_keys[str(status_report.venue_order_id)] = status_key
+        self._untracked_status_keys.record(venue_key, status_key)
         return True
 
     def _publish_untracked_fill(self, fields: dict[str, Any], ts_event: int) -> None:
