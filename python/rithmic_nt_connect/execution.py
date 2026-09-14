@@ -71,6 +71,7 @@ from rithmic_nt_connect._orders import (
     DEFAULT_TRAIL_BY_PRICE_ID,
     FillDedupStore,
     UntrackedStatusBook,
+    is_benign_bare_complete,
     nautilus_order_type_to_rithmic,
     nautilus_side_to_rithmic,
     nautilus_tif_to_rithmic,
@@ -78,6 +79,12 @@ from rithmic_nt_connect._orders import (
     order_side_from_notification,
     trade_id_from_fill_fields,
     trailing_ticks_from_order,
+)
+from rithmic_nt_connect._orders import (
+    RITHMIC_DURATION_TO_TIF as _RITHMIC_DURATION_TO_TIF,
+)
+from rithmic_nt_connect._orders import (
+    RITHMIC_PRICE_TYPE_TO_ORDER_TYPE as _RITHMIC_PRICE_TYPE_TO_ORDER_TYPE,
 )
 from rithmic_nt_connect.commission import CommissionRegistry
 from rithmic_nt_connect.config import (
@@ -93,9 +100,7 @@ from rithmic_nt_connect.notification_intake import (
     TRIGGERABLE_ORDER_TYPES as _TRIGGERABLE_ORDER_TYPES,
 )
 from rithmic_nt_connect.notification_intake import (
-    VenueNotificationIntake,
     intake_for,
-    is_benign_bare_complete,
 )
 from rithmic_nt_connect.polling import PlantPoller
 from rithmic_nt_connect.providers import RithmicInstrumentProvider
@@ -103,7 +108,6 @@ from rithmic_nt_connect.recon import (
     DrainRowResult as _DrainRowResult,
 )
 from rithmic_nt_connect.recon import (
-    WorkingOrdersDrain,
     apply_mass_status_report_window,
     drain_for,
 )
@@ -116,22 +120,6 @@ _POSITION_SIDE = {
 }
 
 _TRADING_DISABLED_REASON = "Rithmic trading disabled (enable_trading=False)"
-
-# Rithmic price_type enum (1=Limit, 2=Market, 3=StopLimit, 4=StopMarket) -> Nautilus.
-_RITHMIC_PRICE_TYPE_TO_ORDER_TYPE: dict[int, OrderType] = {
-    1: OrderType.LIMIT,
-    2: OrderType.MARKET,
-    3: OrderType.STOP_LIMIT,
-    4: OrderType.STOP_MARKET,
-}
-
-# Rithmic duration enum (1=Day, 2=Gtc, 3=Ioc, 4=Fok) -> Nautilus.
-_RITHMIC_DURATION_TO_TIF: dict[int, TimeInForce] = {
-    1: TimeInForce.DAY,
-    2: TimeInForce.GTC,
-    3: TimeInForce.IOC,
-    4: TimeInForce.FOK,
-}
 
 ACCOUNT_CACHE_TIMEOUT_S = 10.0
 
@@ -363,14 +351,6 @@ class RithmicExecutionClient(LiveExecutionClient):
 
     def _mark_fill_key(self, key: str) -> None:
         self._seen_fill_keys.mark(key)
-
-    def _notification_intake(self) -> VenueNotificationIntake:
-        """Lazy host-backed intake (works for ``__new__`` stubs and MethodType)."""
-        return intake_for(self)
-
-    def _working_orders_drain(self) -> WorkingOrdersDrain:
-        """Lazy host-backed drain (works for ``__new__`` stubs and MethodType)."""
-        return drain_for(self)
 
     async def _load_commission_rates(self) -> None:
         """Fetch venue commission rates (order-plant RMS info) at connect."""
@@ -1791,9 +1771,9 @@ class RithmicExecutionClient(LiveExecutionClient):
         the meantime: re-read the cache first and prefer that newer state over
         a stale drain row (never regress a live terminal/bound order). The
         venue id is bound only after a row builds a report under strict
-        validation (``_row_is_trustworthy``) — a malformed row, or one whose
-        closed-set terms would be fabricated, must not disable recovery or
-        bind a venue id from fabricated terms. When
+        validation (``row_is_trustworthy`` / bindable drain row) — a malformed
+        row, or one whose closed-set terms would be fabricated, must not
+        disable recovery or bind a venue id from fabricated terms. When
         several matching rows are strict-usable, the newest wins (same
         (ts_event, arrival) policy as the bulk status path) and the venue id is
         bound exactly once from that row.

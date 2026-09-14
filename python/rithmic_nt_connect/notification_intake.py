@@ -16,8 +16,8 @@ from nautilus_trader.model.objects import Currency, Price, Quantity
 
 from rithmic_nt_connect._convert import format_price_str
 from rithmic_nt_connect._orders import (
-    VenueNotification,
     fill_dedup_key,
+    is_benign_bare_complete,
     notification_action,
     slim_order_fields,
 )
@@ -32,11 +32,6 @@ TRIGGERABLE_ORDER_TYPES = frozenset(
         OrderType.LIMIT_IF_TOUCHED,
     }
 )
-
-
-def is_benign_bare_complete(fields: dict[str, Any], order: Any) -> bool:
-    """Closed FILLED/CANCELED tracked leg + bare COMPLETE (no fill payload)."""
-    return VenueNotification(fields).is_benign_bare_complete(order)
 
 
 def _price(value: float | Decimal | str, precision: int | None = None) -> Price:
@@ -64,7 +59,13 @@ class VenueNotificationIntake:
             host._seed_account_if_needed(str(account_hint))
         client_order_id = host._resolve_client_order_id(fields)
         if client_order_id is None:
-            self.handle_untracked_notification(fields)
+            # Prefer host thin delegate so MethodType spies apply; fall back for
+            # direct intake unit stubs that lack the client wrappers.
+            untracked = getattr(host, "_handle_untracked_notification", None)
+            if untracked is not None:
+                untracked(fields)
+            else:
+                self.handle_untracked_notification(fields)
             return
         order = host._cache.order(client_order_id)
         if order is None:
@@ -85,7 +86,11 @@ class VenueNotificationIntake:
         strategy_id = order.strategy_id
         instrument_id = order.instrument_id
         if action.kind == "accepted":
-            self.emit_accepted(order, client_order_id, venue_order_id, ts_event)
+            emit = getattr(host, "_emit_accepted", None)
+            if emit is not None:
+                emit(order, client_order_id, venue_order_id, ts_event)
+            else:
+                self.emit_accepted(order, client_order_id, venue_order_id, ts_event)
         elif action.kind == "rejected":
             host.generate_order_rejected(
                 strategy_id,
@@ -113,7 +118,11 @@ class VenueNotificationIntake:
                 ts_event,
             )
         elif action.kind == "updated":
-            qty, price, trigger = self.resolve_updated_terms(order, action)
+            resolve = getattr(host, "_resolve_updated_terms", None)
+            if resolve is not None:
+                qty, price, trigger = resolve(order, action)
+            else:
+                qty, price, trigger = self.resolve_updated_terms(order, action)
             host.generate_order_updated(
                 strategy_id,
                 instrument_id,
@@ -129,18 +138,33 @@ class VenueNotificationIntake:
                 strategy_id, instrument_id, client_order_id, venue_order_id, ts_event
             )
         elif action.kind == "triggered":
-            self.emit_triggered_guarded(
-                order, client_order_id, venue_order_id, ts_event
-            )
+            emit_trig = getattr(host, "_emit_triggered_guarded", None)
+            if emit_trig is not None:
+                emit_trig(order, client_order_id, venue_order_id, ts_event)
+            else:
+                self.emit_triggered_guarded(
+                    order, client_order_id, venue_order_id, ts_event
+                )
         elif action.kind == "filled":
-            self.handle_tracked_fill(
-                order,
-                client_order_id,
-                venue_order_id,
-                fields,
-                ts_event,
-                action,
-            )
+            tracked_fill = getattr(host, "_handle_tracked_fill", None)
+            if tracked_fill is not None:
+                tracked_fill(
+                    order,
+                    client_order_id,
+                    venue_order_id,
+                    fields,
+                    ts_event,
+                    action,
+                )
+            else:
+                self.handle_tracked_fill(
+                    order,
+                    client_order_id,
+                    venue_order_id,
+                    fields,
+                    ts_event,
+                    action,
+                )
 
     def emit_accepted(
         self,
@@ -278,8 +302,7 @@ class VenueNotificationIntake:
     def publish_untracked_status(self, fields: dict[str, Any], ts_event: int) -> bool:
         """Status phase of the untracked path. ``False`` suppresses the fill."""
         host = self._host
-        # Drain owns the row interpreter (KTD2). Call through the host so spies
-        # / MethodType stubs on ``_drain_row_from_fields`` remain effective.
+        # Call through host so ``_drain_row_from_fields`` overrides apply.
         status_report = host._drain_row_from_fields(fields, ts_event).report
         if status_report is None:
             cid = host._basket_client_id(fields)
@@ -308,8 +331,7 @@ class VenueNotificationIntake:
         venue_key = str(status_report.venue_order_id)
         if host._untracked_status_keys.get(venue_key) == status_key:
             return True
-        # Call through the host so spies / MethodType bindings on
-        # ``_publish_order_status_report`` remain effective.
+        # Call through host so ``_publish_order_status_report`` overrides apply.
         if not host._publish_order_status_report(
             status_report,
             context="untracked notification",
@@ -358,9 +380,19 @@ class VenueNotificationIntake:
                 f"{slim_order_fields(fields)}"
             )
             return
-        if not self.publish_untracked_status(fields, ts_event):
+        # Prefer host thin delegates so MethodType spies apply; fall back for
+        # direct intake unit stubs.
+        publish_status = getattr(host, "_publish_untracked_status", None)
+        publish_fill = getattr(host, "_publish_untracked_fill", None)
+        if publish_status is not None:
+            if not publish_status(fields, ts_event):
+                return
+        elif not self.publish_untracked_status(fields, ts_event):
             return
-        self.publish_untracked_fill(fields, ts_event)
+        if publish_fill is not None:
+            publish_fill(fields, ts_event)
+        else:
+            self.publish_untracked_fill(fields, ts_event)
 
     def publish_order_status_report(
         self,
@@ -382,11 +414,7 @@ class VenueNotificationIntake:
 
 
 def intake_for(host: Any) -> VenueNotificationIntake:
-    """Return the host's intake, creating one lazily.
-
-    Works for real clients and ``SimpleNamespace`` / MethodType stubs that
-    only bind the thin private delegates (no class method lookup on ``self``).
-    """
+    """Return the host's intake, creating one lazily."""
     intake = getattr(host, "_notification_intake_inst", None)
     if intake is None:
         intake = VenueNotificationIntake(host)

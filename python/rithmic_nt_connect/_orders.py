@@ -7,8 +7,27 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from nautilus_trader.model.enums import OrderStatus, OrderType, TimeInForce
+
 from rithmic_nt_connect._convert import ConvertError, _ts_ns, instrument_id_from_symbol
 from rithmic_nt_connect.constants import VENUE
+
+# Rithmic price_type / duration closed-set ints (shared by report mapping +
+# drain bindability). Keep keys identical everywhere they are consulted.
+RITHMIC_PRICE_TYPE_TO_ORDER_TYPE: dict[int, OrderType] = {
+    1: OrderType.LIMIT,
+    2: OrderType.MARKET,
+    3: OrderType.STOP_LIMIT,
+    4: OrderType.STOP_MARKET,
+}
+RITHMIC_DURATION_TO_TIF: dict[int, TimeInForce] = {
+    1: TimeInForce.DAY,
+    2: TimeInForce.GTC,
+    3: TimeInForce.IOC,
+    4: TimeInForce.FOK,
+}
+TRUSTWORTHY_PRICE_TYPES = frozenset(RITHMIC_PRICE_TYPE_TO_ORDER_TYPE)
+TRUSTWORTHY_DURATIONS = frozenset(RITHMIC_DURATION_TO_TIF)
 
 OrderActionKind = Literal[
     "accepted",
@@ -154,61 +173,20 @@ class UntrackedStatusBook:
         return len(self._cache)
 
 
-@dataclass(frozen=True, slots=True)
-class VenueNotification:
-    """Domain wrapper over normalized wire order notifications (Tell, Don't Ask)."""
-
-    fields: Mapping[str, Any]
-
-    @property
-    def kind(self) -> str | None:
-        val = self.fields.get("kind")
-        return str(val) if val is not None else None
-
-    @property
-    def status(self) -> str:
-        return str(self.fields.get("status") or "")
-
-    @property
-    def basket_id(self) -> str | None:
-        val = self.fields.get("basket_id")
-        return str(val) if val is not None else None
-
-    @property
-    def symbol(self) -> str | None:
-        val = self.fields.get("symbol")
-        return str(val) if val is not None else None
-
-    @property
-    def account_id(self) -> str | None:
-        val = self.fields.get("account_id")
-        return str(val) if val is not None else None
-
-    @property
-    def ts_event(self) -> int | None:
-        val = self.fields.get("ts_event")
-        return int(val) if val is not None else None
-
-    @property
-    def is_fill(self) -> bool:
-        return self.kind == "filled"
-
-    def is_benign_bare_complete(self, order: Any) -> bool:
-        """Tell, Don't Ask: Check if bare COMPLETE for an already closed tracked leg."""
-        from nautilus_trader.model.enums import OrderStatus
-
-        return (
-            order is not None
-            and getattr(order, "is_closed", False)
-            and self.fields.get("source") == "rithmic"
-            and str(self.fields.get("notify_type_name") or "").upper() == "COMPLETE"
-            and self.status.lower() == "complete"
-            and self.fields.get("kind") is None
-            and self.fields.get("quantity") is None
-            and self.fields.get("fill_size") is None
-            and self.fields.get("fill_id") is None
-            and order.status in (OrderStatus.FILLED, OrderStatus.CANCELED)
-        )
+def is_benign_bare_complete(fields: dict[str, Any], order: Any) -> bool:
+    """Bare COMPLETE on an already closed FILLED/CANCELED tracked leg."""
+    return (
+        order is not None
+        and getattr(order, "is_closed", False)
+        and fields.get("source") == "rithmic"
+        and str(fields.get("notify_type_name") or "").upper() == "COMPLETE"
+        and str(fields.get("status") or "").lower() == "complete"
+        and fields.get("kind") is None
+        and fields.get("quantity") is None
+        and fields.get("fill_size") is None
+        and fields.get("fill_id") is None
+        and order.status in (OrderStatus.FILLED, OrderStatus.CANCELED)
+    )
 
 
 def _enum_name(value: Any, prefix: str) -> str:

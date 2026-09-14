@@ -33,7 +33,8 @@ class CommissionRegistry:
 
     @property
     def rates(self) -> dict[str, Decimal]:
-        return dict(self._rates)
+        """Live product-code → rate map (mutations affect the registry)."""
+        return self._rates
 
     @rates.setter
     def rates(self, value: dict[str, Decimal]) -> None:

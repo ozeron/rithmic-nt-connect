@@ -100,6 +100,25 @@ def test_emit_accepted_only_while_submitted() -> None:
     assert accepted == []
 
 
+def _wire_untracked_publish_spies(
+    host: SimpleNamespace, intake: VenueNotificationIntake
+) -> list[str]:
+    """Install host thin delegates that record calls then forward to intake."""
+    calls: list[str] = []
+
+    def _publish_status(fields: dict[str, Any], ts_event: int) -> bool:
+        calls.append("status")
+        return intake.publish_untracked_status(fields, ts_event)
+
+    def _publish_fill(fields: dict[str, Any], ts_event: int) -> None:
+        calls.append("fill")
+        intake.publish_untracked_fill(fields, ts_event)
+
+    host._publish_untracked_status = _publish_status
+    host._publish_untracked_fill = _publish_fill
+    return calls
+
+
 def test_untracked_suppresses_unchanged_and_republishes_on_qty_change() -> None:
     published: list[object] = []
     status = SimpleNamespace(
@@ -116,6 +135,7 @@ def test_untracked_suppresses_unchanged_and_republishes_on_qty_change() -> None:
         _drain_row_from_fields=lambda fields, ts_event: _drain_row_result(status),
     )
     intake = VenueNotificationIntake(host)
+    spy_calls = _wire_untracked_publish_spies(host, intake)
     fields = {
         "basket_id": "B-EXT",
         "symbol": "MNQU6",
@@ -127,6 +147,7 @@ def test_untracked_suppresses_unchanged_and_republishes_on_qty_change() -> None:
     intake.handle_untracked_notification(fields)
     intake.handle_untracked_notification(fields)
     assert len(published) == 1
+    assert spy_calls.count("status") == 2
 
     changed = SimpleNamespace(
         venue_order_id="B-EXT",
@@ -158,6 +179,7 @@ def test_untracked_status_failure_suppresses_fill() -> None:
         _fill_report_from_fields=lambda fields, ts_event: object(),
     )
     intake = VenueNotificationIntake(host)
+    _wire_untracked_publish_spies(host, intake)
     intake.handle_untracked_notification(
         {
             "basket_id": "B-EXT",
@@ -191,6 +213,7 @@ def test_untracked_fill_marks_dedup_after_publish() -> None:
         _fill_report_from_fields=lambda fields, ts_event: object(),
     )
     intake = VenueNotificationIntake(host)
+    _wire_untracked_publish_spies(host, intake)
     fields = {
         "basket_id": "B-EXT",
         "symbol": "MNQU6",

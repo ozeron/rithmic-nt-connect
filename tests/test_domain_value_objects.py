@@ -1,4 +1,4 @@
-"""Tests for SeenKeyCache, FillDedupStore, UntrackedStatusBook, VenueNotification."""
+"""Tests for SeenKeyCache, FillDedupStore, UntrackedStatusBook, bare COMPLETE."""
 
 from unittest.mock import Mock
 
@@ -7,7 +7,7 @@ from rithmic_nt_connect._orders import (
     FillDedupStore,
     SeenKeyCache,
     UntrackedStatusBook,
-    VenueNotification,
+    is_benign_bare_complete,
 )
 
 
@@ -75,37 +75,18 @@ def test_untracked_status_book_record_and_get() -> None:
     assert book.get("B-OTHER") is None
 
 
-def test_venue_notification_properties_and_tell_dont_ask() -> None:
-    raw = {
-        "source": "rithmic",
-        "basket_id": "B-123",
-        "symbol": "MNQU6",
-        "account_id": "ACT-1",
-        "kind": "filled",
-        "status": "complete",
-        "ts_event": "1700000000000",
-    }
-    notif = VenueNotification(raw)
-    assert notif.basket_id == "B-123"
-    assert notif.symbol == "MNQU6"
-    assert notif.account_id == "ACT-1"
-    assert notif.kind == "filled"
-    assert notif.status == "complete"
-    assert notif.ts_event == 1700000000000
-    assert notif.is_fill is True
-
+def test_is_benign_bare_complete() -> None:
     bare_raw = {
         "source": "rithmic",
         "notify_type_name": "COMPLETE",
         "status": "complete",
     }
-    bare_notif = VenueNotification(bare_raw)
 
     order_open = Mock(is_closed=False, status=OrderStatus.ACCEPTED)
-    assert bare_notif.is_benign_bare_complete(order_open) is False
+    assert is_benign_bare_complete(bare_raw, order_open) is False
 
     order_filled = Mock(is_closed=True, status=OrderStatus.FILLED)
-    assert bare_notif.is_benign_bare_complete(order_filled) is True
+    assert is_benign_bare_complete(bare_raw, order_filled) is True
 
     order_canceled = Mock(is_closed=True, status=OrderStatus.CANCELED)
-    assert bare_notif.is_benign_bare_complete(order_canceled) is True
+    assert is_benign_bare_complete(bare_raw, order_canceled) is True

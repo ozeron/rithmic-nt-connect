@@ -24,6 +24,12 @@ from nautilus_trader.model.objects import Price, Quantity
 
 from rithmic_nt_connect._convert import format_price_str
 from rithmic_nt_connect._orders import (
+    TRUSTWORTHY_DURATIONS as _TRUSTWORTHY_DURATIONS,
+)
+from rithmic_nt_connect._orders import (
+    TRUSTWORTHY_PRICE_TYPES as _TRUSTWORTHY_PRICE_TYPES,
+)
+from rithmic_nt_connect._orders import (
     enum_int,
     fill_dedup_key,
     order_notification_to_fields,
@@ -54,11 +60,6 @@ _RECOGNIZABLE_KINDS = frozenset(
 # live-proven on Rithmic Test 2026-08-21 — stops never emit an OPEN
 # notification, so this is the only state their drain rows ever carry.
 _STATUS_MARKERS = ("OPEN", "WORKING", "CANCEL", "REJECT", "EXPIRED", "TRIGGER")
-
-# Exact Rithmic closed-set ints that may bind a venue id (same keys as the
-# execution maps). Membership only — report mapping stays on the client.
-_TRUSTWORTHY_PRICE_TYPES = frozenset({1, 2, 3, 4})
-_TRUSTWORTHY_DURATIONS = frozenset({1, 2, 3, 4})
 
 TERMINAL_ORDER_STATUSES = frozenset(
     {
@@ -278,8 +279,7 @@ class WorkingOrdersDrain:
                 ts_event = int(fields.get("ts_event") or 0)
             except (TypeError, ValueError, OverflowError):
                 continue
-            # Call through the host so spies / MethodType stubs on
-            # ``_drain_row_from_fields`` remain effective (R12).
+            # Call through host so ``_drain_row_from_fields`` overrides apply.
             row = host._drain_row_from_fields(fields, ts_event)
             if row.report is None:
                 continue
@@ -491,8 +491,7 @@ class WorkingOrdersDrain:
         """Venue order-status recon body (caller owns enable_trading gate)."""
         host = self._host
         start_sec, end_sec = host._recon_window_sec(command.start, command.end)
-        # Call ``self.load_orders_events`` (not the host thin delegate) to avoid
-        # recursion once ``host._load_orders_events`` points here.
+        # Use self to avoid recursion through ``host._load_orders_events``.
         events = await self.load_orders_events(start_sec, end_sec)
         return self.order_status_reports_from_events(
             events,
@@ -501,11 +500,7 @@ class WorkingOrdersDrain:
         )
 
     async def generate_fill_reports(self, command: Any) -> list[FillReport]:
-        """Venue fill recon body (caller owns enable_trading gate).
-
-        Uses the host's shared ``FillDedupStore`` via ``_fill_key_seen`` /
-        ``_mark_fill_key`` (KTD1).
-        """
+        """Venue fill recon body (caller owns enable_trading gate)."""
         host = self._host
         start_sec, end_sec = host._recon_window_sec(command.start, command.end)
         events = await self.load_orders_events(start_sec, end_sec)
@@ -622,11 +617,7 @@ class WorkingOrdersDrain:
 
 
 def drain_for(host: Any) -> WorkingOrdersDrain:
-    """Return the host's working-orders drain, creating one lazily.
-
-    Works for real clients and ``SimpleNamespace`` / MethodType stubs that
-    only bind the thin private delegates (no class method lookup on ``self``).
-    """
+    """Return the host's working-orders drain, creating one lazily."""
     drain = getattr(host, "_working_orders_drain_inst", None)
     if drain is None:
         drain = WorkingOrdersDrain(host)
