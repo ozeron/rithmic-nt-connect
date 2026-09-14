@@ -278,6 +278,8 @@ class VenueNotificationIntake:
     def publish_untracked_status(self, fields: dict[str, Any], ts_event: int) -> bool:
         """Status phase of the untracked path. ``False`` suppresses the fill."""
         host = self._host
+        # Drain owns the row interpreter (KTD2). Call through the host so spies
+        # / MethodType stubs on ``_drain_row_from_fields`` remain effective.
         status_report = host._drain_row_from_fields(fields, ts_event).report
         if status_report is None:
             cid = host._basket_client_id(fields)
