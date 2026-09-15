@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
-from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from decimal import Decimal
 from typing import Any
@@ -35,7 +34,6 @@ from nautilus_trader.model.enums import (
     AccountType,
     LiquiditySide,
     OmsType,
-    OrderSide,
     OrderStatus,
     OrderType,
     PositionSide,
@@ -71,30 +69,48 @@ from rithmic_nt_connect._convert import (
 from rithmic_nt_connect._order_plant import OrderPlantPolicy, OrderPlantState
 from rithmic_nt_connect._orders import (
     DEFAULT_TRAIL_BY_PRICE_ID,
-    enum_int,
-    fill_dedup_key,
+    FillDedupStore,
+    UntrackedStatusBook,
+    is_benign_bare_complete,
     nautilus_order_type_to_rithmic,
     nautilus_side_to_rithmic,
     nautilus_tif_to_rithmic,
-    notification_action,
     order_notification_to_fields,
     order_side_from_notification,
-    slim_order_fields,
     trade_id_from_fill_fields,
     trailing_ticks_from_order,
 )
+from rithmic_nt_connect._orders import (
+    RITHMIC_DURATION_TO_TIF as _RITHMIC_DURATION_TO_TIF,
+)
+from rithmic_nt_connect._orders import (
+    RITHMIC_PRICE_TYPE_TO_ORDER_TYPE as _RITHMIC_PRICE_TYPE_TO_ORDER_TYPE,
+)
+from rithmic_nt_connect.commission import CommissionRegistry
 from rithmic_nt_connect.config import (
     RithmicExecClientConfig,
     RithmicLiveExecClientConfig,
 )
 from rithmic_nt_connect.constants import ADAPTER_NAME, DEFAULT_ACCOUNT_CURRENCY, VENUE
 from rithmic_nt_connect.errors import (
-    CHANNEL_ERRORS,
     ReconciliationUnavailableError,
     VenueQueryUnavailable,
-    is_reconnectable_poll_error,
 )
+from rithmic_nt_connect.notification_intake import (
+    TRIGGERABLE_ORDER_TYPES as _TRIGGERABLE_ORDER_TYPES,
+)
+from rithmic_nt_connect.notification_intake import (
+    intake_for,
+)
+from rithmic_nt_connect.polling import PlantPoller
 from rithmic_nt_connect.providers import RithmicInstrumentProvider
+from rithmic_nt_connect.recon import (
+    DrainRowResult as _DrainRowResult,
+)
+from rithmic_nt_connect.recon import (
+    apply_mass_status_report_window,
+    drain_for,
+)
 from rithmic_nt_connect.session import WireSession
 
 _POSITION_SIDE = {
@@ -104,44 +120,6 @@ _POSITION_SIDE = {
 }
 
 _TRADING_DISABLED_REASON = "Rithmic trading disabled (enable_trading=False)"
-
-# Order types that support the TRIGGERED order status (Nautilus #3812, ported
-# from upstream 2f7d3947). Market-style stops (STOP_MARKET, MARKET_IF_TOUCHED,
-# TRAILING_STOP_MARKET) execute immediately on trigger and have no intermediate
-# TRIGGERED state, so a venue TRIGGER notification for them must not emit
-# OrderTriggered (the 1.231.x model rejects it).
-_TRIGGERABLE_ORDER_TYPES = frozenset(
-    {
-        OrderType.STOP_LIMIT,
-        OrderType.TRAILING_STOP_LIMIT,
-        OrderType.LIMIT_IF_TOUCHED,
-    }
-)
-
-# Rithmic price_type enum (1=Limit, 2=Market, 3=StopLimit, 4=StopMarket) -> Nautilus.
-_RITHMIC_PRICE_TYPE_TO_ORDER_TYPE: dict[int, OrderType] = {
-    1: OrderType.LIMIT,
-    2: OrderType.MARKET,
-    3: OrderType.STOP_LIMIT,
-    4: OrderType.STOP_MARKET,
-}
-
-# Rithmic duration enum (1=Day, 2=Gtc, 3=Ioc, 4=Fok) -> Nautilus.
-_RITHMIC_DURATION_TO_TIF: dict[int, TimeInForce] = {
-    1: TimeInForce.DAY,
-    2: TimeInForce.GTC,
-    3: TimeInForce.IOC,
-    4: TimeInForce.FOK,
-}
-
-_TERMINAL_ORDER_STATUSES = frozenset(
-    {
-        OrderStatus.FILLED,
-        OrderStatus.CANCELED,
-        OrderStatus.REJECTED,
-        OrderStatus.EXPIRED,
-    }
-)
 
 ACCOUNT_CACHE_TIMEOUT_S = 10.0
 
@@ -229,22 +207,6 @@ def order_status_from_fields(fields: dict[str, Any]) -> OrderStatus:
     return OrderStatus.ACCEPTED
 
 
-def is_benign_bare_complete(fields: dict[str, Any], order: Any) -> bool:
-    """Closed FILLED/CANCELED tracked leg + bare COMPLETE (no fill payload)."""
-    return (
-        order is not None
-        and getattr(order, "is_closed", False)
-        and fields.get("source") == "rithmic"
-        and str(fields.get("notify_type_name") or "").upper() == "COMPLETE"
-        and str(fields.get("status") or "").lower() == "complete"
-        and fields.get("kind") is None
-        and fields.get("quantity") is None
-        and fields.get("fill_size") is None
-        and fields.get("fill_id") is None
-        and order.status in (OrderStatus.FILLED, OrderStatus.CANCELED)
-    )
-
-
 async def wait_account_in_cache(
     cache: Any,
     account_id: AccountId,
@@ -281,92 +243,6 @@ def _price(value: float | Decimal | str, precision: int | None = None) -> Price:
     if precision is None:
         return Price.from_str(format_price_str(value))
     return Price.from_str(f"{float(value):.{int(precision)}f}")
-
-
-class _PollTransientError(Exception):
-    """A transient (non-channel) poll failure: the stream may recover, so the
-    poll loop retries. The loop owns the failure streak (local state, per
-    stream lifetime) — not the client, so a transient run cannot carry across
-    a disconnect/reconnect or a successful resubscribe.
-    """
-
-
-# Canonical notification kinds that describe a real order state (see
-# ``kind_from_notify`` in ``_orders.py``) — the strict trust boundary for
-# binding a venue id from a drain row.
-_RECOGNIZABLE_KINDS = frozenset(
-    {
-        "accepted",
-        "updated",
-        "canceled",
-        "filled",
-        "rejected",
-        "modify_rejected",
-        "cancel_rejected",
-        "expired",
-        "triggered",
-    }
-)
-
-# Status substrings that mark a drain row as a real venue order state.
-# "TRIGGER" covers resting stop rows ("TRIGGER_PENDING" / "trigger pending"):
-# live-proven on Rithmic Test 2026-08-21 — stops never emit an OPEN
-# notification, so this is the only state their drain rows ever carry.
-_STATUS_MARKERS = ("OPEN", "WORKING", "CANCEL", "REJECT", "EXPIRED", "TRIGGER")
-
-
-def _row_is_trustworthy(fields: dict[str, Any]) -> bool:
-    """A drain row binds a venue id only when its closed-set execution terms
-    are real: side present, ``price_type``/``duration`` present and mappable,
-    and a recognizable order state. Never fabricates terms (a row with
-    missing/unknown closed-set values is advisory-only).
-    """
-    if order_side_from_notification(fields) is None:
-        return False
-    # The closed-set values are exact integers or None (``enum_int`` at the
-    # convert boundary; the same whitelist defends raw fields here too, so a
-    # bool/non-integral value can never coerce into a valid enum).
-    price_type = enum_int(fields.get("price_type"))
-    duration = enum_int(fields.get("duration"))
-    if (
-        price_type is None
-        or duration is None
-        or price_type not in _RITHMIC_PRICE_TYPE_TO_ORDER_TYPE
-        or duration not in _RITHMIC_DURATION_TO_TIF
-    ):
-        return False
-    kind = fields.get("kind")
-    status_u = str(fields.get("status") or "").upper()
-    return kind in _RECOGNIZABLE_KINDS or any(
-        marker in status_u for marker in _STATUS_MARKERS
-    )
-
-
-class _DrainRowResult:
-    """Tagged result of the drain-row interpretation boundary
-    (``RithmicExecutionClient._drain_row_from_fields``).
-
-    One boundary decides, for any working-orders drain row, what to publish
-    (``report`` — the advisory ``OrderStatusReport``) and whether the row is
-    trustworthy enough to bind a venue id from it (``bindable``, strict
-    closed-set terms — never fabricated). ``fields``/``ts_event`` let callers
-    re-read the winning row (freshness check, venue-id bind). No caller
-    re-implements the interpretation.
-    """
-
-    __slots__ = ("bindable", "fields", "report", "ts_event")
-
-    def __init__(
-        self,
-        fields: dict[str, Any],
-        ts_event: int,
-        report: OrderStatusReport | None,
-        bindable: bool,
-    ) -> None:
-        self.fields = fields
-        self.ts_event = ts_event
-        self.report = report
-        self.bindable = bindable
 
 
 class RithmicExecutionClient(LiveExecutionClient):
@@ -412,12 +288,13 @@ class RithmicExecutionClient(LiveExecutionClient):
         # client_order_id.value for orders this client placed, so tracked-ness is
         # decided by whether the order is present in the cache.
         # Venue-stable fill ids; retained across reconnect so snapshot replays
-        # stay idempotent.
-        self._seen_fill_keys: OrderedDict[str, None] = OrderedDict()
+        # stay idempotent. Hit paths refresh LRU so live/recon re-sees stay.
+        self._seen_fill_keys = FillDedupStore(self._MAX_SEEN_FILL_KEYS)
         # Last published untracked-status key per venue order, so Rithmic's
         # frequent re-pushes of unchanged order state do not re-emit status
-        # reports for external orders.
-        self._untracked_status_keys: dict[str, tuple[object, ...]] = {}
+        # reports for external orders. Suppress hits must refresh LRU or hot
+        # working orders are evicted by one-shot venue-id churn.
+        self._untracked_status_keys = UntrackedStatusBook(self._MAX_SEEN_FILL_KEYS)
         self._order_plant = OrderPlantPolicy(OrderPlantState.DISCONNECTED)
         # Fresh per-connect activity gate: the PnL/account stream delivered at
         # least one parseable account/position snapshot since (re)connect. This
@@ -434,8 +311,31 @@ class RithmicExecutionClient(LiveExecutionClient):
         # connect: per-contract rate keyed by product code (e.g. ``MNQ``), plus
         # the account-level default as fallback. Empty on fetch failure — fills
         # then report zero commission (allowed to be temporarily unavailable).
-        self._commission_rates: dict[str, Decimal] = {}
-        self._default_commission: Decimal | None = None
+        self._commission_registry = CommissionRegistry()
+
+    @property
+    def _commission_registry(self) -> CommissionRegistry:
+        return self._commission_registry_inst
+
+    @_commission_registry.setter
+    def _commission_registry(self, value: CommissionRegistry) -> None:
+        self._commission_registry_inst = value
+
+    @property
+    def _commission_rates(self) -> dict[str, Decimal]:
+        return self._commission_registry.rates
+
+    @_commission_rates.setter
+    def _commission_rates(self, value: dict[str, Decimal]) -> None:
+        self._commission_registry.rates = value
+
+    @property
+    def _default_commission(self) -> Decimal | None:
+        return self._commission_registry.default_commission
+
+    @_default_commission.setter
+    def _default_commission(self, value: Decimal | None) -> None:
+        self._commission_registry.default_commission = value
 
     _MAX_SEEN_FILL_KEYS = 10_000
     _REARM_PNL_SNAPSHOT_TIMEOUT_S = 5.0
@@ -443,112 +343,32 @@ class RithmicExecutionClient(LiveExecutionClient):
     _L3_PLANT_RESTORE_MAX_ATTEMPTS = 5
 
     def _fill_key_seen(self, key: str) -> bool:
-        if key in self._seen_fill_keys:
-            self._seen_fill_keys.move_to_end(key)
-            return True
-        return False
+        return self._seen_fill_keys.has_seen(key)
 
     def _mark_fill_key(self, key: str) -> None:
-        self._seen_fill_keys[key] = None
-        self._seen_fill_keys.move_to_end(key)
-        while len(self._seen_fill_keys) > self._MAX_SEEN_FILL_KEYS:
-            self._seen_fill_keys.popitem(last=False)
+        self._seen_fill_keys.mark(key)
 
     async def _load_commission_rates(self) -> None:
-        """Fetch venue commission rates (order-plant RMS info) at connect.
-
-        Product fill rates keyed by product code, with the account default as
-        fallback. The two fetches are independent: a failed account-default
-        fetch must NOT clear an already-loaded product table (and vice versa).
-        Best-effort: failure leaves the affected cache empty and fills report
-        zero commission (the review checklist requires commission to be allowed
-        to be temporarily unavailable without crashing). Never raises.
-        """
-        try:
-            rows = await asyncio.to_thread(self._session.load_product_rms_info)
-        except Exception as exc:
-            rows = []
-            self._log.warning(
-                f"product commission rates unavailable (0.0 fallback): {exc}"
-            )
-        rates: dict[str, Decimal] = {}
-        for row in rows:
-            code = row.get("product_code")
-            rate = row.get("commission_fill_rate")
-            if code and rate is not None:
-                rates[str(code)] = Decimal(str(rate))
-        self._commission_rates = rates
-        try:
-            account_rows = await asyncio.to_thread(self._session.load_account_rms_info)
-        except Exception as exc:
-            account_rows = []
-            self._log.warning(f"account commission default unavailable: {exc}")
-        # Only the active account's default may back unknown products; another
-        # account's schedule would mis-charge fills (best effort when the
-        # account is not yet resolvable at connect time).
+        """Fetch venue commission rates (order-plant RMS info) at connect."""
         try:
             active_account = self._account_raw()
         except Exception:
             active_account = None
-        default = next(
-            (
-                r.get("default_commission")
-                for r in account_rows
-                if (
-                    active_account is None or str(r.get("account_id")) == active_account
-                )
-                and r.get("default_commission") is not None
-            ),
-            None,
-        )
-        self._default_commission = (
-            Decimal(str(default)) if default is not None else None
-        )
-        self._log.info(
-            f"commission rates: {len(rates)} products"
-            + (
-                f", account default {self._default_commission}"
-                if self._default_commission is not None
-                else ""
-            )
+        await self._commission_registry.load(
+            self._session, active_account=active_account, log=self._log
         )
 
     def _product_code_for_fill(
         self, instrument_id: InstrumentId, symbol: str | None
     ) -> str | None:
-        """RMS product code for one fill's commission lookup.
-
-        Venue contract (verified from rithmic-rs ``MNM_SYMBOL`` tag 110100 +
-        live probe): order notifications carry the contract symbol (e.g.
-        ``MNQU6``) while RMS rates are keyed by product code (e.g. ``MNQ``).
-        The reference-data instrument knows the mapping; fall back to the raw
-        symbol for products where symbol == product code and for instruments
-        not in the cache.
-        """
-        if instrument_id is not None:
-            instrument = self._cache.instrument(instrument_id)
-            if instrument is not None:
-                code = (getattr(instrument, "info", None) or {}).get(
-                    "rithmic_product_code"
-                )
-                if code:
-                    return str(code)
-        return symbol
+        """RMS product code for one fill's commission lookup."""
+        return self._commission_registry.product_code_for_fill(
+            self._cache, instrument_id, symbol
+        )
 
     def _commission_money(self, product_code: str | None, qty: int) -> Money:
-        """Venue commission for one fill: per-contract RMS rate x qty (USD).
-
-        Unknown products fall back to the account default, then to zero.
-        """
-        if product_code is not None:
-            rate = self._commission_rates.get(product_code)
-            if rate is not None:
-                return Money(rate * Decimal(qty), Currency.from_str("USD"))
-        if self._default_commission is not None:
-            return Money(
-                self._default_commission * Decimal(qty), Currency.from_str("USD")
-            )
-        return Money(Decimal(0), Currency.from_str("USD"))
+        """Venue commission for one fill: per-contract RMS rate x qty (USD)."""
+        return self._commission_registry.commission_money(product_code, qty)
 
     @property
     def enable_trading(self) -> bool:
@@ -909,63 +729,22 @@ class RithmicExecutionClient(LiveExecutionClient):
     def _drain_row_from_fields(
         self, fields: dict[str, Any], ts_event: int
     ) -> _DrainRowResult:
-        """One interpretation boundary for a working-orders drain row.
-
-        Builds a single advisory ``OrderStatusReport`` (permissive: unknown
-        closed-set terms fall back to ``BUY``/``MARKET``/``GTC``/``ACCEPTED``
-        so one malformed row cannot abort a whole recon) and decides
-        ``bindable`` separately — a row binds a venue id only when its
-        closed-set execution terms are real (``_row_is_trustworthy``). Every
-        drain/recon caller consumes this; no caller re-implements "usable".
-        """
-        report = self._order_status_report_from_fields(fields, ts_event)
-        bindable = report is not None and _row_is_trustworthy(fields)
-        return _DrainRowResult(fields, ts_event, report, bindable)
+        """One interpretation boundary for a working-orders drain row."""
+        return drain_for(self).drain_row_from_fields(fields, ts_event)
 
     def _iter_drain_rows(
         self, events: list[dict[str, Any]]
     ) -> Iterator[_DrainRowResult]:
-        """Yield one interpretation per usable drain row; skip the malformed.
-
-        The raw-row pipeline — normalize, require a basket, coerce
-        ``ts_event`` — lives HERE with every guard inside, so no drain caller
-        re-implements "normalize then guard then interpret". A row that cannot
-        build an advisory report (``report is None``) is skipped too.
-        """
-        for raw in events:
-            try:
-                fields = order_notification_to_fields(raw)
-            except Exception:
-                continue
-            if not fields.get("basket_id"):
-                continue
-            try:
-                ts_event = int(fields.get("ts_event") or 0)
-            except (TypeError, ValueError, OverflowError):
-                continue
-            row = self._drain_row_from_fields(fields, ts_event)
-            if row.report is None:
-                continue
-            yield row
+        """Yield one interpretation per usable drain row; skip the malformed."""
+        return drain_for(self).iter_drain_rows(events)
 
     def _latest_drain_rows(
         self,
         events: list[dict[str, Any]],
         instrument_id: Any = None,
     ) -> dict[str, _DrainRowResult]:
-        """Keep only the freshest drain row per basket id (optionally
-        filtered to one instrument — ``None`` matches every instrument)."""
-        latest: dict[str, _DrainRowResult] = {}
-        for row in self._iter_drain_rows(events):
-            if not self._matches_instrument(row.fields, instrument_id, None):
-                continue
-            key = str(row.fields["basket_id"])
-            # Keep the latest row; on an equal timestamp (e.g. both 0 when
-            # ts_event is missing) prefer the last-arrived row so a terminal
-            # status following an earlier non-terminal is not masked.
-            if key not in latest or row.ts_event >= latest[key].ts_event:
-                latest[key] = row
-        return latest
+        """Keep only the freshest drain row per basket id."""
+        return drain_for(self).latest_drain_rows(events, instrument_id=instrument_id)
 
     def _row_stale_reason(
         self,
@@ -974,97 +753,16 @@ class RithmicExecutionClient(LiveExecutionClient):
         *,
         live_stream_authoritative: bool,
     ) -> str | None:
-        """Why a drain row must not advance local state (``None`` = forward).
-
-        The two drain consumers run under different authority models and the
-        difference is deliberate:
-
-        - Re-arm barrier (``live_stream_authoritative=True``): the live
-          stream owns tracked-order state, so ANY row for an order it
-          already closed is stale — terminal included — as is any row older
-          than the order's last local event.
-        - Bulk status recon (``False``): the drain is an advisory snapshot;
-          arrival order is not causal. A non-terminal row for a locally
-          closed order is venue lag and would reconcile ACCEPTED over
-          CANCELED/FILLED (the unguarded ``InvalidStateTrigger: CANCELED ->
-          ACCEPTED``, MY043-001 2026-08-21), so only that class is
-          suppressed. Terminal-vs-terminal still forwards: venue FILLED vs
-          local CANCELED is a real fill-after-cancel race the engine must
-          see.
-        """
-        if client_order_id is None:
-            return None
-        order = self._cache.order(client_order_id)
-        if order is None:
-            return None
-        if getattr(order, "is_closed", False):
-            if live_stream_authoritative:
-                return "order closed locally"
-            report = row.report
-            if report is None or report.order_status in _TERMINAL_ORDER_STATUSES:
-                return None
-            return "non-terminal snapshot for locally closed order"
-        if (
-            live_stream_authoritative
-            and row.ts_event
-            and int(getattr(order, "ts_last", 0) or 0) > row.ts_event
-        ):
-            # ``row.ts_event == 0`` is the iterator's synthetic missing-ts
-            # value: skipping on it would drop a valid snapshot whenever the
-            # tracked order has any live history.
-            return "live stream advanced past the snapshot"
-        return None
+        """Why a drain row must not advance local state (``None`` = forward)."""
+        return drain_for(self).row_stale_reason(
+            client_order_id,
+            row,
+            live_stream_authoritative=live_stream_authoritative,
+        )
 
     def _apply_drain_rows(self, events: list[dict[str, Any]]) -> None:
-        """Apply a working-orders drain to the local cache before re-arming.
-
-        The drain is a snapshot, not a replay: bind the venue id for tracked
-        in-flight orders (so commands target the real venue order and later
-        notifications attach), and publish reconciliation status reports for
-        the rows (terminal outcomes the live stream missed while
-        disconnected). Typed live events are NOT re-emitted — that is the live
-        stream's job and would double-emit for rows already seen live.
-        Publication happens BEFORE the venue id is bound and a failed
-        publication raises: the engine must receive the reconciled status
-        before trading resumes, so the barrier aborts (the plant stays
-        un-armed).
-        """
-        for row in self._latest_drain_rows(events).values():
-            fields = row.fields
-            basket = str(fields["basket_id"])
-            report = row.report
-            if report is None:
-                # Unreachable (the iterator skips unusable rows); narrows the
-                # type for the checker.
-                continue
-            client_order_id = self._drain_client_order_id(fields)
-            if (
-                client_order_id is not None
-                and self._row_stale_reason(
-                    client_order_id, row, live_stream_authoritative=True
-                )
-                is not None
-            ):
-                continue
-            # Apply (publish) BEFORE binding the venue id — commit ordering:
-            # the engine must receive the reconciled status before trading
-            # resumes, so a failed publication fails the barrier (raises) and
-            # the plant stays un-armed; the venue id is bound only afterwards.
-            if not self._publish_order_status_report(
-                report,
-                context="reconnect re-arm drain",
-            ):
-                raise VenueQueryUnavailable(
-                    "reconnect re-arm drain aborted: a reconciliation status "
-                    "report failed to publish"
-                )
-            if (
-                client_order_id is not None
-                and row.bindable
-                and self._cache.order(client_order_id) is not None
-                and self._cache.venue_order_id(client_order_id) is None
-            ):
-                self._bind_venue_id(client_order_id, basket)
+        """Apply a working-orders drain to the local cache before re-arming."""
+        drain_for(self).apply_drain_rows(events)
 
     async def _await_pnl_snapshot(self, timeout_s: float | None = None) -> None:
         """Wait (bounded) for the PnL stream to deliver account/position
@@ -1085,24 +783,6 @@ class RithmicExecutionClient(LiveExecutionClient):
                 "observed after reconnect"
             ) from None
 
-    async def _poll_session_event(
-        self,
-        poll_fn: Callable[[], dict[str, Any] | None],
-    ) -> dict[str, Any] | None:
-        """Return the next event, or None when there is none; raise
-        ``_PollTransientError`` on a transient (non-channel) failure so the
-        loop can retry (and count the streak itself); re-raise channel
-        failures for the resync path."""
-        try:
-            return await asyncio.to_thread(poll_fn)
-        except CHANNEL_ERRORS:
-            raise
-        except Exception as exc:
-            if is_reconnectable_poll_error(exc):
-                raise
-            self._log.warning(f"poll transient error: {exc}")
-            raise _PollTransientError(str(exc)) from exc
-
     async def _plant_poll_loop(
         self,
         *,
@@ -1111,94 +791,22 @@ class RithmicExecutionClient(LiveExecutionClient):
         on_event: Callable[[dict[str, Any]], None],
         on_resync: Callable[[], Any],
     ) -> None:
-        # Stream-lifetime state, local to this loop: a new loop (reconnect)
-        # starts at zero and a successful resubscribe resets it, so a transient
-        # run can never carry across stream lifetimes (the 4-before-drop + 1-
-        # after-recovery latch class is structurally impossible).
-        backoff = 0.05
-        transient_streak = 0
-        while True:
-            outcome = await self._poll_iteration(
-                name=name,
-                poll_fn=poll_fn,
-                on_event=on_event,
-                on_resync=on_resync,
-                backoff=backoff,
-                transient_streak=transient_streak,
-            )
-            if outcome is None:
-                return
-            backoff, transient_streak = outcome
-
-    async def _poll_iteration(
-        self,
-        *,
-        name: str,
-        poll_fn: Callable[[], dict[str, Any] | None],
-        on_event: Callable[[dict[str, Any]], None],
-        on_resync: Callable[[], Any],
-        backoff: float,
-        transient_streak: int,
-    ) -> tuple[float, int] | None:
-        """Run one poll iteration; return updated ``(backoff, transient_streak)``
-        to continue, or ``None`` when the stream must stop (order latch)."""
-        try:
-            event = await self._poll_session_event(poll_fn)
-        except _PollTransientError as exc:
-            # A persistent non-channel failure on the order stream means
-            # notifications are not being processed: fail closed (latch)
-            # rather than keep polling garbage. PnL keeps transient
-            # semantics (soft-fail is the operator's escape).
-            if name == "order":
-                transient_streak += 1
-                if transient_streak >= self._ORDER_POLL_MAX_TRANSIENT:
-                    self._log.error(f"{name} poll stream failing persistently: {exc}")
-                    self._latch_order_plant("order poll stream failure", str(exc))
-                    return None
-            await asyncio.sleep(0.1)
-            return backoff, transient_streak
-        except Exception as exc:
-            self._log.error(f"{name} poll channel error: {exc}")
-            if name == "order":
-                self._order_plant.resync_start()
-            try:
-                await on_resync()
-                self._log.warning(f"{name} subscription resynced after channel error")
-                backoff = 0.05
-                if name == "order":
-                    # Fresh stream lifetime: the old transient run must not
-                    # count toward the recovered stream.
-                    transient_streak = 0
-            except Exception as resync_exc:
-                self._log.error(f"{name} subscription resync failed: {resync_exc}")
-                if name == "order":
-                    # A failed resync is a dead stream: the plant machine
-                    # moves to DISCONNECTED (or stays LATCHED), so a
-                    # concurrent reconnect re-arm barrier can never clear a
-                    # latch over it, and a later resync cannot re-arm it.
-                    self._order_plant.resync_failed()
-                backoff = min(backoff * 2, 2.0)
-            await asyncio.sleep(backoff)
-            return backoff, transient_streak
-        if event is None:
-            await asyncio.sleep(0.05)
-            return backoff, transient_streak
-        try:
-            on_event(event)
-        except Exception as exc:
-            self._log.exception(f"{name} event handler error (suppressed)", exc)
-            if name == "order":
-                # A handler failure can leave venue and cache state divergent.
-                # Stop the order stream and fail closed instead of continuing
-                # to accept commands against stale execution state. Latch
-                # (not just DISCONNECTED): the re-arm barrier (keyed on
-                # plant state) must never clear a latch over a dead stream.
-                self._latch_order_plant(
-                    "order handler failure",
-                    f"order stream stopped; venue/cache state may be divergent: {exc}",
-                )
-                return None
-        return backoff, transient_streak
+        poller = PlantPoller(
+            name=name,
+            poll_fn=poll_fn,
+            on_event=on_event,
+            on_resync=on_resync,
+            max_transient=self._ORDER_POLL_MAX_TRANSIENT,
+            on_latch=self._latch_order_plant,
+            on_resync_start=(
+                self._order_plant.resync_start if name == "order" else None
+            ),
+            on_resync_failed=(
+                self._order_plant.resync_failed if name == "order" else None
+            ),
+            log=self._log,
+        )
+        await poller.run()
 
     def _dispatch_pnl_event(self, event: dict[str, Any]) -> None:
         etype = event.get("type")
@@ -1445,88 +1053,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         )
 
     def _handle_order_notification(self, fields: dict[str, Any]) -> None:
-        account_hint = fields.get("account_id")
-        if account_hint:
-            self._seed_account_if_needed(str(account_hint))
-        client_order_id = self._resolve_client_order_id(fields)
-        if client_order_id is None:
-            self._handle_untracked_notification(fields)
-            return
-        order = self._cache.order(client_order_id)
-        if order is None:
-            self._log.warning(
-                f"cached order missing for tracked {client_order_id}; "
-                f"notification suppressed: {slim_order_fields(fields)}"
-            )
-            return
-        ts_event = fields.get("ts_event")
-        ts_event = int(ts_event) if ts_event is not None else self._clock.timestamp_ns()
-        basket = fields.get("basket_id")
-        if basket:
-            self._bind_venue_id(client_order_id, str(basket))
-        venue_order_id = VenueOrderId(self._venue_id_for(fields, client_order_id))
-        action = notification_action(fields, order)
-        if action is None:
-            return
-        strategy_id = order.strategy_id
-        instrument_id = order.instrument_id
-        if action.kind == "accepted":
-            self._emit_accepted(order, client_order_id, venue_order_id, ts_event)
-        elif action.kind == "rejected":
-            self.generate_order_rejected(
-                strategy_id,
-                instrument_id,
-                client_order_id,
-                str(action.reason),
-                ts_event,
-            )
-        elif action.kind == "modify_rejected":
-            self.generate_order_modify_rejected(
-                strategy_id,
-                instrument_id,
-                client_order_id,
-                venue_order_id,
-                str(action.reason),
-                ts_event,
-            )
-        elif action.kind == "cancel_rejected":
-            self.generate_order_cancel_rejected(
-                strategy_id,
-                instrument_id,
-                client_order_id,
-                venue_order_id,
-                str(action.reason),
-                ts_event,
-            )
-        elif action.kind == "updated":
-            qty, price, trigger = self._resolve_updated_terms(order, action)
-            self.generate_order_updated(
-                strategy_id,
-                instrument_id,
-                client_order_id,
-                venue_order_id,
-                qty,
-                price,
-                trigger,
-                ts_event,
-            )
-        elif action.kind == "canceled":
-            self.generate_order_canceled(
-                strategy_id, instrument_id, client_order_id, venue_order_id, ts_event
-            )
-        elif action.kind == "triggered":
-            self._emit_triggered_guarded(
-                order, client_order_id, venue_order_id, ts_event
-            )
-        elif action.kind == "filled":
-            self._handle_tracked_fill(
-                order,
-                client_order_id,
-                venue_order_id,
-                fields,
-                ts_event,
-                action,
-            )
+        intake_for(self).handle_order_notification(fields)
 
     def _emit_accepted(
         self,
@@ -1535,47 +1062,14 @@ class RithmicExecutionClient(LiveExecutionClient):
         venue_order_id: VenueOrderId,
         ts_event: int,
     ) -> None:
-        """Emit OrderAccepted under the LAP-42 guard: Rithmic may defer OPEN
-        until terminal; only emit while still SUBMITTED (late OPEN after
-        ACCEPTED/advanced is noise)."""
-        if order.status is OrderStatus.SUBMITTED:
-            self.generate_order_accepted(
-                order.strategy_id,
-                order.instrument_id,
-                client_order_id,
-                venue_order_id,
-                ts_event,
-            )
-        else:
-            self._log.debug(
-                f"skipping late/duplicate OrderAccepted for {client_order_id}: "
-                f"local status={order.status}"
-            )
+        """Emit OrderAccepted only while local status is SUBMITTED (LAP-42)."""
+        intake_for(self).emit_accepted(order, client_order_id, venue_order_id, ts_event)
 
     def _resolve_updated_terms(
         self, order: Any, action: Any
     ) -> tuple[Quantity, Any, Any]:
-        """Resolve UPDATED-branch qty/price/trigger: the notification value
-        wins; else the order's own term; else None."""
-        qty = (
-            Quantity.from_int(int(action.quantity))
-            if action.quantity is not None
-            else order.quantity
-        )
-        prec = int(order.price.precision) if order.has_price else None
-        if action.price is not None:
-            price = _price(action.price, prec)
-        elif order.has_price:
-            price = order.price
-        else:
-            price = None
-        if action.trigger is not None:
-            trigger = _price(action.trigger, prec)
-        elif order.has_trigger_price:
-            trigger = order.trigger_price
-        else:
-            trigger = None
-        return qty, price, trigger
+        """Resolve UPDATED-branch qty/price/trigger from the action or order."""
+        return intake_for(self).resolve_updated_terms(order, action)
 
     def _emit_triggered_guarded(
         self,
@@ -1584,28 +1078,9 @@ class RithmicExecutionClient(LiveExecutionClient):
         venue_order_id: VenueOrderId,
         ts_event: int,
     ) -> None:
-        """Emit OrderTriggered under the #3812 producer guard: only
-        limit-style stops have a TRIGGERED state. Market-style stops go
-        straight to FILLED on trigger; emitting OrderTriggered for them is
-        rejected by the Nautilus model, which would kill the order event
-        stream. A duplicate TRIGGER for an already-TRIGGERED order is
-        suppressed too (terminal-state monotonicity). A closed order never
-        reaches this branch: ``_resolve_client_order_id`` routes it to the
-        untracked report path.
-        """
-        already_triggered = getattr(order, "status", None) is OrderStatus.TRIGGERED
-        if order.order_type not in _TRIGGERABLE_ORDER_TYPES or already_triggered:
-            self._log.debug(
-                f"skipping OrderTriggered for {order.order_type} order "
-                f"{client_order_id} (market-style stop or already triggered)"
-            )
-            return
-        self.generate_order_triggered(
-            order.strategy_id,
-            order.instrument_id,
-            client_order_id,
-            venue_order_id,
-            ts_event,
+        """Emit OrderTriggered for triggerable types not already triggered (#3812)."""
+        intake_for(self).emit_triggered_guarded(
+            order, client_order_id, venue_order_id, ts_event
         )
 
     def _handle_tracked_fill(
@@ -1617,75 +1092,10 @@ class RithmicExecutionClient(LiveExecutionClient):
         ts_event: int,
         action: Any,
     ) -> None:
-        """Emit one venue-priced tracked fill; dedup by venue trade id.
-
-        Honesty rules enforced here (single home):
-        - an unpriceable definitive fill latches fail-closed WITHOUT consuming
-          the dedup key, so a later priced replay can recover;
-        - a unique overfill is still emitted at true size (never dropped,
-          never capped) but latches for recon;
-        - the dedup key is marked only after successful publication.
-        """
-        strategy_id = order.strategy_id
-        instrument_id = order.instrument_id
-        if action.fill_qty is None or action.trade_id is None:
-            self._log.error(f"fill action missing fields: {slim_order_fields(fields)}")
-            return
-        dedup = fill_dedup_key(fields, ts_event=ts_event)
-        if self._fill_key_seen(dedup):
-            return
-        try:
-            fill_qty = Quantity.from_int(int(action.fill_qty))
-            if action.fill_px is None:
-                raise ValueError("fill price missing (pending/sentinel)")
-            fill_px = self._price_for_instrument(instrument_id, action.fill_px)
-        except (TypeError, ValueError, OverflowError) as exc:
-            # A definitive venue fill we cannot price (absent price or the
-            # -1.0 pending-price sentinel) means local exposure is known to
-            # be incomplete. The dedup key is NOT consumed, so a later
-            # priced replay of the same fill id can still recover; the
-            # plant is latched (fail-closed) until a recon re-syncs.
-            self._latch_order_plant(
-                "fill suppressed",
-                f"tracked {client_order_id} fill unpriceable ({exc}); "
-                "exposure may be incomplete; recon will re-sync",
-            )
-            return
-        # A2: a unique venue fill beyond the local remaining qty is real
-        # (never-drop, never cap): Nautilus 1.231.x clamps ``leaves_qty``
-        # to zero and accumulates the excess in ``overfill_qty``. Latch so
-        # a recon cycle re-syncs the cache (a missed partial is usually the
-        # cause); the fill is still emitted at its true size.
-        leaves = order.leaves_qty
-        if leaves is not None and fill_qty > leaves:
-            self._latch_order_plant(
-                "overfill",
-                f"tracked {client_order_id} fill qty {fill_qty} exceeds "
-                f"leaves {leaves} by {fill_qty - leaves}; Nautilus clamps "
-                "leaves_qty and tracks overfill_qty; recon will re-sync",
-            )
-        commission = self._commission_money(
-            self._product_code_for_fill(instrument_id, fields.get("symbol")),
-            int(fill_qty),
+        """Emit one venue-priced tracked fill; dedup by venue trade id."""
+        intake_for(self).handle_tracked_fill(
+            order, client_order_id, venue_order_id, fields, ts_event, action
         )
-        self.generate_order_filled(
-            strategy_id,
-            instrument_id,
-            client_order_id,
-            venue_order_id,
-            None,
-            TradeId(str(action.trade_id)),
-            order.side,
-            order.order_type,
-            fill_qty,
-            fill_px,
-            Currency.from_str("USD"),
-            commission,
-            LiquiditySide.NO_LIQUIDITY_SIDE,
-            ts_event,
-            info={"rithmic": dict(fields)},
-        )
-        self._mark_fill_key(dedup)
 
     def _instrument_id_from_order_fields(
         self, fields: dict[str, Any]
@@ -1752,101 +1162,16 @@ class RithmicExecutionClient(LiveExecutionClient):
         return is_benign_bare_complete(fields, order)
 
     def _publish_untracked_status(self, fields: dict[str, Any], ts_event: int) -> bool:
-        """Status phase of the untracked path. Returns ``False`` when the
-        caller must stop — a failed status publication also suppresses the
-        fill phase (fail-closed: no venue fill without its order
-        prerequisite)."""
-        status_report = self._drain_row_from_fields(fields, ts_event).report
-        if status_report is None:
-            # LAP-42: bare COMPLETE on a closed tracked leg is DEBUG; else WARN.
-            cid = self._basket_client_id(fields)
-            order = self._cache.order(cid) if cid is not None else None
-            if is_benign_bare_complete(fields, order):
-                self._log.debug(
-                    f"skipping benign bare COMPLETE for closed {cid}: "
-                    f"{slim_order_fields(fields)}"
-                )
-            else:
-                self._log.warning(
-                    f"untracked order status could not be built: "
-                    f"{slim_order_fields(fields)}"
-                )
-            return True
-
-        # Rithmic re-pushes order state frequently; skip an unchanged
-        # re-push of an external order (fills below are deduped separately).
-        # Include the mutable order terms — an ACCEPTED re-push that changes
-        # quantity/price/trigger must update Nautilus, not be discarded.
-        status_key = (
-            str(status_report.venue_order_id),
-            str(getattr(status_report, "order_status", "")),
-            str(getattr(status_report, "quantity", "")),
-            str(getattr(status_report, "price", "")),
-            str(getattr(status_report, "trigger_price", "")),
-            str(getattr(status_report, "filled_qty", "")),
-            str(getattr(status_report, "avg_px", "")),
-        )
-        if (
-            self._untracked_status_keys.get(str(status_report.venue_order_id))
-            == status_key
-        ):
-            return True
-        if not self._publish_order_status_report(
-            status_report,
-            context="untracked notification",
-        ):
-            return False
-        # Record only on success so a later re-push can retry.
-        if (
-            len(self._untracked_status_keys)
-            >= RithmicExecutionClient._MAX_SEEN_FILL_KEYS
-        ):
-            self._untracked_status_keys.clear()
-        self._untracked_status_keys[str(status_report.venue_order_id)] = status_key
-        return True
+        """Publish untracked status; False aborts the fill phase (fail-closed)."""
+        return intake_for(self).publish_untracked_status(fields, ts_event)
 
     def _publish_untracked_fill(self, fields: dict[str, Any], ts_event: int) -> None:
-        """Fill phase of the untracked path: dedupe by venue trade id and
-        publish one external FillReport."""
-        if fields.get("kind") != "filled":
-            return
-        dedup = fill_dedup_key(fields, ts_event=ts_event)
-        if self._fill_key_seen(dedup):
-            return
-        report = self._fill_report_from_fields(fields, ts_event)
-        if report is None:
-            self._log.error(
-                f"untracked fill suppressed (build failed): {slim_order_fields(fields)}"
-            )
-            return
-        self._send_fill_report(report)
-        self._mark_fill_key(dedup)
+        """Publish one untracked fill after status succeeded."""
+        intake_for(self).publish_untracked_fill(fields, ts_event)
 
     def _handle_untracked_notification(self, fields: dict[str, Any]) -> None:
-        """Report external venue activity without assigning it to a strategy order."""
-        ts_event = fields.get("ts_event")
-        ts_event = int(ts_event) if ts_event is not None else self._clock.timestamp_ns()
-        basket = fields.get("basket_id")
-        symbol = fields.get("symbol")
-        instrument_raw = fields.get("instrument_id")
-        if not basket or not (instrument_raw or symbol):
-            self._log.warning(
-                f"untracked order notification missing identity: "
-                f"{slim_order_fields(fields)}"
-            )
-            return
-        account_raw = fields.get("account_id")
-        if account_raw:
-            self._seed_account_if_needed(str(account_raw))
-        if self.account_id is None:
-            self._log.warning(
-                f"untracked order notification missing account: "
-                f"{slim_order_fields(fields)}"
-            )
-            return
-        if not self._publish_untracked_status(fields, ts_event):
-            return
-        self._publish_untracked_fill(fields, ts_event)
+        """Report external venue activity without strategy ownership."""
+        intake_for(self).handle_untracked_notification(fields)
 
     def _publish_order_status_report(
         self,
@@ -1854,22 +1179,8 @@ class RithmicExecutionClient(LiveExecutionClient):
         *,
         context: str,
     ) -> bool:
-        """Publish a status report without killing the order event stream.
-
-        Returns ``False`` on publication failure. Callers that need the status
-        as a reconciliation prerequisite (fills) treat ``False`` as
-        "cannot reconcile, skip this row" — a venue fill is suppressed rather
-        than published without an order prerequisite (fail-closed, logged).
-        """
-        try:
-            self._send_order_status_report(report)
-        except Exception as exc:
-            self._log.exception(
-                f"{context}: status report publication failed; skipping stale report",
-                exc,
-            )
-            return False
-        return True
+        """Publish a status report without killing the order event stream."""
+        return intake_for(self).publish_order_status_report(report, context=context)
 
     def _venue_id_for_order(self, order: Order) -> str | None:
         """Venue id for an order: the cache mapping wins, then the order model's."""
@@ -2456,9 +1767,9 @@ class RithmicExecutionClient(LiveExecutionClient):
         the meantime: re-read the cache first and prefer that newer state over
         a stale drain row (never regress a live terminal/bound order). The
         venue id is bound only after a row builds a report under strict
-        validation (``_row_is_trustworthy``) — a malformed row, or one whose
-        closed-set terms would be fabricated, must not disable recovery or
-        bind a venue id from fabricated terms. When
+        validation (``row_is_trustworthy`` / bindable drain row) — a malformed
+        row, or one whose closed-set terms would be fabricated, must not
+        disable recovery or bind a venue id from fabricated terms. When
         several matching rows are strict-usable, the newest wins (same
         (ts_event, arrival) policy as the bulk status path) and the venue id is
         bound exactly once from that row.
@@ -2545,23 +1856,8 @@ class RithmicExecutionClient(LiveExecutionClient):
     async def _load_orders_events(
         self, start_sec: int, end_sec: int
     ) -> list[dict[str, Any]]:
-        # The gateway performs a bounded silence-window drain of the current
-        # working orders (`show_orders`). An empty result means "no working
-        # orders after the drain" and is a valid best-effort answer, not an
-        # error. One bounded attempt per barrier/query: a definitive
-        # unavailable result fails immediately, and any other failure is
-        # surfaced as unavailable — the next engine query or reconnect is the
-        # retry boundary (no hidden retry policy inside recovery paths).
-        try:
-            return await asyncio.to_thread(
-                self._session.load_orders, start_sec, end_sec
-            )
-        except Exception as exc:
-            if self._is_recon_unavailable(exc):
-                raise
-            raise VenueQueryUnavailable(
-                f"load_orders recon failed ({start_sec}..{end_sec}): {exc}"
-            ) from exc
+        """Bounded working-orders drain; empty is best-effort, not venue-empty."""
+        return await drain_for(self).load_orders_events(start_sec, end_sec)
 
     def _matches_instrument(
         self,
@@ -2617,69 +1913,8 @@ class RithmicExecutionClient(LiveExecutionClient):
         fields: dict[str, Any],
         ts_event: int,
     ) -> OrderStatusReport | None:
-        """Build an advisory ``OrderStatusReport`` from normalized wire fields.
-
-        Deliberately permissive: unknown closed-set fields fall back to
-        ``BUY``/``MARKET``/``GTC``/``ACCEPTED`` so one malformed row cannot
-        abort the whole recon. Whether a row is trustworthy enough to bind a
-        venue id is decided separately by ``_row_is_trustworthy`` (the drain
-        boundary), not here.
-        """
-        basket = fields.get("basket_id")
-        instrument_id = self._instrument_id_from_order_fields(fields)
-        if not basket or instrument_id is None:
-            return None
-        account_raw = fields.get("account_id")
-        if account_raw:
-            self._seed_account_if_needed(str(account_raw))
-        if self.account_id is None:
-            return None
-        try:
-            side = order_side_from_notification(fields)
-            qty = Quantity.from_int(max(0, int(fields.get("quantity") or 0)))
-            filled = Quantity.from_int(max(0, int(fields.get("total_fill_size") or 0)))
-            price_raw = fields.get("price")
-            trigger_raw = fields.get("trigger_price")
-            price = _price(price_raw) if price_raw is not None else None
-            trigger = _price(trigger_raw) if trigger_raw is not None else None
-            avg = fields.get("avg_fill_price")
-            avg_px = Decimal(str(avg)) if avg is not None else None
-            if qty <= 0:
-                # No order terms (e.g. a bare TRIGGER notification): a status
-                # report cannot be built. Skip rather than crash the handler
-                # (the constructor rejects a zero quantity).
-                return None
-            order_type = self._order_type_from_event(fields)
-            tif = self._tif_from_event(fields)
-            status = self._order_status_from_event(fields)
-            # Event-time fallback, owned HERE: the ordering ``ts_event`` is the
-            # iterator's 0-default when the venue sent no timestamp — a report
-            # published with epoch 0 could be treated as stale (e.g. a fill's
-            # order prerequisite). One policy for every report consumer.
-            report_ts = ts_event or self._clock.timestamp_ns()
-            return OrderStatusReport(
-                account_id=self.account_id,
-                instrument_id=instrument_id,
-                venue_order_id=VenueOrderId(str(basket)),
-                order_side=side or OrderSide.BUY,
-                order_type=order_type,
-                time_in_force=tif,
-                order_status=status,
-                quantity=qty,
-                filled_qty=filled,
-                report_id=UUID4(),
-                ts_accepted=report_ts,
-                ts_last=report_ts,
-                ts_init=self._clock.timestamp_ns(),
-                client_order_id=self._client_order_id_for_tag(fields.get("user_tag")),
-                price=price,
-                trigger_price=trigger,
-                trigger_type=self._trigger_type_from_event(fields),
-                avg_px=avg_px,
-            )
-        except (TypeError, ValueError, OverflowError):
-            # Skip a malformed row rather than abort the whole recon response.
-            return None
+        """Build an advisory ``OrderStatusReport`` from normalized wire fields."""
+        return drain_for(self).order_status_report_from_fields(fields, ts_event)
 
     async def generate_order_status_reports(
         self,
@@ -2690,57 +1925,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         # reports only its locally cached orders (never claims venue authority).
         if not self.enable_trading:
             return self._cache_backed_order_status_reports(command)
-        start_sec, end_sec = self._recon_window_sec(command.start, command.end)
-        events = await self._load_orders_events(start_sec, end_sec)
-        if not events:
-            # Best-effort drain is not a snapshot: empty does not prove venue
-            # has no working orders (no end-of-list, 10k cap, quiet channel).
-            #
-            # Continuous open-check uses ``open_only=True``. With operator
-            # ``open_check_open_only=True`` (required for Rithmic), an empty
-            # report list is advisory — NT will not cancel tracked opens. Raise
-            # would only spam ExecEngine ERROR every open_check interval when
-            # the book is flat. Return [] for open_only.
-            #
-            # Full recon (``open_only=False``, startup mass-status) still raises
-            # so soft-complete can continue without treating empty as history.
-            if bool(getattr(command, "open_only", False)):
-                self._log.debug(
-                    "order status open_only drain empty — returning [] "
-                    "(not a complete venue snapshot; keep open_check_open_only=True)"
-                )
-                return []
-            raise VenueQueryUnavailable(
-                "Rithmic order recon unavailable: best-effort drain returned "
-                "no working orders (empty does not prove venue empty; no "
-                "provably complete snapshot API)"
-            )
-        reports: list[OrderStatusReport] = []
-        for row in self._latest_drain_rows(
-            events, instrument_id=command.instrument_id
-        ).values():
-            report = row.report
-            if report is None:
-                # Unreachable (the iterator skips unusable rows); narrows the
-                # type for the checker.
-                continue
-            reason = self._row_stale_reason(
-                self._drain_client_order_id(row.fields),
-                row,
-                live_stream_authoritative=False,
-            )
-            if reason is not None:
-                self._log.debug(
-                    f"suppressing stale drain row ({reason}): "
-                    f"{slim_order_fields(row.fields)}"
-                )
-                continue
-            reports.append(report)
-        if command.open_only:
-            reports = [
-                r for r in reports if r.order_status not in _TERMINAL_ORDER_STATUSES
-            ]
-        return reports
+        return await drain_for(self).generate_order_status_reports(command)
 
     async def generate_fill_reports(
         self,
@@ -2750,54 +1935,7 @@ class RithmicExecutionClient(LiveExecutionClient):
             raise VenueQueryUnavailable(
                 "Rithmic fill reconciliation unavailable (order plant not ready)"
             )
-        start_sec, end_sec = self._recon_window_sec(command.start, command.end)
-        events = await self._load_orders_events(start_sec, end_sec)
-        reports: list[FillReport] = []
-        for row in self._iter_drain_rows(events):
-            fields = row.fields
-            if fields.get("kind") != "filled":
-                continue
-            if not self._matches_instrument(
-                fields, command.instrument_id, command.venue_order_id
-            ):
-                continue
-            # Identity uses the RAW row ts (0 when the venue sent none): the
-            # fill's TradeId and dedup key must be stable across recon runs /
-            # restarts, so the clock fallback must NOT enter them. The clock
-            # fallback applies only to the report/status timestamps below.
-            raw_ts = row.ts_event
-            event_ts = raw_ts or self._clock.timestamp_ns()
-            # Share the adapter-wide fill dedup store (live path + recon) so a
-            # fill already emitted live, or duplicated across the summary/today
-            # drains, is not re-emitted as a second reconciliation fill.
-            dedup = fill_dedup_key(fields, ts_event=raw_ts)
-            if self._fill_key_seen(dedup):
-                continue
-            # The builder applies the clock fallback to the report timestamp
-            # itself; identity (TradeId) stays on the raw ts.
-            report = self._fill_report_from_fields(fields, raw_ts)
-            if report is not None:
-                # Nautilus cannot reconcile a fill without an order prerequisite.
-                # Reconciliation can discover a fill after the live order event
-                # was missed, so publish a venue status first; this may create a
-                # synthetic external order when no cached strategy order exists.
-                # Rebuild the status with the corrected ``event_ts`` (the
-                # iterator's 0-default would publish an epoch-dated
-                # prerequisite for a row without a venue timestamp — the
-                # status must share the fill's clock-fallback timestamp).
-                status = self._drain_row_from_fields(fields, event_ts).report
-                if status is None:
-                    # Unreachable (the iterator already built a report for this
-                    # row); narrows the type for the checker.
-                    continue
-                if not self._publish_order_status_report(
-                    status,
-                    context="fill reconciliation prerequisite",
-                ):
-                    continue
-                reports.append(report)
-                self._mark_fill_key(dedup)
-        return reports
+        return await drain_for(self).generate_fill_reports(command)
 
     async def generate_position_status_reports(
         self,
@@ -2988,61 +2126,16 @@ class RithmicExecutionClient(LiveExecutionClient):
         *,
         ts_init: int,
     ) -> list[PositionStatusReport]:
-        """Add FLAT reports for cache-open instruments the venue did not list."""
-        if self.account_id is None:
-            return venue_reports
-        reports = list(venue_reports)
-        covered = {report.instrument_id for report in reports}
-        try:
-            opens = self._cache.positions_open(
-                venue=self.venue, account_id=self.account_id
-            )
-        except TypeError:
-            opens = self._cache.positions_open(venue=self.venue)
-        for position in opens:
-            if position.instrument_id in covered:
-                continue
-            instrument = self._cache.instrument(position.instrument_id)
-            if instrument is None:
-                continue
-            reports.append(
-                PositionStatusReport.create_flat(
-                    account_id=self.account_id,
-                    instrument_id=position.instrument_id,
-                    size_precision=instrument.size_precision,
-                    ts_init=ts_init,
-                )
-            )
-        return reports
+        """Add FLAT reports for cache-open instruments missing from the venue set."""
+        return drain_for(self).augment_soft_mass_flat_for_cache_opens(
+            venue_reports, ts_init=ts_init
+        )
 
     def _warn_soft_mass_cache_vs_venue(
         self, positions: list[PositionStatusReport]
     ) -> None:
-        """Warn: NT will not clear Redis ghosts if generate_missing_orders=False."""
-        for report in positions:
-            try:
-                opens = self._cache.positions_open(
-                    venue=None,
-                    instrument_id=report.instrument_id,
-                    account_id=report.account_id,
-                )
-            except TypeError:
-                opens = [
-                    p
-                    for p in self._cache.positions_open(venue=self.venue)
-                    if p.instrument_id == report.instrument_id
-                ]
-            cached = sum((p.signed_decimal_qty() for p in opens), Decimal(0))
-            venue_qty = report.signed_decimal_qty
-            if cached == venue_qty:
-                continue
-            self._log.warning(
-                "soft mass-status: cache open qty "
-                f"{cached} != venue {report.instrument_id} qty {venue_qty}; "
-                "NT 1.231 with generate_missing_orders=False will not invent "
-                "closing fills to clear Redis/OMS ghosts. Flush Redis (or start "
-                "cold) when plant is flat before enabling live recon."
-            )
+        """Warn when cache and venue position qty disagree under soft mass-status."""
+        drain_for(self).warn_soft_mass_cache_vs_venue(positions)
 
     @staticmethod
     def _apply_mass_status_report_window(
@@ -3051,29 +2144,12 @@ class RithmicExecutionClient(LiveExecutionClient):
         lookback_start_ns: int | None,
         reports_complete: bool,
     ) -> bool:
-        """Declare NT mass-status history bound when the installed API allows.
-
-        NT 1.231 ``ExecutionMassStatus`` has neither ``lookback_start`` nor
-        ``set_report_window`` (those land on master / 2.0.x; Python bindings may
-        still omit the setter). Returns whether the contract was applied.
-        """
-        setter = getattr(mass_status, "set_report_window", None)
-        if callable(setter):
-            setter(lookback_start_ns, reports_complete)
-            return True
-        applied = False
-        for name, value in (
-            ("lookback_start", lookback_start_ns),
-            ("reports_complete", reports_complete),
-        ):
-            if not hasattr(mass_status, name):
-                continue
-            try:
-                setattr(mass_status, name, value)
-                applied = True
-            except (AttributeError, TypeError):
-                continue
-        return applied
+        """Declare the NT mass-status history bound when reports are complete."""
+        return apply_mass_status_report_window(
+            mass_status,
+            lookback_start_ns=lookback_start_ns,
+            reports_complete=reports_complete,
+        )
 
 
 # Back-compat alias used by factories / tests.

@@ -2,12 +2,32 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from nautilus_trader.model.enums import OrderStatus, OrderType, TimeInForce
+
 from rithmic_nt_connect._convert import ConvertError, _ts_ns, instrument_id_from_symbol
 from rithmic_nt_connect.constants import VENUE
+
+# Rithmic price_type / duration closed-set ints (shared by report mapping +
+# drain bindability). Keep keys identical everywhere they are consulted.
+RITHMIC_PRICE_TYPE_TO_ORDER_TYPE: dict[int, OrderType] = {
+    1: OrderType.LIMIT,
+    2: OrderType.MARKET,
+    3: OrderType.STOP_LIMIT,
+    4: OrderType.STOP_MARKET,
+}
+RITHMIC_DURATION_TO_TIF: dict[int, TimeInForce] = {
+    1: TimeInForce.DAY,
+    2: TimeInForce.GTC,
+    3: TimeInForce.IOC,
+    4: TimeInForce.FOK,
+}
+TRUSTWORTHY_PRICE_TYPES = frozenset(RITHMIC_PRICE_TYPE_TO_ORDER_TYPE)
+TRUSTWORTHY_DURATIONS = frozenset(RITHMIC_DURATION_TO_TIF)
 
 OrderActionKind = Literal[
     "accepted",
@@ -61,6 +81,112 @@ class OrderAction:
     fill_qty: Any | None = None
     fill_px: Any | None = None
     trade_id: str | None = None
+
+
+class SeenKeyCache:
+    """Internal bounded LRU; prefer FillDedupStore / UntrackedStatusBook at call sites.
+
+    Hit paths (``has_seen``, ``get``, ``__getitem__``, ``__contains__``) refresh
+    recency so repeatedly observed keys are not evicted by one-shot churn.
+    """
+
+    def __init__(self, max_size: int = 10_000) -> None:
+        self._entries: OrderedDict[str, Any] = OrderedDict()
+        self._max_size = max_size
+
+    def has_seen(self, key: str) -> bool:
+        """Return whether ``key`` is present; refresh recency on hit."""
+        if key in self._entries:
+            self._entries.move_to_end(key)
+            return True
+        return False
+
+    def mark(self, key: str, value: Any = None) -> None:
+        """Record ``key``, refresh recency, and evict oldest past ``max_size``."""
+        self._entries[key] = value
+        self._entries.move_to_end(key)
+        while len(self._entries) > self._max_size:
+            self._entries.popitem(last=False)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """Return stored value; refresh recency on hit (same as ``has_seen``)."""
+        if key not in self._entries:
+            return default
+        self._entries.move_to_end(key)
+        return self._entries[key]
+
+    def clear(self) -> None:
+        self._entries.clear()
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def __contains__(self, key: str) -> bool:
+        return self.has_seen(key)
+
+    def __getitem__(self, key: str) -> Any:
+        val = self._entries[key]
+        self._entries.move_to_end(key)
+        return val
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self.mark(key, value)
+
+
+class FillDedupStore:
+    """Venue fill-id presence store shared by live and recon paths."""
+
+    def __init__(self, max_size: int = 10_000) -> None:
+        self._cache = SeenKeyCache(max_size)
+
+    def has_seen(self, key: str) -> bool:
+        return self._cache.has_seen(key)
+
+    def mark(self, key: str) -> None:
+        self._cache.mark(key)
+
+    def clear(self) -> None:
+        self._cache.clear()
+
+    def __len__(self) -> int:
+        return len(self._cache)
+
+
+class UntrackedStatusBook:
+    """Last-published untracked status snapshot per venue order id."""
+
+    def __init__(self, max_size: int = 10_000) -> None:
+        self._cache = SeenKeyCache(max_size)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """Return last recorded snapshot; refresh LRU on hit."""
+        return self._cache.get(key, default)
+
+    def record(self, key: str, value: Any) -> None:
+        """Remember a published status snapshot (newest)."""
+        self._cache.mark(key, value)
+
+    def clear(self) -> None:
+        self._cache.clear()
+
+    def __len__(self) -> int:
+        return len(self._cache)
+
+
+def is_benign_bare_complete(fields: dict[str, Any], order: Any) -> bool:
+    """Bare COMPLETE on an already closed FILLED/CANCELED tracked leg."""
+    return (
+        order is not None
+        and getattr(order, "is_closed", False)
+        and fields.get("source") == "rithmic"
+        and str(fields.get("notify_type_name") or "").upper() == "COMPLETE"
+        and str(fields.get("status") or "").lower() == "complete"
+        and fields.get("kind") is None
+        and fields.get("quantity") is None
+        and fields.get("fill_size") is None
+        and fields.get("fill_id") is None
+        and order.status in (OrderStatus.FILLED, OrderStatus.CANCELED)
+    )
 
 
 def _enum_name(value: Any, prefix: str) -> str:

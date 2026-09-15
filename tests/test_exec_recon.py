@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -41,6 +40,7 @@ from nautilus_trader.model.identifiers import (
 from nautilus_trader.model.objects import Currency, Money, Price, Quantity
 from nautilus_trader.model.orders import LimitOrder, Order
 from rithmic_nt_connect._order_plant import OrderPlantPolicy, OrderPlantState
+from rithmic_nt_connect._orders import FillDedupStore, UntrackedStatusBook
 from rithmic_nt_connect.errors import (
     ReconciliationUnavailableError,
     VenueQueryUnavailable,
@@ -161,7 +161,8 @@ def _trading_client(
     client._order_plant = OrderPlantPolicy(OrderPlantState.LIVE)
     source = session if session is not None else _UnavailableLoadOrdersSession()
     client._session = cast(WireSession, source)
-    client._seen_fill_keys = OrderedDict()
+    client._seen_fill_keys = FillDedupStore()
+    client._untracked_status_keys = UntrackedStatusBook()
     client._commission_rates = {}
     client._default_commission = None
     return client
@@ -256,7 +257,7 @@ def test_untracked_order_reports_status_without_strategy_ownership() -> None:
         _log=_Log(),
         _send_order_status_report=status_reports.append,
         _seed_account_if_needed=lambda account_raw: None,
-        _untracked_status_keys={},
+        _untracked_status_keys=UntrackedStatusBook(),
     )
     _bind_untracked_methods(client)
     status_report = SimpleNamespace(venue_order_id="B-EXTERNAL", client_order_id=None)
@@ -298,7 +299,7 @@ def test_untracked_status_suppresses_unchanged_re_push() -> None:
         venue_order_id="B-EXT", order_status="OPEN", filled_qty="1", avg_px="100.5"
     )
     client._drain_row_from_fields = lambda fields, ts_event: _drain_row_result(status)
-    client._untracked_status_keys = {}
+    client._untracked_status_keys = UntrackedStatusBook()
     fields = {
         "basket_id": "B-EXT",
         "symbol": "MNQU6",
@@ -329,6 +330,72 @@ def test_untracked_status_suppresses_unchanged_re_push() -> None:
     assert len(published) == 2
 
 
+def test_untracked_status_hot_key_survives_cache_churn() -> None:
+    """Repeated suppress hits must refresh LRU or unique ids re-emit the hot order.
+
+    Parallel to fill dedup (has_seen touches): untracked status uses get() on
+    suppress. Without touch-on-get, intervening venue ids evict the working
+    order and the next unchanged re-push publishes again.
+    """
+    published: list[object] = []
+    client = SimpleNamespace(
+        account_id="RITHMIC-ACC1",
+        _clock=SimpleNamespace(timestamp_ns=lambda: 2),
+        _log=_Log(),
+        _send_order_status_report=published.append,
+        _seed_account_if_needed=lambda account_raw: None,
+        _untracked_status_keys=UntrackedStatusBook(max_size=2),
+    )
+    _bind_untracked_methods(client)
+
+    def _status(venue_order_id: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            venue_order_id=venue_order_id,
+            order_status="OPEN",
+            quantity="1",
+            price="100.0",
+            trigger_price="",
+            filled_qty="0",
+            avg_px="",
+        )
+
+    hot = _status("B-HOT")
+    client._drain_row_from_fields = lambda fields, ts_event: _drain_row_result(hot)
+    fields = {
+        "basket_id": "B-HOT",
+        "symbol": "MNQU6",
+        "account_id": "ACC1",
+        "status": "OPEN",
+        "kind": "accepted",
+        "price_type": 1,
+        "duration": 1,
+        "quantity": 1,
+        "total_fill_size": 0,
+        "transaction_type": 1,
+    }
+    handle = RithmicExecutionClient._handle_untracked_notification
+    handle(cast(RithmicExecutionClient, client), fields)
+    assert len(published) == 1
+
+    other = _status("B-OTHER")
+    client._drain_row_from_fields = lambda fields, ts_event: _drain_row_result(other)
+    handle(cast(RithmicExecutionClient, client), {**fields, "basket_id": "B-OTHER"})
+    assert len(published) == 2
+
+    client._drain_row_from_fields = lambda fields, ts_event: _drain_row_result(hot)
+    handle(cast(RithmicExecutionClient, client), fields)  # suppress + touch
+    assert len(published) == 2
+
+    churn = _status("B-CHURN")
+    client._drain_row_from_fields = lambda fields, ts_event: _drain_row_result(churn)
+    handle(cast(RithmicExecutionClient, client), {**fields, "basket_id": "B-CHURN"})
+    assert len(published) == 3
+
+    client._drain_row_from_fields = lambda fields, ts_event: _drain_row_result(hot)
+    handle(cast(RithmicExecutionClient, client), fields)
+    assert len(published) == 3
+
+
 def test_untracked_status_re_push_with_changed_terms_reports() -> None:
     """An external re-push that mutates order terms must not be deduped away.
 
@@ -343,7 +410,7 @@ def test_untracked_status_re_push_with_changed_terms_reports() -> None:
         _log=_Log(),
         _send_order_status_report=published.append,
         _seed_account_if_needed=lambda account_raw: None,
-        _untracked_status_keys={},
+        _untracked_status_keys=UntrackedStatusBook(),
     )
     _bind_untracked_methods(client)
     status = SimpleNamespace(
@@ -401,7 +468,7 @@ def test_untracked_status_publication_failure_does_not_escape_handler() -> None:
             RuntimeError("stale report")
         ),
         _seed_account_if_needed=lambda account_raw: None,
-        _untracked_status_keys={},
+        _untracked_status_keys=UntrackedStatusBook(),
     )
     _bind_untracked_methods(client)
     status_report = SimpleNamespace(venue_order_id="B-EXTERNAL", client_order_id=None)
@@ -640,8 +707,8 @@ def test_untracked_status_publish_failure_suppresses_fill() -> None:
         _log=_Log(),
         _send_order_status_report=None,  # replaced below
         _send_fill_report=fills.append,
-        _seen_fill_keys=OrderedDict(),
-        _untracked_status_keys={},
+        _seen_fill_keys=FillDedupStore(),
+        _untracked_status_keys=UntrackedStatusBook(),
         _seed_account_if_needed=lambda account_raw: None,
     )
     _bind_untracked_methods(client)
@@ -724,7 +791,7 @@ def test_stop_market_trigger_then_fill_still_emits_fill(
     client = _client()
     order = _order(OrderType.STOP_MARKET)
     client._cache._orders[str(order.client_order_id)] = order
-    client._seen_fill_keys = OrderedDict()
+    client._seen_fill_keys = FillDedupStore()
     triggered: list[tuple[object, ...]] = []
     filled: list[tuple[object, ...]] = []
     monkeypatch.setattr(
@@ -2346,7 +2413,7 @@ def test_closed_order_late_open_still_publishes_report() -> None:
     client, log = _bare_client(
         _closed_order_cache(OrderStatus.CANCELED), fail_status=False
     )
-    client._untracked_status_keys = {}
+    client._untracked_status_keys = UntrackedStatusBook()
     published: list[object] = []
     client._publish_order_status_report = (  # ty: ignore
         lambda report, context: published.append(report) or True
@@ -2381,8 +2448,8 @@ def test_closed_order_late_fill_still_reconciles(
     client, _log = _bare_client(
         _closed_order_cache(OrderStatus.CANCELED), fail_status=False
     )
-    client._seen_fill_keys = OrderedDict()
-    client._untracked_status_keys = {}
+    client._seen_fill_keys = FillDedupStore()
+    client._untracked_status_keys = UntrackedStatusBook()
     external_fills: list[object] = []
     client._send_fill_report = external_fills.append  # ty: ignore
     client._drain_row_from_fields = lambda fields, ts_event: _drain_row_result(  # ty: ignore
