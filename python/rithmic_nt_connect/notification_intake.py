@@ -59,8 +59,6 @@ class VenueNotificationIntake:
             host._seed_account_if_needed(str(account_hint))
         client_order_id = host._resolve_client_order_id(fields)
         if client_order_id is None:
-            # Prefer host thin delegate so MethodType spies apply; fall back for
-            # direct intake unit stubs that lack the client wrappers.
             untracked = getattr(host, "_handle_untracked_notification", None)
             if untracked is not None:
                 untracked(fields)
@@ -331,7 +329,6 @@ class VenueNotificationIntake:
         venue_key = str(status_report.venue_order_id)
         if host._untracked_status_keys.get(venue_key) == status_key:
             return True
-        # Call through host so ``_publish_order_status_report`` overrides apply.
         if not host._publish_order_status_report(
             status_report,
             context="untracked notification",
@@ -380,8 +377,7 @@ class VenueNotificationIntake:
                 f"{slim_order_fields(fields)}"
             )
             return
-        # Prefer host thin delegates so MethodType spies apply; fall back for
-        # direct intake unit stubs.
+        # Status before fill: fail-closed if status publish fails.
         publish_status = getattr(host, "_publish_untracked_status", None)
         publish_fill = getattr(host, "_publish_untracked_fill", None)
         if publish_status is not None:

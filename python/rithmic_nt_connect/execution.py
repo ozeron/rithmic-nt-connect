@@ -315,11 +315,7 @@ class RithmicExecutionClient(LiveExecutionClient):
 
     @property
     def _commission_registry(self) -> CommissionRegistry:
-        reg = getattr(self, "_commission_registry_inst", None)
-        if reg is None:
-            reg = CommissionRegistry()
-            self._commission_registry_inst = reg
-        return reg
+        return self._commission_registry_inst
 
     @_commission_registry.setter
     def _commission_registry(self, value: CommissionRegistry) -> None:
@@ -1066,13 +1062,13 @@ class RithmicExecutionClient(LiveExecutionClient):
         venue_order_id: VenueOrderId,
         ts_event: int,
     ) -> None:
-        """Emit OrderAccepted under the LAP-42 guard (thin intake delegate)."""
+        """Emit OrderAccepted only while local status is SUBMITTED (LAP-42)."""
         intake_for(self).emit_accepted(order, client_order_id, venue_order_id, ts_event)
 
     def _resolve_updated_terms(
         self, order: Any, action: Any
     ) -> tuple[Quantity, Any, Any]:
-        """Resolve UPDATED-branch qty/price/trigger (thin intake delegate)."""
+        """Resolve UPDATED-branch qty/price/trigger from the action or order."""
         return intake_for(self).resolve_updated_terms(order, action)
 
     def _emit_triggered_guarded(
@@ -1082,7 +1078,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         venue_order_id: VenueOrderId,
         ts_event: int,
     ) -> None:
-        """Emit OrderTriggered under the #3812 guard (thin intake delegate)."""
+        """Emit OrderTriggered for triggerable types not already triggered (#3812)."""
         intake_for(self).emit_triggered_guarded(
             order, client_order_id, venue_order_id, ts_event
         )
@@ -1096,7 +1092,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         ts_event: int,
         action: Any,
     ) -> None:
-        """Emit one venue-priced tracked fill (thin intake delegate)."""
+        """Emit one venue-priced tracked fill; dedup by venue trade id."""
         intake_for(self).handle_tracked_fill(
             order, client_order_id, venue_order_id, fields, ts_event, action
         )
@@ -1166,15 +1162,15 @@ class RithmicExecutionClient(LiveExecutionClient):
         return is_benign_bare_complete(fields, order)
 
     def _publish_untracked_status(self, fields: dict[str, Any], ts_event: int) -> bool:
-        """Status phase of the untracked path (thin intake delegate)."""
+        """Publish untracked status; False aborts the fill phase (fail-closed)."""
         return intake_for(self).publish_untracked_status(fields, ts_event)
 
     def _publish_untracked_fill(self, fields: dict[str, Any], ts_event: int) -> None:
-        """Fill phase of the untracked path (thin intake delegate)."""
+        """Publish one untracked fill after status succeeded."""
         intake_for(self).publish_untracked_fill(fields, ts_event)
 
     def _handle_untracked_notification(self, fields: dict[str, Any]) -> None:
-        """Report external venue activity (thin intake delegate)."""
+        """Report external venue activity without strategy ownership."""
         intake_for(self).handle_untracked_notification(fields)
 
     def _publish_order_status_report(
@@ -1860,7 +1856,7 @@ class RithmicExecutionClient(LiveExecutionClient):
     async def _load_orders_events(
         self, start_sec: int, end_sec: int
     ) -> list[dict[str, Any]]:
-        """Bounded working-orders drain (thin drain delegate)."""
+        """Bounded working-orders drain; empty is best-effort, not venue-empty."""
         return await drain_for(self).load_orders_events(start_sec, end_sec)
 
     def _matches_instrument(
@@ -1917,7 +1913,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         fields: dict[str, Any],
         ts_event: int,
     ) -> OrderStatusReport | None:
-        """Build an advisory ``OrderStatusReport`` (thin drain delegate)."""
+        """Build an advisory ``OrderStatusReport`` from normalized wire fields."""
         return drain_for(self).order_status_report_from_fields(fields, ts_event)
 
     async def generate_order_status_reports(
@@ -2130,7 +2126,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         *,
         ts_init: int,
     ) -> list[PositionStatusReport]:
-        """Add FLAT reports for cache-open instruments (thin drain delegate)."""
+        """Add FLAT reports for cache-open instruments missing from the venue set."""
         return drain_for(self).augment_soft_mass_flat_for_cache_opens(
             venue_reports, ts_init=ts_init
         )
@@ -2138,7 +2134,7 @@ class RithmicExecutionClient(LiveExecutionClient):
     def _warn_soft_mass_cache_vs_venue(
         self, positions: list[PositionStatusReport]
     ) -> None:
-        """Warn on cache/venue qty mismatch (thin drain delegate)."""
+        """Warn when cache and venue position qty disagree under soft mass-status."""
         drain_for(self).warn_soft_mass_cache_vs_venue(positions)
 
     @staticmethod
@@ -2148,7 +2144,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         lookback_start_ns: int | None,
         reports_complete: bool,
     ) -> bool:
-        """Declare NT mass-status history bound (thin drain delegate)."""
+        """Declare the NT mass-status history bound when reports are complete."""
         return apply_mass_status_report_window(
             mass_status,
             lookback_start_ns=lookback_start_ns,

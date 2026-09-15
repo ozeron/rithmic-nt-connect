@@ -196,6 +196,24 @@ def test_bulk_stale_suppresses_non_terminal_for_closed_only() -> None:
     )
 
 
+def test_apply_routes_stale_check_through_host_spy() -> None:
+    """Re-arm apply must honor host._row_stale_reason overrides (R12 seam)."""
+    published: list[object] = []
+    cid = ClientOrderId("O-1")
+    host = _host(
+        _publish_order_status_report=lambda report, *, context: (
+            published.append(report) or True
+        ),
+        _drain_client_order_id=lambda fields: cid,
+        _row_stale_reason=lambda client_order_id, row, *, live_stream_authoritative: (
+            "spy-stale"
+        ),
+    )
+    host._cache._orders["O-1"] = SimpleNamespace(is_closed=False, ts_last=0)
+    WorkingOrdersDrain(host).apply_drain_rows([_raw_row()])
+    assert published == []
+
+
 def test_apply_publishes_before_bind_and_aborts_on_publish_failure() -> None:
     published: list[object] = []
     bound: list[tuple[object, str]] = []

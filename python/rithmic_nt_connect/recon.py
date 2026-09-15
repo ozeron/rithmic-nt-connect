@@ -369,7 +369,15 @@ class WorkingOrdersDrain:
         un-armed).
         """
         host = self._host
-        for row in self.latest_drain_rows(events).values():
+        # Call host wrappers when present so MethodType spies apply; wrappers
+        # only bounce into this drain (no recursion into apply).
+        latest = getattr(host, "_latest_drain_rows", None)
+        rows = (
+            latest(events).values()
+            if latest is not None
+            else self.latest_drain_rows(events).values()
+        )
+        for row in rows:
             fields = row.fields
             basket = str(fields["basket_id"])
             report = row.report
@@ -378,14 +386,17 @@ class WorkingOrdersDrain:
                 # type for the checker.
                 continue
             client_order_id = host._drain_client_order_id(fields)
-            if (
-                client_order_id is not None
-                and self.row_stale_reason(
-                    client_order_id, row, live_stream_authoritative=True
+            if client_order_id is not None:
+                stale = getattr(host, "_row_stale_reason", None)
+                reason = (
+                    stale(client_order_id, row, live_stream_authoritative=True)
+                    if stale is not None
+                    else self.row_stale_reason(
+                        client_order_id, row, live_stream_authoritative=True
+                    )
                 )
-                is not None
-            ):
-                continue
+                if reason is not None:
+                    continue
             # Apply (publish) BEFORE binding the venue id — commit ordering:
             # the engine must receive the reconciled status before trading
             # resumes, so a failed publication fails the barrier (raises) and
