@@ -197,3 +197,27 @@ def test_first_row_of_a_fresh_stream_counts_with_a_ticking_clock() -> None:
     assert live is not None
     snap = client._exposure_snapshot("MNQ", 0, live + PNL_SETTLE_NS)
     assert snap.net == -2 and snap.complete  # never silently flat
+
+
+def test_an_unreadable_position_row_makes_that_root_unknown() -> None:
+    now = [10]
+    client = _client(now, [])
+    client._cache_position(_pnl("MNQZ6", 0))
+    client._cache_position(_pnl("ESZ6", 0))
+    client._cache_position({"type": "instrument_pnl", "symbol": "MNQZ6"})  # no net
+    now[0] = 10 + PNL_SETTLE_NS
+    mnq = asyncio.run(client.request_exposure("MNQ"))
+    assert mnq.net is None and not mnq.complete  # unknown, never flat
+    assert asyncio.run(client.request_exposure("ES")).net == 0  # other roots unaffected
+    client._cache_position(_pnl("MNQZ6", 1))  # a readable row resolves it
+    assert asyncio.run(client.request_exposure("MNQ")).net == 1
+
+
+def test_an_unreadable_row_without_a_symbol_poisons_every_root() -> None:
+    client = _client([10], [])
+    client._cache_position(_pnl("ESZ6", 0))
+    client._cache_position({"type": "instrument_pnl"})
+    assert asyncio.run(client.request_exposure("ES")).net is None
+    client._forget_pnl_state()  # a fresh stream starts clean
+    client._cache_position(_pnl("ESZ6", 0))
+    assert asyncio.run(client.request_exposure("ES")).net == 0

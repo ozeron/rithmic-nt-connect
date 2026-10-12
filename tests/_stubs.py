@@ -445,6 +445,22 @@ class _TestClient(RithmicExecutionClient):
     def _position_seen_ns(self, value: dict[str, int]) -> None:
         object.__setattr__(self, "_position_seen_ns_inst", value)
 
+    @property
+    def _unreadable_position_symbols(self) -> set[str]:
+        try:
+            return cast(
+                set[str],
+                object.__getattribute__(self, "_unreadable_position_symbols_inst"),
+            )
+        except AttributeError:
+            symbols: set[str] = set()
+            object.__setattr__(self, "_unreadable_position_symbols_inst", symbols)
+            return symbols
+
+    @_unreadable_position_symbols.setter
+    def _unreadable_position_symbols(self, value: set[str]) -> None:
+        object.__setattr__(self, "_unreadable_position_symbols_inst", value)
+
 
 def _conforms() -> None:
     """Static proof: the stub satisfies the ``WireSession`` protocol."""

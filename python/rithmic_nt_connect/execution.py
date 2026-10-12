@@ -173,6 +173,10 @@ def trigger_type_from_fields(fields: dict[str, Any]) -> TriggerType:
     return TriggerType.NO_TRIGGER
 
 
+# Marker for an unreadable PnL position row that carried no symbol (root unknown).
+_ANY_SYMBOL = "*"
+
+
 def order_status_from_fields(fields: dict[str, Any]) -> OrderStatus:
     """Venue drain/notification row -> Nautilus order status (pure).
 
@@ -326,6 +330,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         # working-orders drain only proves exposure together with a live stream.
         self._pnl_live_since_ns: int | None = None
         self._position_seen_ns: dict[str, int] = {}
+        self._unreadable_position_symbols: set[str] = set()
         # One venue answers exposure per node: a second Rithmic exec client (or a paper
         # responder already registered) keeps the first registration.
         if EXPOSURE_ENDPOINT not in msgbus.endpoints():
@@ -727,6 +732,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         # Exposure reads Unknown until a fresh observation has settled (a failed
         # resubscribe keeps it Unknown). ``_positions`` stays for position reports.
         self._pnl_live_since_ns = None
+        self._unreadable_position_symbols.discard(_ANY_SYMBOL)  # a fresh stream
         await asyncio.to_thread(self._session.disconnect_pnl_plant)
         await asyncio.to_thread(self._session.subscribe_pnl)
 
@@ -921,7 +927,12 @@ class RithmicExecutionClient(LiveExecutionClient):
             fields = instrument_pnl_to_fields(event)
         except Exception as exc:
             self._log.error(f"invalid instrument_pnl: {exc}")
+            # Exposure for this contract is now unknown (never flat). A row with no
+            # symbol could be any root, so it poisons every root until a resync.
+            raw_symbol = str(event.get("symbol") or "").strip()
+            self._unreadable_position_symbols.add(raw_symbol or _ANY_SYMBOL)
             return
+        self._unreadable_position_symbols.discard(str(fields["symbol"]))
         key = str(fields["instrument_id"])
         # One clock read for both stamps: the first row of a fresh stream must count
         # as seen on that stream (seen >= live), or a real position reads as flat.
@@ -956,6 +967,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         self._pnl_live_since_ns = None
         self._positions.clear()
         self._position_seen_ns.clear()
+        self._unreadable_position_symbols.clear()
 
     def _exposure_snapshot(
         self,
@@ -966,6 +978,8 @@ class RithmicExecutionClient(LiveExecutionClient):
         reply: bool = False,
     ) -> ExposureSnapshot:
         live = self._pnl_live_since_ns
+        if self._position_unreadable_for(root):
+            live = None  # an unreadable row for this root: net unknown, never flat
         # Only rows re-observed on the current stream count: a position that went flat
         # while the stream was down and is not re-pushed must not linger in the net.
         current = (
@@ -985,6 +999,12 @@ class RithmicExecutionClient(LiveExecutionClient):
             drain_ts_ns=drain_ts_ns,
             ts_init=self._clock.timestamp_ns(),
             reply=reply,
+        )
+
+    def _position_unreadable_for(self, root: str) -> bool:
+        return any(
+            symbol == _ANY_SYMBOL or matches_root(symbol, root)
+            for symbol in self._unreadable_position_symbols
         )
 
     def _publish_exposure(self, snap: ExposureSnapshot) -> None:
