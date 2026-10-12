@@ -937,7 +937,12 @@ class RithmicExecutionClient(LiveExecutionClient):
         self._positions.clear()
 
     def _exposure_snapshot(
-        self, root: str, open_orders: int | None, drain_ts_ns: int | None
+        self,
+        root: str,
+        open_orders: int | None,
+        drain_ts_ns: int | None,
+        *,
+        reply: bool = False,
     ) -> ExposureSnapshot:
         live = self._pnl_live_since_ns
         return ExposureSnapshot(
@@ -947,6 +952,7 @@ class RithmicExecutionClient(LiveExecutionClient):
             pnl_ts_ns=live,
             drain_ts_ns=drain_ts_ns,
             ts_init=self._clock.timestamp_ns(),
+            reply=reply,
         )
 
     def _publish_exposure(self, snap: ExposureSnapshot) -> None:
@@ -982,7 +988,7 @@ class RithmicExecutionClient(LiveExecutionClient):
             drain_ts = self._clock.timestamp_ns()
         except Exception as exc:
             self._log.warning(f"exposure drain failed for {root}: {exc}")
-        snap = self._exposure_snapshot(root, open_orders, drain_ts)
+        snap = self._exposure_snapshot(root, open_orders, drain_ts, reply=True)
         self._publish_exposure(snap)
         return snap
 

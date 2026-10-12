@@ -50,6 +50,9 @@ class ExposureSnapshot:
     pnl_ts_ns: int | None
     drain_ts_ns: int | None
     ts_init: int
+    # True for the answer to a request (drain attempted); False for the net-only
+    # push every PnL row triggers.
+    reply: bool = False
 
     @property
     def complete(self) -> bool:

@@ -81,7 +81,7 @@ def test_net_is_unknown_until_the_pnl_stream_is_live() -> None:
     now = [10]
     client = _client(now, [])
     snap = asyncio.run(client.request_exposure("MNQ"))
-    assert snap.net is None and not snap.complete
+    assert snap.net is None and not snap.complete and snap.reply
     assert client._msgbus.published[-1] == (exposure_topic("MNQ"), snap)
 
 
@@ -126,3 +126,4 @@ def test_position_rows_push_a_net_only_snapshot() -> None:
     assert topic == "rithmic.exposure.MNQ"
     assert isinstance(snap, ExposureSnapshot)
     assert snap.net == 1 and snap.open_orders is None and not snap.complete
+    assert snap.reply is False
