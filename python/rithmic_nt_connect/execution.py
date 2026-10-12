@@ -932,7 +932,7 @@ class RithmicExecutionClient(LiveExecutionClient):
             raw_symbol = str(event.get("symbol") or "").strip()
             self._unreadable_position_symbols.add(raw_symbol or _ANY_SYMBOL)
             return
-        self._unreadable_position_symbols.discard(str(fields["symbol"]))
+        self._unreadable_position_symbols.discard(str(fields["symbol"]).strip())
         key = str(fields["instrument_id"])
         # One clock read for both stamps: the first row of a fresh stream must count
         # as seen on that stream (seen >= live), or a real position reads as flat.

@@ -209,7 +209,10 @@ def test_an_unreadable_position_row_makes_that_root_unknown() -> None:
     mnq = asyncio.run(client.request_exposure("MNQ"))
     assert mnq.net is None and not mnq.complete  # unknown, never flat
     assert asyncio.run(client.request_exposure("ES")).net == 0  # other roots unaffected
-    client._cache_position(_pnl("MNQZ6", 1))  # a readable row resolves it
+    padded = _pnl("MNQZ6", 1)
+    padded["symbol"] = " MNQZ6 "
+    client._cache_position({"type": "instrument_pnl", "symbol": " MNQZ6 "})
+    client._cache_position(padded)  # a readable row resolves it, however padded
     assert asyncio.run(client.request_exposure("MNQ")).net == 1
 
 
