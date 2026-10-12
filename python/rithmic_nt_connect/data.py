@@ -7,6 +7,7 @@ import contextlib
 import itertools
 import os
 import time
+from collections import OrderedDict
 from typing import Any
 
 from nautilus_trader.cache.cache import Cache
@@ -57,17 +58,23 @@ from rithmic_nt_connect.errors import is_reconnectable_poll_error
 from rithmic_nt_connect.providers import RithmicInstrumentProvider
 from rithmic_nt_connect.session import WireSession
 
-# Last RequestBars failure reason for qgw hydrate fail-closed messaging.
-# ``hydrate_blocked_live_md`` = RC2.3 capability_denied after bounded wait.
-_last_request_bars_error: str | None = None
+# RequestBars failure reason per request id (``hydrate_blocked_live_md`` = RC2.3
+# capability_denied after the bounded wait, ``history_error`` otherwise). Keyed so
+# concurrent lookbacks (several strategies hydrating at once) never read each
+# other's failure; NT's request callback only carries the request id.
+_REQUEST_BARS_ERRORS: OrderedDict[str, str] = OrderedDict()
+_MAX_REQUEST_BARS_ERRORS = 256
 
 
-def take_last_request_bars_error() -> str | None:
-    """Return and clear the last RequestBars error tag (or None)."""
-    global _last_request_bars_error
-    out = _last_request_bars_error
-    _last_request_bars_error = None
-    return out
+def request_bars_error(request_id: object) -> str | None:
+    """Return and forget the failure tag of RequestBars ``request_id`` (None = ok)."""
+    return _REQUEST_BARS_ERRORS.pop(str(request_id), None)
+
+
+def _note_request_bars_error(request_id: object, tag: str) -> None:
+    _REQUEST_BARS_ERRORS[str(request_id)] = tag
+    while len(_REQUEST_BARS_ERRORS) > _MAX_REQUEST_BARS_ERRORS:
+        _REQUEST_BARS_ERRORS.popitem(last=False)
 
 
 def _is_live_md_history_denied(exc: BaseException) -> bool:
@@ -1265,8 +1272,6 @@ class RithmicDataClient(LiveMarketDataClient):
             f"history {bar_type} → rithmic type={rithmic_type} period={period} "
             f"(not 1s/1m unless that is the requested type)"
         )
-        global _last_request_bars_error
-        _last_request_bars_error = None
         wait_budget = _history_live_md_wait_sec()
         retry_every = _history_live_md_retry_sec()
         deadline = time.monotonic() + wait_budget
@@ -1295,13 +1300,13 @@ class RithmicDataClient(LiveMarketDataClient):
                     await asyncio.sleep(retry_every)
                     continue
                 if _is_live_md_history_denied(exc):
-                    _last_request_bars_error = "hydrate_blocked_live_md"
+                    _note_request_bars_error(request.id, "hydrate_blocked_live_md")
                     self._log.error(
                         f"HYDRATE_BLOCKED_LIVE_MD: Error requesting bars for "
                         f"{bar_type} after {wait_budget:.0f}s wait: {exc}"
                     )
                 else:
-                    _last_request_bars_error = "history_error"
+                    _note_request_bars_error(request.id, "history_error")
                     self._log.error(f"Error requesting bars for {bar_type}: {exc}")
                 self._handle_bars(
                     bar_type,
