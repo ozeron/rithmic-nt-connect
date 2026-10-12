@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 from _stubs import _CacheStub, _Log, _TestClient
 from nautilus_trader.model.identifiers import AccountId
@@ -17,6 +17,7 @@ from rithmic_nt_connect.exposure import (
     product_root,
     signed_net,
 )
+from rithmic_nt_connect.session import WireSession
 
 
 def _row(basket: str, symbol: str, status: str = "OPEN") -> dict[str, object]:
@@ -163,8 +164,9 @@ def test_a_malformed_row_is_not_masked_by_a_readable_sibling() -> None:
 def test_pnl_resync_makes_exposure_unknown_until_fresh_rows_settle() -> None:
     now = [10]
     client = _client(now, [])
-    client._session = SimpleNamespace(
-        disconnect_pnl_plant=lambda: None, subscribe_pnl=lambda: None
+    client._session = cast(
+        WireSession,
+        SimpleNamespace(disconnect_pnl_plant=lambda: None, subscribe_pnl=lambda: None),
     )
     client._cache_position(_pnl("MNQZ6", 2))
     client._cache_position(_pnl("ESZ6", 1))
@@ -178,3 +180,20 @@ def test_pnl_resync_makes_exposure_unknown_until_fresh_rows_settle() -> None:
     now[0] = 20 + 2 * PNL_SETTLE_NS
     snap = asyncio.run(client.request_exposure("MNQ"))
     assert (snap.net, snap.complete) == (0, True)
+
+
+def test_first_row_of_a_fresh_stream_counts_with_a_ticking_clock() -> None:
+    ticks = iter(range(100, 10_000_000_000, 7))  # every clock read advances
+    now = [0]
+
+    def _tick() -> int:
+        now[0] = next(ticks)
+        return now[0]
+
+    client = _client(now, [])
+    client._clock = SimpleNamespace(timestamp_ns=_tick)
+    client._cache_position(_pnl("MNQZ6", -2))  # first row: also starts the stream
+    live = client._pnl_live_since_ns
+    assert live is not None
+    snap = client._exposure_snapshot("MNQ", 0, live + PNL_SETTLE_NS)
+    assert snap.net == -2 and snap.complete  # never silently flat

@@ -122,16 +122,24 @@ class Inventory:
         self.pnl_events = 0
         self._pnl_first_s: float | None = None
         self._observed_until_s: float | None = None
+        # Baskets the venue already finished: Rithmic never reuses a basket id, so a
+        # late row (e.g. a bare COMPLETE) must not resurrect a phantom working order.
+        self._done_baskets: set[str] = set()
+        # Contracts whose last PnL row carried no readable net: exposure unknown.
+        self._unknown_positions: set[str] = set()
 
     @property
     def pnl_live(self) -> bool:
-        """True once the PnL stream was observed for ``PNL_SETTLE_S``.
+        """True once the PnL stream was observed for ``PNL_SETTLE_S`` and every
+        position row read cleanly.
 
         The first row is often an account row that lands before the instrument burst;
         positions read before the settle window may still be missing (never flat).
         """
         if self._pnl_first_s is None or self._observed_until_s is None:
             return False
+        if self._unknown_positions:
+            return False  # a position row we could not read is not flat
         return self._observed_until_s - self._pnl_first_s >= PNL_SETTLE_S
 
     def mark_observed(self, now_s: float) -> None:
@@ -159,7 +167,7 @@ class Inventory:
 
     def _ingest_order(self, event: dict[str, Any]) -> None:
         basket = str(event.get("basket_id") or "").strip()
-        if not basket:
+        if not basket or basket in self._done_baskets:
             return
         try:
             fields = order_notification_to_fields(event)
@@ -170,6 +178,7 @@ class Inventory:
         unfilled = _as_int(event.get("total_unfilled_size"))
         if fields is not None and _is_gone(fields, unfilled):
             self._orders.pop(basket, None)
+            self._done_baskets.add(basket)
             return
         prev = self._orders.get(basket)
         symbol = str(event.get("symbol") or (prev.symbol if prev else "")).strip()
@@ -209,11 +218,14 @@ class Inventory:
         symbol = str(event.get("symbol") or "").strip()
         if not symbol:
             return
-        net = _as_int(event.get("net_quantity"))
-        if net is None:
-            return
         exchange = str(event.get("exchange") or "CME")
         key = f"{symbol}.{exchange}"
+        net = _as_int(event.get("net_quantity"))
+        if net is None:
+            self._positions.pop(key, None)
+            self._unknown_positions.add(key)
+            return
+        self._unknown_positions.discard(key)
         if net == 0:
             self._positions.pop(key, None)
             return

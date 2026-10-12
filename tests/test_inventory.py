@@ -125,3 +125,26 @@ def test_snapshot_replays_orders_and_reads_pnl() -> None:
 def test_snapshot_raises_when_pnl_cannot_subscribe() -> None:
     with pytest.raises(ConnectionError):
         venue_inventory_snapshot(_Session(pnl_fails=True), seconds=0.01)
+
+
+def test_late_complete_row_never_resurrects_a_finished_order() -> None:
+    inv = Inventory()
+    inv.ingest(_open("B1"))
+    done = _open("B1")
+    done.update(kind="filled", total_unfilled_size=0)
+    inv.ingest(done)
+    late = _open("B1")
+    late.update(kind=None, notify_type_name="COMPLETE", status="COMPLETE")
+    inv.ingest(late)
+    assert inv.working() == []
+
+
+def test_unreadable_position_row_keeps_pnl_unknown() -> None:
+    inv = Inventory()
+    inv.ingest({"type": "account_pnl", "account_balance": 1}, now_s=100.0)
+    inv.ingest({"type": "instrument_pnl", "symbol": "MNQU6", "net_quantity": 2})
+    inv.ingest({"type": "instrument_pnl", "symbol": "MNQU6", "net_quantity": "?"})
+    inv.mark_observed(100.0 + PNL_SETTLE_S)
+    assert inv.pnl_live is False and inv.positions() == []  # unknown, not flat
+    inv.ingest({"type": "instrument_pnl", "symbol": "MNQU6", "net_quantity": 1})
+    assert inv.pnl_live is True and inv.positions()[0].net_qty == 1

@@ -923,14 +923,17 @@ class RithmicExecutionClient(LiveExecutionClient):
             self._log.error(f"invalid instrument_pnl: {exc}")
             return
         key = str(fields["instrument_id"])
+        # One clock read for both stamps: the first row of a fresh stream must count
+        # as seen on that stream (seen >= live), or a real position reads as flat.
+        now = self._clock.timestamp_ns()
         self._positions[key] = fields
-        self._position_seen_ns[key] = self._clock.timestamp_ns()
         account_raw = fields.get("account_id")
         if account_raw:
             self._seed_account_if_needed(str(account_raw))
         # Marked only after the position write and seeding succeeded (activity
         # gate, not completeness proof).
-        self._note_pnl_observed()
+        self._note_pnl_observed(now)
+        self._position_seen_ns[key] = now
         try:
             self._publish_exposure(
                 self._exposure_snapshot(
@@ -940,9 +943,11 @@ class RithmicExecutionClient(LiveExecutionClient):
         except Exception as exc:
             self._log.warning(f"exposure push failed: {exc}")
 
-    def _note_pnl_observed(self) -> None:
+    def _note_pnl_observed(self, now_ns: int | None = None) -> None:
         if self._pnl_live_since_ns is None:
-            self._pnl_live_since_ns = self._clock.timestamp_ns()
+            self._pnl_live_since_ns = (
+                self._clock.timestamp_ns() if now_ns is None else now_ns
+            )
         self._pnl_snapshot_observed.set()
 
     def _forget_pnl_state(self) -> None:
