@@ -21,6 +21,7 @@ from nautilus_trader.model.identifiers import (
     VenueOrderId,
 )
 from rithmic_gateway.types import AccountRmsInfo, ProductRmsInfo
+from rithmic_nt_connect.commission import CommissionRegistry
 from rithmic_nt_connect.execution import RithmicExecutionClient
 from rithmic_nt_connect.session import WireSession
 
@@ -382,6 +383,25 @@ class _TestClient(RithmicExecutionClient):
     @account_id.setter
     def account_id(self, value: AccountId | None) -> None:
         object.__setattr__(self, "_TestClient__account_id", value)
+
+    # ``RithmicExecutionClient.__init__`` creates the registry behind a property
+    # pair (``_commission_registry_inst``); this double skips ``__init__``, so
+    # default it lazily (tests may still assign their own).
+    @property
+    def _commission_registry(self) -> CommissionRegistry:
+        try:
+            return cast(
+                CommissionRegistry,
+                object.__getattribute__(self, "_commission_registry_inst"),
+            )
+        except AttributeError:
+            registry = CommissionRegistry()
+            object.__setattr__(self, "_commission_registry_inst", registry)
+            return registry
+
+    @_commission_registry.setter
+    def _commission_registry(self, value: CommissionRegistry) -> None:
+        object.__setattr__(self, "_commission_registry_inst", value)
 
 
 def _conforms() -> None:
