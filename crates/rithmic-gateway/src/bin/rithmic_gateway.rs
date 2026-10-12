@@ -55,11 +55,12 @@ async fn run() -> Result<(), String> {
     // one login — never a silent fallback to the production URL.
     let user = process_env_first(env_keys::USER_KEYS).ok_or("RITHMIC_USER required")?;
     let password = std::env::var("RITHMIC_PASSWORD").map_err(|_| "RITHMIC_PASSWORD required")?;
-    let system_name = process_env_first(env_keys::SYSTEM_KEYS)
-        .unwrap_or_else(|| env_keys::DEFAULT_SYSTEM_NAME.into());
-    let url = process_env_first(env_keys::URL_KEYS).unwrap_or_else(|| env_keys::DEFAULT_URL.into());
-    let env_name =
-        process_env_first(env_keys::ENV_KEYS).unwrap_or_else(|| env_keys::DEFAULT_ENV.into());
+    let endpoint = env_keys::resolve_endpoint(|key| std::env::var(key).ok())?;
+    let env_keys::Endpoint {
+        system_name,
+        url,
+        env_name,
+    } = endpoint;
     // rithmic-rs only parses lowercase env names ("live"/"demo"/"test").
     let env = RithmicEnv::from_str(&env_name.to_lowercase())
         .map_err(|e| format!("RITHMIC_ENV {env_name:?}: {e}"))?;
