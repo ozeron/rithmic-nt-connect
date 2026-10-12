@@ -10,8 +10,10 @@ from _stubs import _CacheStub, _Log, _TestClient
 from nautilus_trader.model.identifiers import AccountId
 from rithmic_nt_connect.errors import VenueQueryUnavailable
 from rithmic_nt_connect.exposure import (
+    PNL_SETTLE_NS,
     ExposureSnapshot,
     exposure_topic,
+    matches_root,
     product_root,
     signed_net,
 )
@@ -96,9 +98,27 @@ def test_complete_snapshot_counts_root_orders_and_net() -> None:
         ],
     )
     client._cache_position(_pnl("MNQZ6", -1))
-    now[0] = 20
+    now[0] = 20  # right after the first PnL row: the burst may still be landing
+    assert asyncio.run(client.request_exposure("MNQ")).complete is False
+    now[0] = 10 + PNL_SETTLE_NS
     snap = asyncio.run(client.request_exposure("MNQ"))
     assert (snap.net, snap.open_orders, snap.complete) == (-1, 1, True)
+
+
+def test_an_uninterpretable_root_row_makes_the_count_unknown() -> None:
+    bad = _row("B9", "MNQZ6")
+    del bad["basket_id"]
+    client = _client([10], [_row("B1", "MNQZ6"), bad])
+    client._cache_position(_pnl("MNQZ6", 0))
+    snap = asyncio.run(client.request_exposure("MNQ"))
+    assert snap.open_orders is None and not snap.complete
+
+
+def test_root_matching_is_exact_never_a_prefix() -> None:
+    assert matches_root("MNQZ6", "MNQ")
+    assert not matches_root("MNQZ6", "MN")
+    assert not matches_root("ESTX6", "ES")
+    assert matches_root("ESZ6", "ES")
 
 
 def test_failed_drain_is_unknown_not_zero() -> None:

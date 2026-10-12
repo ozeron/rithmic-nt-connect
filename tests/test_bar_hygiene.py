@@ -46,3 +46,13 @@ def test_older_history_never_rewinds_the_live_mark() -> None:
     assert guard.admit(_bar(M1, 5 * MIN)) is True
     guard.note(_bar(M1, MIN))  # another sleeve's lookback arrives later
     assert guard.admit(_bar(M1, 6 * MIN)) is True
+
+
+def test_todays_daily_bar_is_cut_from_history() -> None:
+    d1 = BarType.from_str("MNQZ6.RITHMIC-1-DAY-LAST-EXTERNAL")
+    day = 86_400_000_000_000
+    bars = [_bar(d1, 10 * day), _bar(d1, 11 * day)]
+    # end inside day 11: its bar is still forming
+    assert [int(b.ts_event) for b in closed_bars(bars, d1, 11 * day + day // 2)] == [
+        10 * day
+    ]

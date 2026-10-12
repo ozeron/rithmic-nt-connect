@@ -502,9 +502,14 @@ def closed_bars(bars: list[Bar], bar_type: BarType, end_ns: int) -> list[Bar]:
     Rithmic serves the still-forming bar when ``end`` falls inside it; a consumer
     that hydrates from history and then subscribes live would otherwise see that
     minute twice (forming from history, final from live). Calendar bars (no
-    duration) compare ts_event.
+    duration) must be a full period old.
     """
     dur = _bar_type_duration_ns(bar_type)
+    if dur == 0:
+        # Calendar bars carry a date marker, not an open time: keep only those a full
+        # period old, so today's (still forming) daily bar is never served.
+        agg = bar_type.spec.aggregation
+        dur = (7 if agg == BarAggregation.WEEK else 1) * 86_400 * 1_000_000_000
     return [b for b in bars if int(b.ts_event) + dur <= end_ns]
 
 

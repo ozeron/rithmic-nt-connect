@@ -13,11 +13,14 @@ Never read ``None`` as zero.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
 EXPOSURE_TOPIC_PREFIX = "rithmic.exposure."
+# The PnL plant answers a (re)subscribe with a burst: an account row may land before
+# the instrument rows. A drain is proof only once the stream has been live this long.
+PNL_SETTLE_NS = 3_000_000_000
 EXPOSURE_ENDPOINT = "RithmicExecutionClient.request_exposure"
 
 
@@ -38,8 +41,8 @@ def product_root(symbol: str) -> str:
 def matches_root(symbol: str, root: str) -> bool:
     """``MNQZ6`` belongs to root ``MNQ`` (and exact ``MNQ`` matches itself)."""
     want = root.strip().upper()
-    got = symbol.strip().upper()
-    return bool(want) and (got == want or got.startswith(want))
+    # Exact product root, never a prefix: "ES" must not claim "ESTX6".
+    return bool(want) and product_root(symbol) == want
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,13 +59,13 @@ class ExposureSnapshot:
 
     @property
     def complete(self) -> bool:
-        """Both legs read from the venue, the drain after the PnL stream was live."""
+        """Both legs read from the venue, the drain after the PnL burst settled."""
         return (
             self.net is not None
             and self.open_orders is not None
             and self.pnl_ts_ns is not None
             and self.drain_ts_ns is not None
-            and self.drain_ts_ns >= self.pnl_ts_ns
+            and self.drain_ts_ns - self.pnl_ts_ns >= PNL_SETTLE_NS
         )
 
 
@@ -78,18 +81,13 @@ def signed_net(positions: Mapping[str, Mapping[str, Any]], root: str) -> int:
     return net
 
 
-def working_count(rows: Iterable[tuple[str, bool]], root: str) -> int:
-    """Count working rows (``(symbol, is_open)``) of ``root``."""
-    return sum(1 for symbol, is_open in rows if is_open and matches_root(symbol, root))
-
-
 __all__ = [
     "EXPOSURE_ENDPOINT",
     "EXPOSURE_TOPIC_PREFIX",
+    "PNL_SETTLE_NS",
     "ExposureSnapshot",
     "exposure_topic",
     "matches_root",
     "product_root",
     "signed_net",
-    "working_count",
 ]

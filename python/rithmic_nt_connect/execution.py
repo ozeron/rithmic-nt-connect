@@ -101,8 +101,8 @@ from rithmic_nt_connect.exposure import (
     EXPOSURE_ENDPOINT,
     ExposureSnapshot,
     exposure_topic,
+    matches_root,
     signed_net,
-    working_count,
 )
 from rithmic_nt_connect.exposure import product_root as _product_root
 from rithmic_nt_connect.notification_intake import (
@@ -325,7 +325,10 @@ class RithmicExecutionClient(LiveExecutionClient):
         # When the PnL stream was first observed since the last (re)connect: a
         # working-orders drain only proves exposure together with a live stream.
         self._pnl_live_since_ns: int | None = None
-        msgbus.register(EXPOSURE_ENDPOINT, self._on_exposure_request)
+        # One venue answers exposure per node: a second Rithmic exec client (or a paper
+        # responder already registered) keeps the first registration.
+        if EXPOSURE_ENDPOINT not in msgbus.endpoints():
+            msgbus.register(EXPOSURE_ENDPOINT, self._on_exposure_request)
 
     @property
     def _commission_registry(self) -> CommissionRegistry:
@@ -921,9 +924,14 @@ class RithmicExecutionClient(LiveExecutionClient):
         # Marked only after the position write and seeding succeeded (activity
         # gate, not completeness proof).
         self._note_pnl_observed()
-        self._publish_exposure(
-            self._exposure_snapshot(_product_root(str(fields["symbol"])), None, None)
-        )
+        try:
+            self._publish_exposure(
+                self._exposure_snapshot(
+                    _product_root(str(fields["symbol"])), None, None
+                )
+            )
+        except Exception as exc:
+            self._log.warning(f"exposure push failed: {exc}")
 
     def _note_pnl_observed(self) -> None:
         if self._pnl_live_since_ns is None:
@@ -962,6 +970,36 @@ class RithmicExecutionClient(LiveExecutionClient):
         """msgbus endpoint: drain the venue for ``root`` and publish the snapshot."""
         self.create_task(self.request_exposure(str(root)))
 
+    def _working_orders_for_root(
+        self, events: list[dict[str, Any]], root: str
+    ) -> int | None:
+        """Working orders of ``root`` in a drain; None if a root row is unreadable.
+
+        ``latest_drain_rows`` skips rows it cannot interpret (no basket, bad ts, no
+        report). Skipping is fine for recon but would read an unknown order as absent
+        here, so any such row of ``root`` makes the count unknown (fail closed).
+        """
+        rows = drain_for(self).latest_drain_rows(events)
+        root_baskets: set[str] = set()
+        for raw in events:
+            try:
+                fields = order_notification_to_fields(raw)
+            except Exception:
+                fields = None
+            symbol = str((fields or raw).get("symbol") or "")
+            if not matches_root(symbol, root):
+                continue
+            basket = str((fields or raw).get("basket_id") or "")
+            if fields is None or not basket or basket not in rows:
+                return None
+            root_baskets.add(basket)
+        return sum(
+            1
+            for basket in root_baskets
+            if (report := rows[basket].report) is not None
+            and report.order_status not in TERMINAL_ORDER_STATUSES
+        )
+
     async def request_exposure(self, root: str) -> ExposureSnapshot:
         """Authoritative exposure for a product root from this node's session.
 
@@ -973,18 +1011,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         drain_ts: int | None = None
         try:
             events = await self._load_orders_events(0, 0)
-            rows = drain_for(self).latest_drain_rows(events).values()
-            open_orders = working_count(
-                (
-                    (
-                        str(row.fields.get("symbol") or ""),
-                        row.report is not None
-                        and row.report.order_status not in TERMINAL_ORDER_STATUSES,
-                    )
-                    for row in rows
-                ),
-                root,
-            )
+            open_orders = self._working_orders_for_root(events, root)
             drain_ts = self._clock.timestamp_ns()
         except Exception as exc:
             self._log.warning(f"exposure drain failed for {root}: {exc}")
@@ -1795,8 +1822,12 @@ class RithmicExecutionClient(LiveExecutionClient):
         """Cancel the open orders the command selects, one basket at a time.
 
         Honors ``instrument_id``, ``strategy_id`` and ``order_side`` like every NT
-        venue. The plant's account-wide ``cancel_all`` is not reachable from a
-        strategy; it stays the gateway parent's separate panic button.
+        venue. Cache-scoped: an order the cache does not hold as open (untracked at
+        the venue, or still in flight without a basket id) is not cancelled here —
+        each cache order goes through ``_cancel_order`` (deny / cancel-rejected
+        rules apply per order). The plant's account-wide ``cancel_all`` is not
+        reachable from a strategy: it is the gateway parent's explicit panic flag
+        (``RITHMIC_GATEWAY_CANCEL_ALL``).
         """
         orders = self._cache.orders_open(
             instrument_id=command.instrument_id,
