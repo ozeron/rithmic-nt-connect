@@ -509,7 +509,9 @@ def closed_bars(bars: list[Bar], bar_type: BarType, end_ns: int) -> list[Bar]:
         # Calendar bars carry a date marker, not an open time: keep only those a full
         # period old, so today's (still forming) daily bar is never served.
         agg = bar_type.spec.aggregation
-        dur = (7 if agg == BarAggregation.WEEK else 1) * 86_400 * 1_000_000_000
+        span = 7 if agg == BarAggregation.WEEK else 1
+        days = span * max(1, int(bar_type.spec.step))  # a 2-DAY bar spans two days
+        dur = days * 86_400 * 1_000_000_000
     return [b for b in bars if int(b.ts_event) + dur <= end_ns]
 
 

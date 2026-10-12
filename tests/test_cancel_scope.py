@@ -70,8 +70,14 @@ def test_cancel_all_is_scoped_and_never_plant_wide() -> None:
     client, session = _client(cache)
     cmd = CancelAllOrders(TID, SID, IID, OrderSide.SELL, UUID4(), 0)
     asyncio.run(client._cancel_all_orders(cmd))
+    # Scoped to this client's venue too: the node cache is shared across venues.
     assert cache.queries == [
-        {"instrument_id": IID, "strategy_id": SID, "side": OrderSide.SELL}
+        {
+            "venue": client.venue,
+            "instrument_id": IID,
+            "strategy_id": SID,
+            "side": OrderSide.SELL,
+        }
     ]
     assert session.calls == ["cancel_order:B1", "cancel_order:B2"]
     assert "cancel_all_orders" not in session.calls

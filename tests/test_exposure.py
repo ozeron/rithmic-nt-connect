@@ -147,3 +147,34 @@ def test_position_rows_push_a_net_only_snapshot() -> None:
     assert isinstance(snap, ExposureSnapshot)
     assert snap.net == 1 and snap.open_orders is None and not snap.complete
     assert snap.reply is False
+
+
+def test_a_malformed_row_is_not_masked_by_a_readable_sibling() -> None:
+    # Parses, but no status report can be built (a bare TRIGGER row has no terms), so
+    # the drain skips it — while a readable row of the same basket makes it "present".
+    bad = _row("B1", "MNQZ6", status="TRIGGER_PENDING")
+    bad["quantity"] = 0
+    client = _client([10], [_row("B1", "MNQZ6"), bad])
+    client._cache_position(_pnl("MNQZ6", 0))
+    snap = asyncio.run(client.request_exposure("MNQ"))
+    assert snap.open_orders is None and not snap.complete
+
+
+def test_pnl_resync_makes_exposure_unknown_until_fresh_rows_settle() -> None:
+    now = [10]
+    client = _client(now, [])
+    client._session = SimpleNamespace(
+        disconnect_pnl_plant=lambda: None, subscribe_pnl=lambda: None
+    )
+    client._cache_position(_pnl("MNQZ6", 2))
+    client._cache_position(_pnl("ESZ6", 1))
+    now[0] = 10 + PNL_SETTLE_NS
+    assert asyncio.run(client.request_exposure("MNQ")).net == 2
+    asyncio.run(client._resync_pnl_subscription())  # the stream failed mid-session
+    snap = asyncio.run(client.request_exposure("MNQ"))
+    assert snap.net is None and not snap.complete  # stale net is never reported
+    now[0] = 20 + PNL_SETTLE_NS
+    client._cache_position(_pnl("ESZ6", 1))  # MNQ went flat while down: not re-pushed
+    now[0] = 20 + 2 * PNL_SETTLE_NS
+    snap = asyncio.run(client.request_exposure("MNQ"))
+    assert (snap.net, snap.complete) == (0, True)

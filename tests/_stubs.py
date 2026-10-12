@@ -428,6 +428,23 @@ class _TestClient(RithmicExecutionClient):
     def _commission_registry(self, value: CommissionRegistry) -> None:
         object.__setattr__(self, "_commission_registry_inst", value)
 
+    # ``__init__`` creates the per-row PnL observation times; default lazily here.
+    @property
+    def _position_seen_ns(self) -> dict[str, int]:
+        try:
+            return cast(
+                dict[str, int],
+                object.__getattribute__(self, "_position_seen_ns_inst"),
+            )
+        except AttributeError:
+            seen: dict[str, int] = {}
+            object.__setattr__(self, "_position_seen_ns_inst", seen)
+            return seen
+
+    @_position_seen_ns.setter
+    def _position_seen_ns(self, value: dict[str, int]) -> None:
+        object.__setattr__(self, "_position_seen_ns_inst", value)
+
 
 def _conforms() -> None:
     """Static proof: the stub satisfies the ``WireSession`` protocol."""

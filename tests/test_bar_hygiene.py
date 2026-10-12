@@ -56,3 +56,11 @@ def test_todays_daily_bar_is_cut_from_history() -> None:
     assert [int(b.ts_event) for b in closed_bars(bars, d1, 11 * day + day // 2)] == [
         10 * day
     ]
+
+
+def test_multi_day_bar_needs_its_whole_span() -> None:
+    bt = BarType.from_str("MNQZ6.RITHMIC-2-DAY-LAST-EXTERNAL")
+    day = 86_400 * 1_000_000_000
+    bar = _bar(bt, 10 * day)
+    assert closed_bars([bar], bt, 11 * day) == []  # one day into a two-day bar
+    assert closed_bars([bar], bt, 12 * day) == [bar]

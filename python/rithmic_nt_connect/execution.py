@@ -325,6 +325,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         # When the PnL stream was first observed since the last (re)connect: a
         # working-orders drain only proves exposure together with a live stream.
         self._pnl_live_since_ns: int | None = None
+        self._position_seen_ns: dict[str, int] = {}
         # One venue answers exposure per node: a second Rithmic exec client (or a paper
         # responder already registered) keeps the first registration.
         if EXPOSURE_ENDPOINT not in msgbus.endpoints():
@@ -722,6 +723,10 @@ class RithmicExecutionClient(LiveExecutionClient):
         self._order_plant.resync_complete()
 
     async def _resync_pnl_subscription(self) -> None:
+        # The stream failed: rows from before it are not proof of current exposure.
+        # Exposure reads Unknown until a fresh observation has settled (a failed
+        # resubscribe keeps it Unknown). ``_positions`` stays for position reports.
+        self._pnl_live_since_ns = None
         await asyncio.to_thread(self._session.disconnect_pnl_plant)
         await asyncio.to_thread(self._session.subscribe_pnl)
 
@@ -917,7 +922,9 @@ class RithmicExecutionClient(LiveExecutionClient):
         except Exception as exc:
             self._log.error(f"invalid instrument_pnl: {exc}")
             return
-        self._positions[str(fields["instrument_id"])] = fields
+        key = str(fields["instrument_id"])
+        self._positions[key] = fields
+        self._position_seen_ns[key] = self._clock.timestamp_ns()
         account_raw = fields.get("account_id")
         if account_raw:
             self._seed_account_if_needed(str(account_raw))
@@ -943,6 +950,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         self._pnl_snapshot_observed.clear()
         self._pnl_live_since_ns = None
         self._positions.clear()
+        self._position_seen_ns.clear()
 
     def _exposure_snapshot(
         self,
@@ -953,9 +961,20 @@ class RithmicExecutionClient(LiveExecutionClient):
         reply: bool = False,
     ) -> ExposureSnapshot:
         live = self._pnl_live_since_ns
+        # Only rows re-observed on the current stream count: a position that went flat
+        # while the stream was down and is not re-pushed must not linger in the net.
+        current = (
+            {
+                key: fields
+                for key, fields in self._positions.items()
+                if self._position_seen_ns.get(key, 0) >= live
+            }
+            if live is not None
+            else {}
+        )
         return ExposureSnapshot(
             root=root.strip().upper(),
-            net=signed_net(self._positions, root) if live is not None else None,
+            net=signed_net(current, root) if live is not None else None,
             open_orders=open_orders,
             pnl_ts_ns=live,
             drain_ts_ns=drain_ts_ns,
@@ -975,28 +994,28 @@ class RithmicExecutionClient(LiveExecutionClient):
     ) -> int | None:
         """Working orders of ``root`` in a drain; None if a root row is unreadable.
 
-        ``latest_drain_rows`` skips rows it cannot interpret (no basket, bad ts, no
+        ``iter_drain_rows`` skips rows it cannot interpret (no basket, bad ts, no
         report). Skipping is fine for recon but would read an unknown order as absent
-        here, so any such row of ``root`` makes the count unknown (fail closed).
+        here — even when a readable sibling row shares its basket — so every ``root``
+        row must be a usable drain row, else the count is unknown (fail closed).
         """
-        rows = drain_for(self).latest_drain_rows(events)
-        root_baskets: set[str] = set()
-        for raw in events:
-            try:
-                fields = order_notification_to_fields(raw)
-            except Exception:
-                fields = None
-            symbol = str((fields or raw).get("symbol") or "")
-            if not matches_root(symbol, root):
-                continue
-            basket = str((fields or raw).get("basket_id") or "")
-            if fields is None or not basket or basket not in rows:
-                return None
-            root_baskets.add(basket)
+        drain = drain_for(self)
+        root_rows = sum(
+            1 for raw in events if matches_root(str(raw.get("symbol") or ""), root)
+        )
+        usable = [
+            row
+            for row in drain.iter_drain_rows(events)
+            if matches_root(str(row.fields.get("symbol") or ""), root)
+        ]
+        if len(usable) != root_rows:
+            return None
+        latest = drain.latest_drain_rows(events)
+        baskets = {str(row.fields["basket_id"]) for row in usable}
         return sum(
             1
-            for basket in root_baskets
-            if (report := rows[basket].report) is not None
+            for basket in baskets
+            if (report := latest[basket].report) is not None
             and report.order_status not in TERMINAL_ORDER_STATUSES
         )
 
@@ -1830,6 +1849,8 @@ class RithmicExecutionClient(LiveExecutionClient):
         (``RITHMIC_GATEWAY_CANCEL_ALL``).
         """
         orders = self._cache.orders_open(
+            # The cache is node-wide: never cancel another venue's order.
+            venue=self.venue,
             instrument_id=command.instrument_id,
             strategy_id=command.strategy_id,
             side=command.order_side,
