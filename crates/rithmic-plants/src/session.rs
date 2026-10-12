@@ -27,8 +27,9 @@ use crate::dto::{
 };
 use crate::error::{Error, Result};
 use crate::history::{
-    bar_replay_index, bar_slice_secs, dedup_bars, dedup_ticks, history_ready_probe_root,
-    load_sliced, looks_like_listed_contract, parse_time_bar_type, DEFAULT_TICK_SLICE_SECS,
+    bar_replay_index, bar_slice_secs, dedup_bars, dedup_ticks, history_ready_probe_enabled,
+    history_ready_probe_root, load_sliced, looks_like_listed_contract, parse_time_bar_type,
+    DEFAULT_TICK_SLICE_SECS,
 };
 use crate::plants::PlantSet;
 
@@ -218,9 +219,10 @@ impl RithmicSession {
     ///
     /// Empty rows are success (plant answered). `RequestTimeout` retries via
     /// [`crate::history::is_transient`]. Probe root defaults to ES/CME (env
-    /// overrides — see [`history_ready_probe_root`]).
+    /// overrides — see [`history_ready_probe_root`]); opt out with
+    /// `RITHMIC_HISTORY_READY_PROBE=0` ([`history_ready_probe_enabled`]).
     pub async fn prove_history_ready(&self) -> Result<()> {
-        if self.history.is_none() {
+        if self.history.is_none() || !history_ready_probe_enabled() {
             return Ok(());
         }
         let (root, exchange) = history_ready_probe_root();
