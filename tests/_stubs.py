@@ -339,6 +339,14 @@ class _CacheStub:
         return self._instruments.get(str(instrument_id))
 
 
+class _RecordingBus:
+    def __init__(self) -> None:
+        self.published: list[tuple[str, object]] = []
+
+    def publish(self, topic: str, msg: object, external_pub: bool = True) -> None:
+        self.published.append((topic, msg))
+
+
 class _TestClient(RithmicExecutionClient):
     """Test double: skips the Cython base's ``__init__`` and re-exposes the
     cdef read-only ``_log`` / ``_clock`` / ``_cache`` / ``account_id`` as
@@ -375,6 +383,20 @@ class _TestClient(RithmicExecutionClient):
         object.__setattr__(self, "_TestClient__cache", value)
 
     @property
+    def _msgbus(self) -> Any:
+        """Recording bus (``published`` topic/msg pairs) unless a test assigns one."""
+        try:
+            return object.__getattribute__(self, "_TestClient__msgbus")
+        except AttributeError:
+            bus = _RecordingBus()
+            object.__setattr__(self, "_TestClient__msgbus", bus)
+            return bus
+
+    @_msgbus.setter
+    def _msgbus(self, value: Any) -> None:
+        object.__setattr__(self, "_TestClient__msgbus", value)
+
+    @property
     def account_id(self) -> AccountId | None:
         return cast(
             AccountId | None, object.__getattribute__(self, "_TestClient__account_id")
@@ -383,6 +405,9 @@ class _TestClient(RithmicExecutionClient):
     @account_id.setter
     def account_id(self, value: AccountId | None) -> None:
         object.__setattr__(self, "_TestClient__account_id", value)
+
+    # ``__init__`` is skipped: per-connect PnL liveness starts unknown.
+    _pnl_live_since_ns: int | None = None
 
     # ``RithmicExecutionClient.__init__`` creates the registry behind a property
     # pair (``_commission_registry_inst``); this double skips ``__init__``, so

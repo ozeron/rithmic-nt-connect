@@ -97,6 +97,14 @@ from rithmic_nt_connect.errors import (
     ReconciliationUnavailableError,
     VenueQueryUnavailable,
 )
+from rithmic_nt_connect.exposure import (
+    EXPOSURE_ENDPOINT,
+    ExposureSnapshot,
+    exposure_topic,
+    signed_net,
+    working_count,
+)
+from rithmic_nt_connect.exposure import product_root as _product_root
 from rithmic_nt_connect.notification_intake import (
     TRIGGERABLE_ORDER_TYPES as _TRIGGERABLE_ORDER_TYPES,
 )
@@ -106,11 +114,12 @@ from rithmic_nt_connect.notification_intake import (
 from rithmic_nt_connect.polling import PlantPoller
 from rithmic_nt_connect.providers import RithmicInstrumentProvider
 from rithmic_nt_connect.recon import (
-    DrainRowResult as _DrainRowResult,
-)
-from rithmic_nt_connect.recon import (
+    TERMINAL_ORDER_STATUSES,
     apply_mass_status_report_window,
     drain_for,
+)
+from rithmic_nt_connect.recon import (
+    DrainRowResult as _DrainRowResult,
 )
 from rithmic_nt_connect.session import WireSession
 
@@ -313,6 +322,10 @@ class RithmicExecutionClient(LiveExecutionClient):
         # the account-level default as fallback. Empty on fetch failure — fills
         # then report zero commission (allowed to be temporarily unavailable).
         self._commission_registry = CommissionRegistry()
+        # When the PnL stream was first observed since the last (re)connect: a
+        # working-orders drain only proves exposure together with a live stream.
+        self._pnl_live_since_ns: int | None = None
+        msgbus.register(EXPOSURE_ENDPOINT, self._on_exposure_request)
 
     @property
     def _commission_registry(self) -> CommissionRegistry:
@@ -381,7 +394,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         # A reconnect must re-observe the PnL/account stream before the order
         # plant can re-arm: positions ride that stream, and a stale observation
         # from before the drop is not proof of current exposure.
-        self._pnl_snapshot_observed.clear()
+        self._forget_pnl_state()
         await asyncio.to_thread(ensure_connected, self._session)
         self._wire_gateway_transport_listener()
         self._log.info("Rithmic exec session ready (shared with data client)")
@@ -624,7 +637,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         last_exc: BaseException | None = None
         for attempt in range(1, self._L3_PLANT_RESTORE_MAX_ATTEMPTS + 1):
             try:
-                self._pnl_snapshot_observed.clear()
+                self._forget_pnl_state()
                 self._order_plant.begin_connect()
                 if self._pnl_connected:
                     try:
@@ -880,7 +893,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         state_key = (str(account_id), str(currency), free_dec)
         if state_key == getattr(self, "_last_account_state_key", None):
             # Identical re-push: still a successful observation of the stream.
-            self._pnl_snapshot_observed.set()
+            self._note_pnl_observed()
             return
         self.generate_account_state(
             balances=balances,
@@ -893,7 +906,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         # Marked only after every fallible step (currency, account id, seed,
         # account state publication) succeeded: a failed handler must not
         # satisfy the re-arm gate (activity gate, not completeness proof).
-        self._pnl_snapshot_observed.set()
+        self._note_pnl_observed()
 
     def _cache_position(self, event: dict[str, Any]) -> None:
         try:
@@ -907,7 +920,71 @@ class RithmicExecutionClient(LiveExecutionClient):
             self._seed_account_if_needed(str(account_raw))
         # Marked only after the position write and seeding succeeded (activity
         # gate, not completeness proof).
+        self._note_pnl_observed()
+        self._publish_exposure(
+            self._exposure_snapshot(_product_root(str(fields["symbol"])), None, None)
+        )
+
+    def _note_pnl_observed(self) -> None:
+        if self._pnl_live_since_ns is None:
+            self._pnl_live_since_ns = self._clock.timestamp_ns()
         self._pnl_snapshot_observed.set()
+
+    def _forget_pnl_state(self) -> None:
+        """(Re)connect: the previous stream's rows are not proof of current exposure."""
+        self._pnl_snapshot_observed.clear()
+        self._pnl_live_since_ns = None
+        self._positions.clear()
+
+    def _exposure_snapshot(
+        self, root: str, open_orders: int | None, drain_ts_ns: int | None
+    ) -> ExposureSnapshot:
+        live = self._pnl_live_since_ns
+        return ExposureSnapshot(
+            root=root.strip().upper(),
+            net=signed_net(self._positions, root) if live is not None else None,
+            open_orders=open_orders,
+            pnl_ts_ns=live,
+            drain_ts_ns=drain_ts_ns,
+            ts_init=self._clock.timestamp_ns(),
+        )
+
+    def _publish_exposure(self, snap: ExposureSnapshot) -> None:
+        self._msgbus.publish(exposure_topic(snap.root), snap)
+
+    def _on_exposure_request(self, root: str) -> None:
+        """msgbus endpoint: drain the venue for ``root`` and publish the snapshot."""
+        self.create_task(self.request_exposure(str(root)))
+
+    async def request_exposure(self, root: str) -> ExposureSnapshot:
+        """Authoritative exposure for a product root from this node's session.
+
+        Net from the PnL plant rows, open orders from a fresh bounded drain. A
+        failed drain leaves ``open_orders=None`` (never 0); ``complete`` is the
+        only proof. Published on ``exposure_topic(root)`` and returned.
+        """
+        open_orders: int | None = None
+        drain_ts: int | None = None
+        try:
+            events = await self._load_orders_events(0, 0)
+            rows = drain_for(self).latest_drain_rows(events).values()
+            open_orders = working_count(
+                (
+                    (
+                        str(row.fields.get("symbol") or ""),
+                        row.report is not None
+                        and row.report.order_status not in TERMINAL_ORDER_STATUSES,
+                    )
+                    for row in rows
+                ),
+                root,
+            )
+            drain_ts = self._clock.timestamp_ns()
+        except Exception as exc:
+            self._log.warning(f"exposure drain failed for {root}: {exc}")
+        snap = self._exposure_snapshot(root, open_orders, drain_ts)
+        self._publish_exposure(snap)
+        return snap
 
     def _position_report_from_fields(
         self,
