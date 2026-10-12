@@ -7,6 +7,7 @@ import contextlib
 import itertools
 import os
 import time
+from collections import OrderedDict
 from typing import Any
 
 from nautilus_trader.cache.cache import Cache
@@ -57,17 +58,23 @@ from rithmic_nt_connect.errors import is_reconnectable_poll_error
 from rithmic_nt_connect.providers import RithmicInstrumentProvider
 from rithmic_nt_connect.session import WireSession
 
-# Last RequestBars failure reason for qgw hydrate fail-closed messaging.
-# ``hydrate_blocked_live_md`` = RC2.3 capability_denied after bounded wait.
-_last_request_bars_error: str | None = None
+# RequestBars failure reason per request id (``hydrate_blocked_live_md`` = RC2.3
+# capability_denied after the bounded wait, ``history_error`` otherwise). Keyed so
+# concurrent lookbacks (several strategies hydrating at once) never read each
+# other's failure; NT's request callback only carries the request id.
+_REQUEST_BARS_ERRORS: OrderedDict[str, str] = OrderedDict()
+_MAX_REQUEST_BARS_ERRORS = 256
 
 
-def take_last_request_bars_error() -> str | None:
-    """Return and clear the last RequestBars error tag (or None)."""
-    global _last_request_bars_error
-    out = _last_request_bars_error
-    _last_request_bars_error = None
-    return out
+def request_bars_error(request_id: object) -> str | None:
+    """Return and forget the failure tag of RequestBars ``request_id`` (None = ok)."""
+    return _REQUEST_BARS_ERRORS.pop(str(request_id), None)
+
+
+def _note_request_bars_error(request_id: object, tag: str) -> None:
+    _REQUEST_BARS_ERRORS[str(request_id)] = tag
+    while len(_REQUEST_BARS_ERRORS) > _MAX_REQUEST_BARS_ERRORS:
+        _REQUEST_BARS_ERRORS.popitem(last=False)
 
 
 def _is_live_md_history_denied(exc: BaseException) -> bool:
@@ -489,6 +496,46 @@ def fields_to_bar(
     )
 
 
+def closed_bars(bars: list[Bar], bar_type: BarType, end_ns: int) -> list[Bar]:
+    """History bars whose CLOSE is at or before ``end_ns``.
+
+    Rithmic serves the still-forming bar when ``end`` falls inside it; a consumer
+    that hydrates from history and then subscribes live would otherwise see that
+    minute twice (forming from history, final from live). Calendar bars (no
+    duration) must be a full period old.
+    """
+    dur = _bar_type_duration_ns(bar_type)
+    if dur == 0:
+        # Calendar bars carry a date marker, not an open time: keep only those a full
+        # period old, so today's (still forming) daily bar is never served.
+        agg = bar_type.spec.aggregation
+        span = 7 if agg == BarAggregation.WEEK else 1
+        days = span * max(1, int(bar_type.spec.step))  # a 2-DAY bar spans two days
+        dur = days * 86_400 * 1_000_000_000
+    return [b for b in bars if int(b.ts_event) + dur <= end_ns]
+
+
+class BarSequenceGuard:
+    """Per-BarType monotonic ``ts_event``: drops a live bar already delivered.
+
+    History deliveries advance the high-water mark too, so the first live bar after a
+    lookback cannot repeat the lookback's last bar.
+    """
+
+    def __init__(self) -> None:
+        self._last: dict[BarType, int] = {}
+
+    def note(self, bar: Bar) -> None:
+        bt = bar.bar_type
+        self._last[bt] = max(self._last.get(bt, 0), int(bar.ts_event))
+
+    def admit(self, bar: Bar) -> bool:
+        if int(bar.ts_event) <= self._last.get(bar.bar_type, -1):
+            return False
+        self._last[bar.bar_type] = int(bar.ts_event)
+        return True
+
+
 def external_bar_advertised(bar_type: BarType) -> bool:
     """Live EXTERNAL subscribe is only advertised for these specs."""
     agg = bar_type.spec.aggregation
@@ -637,6 +684,7 @@ class RithmicDataClient(LiveMarketDataClient):
         self._last_replayed_transport_gen = 0
         # One-sided BestBidOffer merge state, keyed by symbol[:exchange].
         self._bbo_state: dict[str, dict[str, Any]] = {}
+        self._bar_seq = BarSequenceGuard()
         # Rate-limited skip diagnostics (Rithmic push feed is presence-bit based).
         self._skip_counts: dict[str, int] = {}
         self._skip_last_flush = 0.0
@@ -962,9 +1010,11 @@ class RithmicDataClient(LiveMarketDataClient):
                 fields = time_bar_to_fields(event)
                 for bar_type in bar_types:
                     prec = self._price_precision(bar_type.instrument_id)
-                    self._handle_data(
-                        fields_to_bar(fields, bar_type, ts_init, price_precision=prec)
-                    )
+                    bar = fields_to_bar(fields, bar_type, ts_init, price_precision=prec)
+                    if not self._bar_seq.admit(bar):
+                        self._count_skip("time_bar_repeat")
+                        continue
+                    self._handle_data(bar)
         except ConvertError as exc:
             self._count_skip(f"{etype}: {exc}")
         except Exception as exc:
@@ -1229,8 +1279,6 @@ class RithmicDataClient(LiveMarketDataClient):
             f"history {bar_type} → rithmic type={rithmic_type} period={period} "
             f"(not 1s/1m unless that is the requested type)"
         )
-        global _last_request_bars_error
-        _last_request_bars_error = None
         wait_budget = _history_live_md_wait_sec()
         retry_every = _history_live_md_retry_sec()
         deadline = time.monotonic() + wait_budget
@@ -1259,13 +1307,13 @@ class RithmicDataClient(LiveMarketDataClient):
                     await asyncio.sleep(retry_every)
                     continue
                 if _is_live_md_history_denied(exc):
-                    _last_request_bars_error = "hydrate_blocked_live_md"
+                    _note_request_bars_error(request.id, "hydrate_blocked_live_md")
                     self._log.error(
                         f"HYDRATE_BLOCKED_LIVE_MD: Error requesting bars for "
                         f"{bar_type} after {wait_budget:.0f}s wait: {exc}"
                     )
                 else:
-                    _last_request_bars_error = "history_error"
+                    _note_request_bars_error(request.id, "history_error")
                     self._log.error(f"Error requesting bars for {bar_type}: {exc}")
                 self._handle_bars(
                     bar_type,
@@ -1300,9 +1348,12 @@ class RithmicDataClient(LiveMarketDataClient):
             )
             return
 
+        bars = closed_bars(bars, bar_type, int(request.end.timestamp() * 1_000_000_000))
         # Order: FORWARDS + session sort by ts_event_ns (NT does not re-sort).
         if request.limit:
             bars = bars[-request.limit :]
+        for bar in bars:
+            self._bar_seq.note(bar)
         self._log.info(
             f"loaded {len(bars)} {bar_type} history bars (raw={len(bars_raw)})"
         )

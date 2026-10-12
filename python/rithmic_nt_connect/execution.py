@@ -13,6 +13,7 @@ from nautilus_trader.cache.cache import Cache
 from nautilus_trader.common.component import LiveClock, MessageBus
 from nautilus_trader.core.uuid import UUID4
 from nautilus_trader.execution.messages import (
+    BatchCancelOrders,
     CancelAllOrders,
     CancelOrder,
     GenerateFillReports,
@@ -96,6 +97,14 @@ from rithmic_nt_connect.errors import (
     ReconciliationUnavailableError,
     VenueQueryUnavailable,
 )
+from rithmic_nt_connect.exposure import (
+    EXPOSURE_ENDPOINT,
+    ExposureSnapshot,
+    exposure_topic,
+    matches_root,
+    signed_net,
+)
+from rithmic_nt_connect.exposure import product_root as _product_root
 from rithmic_nt_connect.notification_intake import (
     TRIGGERABLE_ORDER_TYPES as _TRIGGERABLE_ORDER_TYPES,
 )
@@ -105,11 +114,12 @@ from rithmic_nt_connect.notification_intake import (
 from rithmic_nt_connect.polling import PlantPoller
 from rithmic_nt_connect.providers import RithmicInstrumentProvider
 from rithmic_nt_connect.recon import (
-    DrainRowResult as _DrainRowResult,
-)
-from rithmic_nt_connect.recon import (
+    TERMINAL_ORDER_STATUSES,
     apply_mass_status_report_window,
     drain_for,
+)
+from rithmic_nt_connect.recon import (
+    DrainRowResult as _DrainRowResult,
 )
 from rithmic_nt_connect.session import WireSession
 
@@ -161,6 +171,10 @@ def trigger_type_from_fields(fields: dict[str, Any]) -> TriggerType:
     except (TypeError, ValueError):
         pass
     return TriggerType.NO_TRIGGER
+
+
+# Marker for an unreadable PnL position row that carried no symbol (root unknown).
+_ANY_SYMBOL = "*"
 
 
 def order_status_from_fields(fields: dict[str, Any]) -> OrderStatus:
@@ -312,6 +326,15 @@ class RithmicExecutionClient(LiveExecutionClient):
         # the account-level default as fallback. Empty on fetch failure — fills
         # then report zero commission (allowed to be temporarily unavailable).
         self._commission_registry = CommissionRegistry()
+        # When the PnL stream was first observed since the last (re)connect: a
+        # working-orders drain only proves exposure together with a live stream.
+        self._pnl_live_since_ns: int | None = None
+        self._position_seen_ns: dict[str, int] = {}
+        self._unreadable_position_symbols: set[str] = set()
+        # One venue answers exposure per node: a second Rithmic exec client (or a paper
+        # responder already registered) keeps the first registration.
+        if EXPOSURE_ENDPOINT not in msgbus.endpoints():
+            msgbus.register(EXPOSURE_ENDPOINT, self._on_exposure_request)
 
     @property
     def _commission_registry(self) -> CommissionRegistry:
@@ -380,7 +403,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         # A reconnect must re-observe the PnL/account stream before the order
         # plant can re-arm: positions ride that stream, and a stale observation
         # from before the drop is not proof of current exposure.
-        self._pnl_snapshot_observed.clear()
+        self._forget_pnl_state()
         await asyncio.to_thread(ensure_connected, self._session)
         self._wire_gateway_transport_listener()
         self._log.info("Rithmic exec session ready (shared with data client)")
@@ -623,7 +646,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         last_exc: BaseException | None = None
         for attempt in range(1, self._L3_PLANT_RESTORE_MAX_ATTEMPTS + 1):
             try:
-                self._pnl_snapshot_observed.clear()
+                self._forget_pnl_state()
                 self._order_plant.begin_connect()
                 if self._pnl_connected:
                     try:
@@ -705,6 +728,11 @@ class RithmicExecutionClient(LiveExecutionClient):
         self._order_plant.resync_complete()
 
     async def _resync_pnl_subscription(self) -> None:
+        # The stream failed: rows from before it are not proof of current exposure.
+        # Exposure reads Unknown until a fresh observation has settled (a failed
+        # resubscribe keeps it Unknown). ``_positions`` stays for position reports.
+        self._pnl_live_since_ns = None
+        self._unreadable_position_symbols.discard(_ANY_SYMBOL)  # a fresh stream
         await asyncio.to_thread(self._session.disconnect_pnl_plant)
         await asyncio.to_thread(self._session.subscribe_pnl)
 
@@ -879,7 +907,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         state_key = (str(account_id), str(currency), free_dec)
         if state_key == getattr(self, "_last_account_state_key", None):
             # Identical re-push: still a successful observation of the stream.
-            self._pnl_snapshot_observed.set()
+            self._note_pnl_observed()
             return
         self.generate_account_state(
             balances=balances,
@@ -892,21 +920,148 @@ class RithmicExecutionClient(LiveExecutionClient):
         # Marked only after every fallible step (currency, account id, seed,
         # account state publication) succeeded: a failed handler must not
         # satisfy the re-arm gate (activity gate, not completeness proof).
-        self._pnl_snapshot_observed.set()
+        self._note_pnl_observed()
 
     def _cache_position(self, event: dict[str, Any]) -> None:
         try:
             fields = instrument_pnl_to_fields(event)
         except Exception as exc:
             self._log.error(f"invalid instrument_pnl: {exc}")
+            # Exposure for this contract is now unknown (never flat). A row with no
+            # symbol could be any root, so it poisons every root until a resync.
+            raw_symbol = str(event.get("symbol") or "").strip()
+            self._unreadable_position_symbols.add(raw_symbol or _ANY_SYMBOL)
             return
-        self._positions[str(fields["instrument_id"])] = fields
+        self._unreadable_position_symbols.discard(str(fields["symbol"]).strip())
+        key = str(fields["instrument_id"])
+        # One clock read for both stamps: the first row of a fresh stream must count
+        # as seen on that stream (seen >= live), or a real position reads as flat.
+        now = self._clock.timestamp_ns()
+        self._positions[key] = fields
         account_raw = fields.get("account_id")
         if account_raw:
             self._seed_account_if_needed(str(account_raw))
         # Marked only after the position write and seeding succeeded (activity
         # gate, not completeness proof).
+        self._note_pnl_observed(now)
+        self._position_seen_ns[key] = now
+        try:
+            self._publish_exposure(
+                self._exposure_snapshot(
+                    _product_root(str(fields["symbol"])), None, None
+                )
+            )
+        except Exception as exc:
+            self._log.warning(f"exposure push failed: {exc}")
+
+    def _note_pnl_observed(self, now_ns: int | None = None) -> None:
+        if self._pnl_live_since_ns is None:
+            self._pnl_live_since_ns = (
+                self._clock.timestamp_ns() if now_ns is None else now_ns
+            )
         self._pnl_snapshot_observed.set()
+
+    def _forget_pnl_state(self) -> None:
+        """(Re)connect: the previous stream's rows are not proof of current exposure."""
+        self._pnl_snapshot_observed.clear()
+        self._pnl_live_since_ns = None
+        self._positions.clear()
+        self._position_seen_ns.clear()
+        self._unreadable_position_symbols.clear()
+
+    def _exposure_snapshot(
+        self,
+        root: str,
+        open_orders: int | None,
+        drain_ts_ns: int | None,
+        *,
+        reply: bool = False,
+    ) -> ExposureSnapshot:
+        live = self._pnl_live_since_ns
+        if self._position_unreadable_for(root):
+            live = None  # an unreadable row for this root: net unknown, never flat
+        # Only rows re-observed on the current stream count: a position that went flat
+        # while the stream was down and is not re-pushed must not linger in the net.
+        current = (
+            {
+                key: fields
+                for key, fields in self._positions.items()
+                if self._position_seen_ns.get(key, 0) >= live
+            }
+            if live is not None
+            else {}
+        )
+        return ExposureSnapshot(
+            root=root.strip().upper(),
+            net=signed_net(current, root) if live is not None else None,
+            open_orders=open_orders,
+            pnl_ts_ns=live,
+            drain_ts_ns=drain_ts_ns,
+            ts_init=self._clock.timestamp_ns(),
+            reply=reply,
+        )
+
+    def _position_unreadable_for(self, root: str) -> bool:
+        return any(
+            symbol == _ANY_SYMBOL or matches_root(symbol, root)
+            for symbol in self._unreadable_position_symbols
+        )
+
+    def _publish_exposure(self, snap: ExposureSnapshot) -> None:
+        self._msgbus.publish(exposure_topic(snap.root), snap)
+
+    def _on_exposure_request(self, root: str) -> None:
+        """msgbus endpoint: drain the venue for ``root`` and publish the snapshot."""
+        self.create_task(self.request_exposure(str(root)))
+
+    def _working_orders_for_root(
+        self, events: list[dict[str, Any]], root: str
+    ) -> int | None:
+        """Working orders of ``root`` in a drain; None if a root row is unreadable.
+
+        ``iter_drain_rows`` skips rows it cannot interpret (no basket, bad ts, no
+        report). Skipping is fine for recon but would read an unknown order as absent
+        here — even when a readable sibling row shares its basket — so every ``root``
+        row must be a usable drain row, else the count is unknown (fail closed).
+        """
+        drain = drain_for(self)
+        root_rows = sum(
+            1 for raw in events if matches_root(str(raw.get("symbol") or ""), root)
+        )
+        usable = [
+            row
+            for row in drain.iter_drain_rows(events)
+            if matches_root(str(row.fields.get("symbol") or ""), root)
+        ]
+        if len(usable) != root_rows:
+            return None
+        latest = drain.latest_drain_rows(events)
+        baskets = {str(row.fields["basket_id"]) for row in usable}
+        return sum(
+            1
+            for basket in baskets
+            if (report := latest[basket].report) is not None
+            and report.order_status not in TERMINAL_ORDER_STATUSES
+        )
+
+    async def request_exposure(self, root: str) -> ExposureSnapshot:
+        """Authoritative exposure for a product root from this node's session.
+
+        Net from the PnL plant rows, open orders from a fresh bounded drain. A
+        failed drain leaves ``open_orders=None`` (never 0); ``complete`` is the
+        only proof. Published on ``exposure_topic(root)`` and returned.
+        """
+        open_orders: int | None = None
+        drain_ts: int | None = None
+        try:
+            events = await self._load_orders_events(0, 0)
+            open_orders = self._working_orders_for_root(events, root)
+            drain_ts = self._clock.timestamp_ns()
+        except Exception as exc:
+            self._log.warning(f"exposure drain failed for {root}: {exc}")
+        snap = self._exposure_snapshot(root, open_orders, drain_ts, reply=True)
+        self._publish_exposure(snap)
+        return snap
 
     def _position_report_from_fields(
         self,
@@ -1708,17 +1863,39 @@ class RithmicExecutionClient(LiveExecutionClient):
             self._mark_order_plant_failed("cancel_order", exc)
 
     async def _cancel_all_orders(self, command: CancelAllOrders) -> None:
-        _ = command
-        if not self.enable_trading:
-            self._log_trading_disabled("cancel_all_orders")
-            return
-        if not self._order_plant.allow_cancel():
-            self._log.error(self._order_plant.reject_reason("cancel_all"))
-            return
-        try:
-            await asyncio.to_thread(self._session.cancel_all_orders)
-        except Exception as exc:
-            self._mark_order_plant_failed("cancel_all_orders", exc)
+        """Cancel the open orders the command selects, one basket at a time.
+
+        Honors ``instrument_id``, ``strategy_id`` and ``order_side`` like every NT
+        venue. Cache-scoped: an order the cache does not hold as open (untracked at
+        the venue, or still in flight without a basket id) is not cancelled here —
+        each cache order goes through ``_cancel_order`` (deny / cancel-rejected
+        rules apply per order). The plant's account-wide ``cancel_all`` is not
+        reachable from a strategy: it is the gateway parent's explicit panic flag
+        (``RITHMIC_GATEWAY_CANCEL_ALL``).
+        """
+        orders = self._cache.orders_open(
+            # The cache is node-wide: never cancel another venue's order.
+            venue=self.venue,
+            instrument_id=command.instrument_id,
+            strategy_id=command.strategy_id,
+            side=command.order_side,
+        )
+        for order in orders:
+            await self._cancel_order(
+                CancelOrder(
+                    command.trader_id,
+                    order.strategy_id,
+                    order.instrument_id,
+                    order.client_order_id,
+                    order.venue_order_id,
+                    UUID4(),
+                    self._clock.timestamp_ns(),
+                )
+            )
+
+    async def _batch_cancel_orders(self, command: BatchCancelOrders) -> None:
+        for cancel in command.cancels:
+            await self._cancel_order(cancel)
 
     async def generate_order_status_report(
         self,

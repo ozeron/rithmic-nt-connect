@@ -217,6 +217,22 @@ pub fn is_transient(err: &Error) -> bool {
     }
 }
 
+/// Whether the post-connect history Ready probe (RC4) runs.
+///
+/// `RITHMIC_HISTORY_READY_PROBE=0|false|no|off` skips it: for accounts without
+/// market-data entitlement (e.g. Rithmic Test), whose order/PnL plants would
+/// otherwise be unreachable behind a history load that never answers. Default on.
+pub fn history_ready_probe_enabled() -> bool {
+    probe_enabled_from(std::env::var("RITHMIC_HISTORY_READY_PROBE").ok().as_deref())
+}
+
+fn probe_enabled_from(raw: Option<&str>) -> bool {
+    !matches!(
+        raw.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Some("0" | "false" | "no" | "off")
+    )
+}
+
 /// Root + exchange for the post-connect history Ready probe (RC4).
 ///
 /// Override with `RITHMIC_HISTORY_READY_SYMBOL` / `RITHMIC_HISTORY_READY_EXCHANGE`,
@@ -315,6 +331,17 @@ async fn sleep_backoff(attempt: u32) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn history_ready_probe_opt_out_is_explicit() {
+        assert!(super::probe_enabled_from(None));
+        assert!(super::probe_enabled_from(Some("")));
+        assert!(super::probe_enabled_from(Some("1")));
+        for off in ["0", "false", "No", " off "] {
+            assert!(!super::probe_enabled_from(Some(off)), "{off}");
+        }
+    }
+
     use super::*;
 
     #[test]

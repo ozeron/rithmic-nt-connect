@@ -21,6 +21,7 @@ from nautilus_trader.model.identifiers import (
     VenueOrderId,
 )
 from rithmic_gateway.types import AccountRmsInfo, ProductRmsInfo
+from rithmic_nt_connect.commission import CommissionRegistry
 from rithmic_nt_connect.execution import RithmicExecutionClient
 from rithmic_nt_connect.session import WireSession
 
@@ -338,6 +339,14 @@ class _CacheStub:
         return self._instruments.get(str(instrument_id))
 
 
+class _RecordingBus:
+    def __init__(self) -> None:
+        self.published: list[tuple[str, object]] = []
+
+    def publish(self, topic: str, msg: object, external_pub: bool = True) -> None:
+        self.published.append((topic, msg))
+
+
 class _TestClient(RithmicExecutionClient):
     """Test double: skips the Cython base's ``__init__`` and re-exposes the
     cdef read-only ``_log`` / ``_clock`` / ``_cache`` / ``account_id`` as
@@ -374,6 +383,20 @@ class _TestClient(RithmicExecutionClient):
         object.__setattr__(self, "_TestClient__cache", value)
 
     @property
+    def _msgbus(self) -> Any:
+        """Recording bus (``published`` topic/msg pairs) unless a test assigns one."""
+        try:
+            return object.__getattribute__(self, "_TestClient__msgbus")
+        except AttributeError:
+            bus = _RecordingBus()
+            object.__setattr__(self, "_TestClient__msgbus", bus)
+            return bus
+
+    @_msgbus.setter
+    def _msgbus(self, value: Any) -> None:
+        object.__setattr__(self, "_TestClient__msgbus", value)
+
+    @property
     def account_id(self) -> AccountId | None:
         return cast(
             AccountId | None, object.__getattribute__(self, "_TestClient__account_id")
@@ -382,6 +405,61 @@ class _TestClient(RithmicExecutionClient):
     @account_id.setter
     def account_id(self, value: AccountId | None) -> None:
         object.__setattr__(self, "_TestClient__account_id", value)
+
+    # ``__init__`` is skipped: per-connect PnL liveness starts unknown.
+    _pnl_live_since_ns: int | None = None
+
+    # ``RithmicExecutionClient.__init__`` creates the registry behind a property
+    # pair (``_commission_registry_inst``); this double skips ``__init__``, so
+    # default it lazily (tests may still assign their own).
+    @property
+    def _commission_registry(self) -> CommissionRegistry:
+        try:
+            return cast(
+                CommissionRegistry,
+                object.__getattribute__(self, "_commission_registry_inst"),
+            )
+        except AttributeError:
+            registry = CommissionRegistry()
+            object.__setattr__(self, "_commission_registry_inst", registry)
+            return registry
+
+    @_commission_registry.setter
+    def _commission_registry(self, value: CommissionRegistry) -> None:
+        object.__setattr__(self, "_commission_registry_inst", value)
+
+    # ``__init__`` creates the per-row PnL observation times; default lazily here.
+    @property
+    def _position_seen_ns(self) -> dict[str, int]:
+        try:
+            return cast(
+                dict[str, int],
+                object.__getattribute__(self, "_position_seen_ns_inst"),
+            )
+        except AttributeError:
+            seen: dict[str, int] = {}
+            object.__setattr__(self, "_position_seen_ns_inst", seen)
+            return seen
+
+    @_position_seen_ns.setter
+    def _position_seen_ns(self, value: dict[str, int]) -> None:
+        object.__setattr__(self, "_position_seen_ns_inst", value)
+
+    @property
+    def _unreadable_position_symbols(self) -> set[str]:
+        try:
+            return cast(
+                set[str],
+                object.__getattribute__(self, "_unreadable_position_symbols_inst"),
+            )
+        except AttributeError:
+            symbols: set[str] = set()
+            object.__setattr__(self, "_unreadable_position_symbols_inst", symbols)
+            return symbols
+
+    @_unreadable_position_symbols.setter
+    def _unreadable_position_symbols(self, value: set[str]) -> None:
+        object.__setattr__(self, "_unreadable_position_symbols_inst", value)
 
 
 def _conforms() -> None:
