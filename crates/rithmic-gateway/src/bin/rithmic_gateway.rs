@@ -5,6 +5,7 @@ use std::str::FromStr;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+use rithmic_gateway::env_keys::{self, process_env_first};
 use rithmic_gateway::idle_exit::{parse_idle_exit_sec, IdleExit};
 use rithmic_gateway::listen::{bind_unix, default_unix_path, ListenEndpoint};
 use rithmic_gateway::reconnect::ReconnectController;
@@ -37,8 +38,9 @@ async fn main() {
 fn print_help() {
     eprintln!(
         "rithmic-gateway — own one Rithmic login; serve plant-semantic IPC on a unix socket.\n\n\
-         Required env: RITHMIC_USER, RITHMIC_PASSWORD\n\
-         Optional: RITHMIC_SYSTEM_NAME, RITHMIC_URL, RITHMIC_ENV,\n\
+         Required env: RITHMIC_USER (or RITHMIC_USERNAME), RITHMIC_PASSWORD\n\
+         Optional: RITHMIC_SYSTEM (or RITHMIC_SYSTEM_NAME), RITHMIC_GATEWAY (or RITHMIC_URL),\n\
+                   RITHMIC_ENV, RITHMIC_HISTORY_READY_PROBE (0 = skip the history Ready probe),\n\
                    RITHMIC_GATEWAY_LISTEN (unix://…),\n\
                    RITHMIC_ENABLE_TRADING, RITHMIC_GATEWAY_CANCEL_ALL,\n\
                    RITHMIC_GATEWAY_AUTH_TOKEN,\n\
@@ -49,13 +51,15 @@ fn print_help() {
 }
 
 async fn run() -> Result<(), String> {
-    let user = std::env::var("RITHMIC_USER").map_err(|_| "RITHMIC_USER required")?;
+    // Same keys and precedence as the Python clients (`env_keys`): one env file,
+    // one login — never a silent fallback to the production URL.
+    let user = process_env_first(env_keys::USER_KEYS).ok_or("RITHMIC_USER required")?;
     let password = std::env::var("RITHMIC_PASSWORD").map_err(|_| "RITHMIC_PASSWORD required")?;
-    let system_name =
-        std::env::var("RITHMIC_SYSTEM_NAME").unwrap_or_else(|_| "LucidTrading".into());
-    let url =
-        std::env::var("RITHMIC_URL").unwrap_or_else(|_| "wss://rprotocol.rithmic.com:443".into());
-    let env_name = std::env::var("RITHMIC_ENV").unwrap_or_else(|_| "Live".into());
+    let system_name = process_env_first(env_keys::SYSTEM_KEYS)
+        .unwrap_or_else(|| env_keys::DEFAULT_SYSTEM_NAME.into());
+    let url = process_env_first(env_keys::URL_KEYS).unwrap_or_else(|| env_keys::DEFAULT_URL.into());
+    let env_name =
+        process_env_first(env_keys::ENV_KEYS).unwrap_or_else(|| env_keys::DEFAULT_ENV.into());
     // rithmic-rs only parses lowercase env names ("live"/"demo"/"test").
     let env = RithmicEnv::from_str(&env_name.to_lowercase())
         .map_err(|e| format!("RITHMIC_ENV {env_name:?}: {e}"))?;
