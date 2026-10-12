@@ -6,7 +6,11 @@ from collections import deque
 from typing import Any
 
 import pytest
-from rithmic_nt_connect.inventory import Inventory, venue_inventory_snapshot
+from rithmic_nt_connect.inventory import (
+    PNL_SETTLE_S,
+    Inventory,
+    venue_inventory_snapshot,
+)
 
 
 def _open(basket: str, symbol: str = "MNQU6") -> dict[str, Any]:
@@ -50,15 +54,41 @@ def test_kind_is_derived_from_notify_type_when_missing() -> None:
     assert inv.working()[0].kind == "accepted"
 
 
-def test_positions_need_a_pnl_row_and_flat_rows_clear() -> None:
+def test_positions_need_a_settled_pnl_stream_and_flat_rows_clear() -> None:
     inv = Inventory()
     assert inv.pnl_live is False
-    inv.ingest({"type": "account_pnl", "account_balance": 1})
-    assert inv.pnl_live is True and inv.positions() == []
+    inv.ingest({"type": "account_pnl", "account_balance": 1}, now_s=100.0)
+    # An account row lands before the instrument burst: not yet proof of flat.
+    assert inv.pnl_live is False and inv.positions() == []
+    inv.mark_observed(100.0 + PNL_SETTLE_S)
+    assert inv.pnl_live is True
     inv.ingest({"type": "instrument_pnl", "symbol": "MNQU6", "net_quantity": -2})
     assert inv.positions()[0].net_qty == -2
     inv.ingest({"type": "instrument_pnl", "symbol": "MNQU6", "net_quantity": 0})
     assert inv.positions() == []
+
+
+def test_terminal_status_follows_the_exec_client_mapping() -> None:
+    inv = Inventory()
+    inv.ingest(_open("B1"))
+    expired = _open("B1")
+    expired.update(kind="expired", status="EXPIRED")
+    inv.ingest(expired)
+    assert inv.working() == []  # EXPIRED is terminal (was missing before)
+
+
+def test_a_fill_without_an_unfilled_size_keeps_the_order() -> None:
+    inv = Inventory()
+    inv.ingest(_open("B1"))
+    fill = _open("B1")
+    fill.update(kind="filled", quantity=2, total_fill_size=1)
+    del fill["total_unfilled_size"]
+    inv.ingest(fill)
+    assert [w.basket_id for w in inv.working()] == ["B1"]  # unknown is not absent
+    done = _open("B1")
+    done.update(kind="filled", total_unfilled_size=0)
+    inv.ingest(done)
+    assert inv.working() == []
 
 
 class _Session:
@@ -88,7 +118,8 @@ class _Session:
 def test_snapshot_replays_orders_and_reads_pnl() -> None:
     inv = venue_inventory_snapshot(_Session(), seconds=0.05)
     assert [w.basket_id for w in inv.working()] == ["B1"]
-    assert inv.pnl_live and inv.positions()[0].net_qty == 1
+    assert inv.positions()[0].net_qty == 1
+    assert inv.pnl_live is False  # a 50 ms window is shorter than the settle gate
 
 
 def test_snapshot_raises_when_pnl_cannot_subscribe() -> None:

@@ -4,7 +4,10 @@ For out-of-process tools (emergency flatten, plant status) that dial their own s
 A node reads the same facts from its exec client (``exposure.ExposureSnapshot``).
 
 Positions come only from PnL-plant ``instrument_pnl`` rows. ``pnl_live`` is False until
-any PnL row arrived: without it positions are unknown, never flat.
+the PnL stream has been observed for ``PNL_SETTLE_NS`` (account rows land before the
+instrument burst): without it positions are unknown, never flat. Order state uses the
+exec client's own status mapping (``order_status_from_fields`` +
+``TERMINAL_ORDER_STATUSES``), so the two can never disagree on what is terminal.
 """
 
 from __future__ import annotations
@@ -13,10 +16,14 @@ import time
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from rithmic_nt_connect._orders import kind_from_notify
+from nautilus_trader.model.enums import OrderStatus
 
-_TERMINAL_KINDS = frozenset({"canceled", "rejected"})
-_DEAD_STATUS = frozenset({"CANCELLED", "CANCELED", "COMPLETE", "FILLED", "REJECTED"})
+from rithmic_nt_connect._orders import order_notification_to_fields
+from rithmic_nt_connect.execution import order_status_from_fields
+from rithmic_nt_connect.exposure import PNL_SETTLE_NS
+from rithmic_nt_connect.recon import TERMINAL_ORDER_STATUSES
+
+PNL_SETTLE_S = PNL_SETTLE_NS / 1e9
 
 
 class InventorySession(Protocol):
@@ -113,13 +120,26 @@ class Inventory:
         self._orders: dict[str, WorkingOrder] = {}
         self._positions: dict[str, OpenPosition] = {}
         self.pnl_events = 0
+        self._pnl_first_s: float | None = None
+        self._observed_until_s: float | None = None
 
     @property
     def pnl_live(self) -> bool:
-        """True once any PnL row arrived; before that positions are unknown."""
-        return self.pnl_events > 0
+        """True once the PnL stream was observed for ``PNL_SETTLE_S``.
 
-    def ingest(self, event: dict[str, Any]) -> None:
+        The first row is often an account row that lands before the instrument burst;
+        positions read before the settle window may still be missing (never flat).
+        """
+        if self._pnl_first_s is None or self._observed_until_s is None:
+            return False
+        return self._observed_until_s - self._pnl_first_s >= PNL_SETTLE_S
+
+    def mark_observed(self, now_s: float) -> None:
+        """The stream was watched until ``now_s`` (monotonic seconds)."""
+        self._observed_until_s = now_s
+
+    def ingest(self, event: dict[str, Any], now_s: float | None = None) -> None:
+        now = time.monotonic() if now_s is None else now_s
         etype = str(event.get("type") or "")
         basket = event.get("basket_id")
         from_order_stream = etype == "order_notification" and event.get("source") in {
@@ -131,6 +151,9 @@ class Inventory:
             return
         if etype in {"account_pnl", "instrument_pnl"}:
             self.pnl_events += 1
+            if self._pnl_first_s is None:
+                self._pnl_first_s = now
+            self.mark_observed(max(now, self._observed_until_s or now))
         if etype == "instrument_pnl":
             self._ingest_position(event)
 
@@ -138,21 +161,14 @@ class Inventory:
         basket = str(event.get("basket_id") or "").strip()
         if not basket:
             return
-        kind = event.get("kind")
-        if kind is None and event.get("notify_type_name") is not None:
-            kind = kind_from_notify(
-                str(event.get("source") or ""),
-                str(event.get("notify_type_name")),
-                event.get("status"),
-            )
+        try:
+            fields = order_notification_to_fields(event)
+        except Exception:  # unreadable row: keep the order (fail closed)
+            fields = None
+        kind = fields.get("kind") if fields is not None else event.get("kind")
         status = str(event.get("status") or "").upper() or None
         unfilled = _as_int(event.get("total_unfilled_size"))
-        if kind in _TERMINAL_KINDS or (
-            status is not None and status in _DEAD_STATUS and kind != "filled"
-        ):
-            self._orders.pop(basket, None)
-            return
-        if kind == "filled" and (unfilled is None or unfilled <= 0):
+        if fields is not None and _is_gone(fields, unfilled):
             self._orders.pop(basket, None)
             return
         prev = self._orders.get(basket)
@@ -216,6 +232,24 @@ class Inventory:
         return [self._positions[k] for k in sorted(self._positions)]
 
 
+def _is_gone(fields: dict[str, Any], unfilled: int | None) -> bool:
+    """Terminal per the exec client's mapping; a fill only when provably complete.
+
+    ``order_status_from_fields`` maps every ``filled`` row to FILLED, partial or not;
+    an order whose unfilled size is unknown stays working (unknown is not absent).
+    """
+    status = order_status_from_fields(fields)
+    if status not in TERMINAL_ORDER_STATUSES:
+        return False
+    if status is not OrderStatus.FILLED:
+        return True
+    if unfilled is not None:
+        return unfilled <= 0
+    qty = _as_int(fields.get("quantity"))
+    filled = _as_int(fields.get("total_fill_size"))
+    return qty is not None and qty > 0 and filled is not None and filled >= qty
+
+
 def poll_into(session: InventorySession, inventory: Inventory, seconds: float) -> int:
     """Feed order + PnL events into ``inventory`` for ``seconds``; returns count."""
     seen = 0
@@ -231,6 +265,7 @@ def poll_into(session: InventorySession, inventory: Inventory, seconds: float) -
             inventory.ingest(ev)
         if not progressed:
             time.sleep(0.05)
+        inventory.mark_observed(time.monotonic())
     return seen
 
 
