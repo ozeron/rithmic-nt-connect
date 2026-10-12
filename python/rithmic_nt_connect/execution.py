@@ -13,6 +13,7 @@ from nautilus_trader.cache.cache import Cache
 from nautilus_trader.common.component import LiveClock, MessageBus
 from nautilus_trader.core.uuid import UUID4
 from nautilus_trader.execution.messages import (
+    BatchCancelOrders,
     CancelAllOrders,
     CancelOrder,
     GenerateFillReports,
@@ -1708,17 +1709,33 @@ class RithmicExecutionClient(LiveExecutionClient):
             self._mark_order_plant_failed("cancel_order", exc)
 
     async def _cancel_all_orders(self, command: CancelAllOrders) -> None:
-        _ = command
-        if not self.enable_trading:
-            self._log_trading_disabled("cancel_all_orders")
-            return
-        if not self._order_plant.allow_cancel():
-            self._log.error(self._order_plant.reject_reason("cancel_all"))
-            return
-        try:
-            await asyncio.to_thread(self._session.cancel_all_orders)
-        except Exception as exc:
-            self._mark_order_plant_failed("cancel_all_orders", exc)
+        """Cancel the open orders the command selects, one basket at a time.
+
+        Honors ``instrument_id``, ``strategy_id`` and ``order_side`` like every NT
+        venue. The plant's account-wide ``cancel_all`` is not reachable from a
+        strategy; it stays the gateway parent's separate panic button.
+        """
+        orders = self._cache.orders_open(
+            instrument_id=command.instrument_id,
+            strategy_id=command.strategy_id,
+            side=command.order_side,
+        )
+        for order in orders:
+            await self._cancel_order(
+                CancelOrder(
+                    command.trader_id,
+                    order.strategy_id,
+                    order.instrument_id,
+                    order.client_order_id,
+                    order.venue_order_id,
+                    UUID4(),
+                    self._clock.timestamp_ns(),
+                )
+            )
+
+    async def _batch_cancel_orders(self, command: BatchCancelOrders) -> None:
+        for cancel in command.cancels:
+            await self._cancel_order(cancel)
 
     async def generate_order_status_report(
         self,

@@ -135,7 +135,7 @@ Not started (real leftover work): Phase 2 definition updates, Phase 7 recovery s
 
 - N/A until advertised: depth-by-order, 1-SECOND-EXTERNAL, weekly/tick bars, catalog
 - [~] Live EXTERNAL time bars (1m/15m/1h/1d): subscribe + poll wired; **1m live-proven on LucidTrading 2026-08-14** and **again on Rithmic Test 2026-08-24** (`test_tc_d40_subscribe_external_bars`); 15m/1h/1d wired but no live payload (SKIP).
-- `cancel_all_orders` exists on the wire; not a safe default
+- `cancel_all_orders` exists on the wire; not a safe default. The NT `CancelAllOrders` / `BatchCancelOrders` commands (2026-10-12) cancel per basket from the cache, scoped by instrument / strategy / side — never the plant-wide wire call (`tests/test_cancel_scope.py`)
 
 ### Phase 6: Factories
 
