@@ -134,7 +134,13 @@ what the Rust client must reproduce (or consciously change); none alters the ser
 3. **Overflow is a disconnect, not a signal.** When a client's outbound queue overflows the
    parent logs and closes the connection; there is no overflow frame. The client therefore sees
    the closed connection (`eof`). The `gateway-client` spec is corrected accordingly.
-4. **Readiness probes are noisy.** A connect-and-close probe logs `client closed before
+4. **Recovery is automatic and adapter-visible.** The Python `TransportRecovery` re-dials on its own
+   (8 attempts, 0.5s doubling to 15s), emits `Down` once per outage, `Up` only for a *re*connect
+   (the first connect is silent), and `RecoveryFailed` when the budget is spent; the exec client
+   latches the order plant on `Down` and waits for `Up` / `RecoveryFailed`, the data client replays
+   MD on `Up`. The Rust runtime therefore owns the same flight (single-flight with any caller's
+   re-dial) and the same three events, found while wiring the adapter (task group 5).
+5. **Readiness probes are noisy.** A connect-and-close probe logs `client closed before
    handshake` on the parent; cosmetic, left alone.
 
 ## Risks / Trade-offs

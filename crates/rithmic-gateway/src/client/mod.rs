@@ -31,7 +31,7 @@ use tokio::sync::broadcast;
 
 use self::convert::Channel;
 use self::runtime::{CallError, Queues, Runtime, Take};
-pub use self::runtime::{ReadyInfo, TransportEvent, EVENT_QUEUE_CAP};
+pub use self::runtime::{ReadyInfo, RecoveryFailed, TransportEvent, EVENT_QUEUE_CAP};
 use crate::listen::{default_unix_path, ListenEndpoint};
 use crate::pb::{self, frame::Body, Frame};
 
@@ -41,6 +41,10 @@ const DEFAULT_HISTORY_RPC_TIMEOUT: Duration = Duration::from_secs(300);
 const DEFAULT_ATTACH_TIMEOUT: Duration = Duration::from_secs(90);
 /// Bounded retries of one history slice that timed out in transport.
 const SLICE_RETRIES: u32 = 2;
+/// Automatic recovery after a transport loss (the Python `TransportRecovery` budget).
+const DEFAULT_RECOVERY_ATTEMPTS: u32 = 8;
+const DEFAULT_RECOVERY_INITIAL_BACKOFF: Duration = Duration::from_millis(500);
+const DEFAULT_RECOVERY_MAX_BACKOFF: Duration = Duration::from_secs(15);
 
 /// How the gateway client identifies the parent it attaches to. There is
 /// deliberately no password field: only the parent holds Rithmic credentials.
@@ -63,6 +67,12 @@ pub struct GatewayConfig {
     /// Require the credential flock to be held before accepting `Ready`
     /// (disable only for mock-parent tests).
     pub attest_flock: bool,
+    /// Re-dial attempts after a transport loss before `RecoveryFailed`
+    /// (0 disables automatic recovery; callers then recover via
+    /// `ensure_transport_live`).
+    pub recovery_attempts: u32,
+    pub recovery_initial_backoff: Duration,
+    pub recovery_max_backoff: Duration,
 }
 
 impl std::fmt::Debug for GatewayConfig {
@@ -94,6 +104,9 @@ impl GatewayConfig {
             rpc_timeout: DEFAULT_RPC_TIMEOUT,
             history_rpc_timeout: DEFAULT_HISTORY_RPC_TIMEOUT,
             attest_flock: true,
+            recovery_attempts: DEFAULT_RECOVERY_ATTEMPTS,
+            recovery_initial_backoff: DEFAULT_RECOVERY_INITIAL_BACKOFF,
+            recovery_max_backoff: DEFAULT_RECOVERY_MAX_BACKOFF,
         }
     }
 
@@ -181,6 +194,11 @@ impl GatewaySession {
     /// Down / Up notifications, so an adapter can re-arm intent after a re-dial.
     pub fn subscribe_transport(&self) -> broadcast::Receiver<TransportEvent> {
         self.runtime.subscribe_transport()
+    }
+
+    /// Reported when automatic recovery spent its attempt budget.
+    pub fn subscribe_recovery_failed(&self) -> broadcast::Receiver<RecoveryFailed> {
+        self.runtime.subscribe_recovery_failed()
     }
 
     /// Recover the transport if it is down (single-flight across all sessions)
@@ -352,6 +370,7 @@ impl Session for GatewaySession {
         }
         let id = self.runtime.register(Arc::clone(&self.queues));
         self.facade_id.store(id, Ordering::SeqCst);
+        self.runtime.allow_recovery();
         match self.runtime.ensure_live().await {
             Ok(_) => {
                 self.connected.store(true, Ordering::SeqCst);

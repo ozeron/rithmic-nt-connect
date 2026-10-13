@@ -408,7 +408,8 @@ async fn polling_a_dropped_transport_drains_queued_events_then_reports_the_close
             Some(Body::EnsurePnl(_)) => Action::Close,
             _ => Action::Ack,
         },
-        |_| {},
+        // No automatic recovery: the closed state stays observable.
+        |cfg| cfg.recovery_attempts = 0,
     )
     .await;
     mock.push_last_trade(NQ, 1.0);
@@ -596,4 +597,134 @@ async fn an_empty_or_inverted_window_makes_no_rpc() {
         .unwrap()
         .is_empty());
     assert_eq!(count_of(&mock, |b| matches!(b, Body::LoadTimeBars(_))), 0);
+}
+
+// --- automatic recovery ----------------------------------------------------------
+
+fn fast_recovery(cfg: &mut rithmic_gateway::client::GatewayConfig) {
+    cfg.recovery_initial_backoff = Duration::from_millis(20);
+    cfg.recovery_max_backoff = Duration::from_millis(80);
+}
+
+#[tokio::test]
+async fn the_first_connect_emits_no_up_event() {
+    let dir = short_dir();
+    let path = dir.path().join("gw.sock");
+    let mock = MockParent::spawn(&path, mock_ready(false, false), 0, |_, _| Action::Ack).await;
+    let session = GatewaySession::new(mock_config(&path));
+    let mut events = session.subscribe_transport();
+    session.connect().await.expect("connect");
+    assert_eq!(session.transport_generation(), 1);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), events.recv())
+            .await
+            .is_err(),
+        "a first connect is not a recovery"
+    );
+    drop(mock);
+}
+
+#[tokio::test]
+async fn a_lost_transport_recovers_automatically_without_any_caller() {
+    let dir = short_dir();
+    let path = dir.path().join("gw.sock");
+    let (mock, session) = connected(
+        &path,
+        |frame, connection| match frame.body {
+            Some(Body::EnsurePnl(_)) if connection == 0 => Action::Close,
+            _ => Action::Ack,
+        },
+        fast_recovery,
+    )
+    .await;
+    let mut events = session.subscribe_transport();
+
+    assert!(session.ensure_pnl_plant().await.is_err());
+    // Nobody calls ensure_transport_live or issues another RPC.
+    let down = tokio::time::timeout(Duration::from_secs(5), events.recv())
+        .await
+        .expect("down")
+        .expect("open");
+    assert_eq!(down, TransportEvent::Down { generation: 1 });
+    let up = tokio::time::timeout(Duration::from_secs(5), events.recv())
+        .await
+        .expect("up")
+        .expect("open");
+    assert_eq!(up, TransportEvent::Up { generation: 2 });
+    assert_eq!(mock.connections.load(Ordering::SeqCst), 2);
+    assert!(session.transport_connected());
+}
+
+#[tokio::test]
+async fn recovery_gives_up_with_recovery_failed_after_its_attempt_budget() {
+    let dir = short_dir();
+    let path = dir.path().join("gw.sock");
+    let (mock, session) = connected(
+        &path,
+        |frame, _| match frame.body {
+            Some(Body::EnsurePnl(_)) => Action::Close,
+            _ => Action::Ack,
+        },
+        |cfg| {
+            fast_recovery(cfg);
+            cfg.recovery_attempts = 3;
+            cfg.attach_timeout = Duration::from_millis(100);
+        },
+    )
+    .await;
+    let mut failed = session.subscribe_recovery_failed();
+
+    // The parent goes away for good, then the transport drops.
+    drop(mock);
+    std::fs::remove_file(&path).ok();
+    let _ = session.ensure_pnl_plant().await;
+
+    let report = tokio::time::timeout(Duration::from_secs(10), failed.recv())
+        .await
+        .expect("recovery_failed")
+        .expect("open");
+    assert_eq!(report.attempts, 3);
+    assert_eq!(report.generation, 1);
+    assert!(!report.cause.is_empty());
+    assert!(!session.transport_connected());
+}
+
+#[tokio::test]
+async fn a_deliberate_disconnect_is_never_recovered() {
+    let dir = short_dir();
+    let path = dir.path().join("gw.sock");
+    let (mock, session) = connected(&path, |_, _| Action::Ack, fast_recovery).await;
+    let mut events = session.subscribe_transport();
+    session.disconnect().await.unwrap();
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(400), events.recv())
+            .await
+            .is_err(),
+        "no Down / Up after a deliberate close"
+    );
+    assert_eq!(mock.connections.load(Ordering::SeqCst), 1, "no re-dial");
+}
+
+#[tokio::test]
+async fn automatic_recovery_can_be_disabled() {
+    let dir = short_dir();
+    let path = dir.path().join("gw.sock");
+    let (mock, session) = connected(
+        &path,
+        |frame, _| match frame.body {
+            Some(Body::EnsurePnl(_)) => Action::Close,
+            _ => Action::Ack,
+        },
+        |cfg| cfg.recovery_attempts = 0,
+    )
+    .await;
+    assert!(session.ensure_pnl_plant().await.is_err());
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+        !session.transport_connected(),
+        "stays down until a caller recovers"
+    );
+    assert_eq!(mock.connections.load(Ordering::SeqCst), 1);
+    assert_eq!(session.ensure_transport_live().await.unwrap(), 2);
 }

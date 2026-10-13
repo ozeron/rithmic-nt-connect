@@ -37,10 +37,19 @@ const DISCONNECT_GRACE: Duration = Duration::from_secs(1);
 /// Transport state changes, for adapters that re-arm intent on recovery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransportEvent {
-    /// The socket to the parent was lost.
+    /// The socket to the parent was lost (`generation` is the one that dropped).
     Down { generation: u64 },
-    /// A (re)connect completed; `generation` is the new transport generation.
+    /// A *re*connect completed; `generation` is the new transport generation.
+    /// The first connect of a process emits no `Up`.
     Up { generation: u64 },
+}
+
+/// Automatic recovery ran out of attempts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryFailed {
+    pub generation: u64,
+    pub attempts: u32,
+    pub cause: String,
 }
 
 /// What the parent advertised in `Ready` (read-only: clients cannot elevate).
@@ -405,6 +414,11 @@ pub(super) struct Runtime {
     facades: StdMutex<HashMap<u64, Arc<Queues>>>,
     next_facade_id: AtomicU64,
     transport_tx: broadcast::Sender<TransportEvent>,
+    failed_tx: broadcast::Sender<RecoveryFailed>,
+    /// Set while the last facade is detaching: no recovery after a deliberate close.
+    stopping: AtomicBool,
+    /// A recovery flight is running (at most one).
+    recovering: AtomicBool,
     self_weak: Weak<Runtime>,
 }
 
@@ -439,6 +453,9 @@ impl Runtime {
             facades: StdMutex::new(HashMap::new()),
             next_facade_id: AtomicU64::new(1),
             transport_tx: broadcast::channel(16).0,
+            failed_tx: broadcast::channel(4).0,
+            stopping: AtomicBool::new(false),
+            recovering: AtomicBool::new(false),
             self_weak: weak.clone(),
         });
         map.retain(|_, w| w.strong_count() > 0);
@@ -497,6 +514,14 @@ impl Runtime {
         self.transport_tx.subscribe()
     }
 
+    pub(super) fn subscribe_recovery_failed(&self) -> broadcast::Receiver<RecoveryFailed> {
+        self.failed_tx.subscribe()
+    }
+
+    pub(super) fn allow_recovery(&self) {
+        self.stopping.store(false, Ordering::SeqCst);
+    }
+
     fn on_connection_lost(&self, conn_id: u64) {
         let is_current = self
             .conn
@@ -509,7 +534,57 @@ impl Runtime {
                 generation: self.generation(),
             });
             self.wake_all();
+            self.start_recovery();
         }
+    }
+
+    /// One background flight: re-dial with exponential backoff until the
+    /// transport is live again or the attempt budget is spent. Shares the
+    /// single-flight re-dial with any RPC that recovers at the same time.
+    fn start_recovery(&self) {
+        let cfg = &self.cfg;
+        if cfg.recovery_attempts == 0 || self.stopping.load(Ordering::SeqCst) {
+            return;
+        }
+        if self.recovering.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let Some(runtime) = self.self_weak.upgrade() else {
+            self.recovering.store(false, Ordering::SeqCst);
+            return;
+        };
+        tokio::spawn(async move {
+            let cfg = &runtime.cfg;
+            let mut backoff = cfg.recovery_initial_backoff;
+            let mut attempts = 0u32;
+            let mut last: Option<Error> = None;
+            while attempts < cfg.recovery_attempts {
+                if runtime.stopping.load(Ordering::SeqCst) {
+                    runtime.recovering.store(false, Ordering::SeqCst);
+                    return;
+                }
+                attempts += 1;
+                match runtime.ensure_live().await {
+                    Ok(_) => {
+                        runtime.recovering.store(false, Ordering::SeqCst);
+                        return;
+                    }
+                    Err(err) => {
+                        last = Some(err);
+                        tokio::time::sleep(backoff).await;
+                        backoff = (backoff * 2).min(cfg.recovery_max_backoff);
+                    }
+                }
+            }
+            runtime.recovering.store(false, Ordering::SeqCst);
+            if !runtime.stopping.load(Ordering::SeqCst) {
+                let _ = runtime.failed_tx.send(RecoveryFailed {
+                    generation: runtime.generation(),
+                    attempts,
+                    cause: last.map(|e| e.to_string()).unwrap_or_default(),
+                });
+            }
+        });
     }
 
     /// A live connection, (re)dialing it if needed. Single-flight: concurrent
@@ -525,8 +600,12 @@ impl Runtime {
         let conn = self.dial().await?;
         *self.ready.lock().expect("ready") = conn.ready.clone();
         *self.conn.lock().expect("conn") = Some(Arc::clone(&conn));
-        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        let _ = self.transport_tx.send(TransportEvent::Up { generation });
+        let previous = self.generation.fetch_add(1, Ordering::SeqCst);
+        let generation = previous + 1;
+        // The first connect of a process is not a recovery: no Up event.
+        if previous > 0 {
+            let _ = self.transport_tx.send(TransportEvent::Up { generation });
+        }
         self.wake_all();
         Ok(conn)
     }
@@ -577,6 +656,7 @@ impl Runtime {
 
     /// Close the connection on purpose (the parent keeps running).
     pub(super) async fn close(&self) {
+        self.stopping.store(true, Ordering::SeqCst);
         let conn = self.conn.lock().expect("conn").take();
         if let Some(conn) = conn {
             conn.shutdown().await;
