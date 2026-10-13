@@ -56,6 +56,7 @@ After a change that emits Nautilus data or execution events, check the rows that
 - [ ] Live / Demo / Test endpoints cannot mix accidentally
 - [ ] Distinct venue instruments never share an `InstrumentId`
 - [ ] `connect_mode` / `RITHMIC_CONNECT_MODE` is explicit (`ConnectMode.DIRECT` \| `GATEWAY`; no silent default)
+- [ ] Gateway-mode clients hold no Rithmic password and never spawn the parent (attach-only, mux-only; the parent is started explicitly)
 
 ### Data
 
@@ -91,6 +92,7 @@ After a change that emits Nautilus data or execution events, check the rows that
 
 - One Rithmic login session — do not run against LucidTrading while MotiveWave / R|Trader is open.
 - Trading is off unless `enable_trading=True` / `RITHMIC_ENABLE_TRADING=1`.
+- Only the gateway **parent** holds `RITHMIC_PASSWORD`; gateway-mode clients (`SessionConfig`, `GatewayConfig`) never read, hold, log, or send it, and the client library never spawns a parent. Start the parent explicitly (`python -m rithmic_gateway`, a service manager, or the harness helper `scripts/_gateway_parent.py` for smokes/live e2e). Retired knobs (`RITHMIC_GATEWAY_CLIENT_MODE=dual`, `SPAWN_POLICY=if_missing|auto|default`, `AUTO_SPAWN=1`) raise a config error (`ConfigError` from `SessionConfig`, `GatewayConfigError` from the `rithmic_gateway` library).
 - Do **not** run `scripts/verify_order_dry_run.py --live-place` unless `RITHMIC_ENABLE_TRADING=1` is set and an explicit far `--price` is passed (BUY below / SELL above market). Test-plant order routing with `DEFAULT_APP_NAME` is confirmed authorized (proven 2026-08-17: order routed to exchange); production `Rithmic 01` / LucidTrading place still needs a conformance `app_name`.
 - Do not commit secrets, certs, or gated `.proto` sources.
 - Do not commit one-off dev probe scripts; live checks belong in mechanism-only e2e tests (`tests/e2e/`) or documented runbook commands.

@@ -1,4 +1,4 @@
-"""Unit tests for pure-Python ``rithmic_gateway`` client + spawn helpers."""
+"""Unit tests for pure-Python ``rithmic_gateway`` client + binary resolution."""
 
 from __future__ import annotations
 
@@ -9,10 +9,13 @@ import struct
 import threading
 import time
 from pathlib import Path
-from typing import Any
 
 import pytest
-from rithmic_gateway.attach import AttachError
+from rithmic_gateway.binary import (
+    GatewayBinaryError,
+    _bundled_bin,
+    resolve_gateway_bin,
+)
 from rithmic_gateway.client import GatewayClient, GatewayError
 from rithmic_gateway.config import (
     GatewayConfig,
@@ -21,15 +24,6 @@ from rithmic_gateway.config import (
     parse_listen_url,
 )
 from rithmic_gateway.framing import encode_frame
-from rithmic_gateway.spawn import (
-    SpawnError,
-    _bundled_bin,
-    assert_no_password_in_argv,
-    curated_env,
-    resolve_gateway_bin,
-    spawn_argv,
-    spawn_gateway,
-)
 from rithmic_gateway.v1 import session_pb2 as pb
 
 
@@ -49,170 +43,17 @@ def test_default_unix_path_stable() -> None:
     assert a.endswith(".sock")
 
 
-def test_spawn_argv_has_no_password() -> None:
-    argv = spawn_argv("/usr/bin/rithmic-gateway")
-    assert argv == ["/usr/bin/rithmic-gateway"]
-    assert_no_password_in_argv(argv, "s3cret")
-
-
-def test_curated_env_keeps_password_in_env_only() -> None:
-    env = curated_env(
-        {
-            "RITHMIC_USER": "u",
-            "RITHMIC_PASSWORD": "s3cret",
-            "OTHER": "nope",
-        }
-    )
-    assert env["RITHMIC_PASSWORD"] == "s3cret"
-    assert "OTHER" not in env
-
-
-def test_spawn_injects_idle_exit_sec_default(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    bin_path = tmp_path / "rithmic-gateway"
-    bin_path.write_text("#!/bin/sh\n")
-    bin_path.chmod(0o755)
-    captured: dict[str, str] = {}
-
-    class _Proc:
-        pid = 99
-        returncode = None
-        stderr = None
-
-        def poll(self) -> int | None:
-            return None
-
-        def terminate(self) -> None:
-            pass  # Stub: spawn tests never trigger graceful shutdown.
-
-    def _popen(*_a: object, **kwargs: Any) -> _Proc:
-        captured.update(kwargs.get("env") or {})
-        return _Proc()
-
-    monkeypatch.setattr("rithmic_gateway.spawn.subprocess.Popen", _popen)
-    monkeypatch.delenv("RITHMIC_GATEWAY_IDLE_EXIT_SEC", raising=False)
-    cfg = GatewayConfig(
-        user="u",
-        system_name="LucidTrading",
-        url="wss://example",
-        env="Live",
-        listen=f"unix://{tmp_path / 'g.sock'}",
-        gateway_bin=str(bin_path),
-        auto_spawn=True,
-    )
-    spawn_gateway(
-        cfg,
-        wait_socket=False,
-        environ={
-            "RITHMIC_USER": "u",
-            "RITHMIC_PASSWORD": "unit-test-secret-zz9",
-        },
-    )
-    assert captured.get("RITHMIC_GATEWAY_IDLE_EXIT_SEC") == "5"
-
-
-def test_spawn_preserves_explicit_idle_exit_sec(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    bin_path = tmp_path / "rithmic-gateway"
-    bin_path.write_text("#!/bin/sh\n")
-    bin_path.chmod(0o755)
-    captured: dict[str, str] = {}
-
-    class _Proc:
-        pid = 99
-        returncode = None
-        stderr = None
-
-        def poll(self) -> int | None:
-            return None
-
-        def terminate(self) -> None:
-            pass  # Stub: spawn tests never trigger graceful shutdown.
-
-    def _popen(*_a: object, **kwargs: Any) -> _Proc:
-        captured.update(kwargs.get("env") or {})
-        return _Proc()
-
-    monkeypatch.setattr("rithmic_gateway.spawn.subprocess.Popen", _popen)
-    cfg = GatewayConfig(
-        user="u",
-        system_name="LucidTrading",
-        url="wss://example",
-        env="Live",
-        listen=f"unix://{tmp_path / 'g.sock'}",
-        gateway_bin=str(bin_path),
-        auto_spawn=True,
-    )
-    spawn_gateway(
-        cfg,
-        wait_socket=False,
-        environ={
-            "RITHMIC_USER": "u",
-            "RITHMIC_PASSWORD": "unit-test-secret-zz9",
-            "RITHMIC_GATEWAY_IDLE_EXIT_SEC": "-1",
-        },
-    )
-    assert captured.get("RITHMIC_GATEWAY_IDLE_EXIT_SEC") == "-1"
-
-
-def test_spawn_preserves_zero_idle_exit_sec(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    bin_path = tmp_path / "rithmic-gateway"
-    bin_path.write_text("#!/bin/sh\n")
-    bin_path.chmod(0o755)
-    captured: dict[str, str] = {}
-
-    class _Proc:
-        pid = 99
-        returncode = None
-        stderr = None
-
-        def poll(self) -> int | None:
-            return None
-
-        def terminate(self) -> None:
-            pass  # Stub: spawn tests never trigger graceful shutdown.
-
-    def _popen(*_a: object, **kwargs: Any) -> _Proc:
-        captured.update(kwargs.get("env") or {})
-        return _Proc()
-
-    monkeypatch.setattr("rithmic_gateway.spawn.subprocess.Popen", _popen)
-    cfg = GatewayConfig(
-        user="u",
-        system_name="LucidTrading",
-        url="wss://example",
-        env="Live",
-        listen=f"unix://{tmp_path / 'g.sock'}",
-        gateway_bin=str(bin_path),
-        auto_spawn=True,
-    )
-    spawn_gateway(
-        cfg,
-        wait_socket=False,
-        environ={
-            "RITHMIC_USER": "u",
-            "RITHMIC_PASSWORD": "unit-test-secret-zz9",
-            "RITHMIC_GATEWAY_IDLE_EXIT_SEC": "0",
-        },
-    )
-    assert captured.get("RITHMIC_GATEWAY_IDLE_EXIT_SEC") == "0"
-
-
 def test_resolve_bin_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("RITHMIC_GATEWAY_BIN", raising=False)
     monkeypatch.delenv("CARGO_TARGET_DIR", raising=False)
     monkeypatch.setenv("PATH", str(tmp_path))
-    monkeypatch.setattr("rithmic_gateway.spawn._bin_search_starts", lambda: [tmp_path])
-    with pytest.raises(SpawnError, match="RITHMIC_GATEWAY_BIN"):
+    monkeypatch.setattr("rithmic_gateway.binary._bin_search_starts", lambda: [tmp_path])
+    with pytest.raises(GatewayBinaryError, match="RITHMIC_GATEWAY_BIN"):
         resolve_gateway_bin(None)
 
 
 def test_resolve_bin_explicit_missing(tmp_path: Path) -> None:
-    with pytest.raises(SpawnError, match="not found"):
+    with pytest.raises(GatewayBinaryError, match="not found"):
         resolve_gateway_bin(str(tmp_path / "missing-bin"))
 
 
@@ -226,11 +67,11 @@ def test_resolve_bin_prefers_bundled_over_path(
     bundled.parent.mkdir(parents=True)
     bundled.write_text("#!/bin/sh\nexit 0\n")
     bundled.chmod(0o755)
-    monkeypatch.setattr("rithmic_gateway.spawn._bundled_bin", lambda: str(bundled))
+    monkeypatch.setattr("rithmic_gateway.binary._bundled_bin", lambda: str(bundled))
     # PATH points at an empty dir with no binary; target fallback also empty.
     monkeypatch.setenv("PATH", str(tmp_path / "nobin"))
     (tmp_path / "nobin").mkdir(exist_ok=True)
-    monkeypatch.setattr("rithmic_gateway.spawn._bin_search_starts", lambda: [tmp_path])
+    monkeypatch.setattr("rithmic_gateway.binary._bin_search_starts", lambda: [tmp_path])
     assert resolve_gateway_bin(None) == str(bundled.resolve())
 
 
@@ -242,7 +83,7 @@ def test_resolve_bin_prefers_explicit_and_env_over_bundled(
     bundled.parent.mkdir(parents=True)
     bundled.write_text("x")
     bundled.chmod(0o755)
-    monkeypatch.setattr("rithmic_gateway.spawn._bundled_bin", lambda: str(bundled))
+    monkeypatch.setattr("rithmic_gateway.binary._bundled_bin", lambda: str(bundled))
 
     env_bin = tmp_path / "env-bin" / "rithmic-gateway"
     env_bin.parent.mkdir(parents=True)
@@ -263,7 +104,7 @@ def _bundled_bin_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     pkg_dir = tmp_path / "pkg"
     bin_dir = pkg_dir / "bin"
     bin_dir.mkdir(parents=True)
-    monkeypatch.setattr("rithmic_gateway.spawn.__file__", str(pkg_dir / "spawn.py"))
+    monkeypatch.setattr("rithmic_gateway.binary.__file__", str(pkg_dir / "spawn.py"))
     return bin_dir
 
 
@@ -293,67 +134,6 @@ def test_bundled_bin_prefers_extensionless_over_exe(
 
     plain.unlink()
     assert _bundled_bin() == str(exe.resolve())
-
-
-def test_spawn_happy_path_requires_flock_not_just_listen(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Listening alone must not succeed — flock must also be held."""
-    bin_path = tmp_path / "rithmic-gateway"
-    bin_path.write_text("#!/bin/sh\nsleep 30\n")
-    bin_path.chmod(0o755)
-    sock = Path(f"/tmp/rgw-impostor-{os.getpid()}.sock")
-    if sock.exists():
-        sock.unlink()
-
-    # Impostor listener with no flock.
-    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server.bind(str(sock))
-    server.listen(1)
-
-    class _Proc:
-        pid = 1
-        returncode = None
-        stderr = None
-
-        def poll(self) -> None:
-            return None
-
-        def terminate(self) -> None:
-            pass  # Stub: spawn tests never trigger graceful shutdown.
-
-        def kill(self) -> None:
-            pass  # Stub: spawn tests never trigger forceful shutdown.
-
-        def wait(self, timeout: float | None = None) -> int:
-            return 0
-
-    monkeypatch.setattr(
-        "rithmic_gateway.spawn.subprocess.Popen", lambda *_a, **_k: _Proc()
-    )
-    cfg = GatewayConfig(
-        user="u-impostor",
-        system_name="LucidTrading",
-        url="wss://example",
-        env="Live",
-        listen=f"unix://{sock}",
-        gateway_bin=str(bin_path),
-        spawn_timeout_sec=0.4,
-    )
-    try:
-        with pytest.raises(AttachError, match="timed out"):
-            spawn_gateway(
-                cfg,
-                wait_socket=True,
-                environ={
-                    "RITHMIC_USER": "u-impostor",
-                    "RITHMIC_PASSWORD": "unit-test-secret-zz9",
-                },
-            )
-    finally:
-        server.close()
-        if sock.exists():
-            sock.unlink()
 
 
 def test_client_handshake_auth_failed() -> None:
@@ -386,7 +166,6 @@ def test_client_handshake_auth_failed() -> None:
         system_name="LucidTrading",
         url="wss://example",
         listen=f"unix://{sock}",
-        auto_spawn=False,
         attest_flock=False,
         auth_token="bad",
     )
@@ -446,7 +225,6 @@ def test_load_ticks_adds_trade_price_aliases() -> None:
         system_name="LucidTrading",
         url="wss://example",
         listen=f"unix://{sock}",
-        auto_spawn=False,
         attest_flock=False,
     )
     client = GatewayClient(cfg, rpc_timeout_sec=2.0)
@@ -538,7 +316,6 @@ def test_client_handshake_ready_and_place_denied() -> None:
             system_name="LucidTrading",
             url="wss://example",
             listen=f"unix://{sock}",
-            auto_spawn=False,
             attest_flock=False,
         )
         client = GatewayClient(cfg)
@@ -563,7 +340,6 @@ def test_client_cancel_all_denied() -> None:
             system_name="LucidTrading",
             url="wss://example",
             listen=f"unix://{sock}",
-            auto_spawn=False,
             attest_flock=False,
         )
         client = GatewayClient(cfg)
@@ -655,7 +431,6 @@ def test_auth_token_omitted_from_repr() -> None:
         system_name="LucidTrading",
         url="wss://example",
         auth_token="super-secret-token",
-        auto_spawn=False,
         attest_flock=False,
         listen="unix:///tmp/rgw-repr.sock",
     )
@@ -673,7 +448,6 @@ def test_client_rpc_demuxes_intervening_events() -> None:
             system_name="LucidTrading",
             url="wss://example",
             listen=f"unix://{sock}",
-            auto_spawn=False,
             attest_flock=False,
         )
         client = GatewayClient(cfg, rpc_timeout_sec=5.0)
@@ -788,7 +562,6 @@ def test_client_rpc_rejects_uncorrelated_error_and_routes_polls() -> None:
             system_name="LucidTrading",
             url="wss://example",
             listen=f"unix://{sock}",
-            auto_spawn=False,
             attest_flock=False,
         )
         client = GatewayClient(cfg, rpc_timeout_sec=5.0)
@@ -870,7 +643,6 @@ def test_poll_routes_md_pnl_order_history() -> None:
             system_name="LucidTrading",
             url="wss://example",
             listen=f"unix://{sock}",
-            auto_spawn=False,
             attest_flock=False,
         )
         client = GatewayClient(cfg, rpc_timeout_sec=5.0)
@@ -958,7 +730,6 @@ def test_desync_nulls_sock_for_next_rpc() -> None:
             system_name="LucidTrading",
             url="wss://example",
             listen=f"unix://{sock}",
-            auto_spawn=False,
             attest_flock=False,
         )
         client = GatewayClient(cfg, rpc_timeout_sec=0.3)
@@ -1023,7 +794,6 @@ def test_timeout_sec_zero_nulls_sock_for_next_rpc() -> None:
             system_name="LucidTrading",
             url="wss://example",
             listen=f"unix://{sock}",
-            auto_spawn=False,
             attest_flock=False,
         )
         client = GatewayClient(cfg, rpc_timeout_sec=0.3)
@@ -1117,7 +887,6 @@ def _resolved_account_client(sock: Path) -> GatewayClient:
         system_name="LucidTrading",
         url="wss://example",
         listen=f"unix://{sock}",
-        auto_spawn=False,
         attest_flock=False,
     )
     return GatewayClient(cfg, rpc_timeout_sec=2.0)
@@ -1208,7 +977,6 @@ def test_history_denied_live_md_maps_to_capability_denied() -> None:
             system_name="LucidTrading",
             url="wss://example",
             listen=f"unix://{sock}",
-            auto_spawn=False,
             attest_flock=False,
         )
         client = GatewayClient(cfg, rpc_timeout_sec=2.0)

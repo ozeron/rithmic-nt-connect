@@ -9,18 +9,14 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, cast
-
-if TYPE_CHECKING:
-    import subprocess  # nosec B404
+from typing import Any, cast
 
 from google.protobuf.json_format import MessageToDict
 
-from rithmic_gateway.attach import GatewayAttachCoordinator
+from rithmic_gateway.attach import AttachError, GatewayAttachCoordinator
 from rithmic_gateway.config import GatewayConfig
 from rithmic_gateway.flock import session_flock_held
 from rithmic_gateway.framing import MAX_FRAME_LEN, encode_frame
-from rithmic_gateway.spawn import SpawnError
 from rithmic_gateway.types import AccountRmsInfo, ProductRmsInfo
 from rithmic_gateway.v1 import session_pb2 as pb
 
@@ -79,33 +75,35 @@ _CONNECT_FIRST = "call connect() first"
 _NOT_CONNECTED = "not_connected"
 
 
-def _dial_with_attach(
-    config: GatewayConfig, dial: Callable[[str], None]
-) -> subprocess.Popen[bytes] | None:
-    """Dial the listen path; on failure run attach coordinator if allowed."""
+def _dial_with_attach(config: GatewayConfig, dial: Callable[[str], None]) -> None:
+    """Dial the listen path; on failure wait for a starting parent or report none.
+
+    The client never starts the parent: a held credential flock means someone
+    else's parent is coming up (bounded wait), otherwise ``parent_not_running``.
+    """
     path = config.socket_path
     try:
         dial(path)
-        return None
+        return
     except OSError:
-        if not config.auto_spawn:
-            raise
-        try:
-            attached = GatewayAttachCoordinator.resolve_dial_failure(config)
-        except SpawnError as spawn_exc:
-            try:
-                dial(path)
-            except (OSError, RuntimeError, ValueError):
-                raise spawn_exc from None
-            return None
+        pass
+    try:
+        GatewayAttachCoordinator.resolve_dial_failure(config)
+    except AttachError as attach_exc:
+        # A parent may have bound its socket between the dial and the flock check.
         try:
             dial(path)
-        except OSError as retry_exc:
-            raise SpawnError(
-                "credential flock held but dial failed after wait — "
-                "check RITHMIC_GATEWAY_LISTEN matches the running parent"
-            ) from retry_exc
-        return attached.spawned_proc
+        except (OSError, RuntimeError, ValueError):
+            raise attach_exc from None
+        return
+    try:
+        dial(path)
+    except OSError as retry_exc:
+        raise AttachError(
+            "listen_path_mismatch",
+            "credential flock held but dial failed after wait — "
+            "check RITHMIC_GATEWAY_LISTEN matches the running parent",
+        ) from retry_exc
 
 
 def _handshake_until_ready(
@@ -120,10 +118,10 @@ def _handshake_until_ready(
 
     Lucid plant cold-connect often exceeds a single RPC socket timeout while the
     parent is up but not yet ``Ready``. Treat ``TimeoutError`` like ``not_ready``
-    and keep re-dialing until ``spawn_timeout_sec`` (default 90s).
+    and keep re-dialing until ``attach_timeout_sec`` (default 90s).
     """
     path = config.socket_path
-    deadline = time.monotonic() + float(config.spawn_timeout_sec)
+    deadline = time.monotonic() + float(config.attach_timeout_sec)
     while True:
         try:
             handshake()
@@ -164,7 +162,6 @@ class GatewayClient:
         self._scopes: list[str] = []
         self._trading_enabled = False
         self._cancel_all_enabled = False
-        self._spawned = None
         self._gateway_instance_id = 0
         self._transport_generation = 0
         self._pending: deque[dict[str, Any]] = deque()
@@ -195,7 +192,7 @@ class GatewayClient:
             return
         with self._io_lock:
             cfg = self._config
-            self._spawned = _dial_with_attach(cfg, self._dial)
+            _dial_with_attach(cfg, self._dial)
             self._require_parent_flock()
             _handshake_until_ready(
                 cfg,
@@ -221,8 +218,8 @@ class GatewayClient:
     def disconnect(self) -> None:
         """Detach this client only — does not tear down parent plants for peers.
 
-        When this was the last Ready peer, an auto-spawned parent may idle-exit
-        after ``RITHMIC_GATEWAY_IDLE_EXIT_SEC`` grace (see ops-runbook).
+        The parent's lifetime is its operator's: it exits after the last client
+        only when started with ``RITHMIC_GATEWAY_IDLE_EXIT_SEC`` (see ops-runbook).
         """
         with self._io_lock:
             if self._sock is None:
@@ -478,7 +475,7 @@ class GatewayClient:
                 )
             return dedupe_bars_by_marker(merged)
 
-        # Ensure parent is up on this client first (auto-spawn / warm attach).
+        # Ensure the parent is reachable on this client first (attach or fail).
         self.connect()
 
         def _fetch_slice(window: tuple[int, int]) -> list[dict[str, Any]]:
@@ -488,7 +485,6 @@ class GatewayClient:
             peer = create_gateway_client(
                 self._config,
                 rpc_timeout_sec=self._rpc_timeout_sec,
-                history_rpc_timeout_sec=timeout,
             )
             peer.connect()
             try:

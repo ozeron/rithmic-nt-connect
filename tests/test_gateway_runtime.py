@@ -15,7 +15,6 @@ from rithmic_gateway.runtime import (
     GatewayRuntimeRegistry,
     MuxGatewayClient,
     create_gateway_client,
-    parse_gateway_client_mode,
 )
 
 _shared = importlib.util.spec_from_file_location(
@@ -35,39 +34,19 @@ def _reset_registry() -> Iterator[None]:
     GatewayRuntimeRegistry.reset_for_tests()
 
 
-def test_default_client_mode_is_mux() -> None:
-    assert parse_gateway_client_mode({}) == "mux"
-    assert parse_gateway_client_mode({"RITHMIC_GATEWAY_CLIENT_MODE": "dual"}) == "dual"
-
-
-def test_mux_clients_share_runtime() -> None:
+def test_clients_share_one_runtime_by_default() -> None:
     cfg = GatewayConfig(
         user="u-runtime",
         system_name="LucidTrading",
         url="wss://example",
-        auto_spawn=False,
         attest_flock=False,
     )
-    a = create_gateway_client(cfg, mode="mux")
-    b = create_gateway_client(cfg, mode="mux")
+    a = create_gateway_client(cfg)
+    b = create_gateway_client(cfg)
     assert isinstance(a, MuxGatewayClient)
     assert isinstance(b, MuxGatewayClient)
     assert a is not b
     assert a._runtime is b._runtime
-
-
-def test_dual_mode_returns_independent_clients() -> None:
-    cfg = GatewayConfig(
-        user="u-dual",
-        system_name="LucidTrading",
-        url="wss://example",
-        auto_spawn=False,
-        attest_flock=False,
-    )
-    a = create_gateway_client(cfg, mode="dual")
-    b = create_gateway_client(cfg, mode="dual")
-    assert not isinstance(a, MuxGatewayClient)
-    assert a is not b
 
 
 def test_acquire_rolls_back_holder_on_connect_failure(
@@ -77,7 +56,6 @@ def test_acquire_rolls_back_holder_on_connect_failure(
         user="u-acquire-fail",
         system_name="LucidTrading",
         url="wss://example",
-        auto_spawn=False,
         attest_flock=False,
     )
     runtime = GatewayRuntimeRegistry._get_or_create(cfg)
@@ -124,11 +102,10 @@ def test_reconnect_resolves_fresh_runtime_after_registry_drop(
             system_name="LucidTrading",
             url="wss://example",
             listen=f"unix://{sock}",
-            auto_spawn=False,
             attest_flock=False,
-            spawn_timeout_sec=3.0,
+            attach_timeout_sec=3.0,
         )
-        client = create_gateway_client(cfg, mode="mux")
+        client = create_gateway_client(cfg)
         assert isinstance(client, MuxGatewayClient)
         stale_runtime = client._runtime
         client.connect()
@@ -149,10 +126,9 @@ def test_detached_mux_client_rejects_rpc() -> None:
         user="u-detached-rpc",
         system_name="LucidTrading",
         url="wss://example",
-        auto_spawn=False,
         attest_flock=False,
     )
-    client = create_gateway_client(cfg, mode="mux")
+    client = create_gateway_client(cfg)
     assert isinstance(client, MuxGatewayClient)
     with pytest.raises(GatewayError, match=r"not_connected|connect"):
         client._rpc(pb.Frame())
@@ -182,11 +158,10 @@ def test_ten_concurrent_acquire_single_dial(
             system_name="LucidTrading",
             url="wss://example",
             listen=f"unix://{sock}",
-            auto_spawn=False,
             attest_flock=False,
-            spawn_timeout_sec=3.0,
+            attach_timeout_sec=3.0,
         )
-        clients = [create_gateway_client(cfg, mode="mux") for _ in range(10)]
+        clients = [create_gateway_client(cfg) for _ in range(10)]
         errors: list[Exception] = []
 
         def _connect(client: MuxGatewayClient) -> None:

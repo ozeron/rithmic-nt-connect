@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Live smoke: two tick consumers (NQ + MNQ) share one ``rithmic-gateway`` parent.
 
-Pre-spawns one ``rithmic-gateway`` parent, then starts two
+Starts one ``rithmic-gateway`` parent through the harness helper
+(``scripts/_gateway_parent.py``; the client library never spawns), then starts two
 ``gateway_tick_consumer.py`` subprocesses against the same listen URL / flock.
 Both must receive ticks and report the same ``gateway_pid``.
 
@@ -84,8 +85,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--stagger-sec",
         type=float,
-        default=1.0,
-        help="Delay before starting the second consumer (lets first own spawn)",
+        default=0.0,
+        help="Delay before starting the second consumer",
     )
     args = parser.parse_args(argv)
     symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
@@ -98,9 +99,14 @@ def main(argv: list[str] | None = None) -> int:
     load_dotenv_files(ROOT / ".env")
 
     try:
-        from rithmic_gateway import GatewayConfig
-        from rithmic_gateway.spawn import spawn_gateway
+        from _gateway_parent import (
+            ParentStartError,
+            password_from_env,
+            start_parent,
+            stop_parent,
+        )
         from rithmic_nt_connect.config import SessionConfig
+        from rithmic_nt_connect.gateway_wire import gateway_config_from_session
     except Exception as exc:
         print(f"import failed: {exc}", file=sys.stderr)
         return 1
@@ -114,29 +120,17 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
     os.environ["RITHMIC_GATEWAY_BIN"] = bin_path
-    # Explicit connect mode for dual-mode helpers; consumers use GatewayClient.
+    # Consumers are gateway-mode clients (no password); the parent gets it below.
     os.environ["RITHMIC_CONNECT_MODE"] = "gateway"
-    os.environ.setdefault("RITHMIC_GATEWAY_AUTO_SPAWN", "1")
 
     try:
         session_cfg = SessionConfig.from_env()
+        password = password_from_env()
     except Exception as exc:
         print(f"SMOKE SKIP (no credentials): {exc}")
         return 2
 
-    gcfg = GatewayConfig(
-        user=session_cfg.user,
-        system_name=session_cfg.system_name,
-        url=session_cfg.url,
-        env=session_cfg.env,
-        account_id=session_cfg.account_id or "",
-        fcm_id=session_cfg.fcm_id or "",
-        ib_id=session_cfg.ib_id or "",
-        auth_token=getattr(session_cfg, "gateway_auth_token", None) or "",
-        listen=getattr(session_cfg, "gateway_listen", None),
-        auto_spawn=True,
-        gateway_bin=bin_path,
-    )
+    gcfg = gateway_config_from_session(session_cfg)
     # Propagate resolved listen so both consumers dial the same (possibly clamped) path.
     os.environ["RITHMIC_GATEWAY_LISTEN"] = gcfg.listen or f"unix://{gcfg.socket_path}"
 
@@ -148,11 +142,11 @@ def main(argv: list[str] | None = None) -> int:
 
     parent = None
     try:
-        print("pre-spawning shared rithmic-gateway parent…")
-        parent = spawn_gateway(gcfg, wait_socket=True)
+        print("starting shared rithmic-gateway parent…")
+        parent = start_parent(gcfg, password=password, bin_path=bin_path)
         print(f"parent pid={parent.pid} socket={gcfg.socket_path}")
-    except Exception as exc:
-        print(f"SMOKE FAIL: could not spawn parent: {exc}", file=sys.stderr)
+    except ParentStartError as exc:
+        print(f"SMOKE FAIL: could not start parent: {exc}", file=sys.stderr)
         return 1
 
     env = os.environ.copy()
@@ -238,7 +232,7 @@ def main(argv: list[str] | None = None) -> int:
         if parent is not None and shared_pid != parent.pid:
             print(
                 f"SMOKE FAIL: consumers saw gateway_pid={shared_pid} but "
-                f"pre-spawned parent pid={parent.pid}",
+                f"started parent pid={parent.pid}",
                 file=sys.stderr,
             )
             return 1
@@ -284,16 +278,8 @@ def main(argv: list[str] | None = None) -> int:
                 except subprocess.TimeoutExpired:
                     proc.kill()
         if parent is not None:
-            # Prefer idle-exit after last client (spawn default grace 5s).
-            try:
-                parent.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                if parent.poll() is None:
-                    parent.terminate()
-                    try:
-                        parent.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        parent.kill()
+            # The harness owns this parent's lifetime: stop it explicitly.
+            stop_parent(parent)
         # Best-effort: remove listen sock we created for this run.
         with contextlib.suppress(Exception):
             Path(gcfg.socket_path).unlink(missing_ok=True)

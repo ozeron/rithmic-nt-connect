@@ -94,7 +94,6 @@ class GatewayMux:
         self._config = config
         self._rpc_timeout_sec = float(rpc_timeout_sec)
         self._sock: socket.socket | None = None
-        self._spawned = None
         self._next_id = 1
         self._next_sub_id = 1
         self._scopes: list[str] = []
@@ -159,7 +158,7 @@ class GatewayMux:
             # Hold the write lock across dial+handshake so a peer RPC cannot
             # interleave bytes on a half-ready socket (Macroscope).
             with self._write_lock:
-                self._spawned = _dial_with_attach(cfg, self._dial)
+                _dial_with_attach(cfg, self._dial)
                 self._require_parent_flock()
                 # Keep the dial timeout through handshake so a silent parent
                 # cannot hang acquire()/connect forever.

@@ -79,12 +79,12 @@ def _connect_mode_fields(env: Mapping[str, str]) -> dict[str, Any]:
             "missing RITHMIC_CONNECT_MODE; set to 'direct' (in-process plants) "
             "or 'gateway' (shared rithmic-gateway)"
         )
-    from rithmic_gateway.config import parse_spawn_policy
-    from rithmic_gateway.runtime import parse_gateway_client_mode
+    from rithmic_gateway.config import GatewayConfigError, reject_retired_client_knobs
 
-    spawn_policy = parse_spawn_policy(env)
-    auto = spawn_policy != "never"
-    client_mode = parse_gateway_client_mode(env)
+    try:
+        reject_retired_client_knobs(env)
+    except GatewayConfigError as exc:
+        raise ConfigError(str(exc)) from exc
     try:
         mode = parse_connect_mode(raw)
     except ConfigError as exc:
@@ -94,11 +94,7 @@ def _connect_mode_fields(env: Mapping[str, str]) -> dict[str, Any]:
     return {
         "connect_mode": mode,
         "gateway_listen": _env_first(env, "RITHMIC_GATEWAY_LISTEN"),
-        "gateway_auto_spawn": auto,
-        "gateway_spawn_policy": spawn_policy,
-        "gateway_client_mode": client_mode,
         "gateway_auth_token": _env_first(env, "RITHMIC_GATEWAY_AUTH_TOKEN") or "",
-        "gateway_bin": _env_first(env, "RITHMIC_GATEWAY_BIN"),
     }
 
 
@@ -334,9 +330,10 @@ class SessionConfig:
     """Wire-level Rithmic session settings (maps onto ``rithmic-rs`` config)."""
 
     user: str
-    password: str
     # Required: how this process opens Rithmic (no silent default).
     connect_mode: ConnectMode
+    #: Required in direct mode; never held in gateway mode (only the parent has it).
+    password: str | None = field(default=None, kw_only=True)
     system_name: str = DEFAULT_SYSTEM_NAME
     url: str = DEFAULT_GATEWAY_URL
     app_name: str = DEFAULT_APP_NAME
@@ -349,15 +346,17 @@ class SessionConfig:
     symbol: str | None = None
     exchange: str | None = None
     gateway_listen: str | None = None
-    gateway_auto_spawn: bool = True
-    gateway_spawn_policy: str = "if_missing"
-    gateway_client_mode: str = "mux"
     gateway_auth_token: str = ""
-    gateway_bin: str | None = None
 
     def __post_init__(self) -> None:
         self.user = _require_nonempty("user", self.user)
-        self.password = _require_nonempty("password", self.password)
+        self.connect_mode = parse_connect_mode(self.connect_mode)
+        if self.connect_mode == ConnectMode.DIRECT:
+            self.password = _require_nonempty("password", self.password)
+        else:
+            # The gateway parent owns the Rithmic login; a client never holds,
+            # logs, or sends the password.
+            self.password = None
         self.system_name = _require_nonempty("system_name", self.system_name)
         self.url = _require_nonempty("url", self.url)
         self.app_name = _require_nonempty("app_name", self.app_name)
@@ -366,25 +365,14 @@ class SessionConfig:
         if env not in {"Live", "Demo", "Test"}:
             raise ConfigError(f"invalid env {env!r}; expected Live, Demo, or Test")
         self.env = env
-        self.connect_mode = parse_connect_mode(self.connect_mode)
-        if self.gateway_spawn_policy not in {"never", "if_missing"}:
-            raise ConfigError(
-                f"invalid gateway_spawn_policy {self.gateway_spawn_policy!r}; "
-                f"expected never or if_missing"
-            )
-        # Explicit auto_spawn=False must disable spawn even when the dataclass
-        # default spawn_policy is still "if_missing".
-        if not self.gateway_auto_spawn:
-            self.gateway_spawn_policy = "never"
-        elif self.gateway_spawn_policy == "never":
-            self.gateway_auto_spawn = False
         if self.beta_url is None or not str(self.beta_url).strip():
             self.beta_url = self.url
 
     def __repr__(self) -> str:
+        password = "" if self.password is None else "password='***', "
         return (
             "SessionConfig("
-            f"user={self.user!r}, password='***', system_name={self.system_name!r}, "
+            f"user={self.user!r}, {password}system_name={self.system_name!r}, "
             f"url={self.url!r}, env={self.env!r}, "
             f"connect_mode={self.connect_mode.value!r}, "
             f"app_name={self.app_name!r}, app_version={self.app_version!r}, "
@@ -411,9 +399,6 @@ class SessionConfig:
             "exchange": self.exchange,
             "connect_mode": self.connect_mode.value,
             "gateway_listen": self.gateway_listen,
-            "gateway_auto_spawn": self.gateway_auto_spawn,
-            "gateway_spawn_policy": self.gateway_spawn_policy,
-            "gateway_client_mode": self.gateway_client_mode,
         }
         return _redact_secrets(data) if redact else data
 
@@ -448,8 +433,14 @@ class SessionConfig:
                 continue
             lucid = prefer_lucid and source.lucid_defaults
             user = _require_nonempty(source.user_keys[0], user)
-            password = _require_nonempty(
-                source.password_keys[0], _env_first(env, *source.password_keys)
+            mode_fields = _connect_mode_fields(env)
+            # Gateway clients never read the password; only direct mode needs it.
+            password = (
+                _require_nonempty(
+                    source.password_keys[0], _env_first(env, *source.password_keys)
+                )
+                if mode_fields["connect_mode"] == ConnectMode.DIRECT
+                else None
             )
             system_name = _env_first(env, *source.system_keys) or (
                 DEFAULT_SYSTEM_NAME if lucid else source.system_default
@@ -504,7 +495,7 @@ class SessionConfig:
                 ib_id=_env_first(env, *source.ib_keys),
                 symbol=_env_first(env, *source.symbol_keys),
                 exchange=_env_first(env, *source.exchange_keys),
-                **_connect_mode_fields(env),
+                **mode_fields,
             )
 
         raise ConfigError(

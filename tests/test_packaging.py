@@ -9,6 +9,9 @@ pre-Windows `spawn.py`. These tests fail on any drift.
 
 from __future__ import annotations
 
+import subprocess  # nosec B404 - runs the launcher under test
+import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -49,3 +52,31 @@ def test_wheel_data_pb2_matches_regenerated_bindings() -> None:
     assert mirror.read_bytes() == source.read_bytes()
     # Sanity: the shipped bindings must be the 5.29.6-compatible generation.
     assert b"Protobuf Python Version: 5.29.6" in mirror.read_bytes()
+
+
+def test_bundled_gateway_binary_is_launchable_via_the_launcher() -> None:
+    """``python -m rithmic_gateway`` execs the binary bundled in the wheel layout.
+
+    The credential-free parent refuses to start (``RITHMIC_USER required``); that
+    refusal comes from the real binary, which proves the launcher resolved and
+    exec'd it without cargo or a ``target/`` directory.
+    """
+    bundled = MIRROR / "bin"
+    if not any(
+        (bundled / n).is_file() for n in ("rithmic-gateway", "rithmic-gateway.exe")
+    ):
+        pytest.skip("no bundled gateway binary (run scripts/build_wheel.sh)")
+
+    proc = subprocess.run(  # nosec B603 - fixed argv, test-controlled env
+        [sys.executable, "-m", "rithmic_gateway"],
+        # Import the wheel layout, not the source tree; empty env, no cargo target.
+        env={"PYTHONPATH": str(MIRROR.parent), "PATH": "/usr/bin:/bin"},
+        cwd=Path(tempfile.gettempdir()),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert "rithmic_gateway:" not in proc.stderr  # launcher did not fail to resolve
+    assert "RITHMIC_USER" in proc.stderr  # the real binary ran and refused to start
+    assert proc.returncode != 0

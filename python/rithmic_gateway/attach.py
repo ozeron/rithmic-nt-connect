@@ -1,33 +1,20 @@
-"""Gateway parent attach coordinator (flock, spawn policy, cold-start races)."""
+"""Gateway parent attach (flock check + bounded wait). The client never spawns."""
 
 from __future__ import annotations
 
 import socket
-import subprocess  # nosec B404
 import time
-from collections.abc import Mapping
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
 
 from rithmic_gateway.config import GatewayConfig
 
-SpawnPolicy = Literal["never", "if_missing"]
-
 
 class AttachError(RuntimeError):
-    """Attach / spawn-policy failure with a stable machine code."""
+    """Attach failure with a stable machine code."""
 
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
-
-
-@dataclass(frozen=True)
-class AttachedParent:
-    """Parent is dialable; ``spawned_proc`` set only when this client spawned it."""
-
-    spawned_proc: subprocess.Popen[bytes] | None = None
 
 
 def config_flock_held(config: GatewayConfig) -> bool:
@@ -37,7 +24,7 @@ def config_flock_held(config: GatewayConfig) -> bool:
     return session_flock_held(config.user, config.system_name, config.url, config.env)
 
 
-def _socket_listening(sock: Path) -> bool:
+def socket_listening(sock: Path) -> bool:
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.settimeout(0.2)
@@ -54,17 +41,17 @@ def wait_for_parent_socket(config: GatewayConfig) -> None:
     Raises ``AttachError`` on timeout (``listen_path_mismatch``) or if the flock
     is released before the socket comes up (``parent_flock_held_no_socket``).
     """
-    deadline = time.monotonic() + float(config.spawn_timeout_sec)
+    deadline = time.monotonic() + float(config.attach_timeout_sec)
     sock = Path(config.socket_path)
     while time.monotonic() < deadline:
-        if _socket_listening(sock) and config_flock_held(config):
-            return
         if not config_flock_held(config):
             raise AttachError(
                 "parent_flock_held_no_socket",
                 "credential flock not held while waiting for existing parent — "
                 "no gateway is starting",
             )
+        if socket_listening(sock):
+            return
         time.sleep(0.05)
     raise AttachError(
         "listen_path_mismatch",
@@ -74,25 +61,22 @@ def wait_for_parent_socket(config: GatewayConfig) -> None:
 
 
 class GatewayAttachCoordinator:
-    """Single entry for dial-fail recovery and explicit spawn requests."""
+    """Dial-fail recovery: wait for a starting parent, else report none running."""
 
     @staticmethod
-    def resolve_dial_failure(
-        config: GatewayConfig,
-        *,
-        environ: Mapping[str, str] | None = None,
-    ) -> AttachedParent:
-        """Ensure a parent exists after ``GatewayClient`` dial failed."""
+    def resolve_dial_failure(config: GatewayConfig) -> None:
+        """Classify a failed dial; returns once the parent socket accepts.
+
+        The credential flock held means a parent was started by someone else and
+        is not listening yet, so wait (bounded). Otherwise no parent exists:
+        raise ``parent_not_running``. This never starts a process.
+        """
         if config_flock_held(config):
             wait_for_parent_socket(config)
-            return AttachedParent()
-        if config.spawn_policy == "never":
-            raise AttachError(
-                "dial_failed_spawn_disabled",
-                "dial failed and spawn policy is never "
-                "(set RITHMIC_GATEWAY_SPAWN_POLICY=if_missing or start the parent)",
-            )
-        from rithmic_gateway.spawn import spawn_gateway
-
-        proc = spawn_gateway(config, environ=environ, wait_socket=True)
-        return AttachedParent(spawned_proc=proc)
+            return
+        raise AttachError(
+            "parent_not_running",
+            f"no gateway parent is listening at {config.socket_path} and none "
+            f"holds the credential flock; start it with `python -m rithmic_gateway` "
+            f"(the parent needs RITHMIC_PASSWORD, clients do not)",
+        )

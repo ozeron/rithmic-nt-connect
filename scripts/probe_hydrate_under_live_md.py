@@ -4,7 +4,8 @@
 Measures whether a session-scale history window can succeed while live 1m
 intents are active, and whether live bars keep arriving during the Load*.
 
-Uses gateway mode + auto-spawn. Forces Rithmic Test (does not touch Lucid).
+Uses gateway mode; starts its own parent via ``scripts/_gateway_parent.py`` (the
+client library never spawns). Forces Rithmic Test (does not touch Lucid).
 
 Exit codes:
   0 — ran both arms; prints PASS/DENY/FAIL lines (always 0 if measurement OK)
@@ -150,25 +151,16 @@ def _gap_stats(times: list[float]) -> tuple[float, float]:
     return max(gaps), sum(gaps) / len(gaps)
 
 
-def _make_client() -> Any:
-    from rithmic_gateway import GatewayClient, GatewayConfig
+def _gateway_config() -> Any:
     from rithmic_nt_connect.config import SessionConfig
+    from rithmic_nt_connect.gateway_wire import gateway_config_from_session
 
-    session_cfg = SessionConfig.from_env()
-    gcfg = GatewayConfig(
-        user=session_cfg.user,
-        system_name=session_cfg.system_name,
-        url=session_cfg.url,
-        env=session_cfg.env,
-        account_id=session_cfg.account_id or "",
-        fcm_id=session_cfg.fcm_id or "",
-        ib_id=session_cfg.ib_id or "",
-        auth_token=getattr(session_cfg, "gateway_auth_token", None) or "",
-        listen=getattr(session_cfg, "gateway_listen", None),
-        auto_spawn=bool(getattr(session_cfg, "gateway_auto_spawn", True)),
-        gateway_bin=getattr(session_cfg, "gateway_bin", None)
-        or os.environ.get("RITHMIC_GATEWAY_BIN"),
-    )
+    return gateway_config_from_session(SessionConfig.from_env())
+
+
+def _make_client(gcfg: Any) -> Any:
+    from rithmic_gateway import GatewayClient
+
     client = GatewayClient(gcfg, rpc_timeout_sec=60.0)
     client.connect()
     print(
@@ -214,9 +206,17 @@ def main(argv: list[str] | None = None) -> int:
         f"system={os.environ.get('RITHMIC_SYSTEM_NAME')!r} "
         f"url={os.environ.get('RITHMIC_GATEWAY')}"
     )
+    from _gateway_parent import password_from_env, start_parent, stop_parent
+
+    # The client library never spawns: this harness owns the parent's lifetime.
+    parent = None
     try:
-        client_a = _make_client()
+        gcfg = _gateway_config()
+        parent = start_parent(gcfg, password=password_from_env())
+        client_a = _make_client(gcfg)
     except Exception as exc:
+        if parent is not None:
+            stop_parent(parent)
         print(f"SKIP/FAIL connect: {exc}")
         return 2 if "credential" in str(exc).lower() else 1
 
@@ -257,7 +257,7 @@ def main(argv: list[str] | None = None) -> int:
 
         load_client = client_a
         if args.two_peer:
-            client_b = _make_client()
+            client_b = _make_client(gcfg)
             load_client = client_b
             print("two-peer: peer B will Load* while peer A keeps live intent")
 
@@ -318,6 +318,7 @@ def main(argv: list[str] | None = None) -> int:
                 client_b.disconnect()
         with contextlib.suppress(Exception):
             client_a.disconnect()
+        stop_parent(parent)
 
 
 if __name__ == "__main__":

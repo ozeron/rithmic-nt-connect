@@ -1,7 +1,7 @@
 [project]
 name = "rithmic-gateway"
 version = "0.1.0"
-description = "Pure-Python client for rithmic-gateway (unix protobuf RPC + auto-spawn). No Nautilus / maturin."
+description = "Pure-Python client for rithmic-gateway (unix protobuf RPC; attach-only, start the parent with `python -m rithmic_gateway`). No Nautilus / maturin."
 requires-python = ">=3.12"
 license = { text = "Apache-2.0" }
 dependencies = [

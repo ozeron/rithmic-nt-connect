@@ -29,14 +29,14 @@ Legend: **Done** `[x]` · **Partial** `[~]` · **Not started** `[ ]` · `N/A` ou
 
 | Area | Total | Done | Partial | Not started | N/A |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| **Capability matrix** | 21 | 4 | 11 | 0 | 6 |
+| **Capability matrix** | 22 | 4 | 12 | 0 | 6 |
 | **Phase marks (0–9)** | 29 | 15 | 8 | 2 | 4 |
 | **Convention marks** | 18 | 15 | 3 | 0 | 0 |
 | **Close-outs (advertised path)** | 9 | 5 | 2 | 0 | 2 |
 | **Paper path (intraday)** | 8 | 8 | 0 | 0 | 0 |
-| **TOTAL** | 85 | 47 | 24 | 2 | 12 |
+| **TOTAL** | 86 | 47 | 25 | 2 | 12 |
 
-**Implemented:** 81% (`47` done + `24` partial of `73` in-scope marked items (`12` N/A excluded); partial counts as half).
+**Implemented:** 80% (`47` done + `25` partial of `74` in-scope marked items (`12` N/A excluded); partial counts as half).
 
 Not started (real leftover work): Phase 2 definition updates, Phase 7 recovery suite.
 
@@ -83,7 +83,7 @@ Not started (real leftover work): Phase 2 definition updates, Phase 7 recovery s
 
 **Reconnect + MD resubscribe.** Every path that re-establishes the wire re-issues ticker + book + EXTERNAL bar intent through one replay boundary (`replay_subscription_intent`): channel-error resync (`_resync_ticker_subscription` → `reset_ticker` + replay) **and** client lifecycle (`_connect` re-issues remembered intent, clears one-sided BBO accumulators, restarts history poll when bars registered — disconnect→connect previously left live plants with zero subscriptions). Duplicate venue subscribe (`[8] already exists`) is treated as success on replay (history-plant bars survive ticker reset). Gateway typed restore covers ticker/book/bars/PnL/order/brackets after plant drop. Data resync is scoped: direct resets **only** the ticker plant (`reset_ticker_plant`; PnL/order untouched); gateway re-dials only that client via `ResetTickerPlantRequest` (wired both paths, framing-tested). **Live-proven on Rithmic Test 2026-08-24** (`tests/e2e/test_reconnect_live.py`).
 
-**Session gateway (shared login).** Plants/session parity on wire (incl. book unsub, `probe_time_bars`, ensure_order, `resolved_account`). Direct is a process-wide singleton per credential fingerprint (data factory, exec factory, and `connect_market_data_session` share one login; flock taken once); credential flock released when the **last** holder disconnects, so a stopped node no longer blocks a separate process. `session_pb2.py` regenerated reproducibly with uv-pinned protoc (`grpcio-tools==1.71.0` bundles 29.0; `scripts/gen_gateway_proto.py` restores the 5.29.6 marker; byte-identical output). Parent binary reads the same env keys/precedence as the Python clients (`env_keys`: `RITHMIC_GATEWAY`>`RITHMIC_URL`, `RITHMIC_SYSTEM`>`RITHMIC_SYSTEM_NAME`) and refuses a Test/Demo system without an explicit URL (env derived from the system name, as in Python); `RITHMIC_HISTORY_READY_PROBE=0` skips the RC4 probe for accounts without market data (Rithmic Test exec smoke 2026-10-12: exposure Known/complete 10/10). Auto-spawn idle-exit after last client (`RITHMIC_GATEWAY_IDLE_EXIT_SEC`, default 5s via spawn; unset = never for standalone). Shared-consumer Lucid smoke green. Native TLS remote **N/A**. **Wheel:** self-contained — `scripts/build_wheel.sh` bundles `rithmic-gateway` binary + `rithmic_gateway` client into the maturin wheel; `resolve_gateway_bin` prefers `rithmic_gateway/bin/`. **Lake:** market-data-lake hardcodes `GatewayClient` + `load_time_bars_range` (client-side chunks); install `python/` package (no Nautilus).
+**Session gateway (shared login).** Plants/session parity on wire (incl. book unsub, `probe_time_bars`, ensure_order, `resolved_account`). Direct is a process-wide singleton per credential fingerprint (data factory, exec factory, and `connect_market_data_session` share one login; flock taken once); credential flock released when the **last** holder disconnects, so a stopped node no longer blocks a separate process. `session_pb2.py` regenerated reproducibly with uv-pinned protoc (`grpcio-tools==1.71.0` bundles 29.0; `scripts/gen_gateway_proto.py` restores the 5.29.6 marker; byte-identical output). Parent binary reads the same env keys/precedence as the Python clients (`env_keys`: `RITHMIC_GATEWAY`>`RITHMIC_URL`, `RITHMIC_SYSTEM`>`RITHMIC_SYSTEM_NAME`) and refuses a Test/Demo system without an explicit URL (env derived from the system name, as in Python); `RITHMIC_HISTORY_READY_PROBE=0` skips the RC4 probe for accounts without market data (Rithmic Test exec smoke 2026-10-12: exposure Known/complete 10/10). **Attach-only, mux-only clients (2026-10-13, `simplify-gateway-modes`):** the gateway client never spawns the parent and has no `dual` topology; with no parent it fails `parent_not_running` (names the listen path + `python -m rithmic_gateway`), and still waits a bounded `attach_timeout_sec` for a parent whose flock is held. Start the parent explicitly (`python -m rithmic_gateway`, systemd, launchd, Kamal — see ops-runbook); its lifetime is the operator's (`RITHMIC_GATEWAY_IDLE_EXIT_SEC` unset = until SIGTERM; nothing injects 5s any more). Gateway-mode clients are credential-free: `SessionConfig.password` is optional and discarded in gateway mode, only the parent holds `RITHMIC_PASSWORD`; direct mode still requires it. Retired knobs fail fast (`CLIENT_MODE=dual`, `SPAWN_POLICY=if_missing|auto|default`, `AUTO_SPAWN=1` → `ConfigError`; `mux`/`never`/`AUTO_SPAWN=0` accepted as deprecated no-ops). Smokes/e2e start their parent through the harness helper `scripts/_gateway_parent.py`. Shared-consumer smoke was green on Lucid before attach-only; after it, attach to a harness-started parent is verified on Rithmic Test 2026-10-13 (tick delivery unverified: that Test account has no reference data). Native TLS remote **N/A**. **Wheel:** self-contained — `scripts/build_wheel.sh` bundles `rithmic-gateway` binary + `rithmic_gateway` client into the maturin wheel; `resolve_gateway_bin` prefers `rithmic_gateway/bin/`. **Lake:** market-data-lake hardcodes `GatewayClient` + `load_time_bars_range` (client-side chunks); install `python/` package (no Nautilus).
 
 ### Test plan
 
@@ -91,7 +91,7 @@ Not started (real leftover work): Phase 2 definition updates, Phase 7 recovery s
 | --- | --- |
 | `cargo test -p rithmic-plants -p rithmic-gateway -p rithmic-nt-connect` + `pytest -q` | Unit / conversion / gateway framing |
 | `scripts/smoke_lucid_nq.py` | Live MD (exit `2` if no creds) |
-| `scripts/smoke_gateway_shared_ticks.py` | Two consumers (NQ+MNQ) share one `rithmic-gateway` (exit `2` if no creds) |
+| `scripts/smoke_gateway_shared_ticks.py` | Two consumers (NQ+MNQ) share one `rithmic-gateway` the harness starts via `scripts/_gateway_parent.py` (exit `2` if no creds) |
 | `scripts/gateway_tick_consumer.py` | Single-symbol gateway tick consumer (used by shared smoke) |
 | `scripts/verify_live_vs_history.py` | Live ↔ history compare |
 | `scripts/verify_order_dry_run.py` | Order plant connect / subscribe; `--live-place` with `RITHMIC_ENABLE_TRADING=1` + far `--price` (test-plant `app_name` authorized) |

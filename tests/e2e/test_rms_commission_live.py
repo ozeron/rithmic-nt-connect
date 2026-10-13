@@ -6,7 +6,8 @@ works and returns the typed row shape on both connect modes:
 
 - **direct session**: ``load_product_rms_info`` / ``load_account_rms_info``
   through the PyO3 plants session (order-plant login, read-only query).
-- **gateway wire**: ``GatewayClient`` over a spawned parent. The RPC rides the
+- **gateway wire**: ``GatewayClient`` over a parent the harness starts
+  (``scripts/_gateway_parent.py``; the client never spawns). The RPC rides the
   order-plant trading gate, so with ``RITHMIC_ENABLE_TRADING=1`` the fetch
   round-trips and without it the parent must refuse with ``trading_disabled``.
 
@@ -28,9 +29,10 @@ import contextlib
 import os
 
 import pytest
-from rithmic_gateway import GatewayClient, GatewayConfig, GatewayError
-from rithmic_gateway.spawn import resolve_gateway_bin
+from _gateway_parent import running_parent
+from rithmic_gateway import GatewayClient, GatewayError
 from rithmic_nt_connect.config import env_truthy, session_config_from_explicit_test_env
+from rithmic_nt_connect.gateway_wire import gateway_config_from_session
 
 
 def _assert_product_rows(rows: list[dict[str, object]]) -> None:
@@ -74,54 +76,43 @@ def test_gateway_rms_round_trip(
         )
 
     session_cfg = session_config_from_explicit_test_env()
-    # The parent needs the password + trading flag in its spawn env; honor an
-    # explicit process-env override so the command line can enable the fetch
-    # without editing the test env file.
+    # Only the parent holds the password; it also needs the trading flag in its
+    # env. Honor an explicit process-env override so the command line can enable
+    # the fetch without editing the test env file.
     trading = env_truthy(
         os.environ.get("RITHMIC_ENABLE_TRADING")
         or (test_env or {}).get("RITHMIC_ENABLE_TRADING")
     )
-    spawn_env: dict[str, str] = {}
-    if (test_env or {}).get("RITHMIC_PASSWORD"):
-        spawn_env["RITHMIC_PASSWORD"] = str(test_env["RITHMIC_PASSWORD"])
-    if trading:
-        spawn_env["RITHMIC_ENABLE_TRADING"] = "1"
+    parent_extra_env = {"RITHMIC_ENABLE_TRADING": "1"} if trading else {}
+    password = str((test_env or {}).get("RITHMIC_PASSWORD") or "")
+    if not password:
+        pytest.skip("test env has no RITHMIC_PASSWORD for the gateway parent")
 
-    gcfg = GatewayConfig(
-        user=session_cfg.user,
-        system_name=session_cfg.system_name,
-        url=session_cfg.url,
-        env=str(session_cfg.env),
-        account_id=session_cfg.account_id or "",
-        fcm_id=session_cfg.fcm_id or "",
-        ib_id=session_cfg.ib_id or "",
-        auth_token=getattr(session_cfg, "gateway_auth_token", None) or "",
-        listen=getattr(session_cfg, "gateway_listen", None),
-        auto_spawn=True,
-        gateway_bin=resolve_gateway_bin(),
-        spawn_environ=spawn_env,
-    )
+    gcfg = gateway_config_from_session(session_cfg)
 
-    client = GatewayClient(gcfg)
-    try:
-        client.connect()
-    except GatewayError as exc:
-        pytest.fail(f"gateway connect failed: {exc.code}: {exc.message}")
+    with running_parent(gcfg, password=password, extra_env=parent_extra_env):
+        client = GatewayClient(gcfg)
+        try:
+            client.connect()
+        except GatewayError as exc:
+            pytest.fail(f"gateway connect failed: {exc.code}: {exc.message}")
 
-    try:
-        if trading:
-            assert client.trading_enabled
-            product = client.load_product_rms_info()
-            _assert_product_rows(product)
-            assert product, "expected at least one product RMS row on the test account"
-            account = client.load_account_rms_info()
-            _assert_account_rows(account)
-        else:
-            # Gate honesty: without parent trading the order-plant RPC is
-            # refused with a clean typed error, never a hang or crash.
-            with pytest.raises(GatewayError) as excinfo:
-                client.load_product_rms_info()
-            assert excinfo.value.code == "trading_disabled"
-    finally:
-        with contextlib.suppress(Exception):
-            client.disconnect()
+        try:
+            if trading:
+                assert client.trading_enabled
+                product = client.load_product_rms_info()
+                _assert_product_rows(product)
+                assert product, (
+                    "expected at least one product RMS row on the test account"
+                )
+                account = client.load_account_rms_info()
+                _assert_account_rows(account)
+            else:
+                # Gate honesty: without parent trading the order-plant RPC is
+                # refused with a clean typed error, never a hang or crash.
+                with pytest.raises(GatewayError) as excinfo:
+                    client.load_product_rms_info()
+                assert excinfo.value.code == "trading_disabled"
+        finally:
+            with contextlib.suppress(Exception):
+                client.disconnect()

@@ -107,21 +107,17 @@ def test_gateway_create_session_returns_fresh_wire_session(
         return obj
 
     monkeypatch.setattr(gw, "create_gateway_wire_session", _fake_gateway)
-    cfg = SessionConfig(
-        user="u",
-        password="p",
-        connect_mode=ConnectMode.GATEWAY,
-        gateway_client_mode="mux",
-    )
+    cfg = SessionConfig(user="u", connect_mode=ConnectMode.GATEWAY)
     a = create_session(cfg)
     b = create_session(cfg)
     assert a is not b
     assert len(created) == 2
 
 
-def test_gateway_dual_mode_create_session_isolated(
+def test_gateway_create_session_shares_one_runtime_socket(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Mux is the only topology: data and exec facades share one runtime."""
     from typing import Any, cast
 
     from rithmic_gateway.runtime import GatewayRuntimeRegistry
@@ -131,17 +127,15 @@ def test_gateway_dual_mode_create_session_isolated(
     GatewayRuntimeRegistry.reset_for_tests()
     monkeypatch.delenv("RITHMIC_GATEWAY_CLIENT_MODE", raising=False)
     cfg = SessionConfig(
-        user="u-dual-factory",
-        password="p",
+        user="u-mux-factory",
         connect_mode=ConnectMode.GATEWAY,
-        gateway_listen=f"unix:///tmp/rgw-dual-factory-{id(object())}.sock",
-        gateway_auto_spawn=False,
-        gateway_client_mode="dual",
+        gateway_listen=f"unix:///tmp/rgw-mux-factory-{id(object())}.sock",
     )
     a = create_session(cfg)
     b = create_session(cfg)
     assert a is not b
     assert cast(Any, a)._client is not cast(Any, b)._client
+    assert cast(Any, a)._client._runtime is cast(Any, b)._client._runtime
     GatewayRuntimeRegistry.reset_for_tests()
 
 

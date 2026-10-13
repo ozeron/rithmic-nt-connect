@@ -6,7 +6,7 @@ import contextlib
 import threading
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
-from rithmic_nt_connect.config import ConnectMode, SessionConfig
+from rithmic_nt_connect.config import ConfigError, ConnectMode, SessionConfig
 from rithmic_nt_connect.errors import AlreadyConnectedError
 
 if TYPE_CHECKING:
@@ -195,6 +195,8 @@ def create_rust_session(
     plant into the set (``request_plants`` attaches it even when already
     connected).
     """
+    if session.password is None:
+        raise ConfigError("direct mode requires a password (RITHMIC_PASSWORD)")
     key = _session_cache_key(session)
     existing = cast(_FlockedDirectSession | None, _SESSION_CACHE.get(key))
     if existing is not None:
@@ -565,10 +567,10 @@ def create_session(
     Direct is a process-wide singleton per credential fingerprint (see
     ``create_rust_session``): the data factory, exec factory, and
     ``connect_market_data_session`` share one in-process Rithmic login.
-    Gateway dials ``rithmic-gateway`` and never opens plants locally. Each
-    call returns a **fresh** ``GatewayWireSession`` facade. In ``mux`` mode
-    (default) data and exec factories share one ``GatewayRuntime`` socket;
-    ``dual`` mode gives each factory its own ``GatewayClient`` unix peer.
+    Gateway attaches to an explicitly started ``rithmic-gateway`` parent (it
+    never spawns one, never holds the password) and never opens plants locally.
+    Each call returns a **fresh** ``GatewayWireSession`` facade; data and exec
+    factories share one ``GatewayRuntime`` socket.
     """
     if session.connect_mode == ConnectMode.GATEWAY:
         from rithmic_nt_connect.gateway_wire import create_gateway_wire_session

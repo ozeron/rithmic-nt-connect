@@ -1,7 +1,7 @@
 # Ops runbook
 
-1. Close MotiveWave / R|Trader whenever **any** process will hold the Rithmic login (direct plants **or** `rithmic-gateway` parent — cold-start auto-spawn counts). Shared gateway only multiplexes **gateway clients**, not MotiveWave.
-2. Copy `.env.example` → `.env` and set `RITHMIC_USER` / `RITHMIC_PASSWORD`.
+1. Close MotiveWave / R|Trader whenever **any** process will hold the Rithmic login (direct plants **or** a `rithmic-gateway` parent). Shared gateway only multiplexes **gateway clients**, not MotiveWave.
+2. Copy `.env.example` → `.env` and set `RITHMIC_USER` / `RITHMIC_PASSWORD`. Only direct mode and the gateway **parent** need the password; gateway-mode clients never read, hold, or send it.
 3. Install system `protoc` (`protobuf-compiler` / `brew install protobuf`) if missing. The **Rust** gateway build invokes `protoc` from PATH (prost-build). The **Python** `session_pb2.py` gencode is pinned instead: it is regenerated from `proto/rithmic_gateway/v1/session.proto` with the uv dev dependency `grpcio-tools==1.71.0` (bundles protoc 29.0) via `uv run python scripts/gen_gateway_proto.py`, which restores the repo's `5.29.6` gencode marker (protoc 29.0 and 29.6 emit byte-identical gencode except the version header). The script fails loudly if the gencode shape drifts.
 4. Sync + build extension: `uv sync --extra dev && uv run maturin develop`
 5. Unit tests: `cargo test -p rithmic-plants -p rithmic-gateway -p rithmic-nt-connect && uv run pytest -q`
@@ -77,8 +77,8 @@ Closed (kept for archaeology — do not re-open without new venue evidence):
 
 The wheel carries the adapter, the `rithmic_gateway` pure-Python client, **and** the
 `rithmic-gateway` native binary in one artifact — consumers `pip install` it and the
-binary is auto-resolved from `rithmic_gateway/bin/`, no `RITHMIC_GATEWAY_BIN`, no
-`cargo build`, no `target/` on their disk.
+binary is auto-resolved from `rithmic_gateway/bin/` by `python -m rithmic_gateway`, no
+`RITHMIC_GATEWAY_BIN`, no `cargo build`, no `target/` on their disk.
 
 ```bash
 scripts/build_wheel.sh            # cargo build -p rithmic-gateway --release, bundle, maturin build
@@ -101,13 +101,14 @@ Unset or any other value → `ConfigError` in the **adapter**. There is no silen
 **market-data-lake** always uses the gateway client (ignores this key).
 
 ```bash
-# Preferred for live + lake: long-lived parent (owns flock + plants)
-# Leave RITHMIC_GATEWAY_IDLE_EXIT_SEC unset/-1 so the parent stays up.
+# Start the parent explicitly: it owns the flock + plants and needs RITHMIC_PASSWORD
+# in ITS environment. Gateway clients never spawn it and never hold the password.
+# Leave RITHMIC_GATEWAY_IDLE_EXIT_SEC unset/-1 so the parent stays up (service default).
+python -m rithmic_gateway     # installed wheel: execs the bundled binary, env unchanged
+# From a checkout (no wheel):
 cargo build -p rithmic-gateway --release
-export RITHMIC_GATEWAY_BIN=$PWD/target/release/rithmic-gateway
-cargo run -p rithmic-gateway --bin rithmic-gateway
-# or: set RITHMIC_GATEWAY_AUTO_SPAWN=1 and let the first client auto-spawn
-#     (auto-spawn injects IDLE_EXIT_SEC=5 — fine for lake-only; prefer manual parent with live)
+RITHMIC_GATEWAY_BIN=$PWD/target/release/rithmic-gateway python -m rithmic_gateway
+# (or run the binary directly: cargo run -p rithmic-gateway --bin rithmic-gateway)
 
 # Child / lake (no maturin / no Nautilus):
 #   cd python && uv pip install -e .
@@ -118,13 +119,11 @@ cargo run -p rithmic-gateway --bin rithmic-gateway
 #   file is one login — the binary used to read only RITHMIC_URL and sent a
 #   RITHMIC_GATEWAY test login to production.
 # Listen socket:        RITHMIC_GATEWAY_LISTEN=unix://…  (never use as WSS URL)
-# Optional: RITHMIC_GATEWAY_SPAWN_POLICY=if_missing (local dev) or never (Kamal/live)
-# RITHMIC_GATEWAY_CLIENT_MODE=mux (default) or dual (rollback)
-# RITHMIC_GATEWAY_AUTO_SPAWN=0 is an alias for SPAWN_POLICY=never
-# When a manual/systemd/Kamal gateway accessory is already running, set
-# RITHMIC_GATEWAY_SPAWN_POLICY=never (or RITHMIC_GATEWAY_AUTO_SPAWN=0) on book/lake
-# clients so they dial-only attach (never Popen a second parent). if_missing still
-# waits for an existing parent when the credential flock is held before spawning.
+# Clients are attach-only and mux-only: one socket per process and credential
+# fingerprint, shared by the data and exec factories. Retired client knobs fail fast:
+#   RITHMIC_GATEWAY_CLIENT_MODE=dual, RITHMIC_GATEWAY_SPAWN_POLICY=if_missing|auto|default
+#   and RITHMIC_GATEWAY_AUTO_SPAWN=1 raise ConfigError (start the parent explicitly).
+#   mux / never / AUTO_SPAWN=0 are accepted as deprecated no-ops (one warning); delete them.
 # Trading / cancel_all are parent-gated (independent toggles):
 #   RITHMIC_ENABLE_TRADING=1          # place / modify / cancel / order updates
 #   RITHMIC_GATEWAY_CANCEL_ALL=1      # plant-wide cancel_all panic button (does not require trading)
@@ -133,9 +132,11 @@ cargo run -p rithmic-gateway --bin rithmic-gateway
 # Idle-exit after last client (parent lifetime):
 #   RITHMIC_GATEWAY_IDLE_EXIT_SEC unset/-1 = stay until SIGTERM (manual/standalone)
 #   0 = exit immediately when peers hit 0; N = grace seconds
-#   Auto-spawn injects IDLE_EXIT_SEC=5 unless already set
+#   Only the parent's own environment sets this; the launcher and clients never do.
+#   (The test harness helper scripts/_gateway_parent.py defaults it to 60 so a killed
+#   smoke cannot orphan a parent holding the login.)
 # Clients refuse a dialable unix path unless the credential flock is held
-# (impostor protection); auto-spawn also requires flock+listen before returning.
+# (impostor protection).
 #
 # Wide history: GatewayClient.load_time_bars_range chunks calendar windows
 # (~4h for 1m bars) so each unix RPC stays within timeout/frame limits.
@@ -169,16 +170,51 @@ cargo run -p rithmic-gateway --bin rithmic-gateway
 # never answer the probe; RITHMIC_HISTORY_READY_PROBE=0 skips it so the order and
 # PnL plants are still reachable. Never set it for a node that hydrates.
 #
-# Daemonize a long-lived live parent (agent shells / nohup without a new
-# session die on SIGHUP when the parent Cursor/tool shell exits):
-#   python -c "import os,subprocess; os.environ.setdefault('RITHMIC_GATEWAY_IDLE_EXIT_SEC','-1'); \
-#     subprocess.Popen([os.environ['RITHMIC_GATEWAY_BIN']], start_new_session=True, ...)"
-# Or: setsid / systemd / launchd with RITHMIC_GATEWAY_IDLE_EXIT_SEC=-1.
-# Auto-spawn already uses start_new_session=True but injects IDLE_EXIT_SEC=5
-# unless you set -1 first — prefer an explicit warm parent for live.
+# Keep a long-lived live parent alive under a service manager (agent shells / nohup
+# without a new session die on SIGHUP when the parent shell exits): see "Running the
+# parent as a service" below.
 ```
 
-If a second direct/parent process hits the same `user|system|url|env` flock, it fails locally before a second Rithmic login. **Attach path:** dial fail + flock held → wait for existing parent socket (no second `Popen`); dial fail + flock free → auto-spawn. **Wrong listen path** (`RITHMIC_GATEWAY_LISTEN` ≠ running parent) looks like flock held but dial never succeeds — align paths on both sides. Default sock/lock paths live under `XDG_RUNTIME_DIR` or a private `$TMPDIR/rgw-$UID/` directory (short names so macOS `sockaddr_un` fits); oversized paths clamp to `/tmp/rgw-$UID/<hash8>.sock` (private dir, not a bare sticky `/tmp` file).
+## Running the parent as a service
+
+The parent is started by its operator, never by a client. `python -m rithmic_gateway`
+resolves the bundled binary (`RITHMIC_GATEWAY_BIN`, then `rithmic_gateway/bin/`, then
+`PATH`/`target/`) and `exec`s it with the caller's environment: it does not detach and
+does not set `RITHMIC_GATEWAY_IDLE_EXIT_SEC`. Put the credentials in the unit's
+environment (the parent needs `RITHMIC_PASSWORD`; clients do not). If no binary
+resolves it exits `2` naming `RITHMIC_GATEWAY_BIN`.
+
+**systemd** (`~/.config/systemd/user/rithmic-gateway.service`):
+
+```ini
+[Unit]
+Description=Rithmic gateway parent (one Rithmic login)
+
+[Service]
+# RITHMIC_USER, RITHMIC_PASSWORD, RITHMIC_SYSTEM_NAME, RITHMIC_URL, ...
+EnvironmentFile=%h/.config/rithmic-gateway.env
+ExecStart=/usr/bin/env python -m rithmic_gateway
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+**launchd** (`~/Library/LaunchAgents/com.example.rithmic-gateway.plist`): `ProgramArguments`
+= `[<venv>/bin/python, -m, rithmic_gateway]`, credentials under `EnvironmentVariables`,
+`KeepAlive` true.
+
+**Kamal accessory**: run the same command as the accessory `cmd`
+(`python -m rithmic_gateway`), pass the secrets as accessory `env.secret`, and mount
+the runtime directory so book and lake containers see the same
+`RITHMIC_GATEWAY_LISTEN` socket path. Clients carry no password and fail with
+`parent_not_running` until the accessory is up.
+
+**`parent_not_running`**: a client dialed `RITHMIC_GATEWAY_LISTEN`, found no listener,
+and no process holds the credential flock. The error names the listen path and the
+launcher command. Start the parent (above) and retry; do not expect the client to do it.
+
+If a second direct/parent process hits the same `user|system|url|env` flock, it fails locally before a second Rithmic login. **Attach path:** dial fail + flock held → bounded wait (`attach_timeout_sec`, default 90s) for the existing parent socket; dial fail + flock free → `parent_not_running` (the client never spawns). Flock released while waiting → `parent_flock_held_no_socket`. **Wrong listen path** (`RITHMIC_GATEWAY_LISTEN` ≠ running parent) looks like flock held but dial never succeeds — align paths on both sides. Default sock/lock paths live under `XDG_RUNTIME_DIR` or a private `$TMPDIR/rgw-$UID/` directory (short names so macOS `sockaddr_un` fits); oversized paths clamp to `/tmp/rgw-$UID/<hash8>.sock` (private dir, not a bare sticky `/tmp` file).
 
 Remote / Docker / TLS: [`gateway-remote.md`](gateway-remote.md) (v1 local unix; v1.5 tunnel recipe; v2 TLS not implemented).
 

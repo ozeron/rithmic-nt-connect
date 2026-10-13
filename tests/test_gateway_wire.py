@@ -1,9 +1,9 @@
-"""Tests for gateway WireSession adapter and dual-mode create_session."""
+"""Tests for the gateway WireSession adapter and gateway-mode create_session."""
 
 from __future__ import annotations
 
 import inspect
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from rithmic_gateway.types import AccountRmsInfo, ProductRmsInfo
@@ -53,13 +53,10 @@ def test_connect_mode_from_env() -> None:
             "RITHMIC_PASSWORD": "pw",
             "RITHMIC_CONNECT_MODE": "gateway",
             "RITHMIC_GATEWAY_LISTEN": "unix:///tmp/rgw.sock",
-            "RITHMIC_GATEWAY_AUTO_SPAWN": "0",
         }
     )
     assert cfg.connect_mode is ConnectMode.GATEWAY
     assert cfg.gateway_listen == "unix:///tmp/rgw.sock"
-    assert cfg.gateway_auto_spawn is False
-    assert cfg.gateway_spawn_policy == "never"
 
 
 def test_connect_mode_missing_from_env() -> None:
@@ -77,14 +74,12 @@ def test_gateway_config_fingerprint() -> None:
     gcfg = gateway_config_from_session(cfg)
     assert gcfg.user == "alice"
     assert gcfg.listen == "unix:///tmp/x.sock"
-    assert gcfg.auto_spawn is True
 
 
 def test_create_session_gateway_returns_adapter_without_pyo3() -> None:
     cfg = _cfg(
         connect_mode=ConnectMode.GATEWAY,
         gateway_listen="unix:///tmp/no-such.sock",
-        gateway_auto_spawn=False,
     )
     session = create_session(cfg)
     assert isinstance(session, GatewayWireSession)
@@ -161,7 +156,7 @@ def test_gateway_wire_restore_covers_every_intent_channel() -> None:
     ``reconnect.rs::restore_plan_covers_every_intent_channel``. Order and
     bracket intents both ride the order-plant stream."""
     inner = _RecordingGatewayClient()
-    session = GatewayWireSession(inner)  # type: ignore[arg-type]
+    session = GatewayWireSession(cast(Any, inner))
 
     # Plant drop -> the adapter's resync sequence re-arms each stream.
     session.disconnect_order_plant()
@@ -198,7 +193,7 @@ def test_gateway_wire_forwards_rms_fetches() -> None:
     """Parity: the gateway façade forwards the RMS fetch RPCs to the client
     (commission rates ride the same wire surface on both modes)."""
     inner = _RecordingGatewayClient()
-    session = GatewayWireSession(inner)  # type: ignore[arg-type]
+    session = GatewayWireSession(cast(Any, inner))
 
     product = session.load_product_rms_info()
     account = session.load_account_rms_info()
@@ -211,32 +206,14 @@ def test_gateway_wire_forwards_rms_fetches() -> None:
     ]
 
 
-def test_gateway_wire_reset_ticker_prefers_plant_rpc() -> None:
-    """Gateway ``reset_ticker`` uses plant RPC (L2) before transport reconnect."""
+def test_gateway_wire_reset_ticker_uses_plant_rpc() -> None:
+    """Gateway ``reset_ticker`` is the plant RPC; there is no dual re-dial fallback."""
     inner = _RecordingGatewayClient()
-    session = GatewayWireSession(inner)  # type: ignore[arg-type]
+    session = GatewayWireSession(cast(Any, inner))
 
     session.reset_ticker()
 
     assert inner.calls == [("reset_ticker_plant", ())]
-
-
-def test_gateway_wire_reset_ticker_falls_back_to_transport_on_plant_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    inner = _RecordingGatewayClient()
-    session = GatewayWireSession(inner)  # type: ignore[arg-type]
-
-    def _boom() -> None:
-        from rithmic_gateway.client import GatewayError
-
-        raise GatewayError("plant_reset_failed", "mock plant reset failure")
-
-    monkeypatch.setattr(inner, "reset_ticker_plant", _boom)
-
-    session.reset_ticker()
-
-    assert inner.calls == [("disconnect", ()), ("connect", ())]
 
 
 def test_gateway_wire_forwards_reset_ticker_plant_rpc() -> None:
@@ -244,8 +221,28 @@ def test_gateway_wire_forwards_reset_ticker_plant_rpc() -> None:
     direct path has (the adapter's own gateway resync prefers the client-level
     ``reset_ticker``, but the surface must not drift)."""
     inner = _RecordingGatewayClient()
-    session = GatewayWireSession(inner)  # type: ignore[arg-type]
+    session = GatewayWireSession(cast(Any, inner))
 
     session.reset_ticker_plant()
 
     assert inner.calls == [("reset_ticker_plant", ())]
+
+
+def test_gateway_wire_reset_ticker_surfaces_plant_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed plant reset is an error, not a detach + re-dial (mux only)."""
+    from rithmic_gateway.client import GatewayError
+
+    inner = _RecordingGatewayClient()
+    session = GatewayWireSession(cast(Any, inner))
+
+    def _boom() -> None:
+        raise GatewayError("plant_reset_failed", "mock plant reset failure")
+
+    monkeypatch.setattr(inner, "reset_ticker_plant", _boom)
+
+    with pytest.raises(GatewayError, match="plant_reset_failed"):
+        session.reset_ticker()
+
+    assert inner.calls == []

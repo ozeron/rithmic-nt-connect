@@ -1,4 +1,4 @@
-"""Unit tests for spawn resolve, env aliases, and history window chunking."""
+"""Unit tests for binary resolve, env aliases, and history window chunking."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from rithmic_gateway.binary import GatewayBinaryError, resolve_gateway_bin
 from rithmic_gateway.client import GatewayClient
 from rithmic_gateway.config import GatewayConfig
 from rithmic_gateway.history_window import (
@@ -16,7 +17,6 @@ from rithmic_gateway.history_window import (
     dedupe_bars_by_marker,
     window_slices,
 )
-from rithmic_gateway.spawn import SpawnError, resolve_gateway_bin, spawn_gateway
 
 
 def test_from_env_prefers_gateway_and_system_aliases() -> None:
@@ -27,12 +27,10 @@ def test_from_env_prefers_gateway_and_system_aliases() -> None:
             "RITHMIC_URL": "wss://legacy.example:443",
             "RITHMIC_SYSTEM": "LucidTrading",
             "RITHMIC_SYSTEM_NAME": "OtherSystem",
-            "RITHMIC_GATEWAY_AUTO_SPAWN": "0",
         }
     )
     assert cfg.url == "wss://preferred.example:443"
     assert cfg.system_name == "LucidTrading"
-    assert cfg.auto_spawn is False
 
 
 def test_from_env_accepts_username_alias() -> None:
@@ -57,121 +55,6 @@ def test_from_env_never_treats_listen_as_wss() -> None:
     assert cfg.listen == "unix:///tmp/rgw-test.sock"
 
 
-def test_spawn_environ_password_wins_over_stale_env(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    bin_path = tmp_path / "rithmic-gateway"
-    bin_path.write_text("#!/bin/sh\n")
-    bin_path.chmod(0o755)
-    captured: dict[str, str] = {}
-
-    class _Proc:
-        pid = 99
-        returncode = None
-        stderr = None
-
-        def poll(self) -> int | None:
-            return None
-
-        def terminate(self) -> None:
-            pass  # Stub: spawn tests never trigger graceful shutdown.
-
-    def _popen(*_a: Any, **kwargs: Any) -> _Proc:
-        captured.update(kwargs.get("env") or {})
-        return _Proc()
-
-    monkeypatch.setattr("rithmic_gateway.spawn.subprocess.Popen", _popen)
-    cfg = GatewayConfig(
-        user="u",
-        system_name="LucidTrading",
-        url="wss://from-config.example",
-        env="Live",
-        listen=f"unix://{tmp_path / 'g.sock'}",
-        gateway_bin=str(bin_path),
-        auto_spawn=True,
-        spawn_environ={"RITHMIC_PASSWORD": "fresh-from-creds"},
-    )
-    spawn_gateway(
-        cfg,
-        wait_socket=False,
-        environ={
-            "RITHMIC_USER": "u",
-            "RITHMIC_PASSWORD": "stale-process-env",
-        },
-    )
-    assert captured["RITHMIC_PASSWORD"] == "fresh-from-creds"
-
-
-def test_spawn_missing_password_raises(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    bin_path = tmp_path / "rithmic-gateway"
-    bin_path.write_text("#!/bin/sh\n")
-    bin_path.chmod(0o755)
-    monkeypatch.setattr(
-        "rithmic_gateway.spawn.subprocess.Popen",
-        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("must not spawn")),
-    )
-    cfg = GatewayConfig(
-        user="u",
-        system_name="LucidTrading",
-        url="wss://example",
-        env="Live",
-        listen=f"unix://{tmp_path / 'g.sock'}",
-        gateway_bin=str(bin_path),
-    )
-    with pytest.raises(SpawnError, match="RITHMIC_PASSWORD"):
-        spawn_gateway(cfg, wait_socket=False, environ={"RITHMIC_USER": "u"})
-
-
-def test_spawn_overwrites_conflicting_url(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    bin_path = tmp_path / "rithmic-gateway"
-    bin_path.write_text("#!/bin/sh\n")
-    bin_path.chmod(0o755)
-    captured: dict[str, str] = {}
-
-    class _Proc:
-        pid = 99
-        returncode = None
-        stderr = None
-
-        def poll(self) -> int | None:
-            return None
-
-        def terminate(self) -> None:
-            pass  # Stub: spawn tests never trigger graceful shutdown.
-
-    def _popen(*_a: Any, **kwargs: Any) -> _Proc:
-        captured.update(kwargs.get("env") or {})
-        return _Proc()
-
-    monkeypatch.setattr("rithmic_gateway.spawn.subprocess.Popen", _popen)
-    cfg = GatewayConfig(
-        user="u",
-        system_name="LucidTrading",
-        url="wss://from-config.example",
-        env="Live",
-        listen=f"unix://{tmp_path / 'g.sock'}",
-        gateway_bin=str(bin_path),
-        auto_spawn=True,
-    )
-    spawn_gateway(
-        cfg,
-        wait_socket=False,
-        environ={
-            "RITHMIC_USER": "u",
-            "RITHMIC_PASSWORD": "unit-test-secret-zz9",
-            "RITHMIC_URL": "wss://stale-env.example",
-            "RITHMIC_SYSTEM_NAME": "StaleSystem",
-        },
-    )
-    assert captured["RITHMIC_URL"] == "wss://from-config.example"
-    assert captured["RITHMIC_SYSTEM_NAME"] == "LucidTrading"
-    assert captured["RITHMIC_PASSWORD"] == "unit-test-secret-zz9"
-
-
 def test_resolve_gateway_bin_finds_cargo_target(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -183,8 +66,8 @@ def test_resolve_gateway_bin_finds_cargo_target(
     (tmp_path / "crates").mkdir()
     monkeypatch.delenv("RITHMIC_GATEWAY_BIN", raising=False)
     monkeypatch.delenv("CARGO_TARGET_DIR", raising=False)
-    monkeypatch.setattr("rithmic_gateway.spawn.shutil.which", lambda _n: None)
-    monkeypatch.setattr("rithmic_gateway.spawn._bin_search_starts", lambda: [tmp_path])
+    monkeypatch.setattr("rithmic_gateway.binary.shutil.which", lambda _n: None)
+    monkeypatch.setattr("rithmic_gateway.binary._bin_search_starts", lambda: [tmp_path])
     found = resolve_gateway_bin()
     assert Path(found).resolve() == release.resolve()
 
@@ -201,9 +84,9 @@ def test_resolve_gateway_bin_skips_non_executable_target(
     (tmp_path / "crates").mkdir()
     monkeypatch.delenv("RITHMIC_GATEWAY_BIN", raising=False)
     monkeypatch.delenv("CARGO_TARGET_DIR", raising=False)
-    monkeypatch.setattr("rithmic_gateway.spawn.shutil.which", lambda _n: None)
-    monkeypatch.setattr("rithmic_gateway.spawn._bin_search_starts", lambda: [tmp_path])
-    with pytest.raises(SpawnError, match="RITHMIC_GATEWAY_BIN"):
+    monkeypatch.setattr("rithmic_gateway.binary.shutil.which", lambda _n: None)
+    monkeypatch.setattr("rithmic_gateway.binary._bin_search_starts", lambda: [tmp_path])
+    with pytest.raises(GatewayBinaryError, match="RITHMIC_GATEWAY_BIN"):
         resolve_gateway_bin()
 
 
@@ -212,9 +95,9 @@ def test_resolve_gateway_bin_missing_mentions_env(
 ) -> None:
     monkeypatch.delenv("RITHMIC_GATEWAY_BIN", raising=False)
     monkeypatch.delenv("CARGO_TARGET_DIR", raising=False)
-    monkeypatch.setattr("rithmic_gateway.spawn.shutil.which", lambda _n: None)
-    monkeypatch.setattr("rithmic_gateway.spawn._bin_search_starts", lambda: [tmp_path])
-    with pytest.raises(SpawnError, match="RITHMIC_GATEWAY_BIN"):
+    monkeypatch.setattr("rithmic_gateway.binary.shutil.which", lambda _n: None)
+    monkeypatch.setattr("rithmic_gateway.binary._bin_search_starts", lambda: [tmp_path])
+    with pytest.raises(GatewayBinaryError, match="RITHMIC_GATEWAY_BIN"):
         resolve_gateway_bin()
 
 
@@ -263,7 +146,6 @@ def test_load_time_bars_range_chunks(monkeypatch: pytest.MonkeyPatch) -> None:
         system_name="LucidTrading",
         url="wss://example",
         listen="unix:///tmp/rgw-unit-range.sock",
-        auto_spawn=False,
         attest_flock=False,
     )
     client = GatewayClient(cfg)
@@ -306,7 +188,6 @@ def test_load_time_bars_range_async(monkeypatch: pytest.MonkeyPatch) -> None:
         system_name="LucidTrading",
         url="wss://example",
         listen="unix:///tmp/rgw-unit-range-async.sock",
-        auto_spawn=False,
         attest_flock=False,
     )
     client = GatewayClient(cfg)

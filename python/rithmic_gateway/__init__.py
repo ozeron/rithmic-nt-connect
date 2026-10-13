@@ -1,6 +1,9 @@
 """Lake-friendly Rithmic gateway client (no Nautilus, no maturin).
 
-Talks plant-semantic protobuf over a unix socket to ``rithmic-gateway``.
+Talks plant-semantic protobuf over a unix socket to ``rithmic-gateway``. The
+client only attaches to a parent that was started explicitly
+(``python -m rithmic_gateway``, a service manager, or a test harness); it never
+spawns one and never holds the Rithmic password.
 
 ``GatewayClient`` is imported lazily so ``direct`` plant sessions can take
 the credential flock without loading the protobuf gencode at all. The
@@ -17,6 +20,7 @@ from __future__ import annotations
 from typing import Any
 
 from rithmic_gateway.attach import wait_for_parent_socket
+from rithmic_gateway.binary import resolve_gateway_bin
 from rithmic_gateway.config import GatewayConfig
 from rithmic_gateway.flock import SessionLock, SessionLockError, session_flock_held
 from rithmic_gateway.history_window import (
@@ -28,10 +32,6 @@ from rithmic_gateway.history_window import (
     window_slices,
 )
 from rithmic_gateway.live_md import wait_until_live_md_clear
-from rithmic_gateway.spawn import (
-    resolve_gateway_bin,
-    spawn_gateway,
-)
 
 __all__ = [
     "BAR_TYPE_DAILY",
@@ -46,7 +46,6 @@ __all__ = [
     "bar_slice_secs",
     "resolve_gateway_bin",
     "session_flock_held",
-    "spawn_gateway",
     "wait_for_parent_socket",
     "wait_until_live_md_clear",
     "window_slices",
