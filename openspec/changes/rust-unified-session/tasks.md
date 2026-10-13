@@ -42,7 +42,7 @@
 
 - [x] 5.1 Add `RITHMIC_GATEWAY_CLIENT=rust|python` to `create_session` (default `python`); route `rust` through the PyO3 class in gateway mode
 - [x] 5.2 Run the shared harness against both the Rust client and the Python lake client; both pass the same scenarios
-- [ ] 5.3 Live verification on Rithmic Test, gateway mode, `rust` selector, no live place, MotiveWave / R|Trader closed: `scripts/smoke_gateway_shared_ticks.py`, `tests/e2e/test_reconnect_live.py`, `tests/e2e/test_rms_commission_live.py`
+- [ ] 5.3 Live verification on Rithmic Test, gateway mode, `rust` selector, no live place, MotiveWave / R|Trader closed: `scripts/smoke_gateway_shared_ticks.py`, `tests/e2e/test_reconnect_live.py`, `tests/e2e/test_rms_commission_live.py`. **Partial (2026-10-13):** verified live with the Rust client: attach to a harness-started parent, handshake, typed `trading_disabled` gate, typed Rithmic errors through the order plant (`[13] permission denied` on RMS and order updates, identical for the Python client), recovery from a real parent restart (`tests/e2e/test_gateway_live.py`), `parent_not_running`. NOT verified: tick delivery and the reconnect smoke — the Rithmic Test account has no reference data and fails the history-ready probe even in direct mode. Needs a market-data account.
 - [ ] 5.4 Flip the default to `rust`; keep `python` selector for one release
 
 ## 6. Remove the Python gateway path from the adapter

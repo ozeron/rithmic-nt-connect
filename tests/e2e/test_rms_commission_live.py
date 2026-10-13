@@ -30,7 +30,9 @@ import os
 
 import pytest
 from _gateway_parent import running_parent
+from conftest import parent_trading_env
 from rithmic_gateway import GatewayClient, GatewayError
+from rithmic_gateway.attach import config_flock_held
 from rithmic_nt_connect.config import env_truthy, session_config_from_explicit_test_env
 from rithmic_nt_connect.errors import GatewayError as ExtensionGatewayError
 from rithmic_nt_connect.gateway_wire import gateway_config_from_session
@@ -71,6 +73,16 @@ def test_direct_rms_round_trip(live_session, require_test_plant) -> None:
 GATEWAY_ERRORS = (GatewayError, ExtensionGatewayError)
 
 
+@contextlib.contextmanager
+def _parent_for(gcfg, password: str, extra_env: dict[str, str]):
+    """The session parent when the test env is in gateway mode, else our own."""
+    if config_flock_held(gcfg):
+        yield  # the session fixture's parent (same trading gate) is serving
+        return
+    with running_parent(gcfg, password=password, extra_env=extra_env):
+        yield
+
+
 def _connect_gateway_client(kind: str, session_cfg, gcfg):
     """A connected gateway client: the pure-Python lake client or the Rust one."""
     if kind == "rust":
@@ -106,14 +118,14 @@ def test_gateway_rms_round_trip(
         os.environ.get("RITHMIC_ENABLE_TRADING")
         or (test_env or {}).get("RITHMIC_ENABLE_TRADING")
     )
-    parent_extra_env = {"RITHMIC_ENABLE_TRADING": "1"} if trading else {}
+    parent_extra_env = parent_trading_env(test_env)
     password = str((test_env or {}).get("RITHMIC_PASSWORD") or "")
     if not password:
         pytest.skip("test env has no RITHMIC_PASSWORD for the gateway parent")
 
     gcfg = gateway_config_from_session(session_cfg)
 
-    with running_parent(gcfg, password=password, extra_env=parent_extra_env):
+    with _parent_for(gcfg, password, parent_extra_env):
         client = _connect_gateway_client(client_kind, session_cfg, gcfg)
 
         try:
