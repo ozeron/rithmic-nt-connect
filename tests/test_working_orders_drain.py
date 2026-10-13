@@ -11,7 +11,7 @@ from nautilus_trader.execution.reports import OrderStatusReport
 from nautilus_trader.model.enums import OrderStatus
 from nautilus_trader.model.identifiers import ClientOrderId, VenueOrderId
 from rithmic_nt_connect.errors import VenueQueryUnavailable
-from rithmic_nt_connect.execution import order_status_from_fields
+from rithmic_nt_connect.order_rows import order_status_from_fields
 from rithmic_nt_connect.recon import (
     DrainRowResult,
     WorkingOrdersDrain,

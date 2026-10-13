@@ -36,7 +36,7 @@ jobs:
       - name: Ruff format check
         run: uv run ruff format --check .
       - name: ty (uv typecheck)
-        run: uv run ty check python/rithmic_nt_connect tests
+        run: uv run ty check python/rithmic_nt_connect python/rithmic_gateway tests
       - name: Pytest (no secrets)
         run: uv run pytest -q
 

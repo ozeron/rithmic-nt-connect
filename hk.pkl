@@ -95,7 +95,7 @@ hooks {
             ...linters
             ...rust_checks
             ["ty"] {
-                check = "uv run ty check python/rithmic_nt_connect tests"
+                check = "uv run ty check python/rithmic_nt_connect python/rithmic_gateway tests"
             }
             // Python test gate (matches the CI `pytest` step).
             ["pytest"] {

@@ -29,14 +29,14 @@ Legend: **Done** `[x]` · **Partial** `[~]` · **Not started** `[ ]` · `N/A` ou
 
 | Area | Total | Done | Partial | Not started | N/A |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| **Capability matrix** | 21 | 4 | 11 | 0 | 6 |
+| **Capability matrix** | 22 | 4 | 12 | 0 | 6 |
 | **Phase marks (0–9)** | 29 | 15 | 8 | 2 | 4 |
-| **Convention marks** | 18 | 15 | 3 | 0 | 0 |
+| **Convention marks** | 18 | 14 | 4 | 0 | 0 |
 | **Close-outs (advertised path)** | 9 | 5 | 2 | 0 | 2 |
 | **Paper path (intraday)** | 8 | 8 | 0 | 0 | 0 |
-| **TOTAL** | 85 | 47 | 24 | 2 | 12 |
+| **TOTAL** | 86 | 46 | 26 | 2 | 12 |
 
-**Implemented:** 81% (`47` done + `24` partial of `73` in-scope marked items (`12` N/A excluded); partial counts as half).
+**Implemented:** 80% (`46` done + `26` partial of `74` in-scope marked items (`12` N/A excluded); partial counts as half).
 
 Not started (real leftover work): Phase 2 definition updates, Phase 7 recovery suite.
 
@@ -147,6 +147,7 @@ Not started (real leftover work): Phase 2 definition updates, Phase 7 recovery s
 
 - [~] Unit + MD smoke + live↔history; order dry-run exercised LucidTrading 2026-08-14 (local under gitignored `artifacts/`)
 - [~] Recovery suite [ ] + skipped-spec register [x] (`docs/references/ops-runbook.md:54`)
+  - Gateway transport recovery is unit-tested (`tests/test_recovery_bridge.py`, data/exec client tests); no end-to-end recovery suite yet. Direct mode has no L3 transport recovery at all (no unix transport): it relies on the poll loops / `PlantPoller` resync only
 - [~] **Exit:** not claimed until advertised close-outs have evidence
 
 ### Phase 8: Perf / robustness
@@ -171,7 +172,7 @@ Cross-cutting items from [`references/nautilus-adapter-conventions.md`](referenc
 | Creds at construction | [x] | |
 | Env / endpoint not mixed | [x] | Live / Demo / Test on `SessionConfig` |
 | Distinct `InstrumentId`s | [x] | |
-| One convert boundary; reject closed-set unknowns | [x] | `_convert.py` / `_orders.py` |
+| One convert boundary; reject closed-set unknowns | [~] | Wire normalization is strict (`_convert.py` / `_orders.py` `enum_int`; bindable gate `order_rows.row_is_trustworthy`), but advisory status/recon builders in `order_rows.py` still fall back to MARKET / GTC / ACCEPTED / BUY for unknown closed-set values instead of rejecting |
 | `ts_event` venue / `ts_init` clock | [x] | |
 | Book `F_LAST` / `F_SNAPSHOT` | [x] | Snapshot envelope; last delta includes `F_LAST` |
 | Subscribe intent vs confirm | [~] | Ticks/quotes tracked; book unsubscribe wired (plants/gateway/direct) |

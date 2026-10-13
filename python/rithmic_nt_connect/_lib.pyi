@@ -44,16 +44,16 @@ class Session:
         self,
         user: str,
         password: str,
-        system_name: str,
-        url: str,
-        app_name: str,
-        app_version: str,
-        env: str,
-        account_id: str | None,
-        fcm_id: str | None,
-        ib_id: str | None,
-        beta_url: str | None,
-        plants: str,
+        system_name: str = ...,
+        url: str = ...,
+        app_name: str = ...,
+        app_version: str = ...,
+        env: str = ...,
+        account_id: str | None = ...,
+        fcm_id: str | None = ...,
+        ib_id: str | None = ...,
+        beta_url: str | None = ...,
+        plants: str = ...,
     ) -> None: ...
 
     # -- lifecycle ---------------------------------------------------------
@@ -69,16 +69,16 @@ class Session:
     def unsubscribe_order_book_summary(self, symbol: str, exchange: str) -> None: ...
     def get_front_month(self, symbol: str, exchange: str) -> Any: ...
     def get_reference_data(self, symbol: str, exchange: str) -> Any: ...
-    def poll_event(self, timeout_ms: int = 0) -> dict[str, Any] | None: ...
+    def poll_event(self) -> dict[str, Any] | None: ...
     def load_ticks(
-        self, symbol: str, exchange: str, start_ssboe: int, end_ssboe: int
+        self, symbol: str, exchange: str, start_time_sec: int, end_time_sec: int
     ) -> list[dict[str, Any]]: ...
     def load_time_bars(
         self,
         symbol: str,
         exchange: str,
-        start_ssboe: int,
-        end_ssboe: int,
+        start_time_sec: int,
+        end_time_sec: int,
         bar_type: int = 2,
         period: int = 1,
     ) -> list[dict[str, Any]]: ...
@@ -86,8 +86,8 @@ class Session:
         self,
         symbol: str,
         exchange: str,
-        start_ssboe: int,
-        end_ssboe: int,
+        start_time_sec: int,
+        end_time_sec: int,
         bar_type: int = 2,
         period: int = 1,
     ) -> list[dict[str, Any]]: ...
@@ -157,7 +157,7 @@ class Session:
         trail_by_ticks: int | None = None,
     ) -> None: ...
     def cancel_all_orders(self) -> None: ...
-    def load_orders(self, start_ssboe: int, end_ssboe: int) -> list[dict[str, Any]]: ...
+    def load_orders(self, start_sec: int, end_sec: int) -> list[dict[str, Any]]: ...
     def load_product_rms_info(self) -> list[ProductRmsInfo]: ...
     def load_account_rms_info(self) -> list[AccountRmsInfo]: ...
     def load_fill_history(

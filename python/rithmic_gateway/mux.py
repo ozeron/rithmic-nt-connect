@@ -5,7 +5,6 @@ from __future__ import annotations
 import contextlib
 import queue
 import socket
-import struct
 import threading
 import time
 from collections import deque
@@ -14,9 +13,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from rithmic_gateway.client import (
-    _CONNECT_FIRST,
-    _NOT_CONNECTED,
-    GatewayError,
     _dial_with_attach,
     _event_to_dict,
     _handshake_until_ready,
@@ -24,15 +20,18 @@ from rithmic_gateway.client import (
     _is_md_event,
     _is_order_event,
     _is_pnl_event,
-    _recv_exact,
     _wire_error,
 )
 from rithmic_gateway.config import GatewayConfig
-from rithmic_gateway.flock import session_flock_held
-from rithmic_gateway.framing import MAX_FRAME_LEN, encode_frame
+from rithmic_gateway.framed_conn import (
+    _CONNECT_FIRST,
+    _NOT_CONNECTED,
+    DEFAULT_RPC_TIMEOUT_SEC,
+    FramedConnection,
+    GatewayError,
+)
 from rithmic_gateway.v1 import session_pb2 as pb
 
-DEFAULT_RPC_TIMEOUT_SEC = 30.0
 _EVENT_QUEUE_CAP = 4096
 _OVERFLOW_TYPE = "queue_overflow"
 
@@ -82,7 +81,7 @@ _STREAM_SAMPLES: dict[str, dict[str, Any]] = {
 }
 
 
-class GatewayMux:
+class GatewayMux(FramedConnection):
     """Owns the unix fd and demuxes frames to RPC waiters and typed queues."""
 
     def __init__(
@@ -373,25 +372,6 @@ class GatewayMux:
             for queues in self._subscribers.values():
                 queues.clear()
 
-    def _dial(self, path: str) -> None:
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(self._rpc_timeout_sec)
-        sock.connect(path)
-        # Leave the timeout set through handshake; connect() adjusts for drain.
-        self._sock = sock
-
-    def _require_parent_flock(self) -> None:
-        if not self._config.attest_flock:
-            return
-        cfg = self._config
-        if not session_flock_held(cfg.user, cfg.system_name, cfg.url, cfg.env):
-            self._close_sock()
-            raise GatewayError(
-                "parent_unattested",
-                "listen path is up but credential flock is free — refusing "
-                "impostor parent",
-            )
-
     def _handshake(self) -> None:
         if self._sock is None:
             raise GatewayError(_NOT_CONNECTED, _CONNECT_FIRST)
@@ -424,28 +404,7 @@ class GatewayMux:
             self._notify_generation_listeners()
 
     def _write_frame(self, frame: pb.Frame) -> None:
-        if self._sock is None:
-            raise GatewayError(_NOT_CONNECTED, _CONNECT_FIRST)
         # Ensure writes cannot hang forever if the parent stops reading.
-        self._sock.settimeout(self._rpc_timeout_sec)
-        payload = frame.SerializeToString()
-        self._sock.sendall(encode_frame(payload))
-
-    def _read_frame(self) -> pb.Frame:
-        if self._sock is None:
-            raise GatewayError(_NOT_CONNECTED, _CONNECT_FIRST)
-        header = _recv_exact(self._sock, 4)
-        (length,) = struct.unpack("!I", header)
-        if length > MAX_FRAME_LEN:
-            raise GatewayError("frame_too_large", f"{length} bytes")
-        payload = _recv_exact(self._sock, length)
-        frame = pb.Frame()
-        frame.ParseFromString(payload)
-        return frame
-
-    def _close_sock(self) -> None:
-        sock = self._sock
-        self._sock = None
-        if sock is not None:
-            with contextlib.suppress(Exception):
-                sock.close()
+        if self._sock is not None:
+            self._sock.settimeout(self._rpc_timeout_sec)
+        super()._write_frame(frame)

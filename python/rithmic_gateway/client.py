@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import contextlib
 import socket
-import struct
 import threading
 import time
 from collections import deque
@@ -18,14 +17,17 @@ from google.protobuf.json_format import MessageToDict
 
 from rithmic_gateway.attach import GatewayAttachCoordinator
 from rithmic_gateway.config import GatewayConfig
-from rithmic_gateway.flock import session_flock_held
-from rithmic_gateway.framing import MAX_FRAME_LEN, encode_frame
+from rithmic_gateway.framed_conn import (
+    _CONNECT_FIRST,
+    _NOT_CONNECTED,
+    DEFAULT_RPC_TIMEOUT_SEC,
+    FramedConnection,
+    GatewayError,
+)
 from rithmic_gateway.spawn import SpawnError
 from rithmic_gateway.types import AccountRmsInfo, ProductRmsInfo
 from rithmic_gateway.v1 import session_pb2 as pb
 
-# Default dial + RPC socket timeout (seconds). Stuck parent must not hang forever.
-DEFAULT_RPC_TIMEOUT_SEC = 30.0
 # Per-chunk history RPC timeout — one plant slice can exceed the dial default.
 DEFAULT_HISTORY_RPC_TIMEOUT_SEC = 300.0
 
@@ -61,22 +63,6 @@ def _is_pnl_event(evt: dict[str, Any]) -> bool:
 
 def _is_order_event(evt: dict[str, Any]) -> bool:
     return evt.get("type") in _ORDER_EVENT_TYPES
-
-
-class GatewayError(RuntimeError):
-    """Gateway RPC or protocol error."""
-
-    def __init__(self, code: str, message: str) -> None:
-        super().__init__(f"{code}: {message}")
-        self.code = code
-        self.message = message
-
-
-# Constants used in the ``not_connected`` raise paths. Kept module-level so the
-# ``Sonar S1192`` "duplicate literal" rule sees a single source of truth; copy
-# only changes when the protocol does, never scattered across private methods.
-_CONNECT_FIRST = "call connect() first"
-_NOT_CONNECTED = "not_connected"
 
 
 def _dial_with_attach(
@@ -142,7 +128,7 @@ def _handshake_until_ready(
         require_flock()
 
 
-class GatewayClient:
+class GatewayClient(FramedConnection):
     """Attach to a parent ``rithmic-gateway`` and issue plant-semantic RPCs.
 
     Events and responses are plain dicts / structured protobuf MessageToDict-style
@@ -203,19 +189,6 @@ class GatewayClient:
                 handshake=self._handshake,
                 require_flock=self._require_parent_flock,
                 close_sock=self._close_sock,
-            )
-
-    def _require_parent_flock(self) -> None:
-        """Refuse Ready from a dialable impostor that does not hold the flock."""
-        if not self._config.attest_flock:
-            return
-        cfg = self._config
-        if not session_flock_held(cfg.user, cfg.system_name, cfg.url, cfg.env):
-            self._close_sock()
-            raise GatewayError(
-                "parent_unattested",
-                "listen path is up but credential flock is free — refusing "
-                "impostor parent",
             )
 
     def disconnect(self) -> None:
@@ -749,12 +722,6 @@ class GatewayClient:
 
     # --- internals ---------------------------------------------------------
 
-    def _dial(self, path: str) -> None:
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(self._rpc_timeout_sec)
-        sock.connect(path)
-        self._sock = sock
-
     def _handshake(self) -> None:
         if self._sock is None:
             raise GatewayError(_NOT_CONNECTED, _CONNECT_FIRST)
@@ -890,51 +857,6 @@ class GatewayClient:
         finally:
             if self._sock is not None:
                 self._sock.settimeout(self._rpc_timeout_sec)
-
-    def _close_sock(self) -> None:
-        sock = self._sock
-        self._sock = None
-        if sock is not None:
-            with contextlib.suppress(Exception):
-                sock.close()
-
-    def _write_frame(self, frame: pb.Frame) -> None:
-        if self._sock is None:
-            raise GatewayError(_NOT_CONNECTED, _CONNECT_FIRST)
-        payload = frame.SerializeToString()
-        self._sock.sendall(encode_frame(payload))
-
-    def _read_frame(self) -> pb.Frame:
-        if self._sock is None:
-            raise GatewayError(_NOT_CONNECTED, _CONNECT_FIRST)
-        header = _recv_exact(self._sock, 4)
-        (length,) = struct.unpack("!I", header)
-        if length > MAX_FRAME_LEN:
-            raise GatewayError("frame_too_large", f"{length} bytes")
-        payload = _recv_exact(self._sock, length)
-        frame = pb.Frame()
-        frame.ParseFromString(payload)
-        return frame
-
-
-def _recv_exact(sock: socket.socket, n: int) -> bytes:
-    buf = bytearray()
-    try:
-        while len(buf) < n:
-            chunk = sock.recv(n - len(buf))
-            if not chunk:
-                raise GatewayError("eof", "gateway closed connection")
-            buf.extend(chunk)
-    except TimeoutError as exc:
-        if buf:
-            with contextlib.suppress(Exception):
-                sock.close()
-            raise GatewayError(
-                "desync",
-                f"timed out after {len(buf)}/{n} bytes; connection closed",
-            ) from exc
-        raise
-    return bytes(buf)
 
 
 def _message_to_dict(msg: Any) -> dict[str, Any]:

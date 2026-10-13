@@ -433,6 +433,7 @@ def test_connect_reissues_intent_and_resets_derived_state() -> None:
     async def _run() -> None:
         client = RithmicDataClient.__new__(RithmicDataClient)
         sess = Sess()
+        client._recovery = client._build_recovery()
         sess._inner = sess
         client._session = sess
         client._instrument_provider = Provider()

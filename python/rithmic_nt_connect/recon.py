@@ -20,46 +20,23 @@ from nautilus_trader.execution.reports import (
 )
 from nautilus_trader.model.enums import OrderSide, OrderStatus
 from nautilus_trader.model.identifiers import ClientOrderId, VenueOrderId
-from nautilus_trader.model.objects import Price, Quantity
+from nautilus_trader.model.objects import Quantity
 
-from rithmic_nt_connect._convert import format_price_str
 from rithmic_nt_connect._orders import (
-    TRUSTWORTHY_DURATIONS as _TRUSTWORTHY_DURATIONS,
-)
-from rithmic_nt_connect._orders import (
-    TRUSTWORTHY_PRICE_TYPES as _TRUSTWORTHY_PRICE_TYPES,
-)
-from rithmic_nt_connect._orders import (
-    enum_int,
     fill_dedup_key,
     order_notification_to_fields,
     order_side_from_notification,
     slim_order_fields,
 )
+from rithmic_nt_connect._prices import price_from_wire
 from rithmic_nt_connect.errors import VenueQueryUnavailable
-
-# Canonical notification kinds that describe a real order state (see
-# ``kind_from_notify`` in ``_orders.py``) — the strict trust boundary for
-# binding a venue id from a drain row.
-_RECOGNIZABLE_KINDS = frozenset(
-    {
-        "accepted",
-        "updated",
-        "canceled",
-        "filled",
-        "rejected",
-        "modify_rejected",
-        "cancel_rejected",
-        "expired",
-        "triggered",
-    }
+from rithmic_nt_connect.order_rows import (
+    order_status_from_fields,
+    order_type_from_fields,
+    row_is_trustworthy,
+    tif_from_fields,
+    trigger_type_from_fields,
 )
-
-# Status substrings that mark a drain row as a real venue order state.
-# "TRIGGER" covers resting stop rows ("TRIGGER_PENDING" / "trigger pending"):
-# live-proven on Rithmic Test 2026-08-21 — stops never emit an OPEN
-# notification, so this is the only state their drain rows ever carry.
-_STATUS_MARKERS = ("OPEN", "WORKING", "CANCEL", "REJECT", "EXPIRED", "TRIGGER")
 
 TERMINAL_ORDER_STATUSES = frozenset(
     {
@@ -69,39 +46,6 @@ TERMINAL_ORDER_STATUSES = frozenset(
         OrderStatus.EXPIRED,
     }
 )
-
-
-def row_is_trustworthy(fields: dict[str, Any]) -> bool:
-    """A drain row binds a venue id only when its closed-set execution terms
-    are real: side present, ``price_type``/``duration`` present and mappable,
-    and a recognizable order state. Never fabricates terms (a row with
-    missing/unknown closed-set values is advisory-only).
-    """
-    if order_side_from_notification(fields) is None:
-        return False
-    # The closed-set values are exact integers or None (``enum_int`` at the
-    # convert boundary; the same whitelist defends raw fields here too, so a
-    # bool/non-integral value can never coerce into a valid enum).
-    price_type = enum_int(fields.get("price_type"))
-    duration = enum_int(fields.get("duration"))
-    if (
-        price_type is None
-        or duration is None
-        or price_type not in _TRUSTWORTHY_PRICE_TYPES
-        or duration not in _TRUSTWORTHY_DURATIONS
-    ):
-        return False
-    kind = fields.get("kind")
-    status_u = str(fields.get("status") or "").upper()
-    return kind in _RECOGNIZABLE_KINDS or any(
-        marker in status_u for marker in _STATUS_MARKERS
-    )
-
-
-def _price(value: float | Decimal | str, precision: int | None = None) -> Price:
-    if precision is None:
-        return Price.from_str(format_price_str(value))
-    return Price.from_str(f"{float(value):.{int(precision)}f}")
 
 
 def apply_mass_status_report_window(
@@ -133,6 +77,17 @@ def apply_mass_status_report_window(
         except (AttributeError, TypeError):
             continue
     return applied
+
+
+def _client_order_id_for_tag(tag: Any) -> ClientOrderId | None:
+    """``user_tag`` is the ``client_order_id`` for orders this client placed.
+
+    External orders keep their tag as the report's client_order_id (honest: it
+    is the id on the wire).
+    """
+    if not tag:
+        return None
+    return ClientOrderId(str(tag))
 
 
 class DrainRowResult:
@@ -200,8 +155,8 @@ class WorkingOrdersDrain:
             filled = Quantity.from_int(max(0, int(fields.get("total_fill_size") or 0)))
             price_raw = fields.get("price")
             trigger_raw = fields.get("trigger_price")
-            price = _price(price_raw) if price_raw is not None else None
-            trigger = _price(trigger_raw) if trigger_raw is not None else None
+            price = price_from_wire(price_raw) if price_raw is not None else None
+            trigger = price_from_wire(trigger_raw) if trigger_raw is not None else None
             avg = fields.get("avg_fill_price")
             avg_px = Decimal(str(avg)) if avg is not None else None
             if qty <= 0:
@@ -209,9 +164,9 @@ class WorkingOrdersDrain:
                 # report cannot be built. Skip rather than crash the handler
                 # (the constructor rejects a zero quantity).
                 return None
-            order_type = host._order_type_from_event(fields)
-            tif = host._tif_from_event(fields)
-            status = host._order_status_from_event(fields)
+            order_type = order_type_from_fields(fields)
+            tif = tif_from_fields(fields)
+            status = order_status_from_fields(fields)
             # Event-time fallback, owned HERE: the ordering ``ts_event`` is the
             # iterator's 0-default when the venue sent no timestamp — a report
             # published with epoch 0 could be treated as stale (e.g. a fill's
@@ -231,10 +186,10 @@ class WorkingOrdersDrain:
                 ts_accepted=report_ts,
                 ts_last=report_ts,
                 ts_init=host._clock.timestamp_ns(),
-                client_order_id=host._client_order_id_for_tag(fields.get("user_tag")),
+                client_order_id=_client_order_id_for_tag(fields.get("user_tag")),
                 price=price,
                 trigger_price=trigger,
-                trigger_type=host._trigger_type_from_event(fields),
+                trigger_type=trigger_type_from_fields(fields),
                 avg_px=avg_px,
             )
         except (TypeError, ValueError, OverflowError):

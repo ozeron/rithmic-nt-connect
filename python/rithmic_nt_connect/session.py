@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import threading
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from rithmic_nt_connect.config import ConnectMode, SessionConfig
@@ -38,9 +39,9 @@ class TickerSession(Protocol):
     def unsubscribe_order_book_summary(self, symbol: str, exchange: str) -> None: ...
     def get_front_month(self, symbol: str, exchange: str) -> Any: ...
     def get_reference_data(self, symbol: str, exchange: str) -> Any: ...
-    def poll_event(self, timeout_ms: int = 0) -> dict[str, Any] | None: ...
+    def poll_event(self) -> dict[str, Any] | None: ...
     def load_ticks(
-        self, symbol: str, exchange: str, start_ssboe: int, end_ssboe: int
+        self, symbol: str, exchange: str, start_ssboe: int, end_ssboe: int, /
     ) -> list[dict[str, Any]]: ...
     def load_time_bars(
         self,
@@ -48,6 +49,7 @@ class TickerSession(Protocol):
         exchange: str,
         start_ssboe: int,
         end_ssboe: int,
+        /,
         bar_type: int = 2,
         period: int = 1,
     ) -> list[dict[str, Any]]: ...
@@ -57,6 +59,7 @@ class TickerSession(Protocol):
         exchange: str,
         start_ssboe: int,
         end_ssboe: int,
+        /,
         bar_type: int = 2,
         period: int = 1,
     ) -> list[dict[str, Any]]: ...
@@ -129,7 +132,9 @@ class OrderSession(Protocol):
         trail_by_ticks: int | None = None,
     ) -> None: ...
     def cancel_all_orders(self) -> None: ...
-    def load_orders(self, start_ssboe: int, end_ssboe: int) -> list[dict[str, Any]]: ...
+    def load_orders(
+        self, start_ssboe: int, end_ssboe: int, /
+    ) -> list[dict[str, Any]]: ...
     def load_product_rms_info(self) -> list[ProductRmsInfo]: ...
     def load_account_rms_info(self) -> list[AccountRmsInfo]: ...
     def poll_order_event(self) -> dict[str, Any] | None: ...
@@ -139,6 +144,21 @@ class WireSession(TickerSession, PnlSession, OrderSession, Protocol):
     """Full multi-plant session facade (composition of ticker / PnL / order)."""
 
     def resolved_account(self) -> dict[str, Any] | None: ...
+
+
+class TransportAware(Protocol):
+    """Optional gateway transport surface (direct sessions have none).
+
+    ``subscribe_transport_events`` returns the unsubscribe callable. Clients
+    reach this through ``TransportRecoveryBridge``; direct sessions simply do
+    not implement it, so recovery wiring is a no-op there.
+    """
+
+    def subscribe_transport_events(
+        self, listener: Callable[[object], None]
+    ) -> Callable[[], None]: ...
+    def ensure_transport_live(self) -> int: ...
+    def reconnect_transport(self) -> None: ...
 
 
 PLANTS_MARKET_DATA = "market_data"
@@ -335,13 +355,7 @@ class _FlockedDirectSession:
     def resolved_account(self) -> dict[str, Any] | None:
         return self._inner.resolved_account()
 
-    def poll_event(self, timeout_ms: int = 0) -> dict[str, Any] | None:
-        # The direct PyO3 ``Session.poll_event`` is a non-blocking ``try_recv``
-        # poll and takes no timeout argument (the gateway client's blocking
-        # ``_poll_filtered`` accepts ``timeout_ms``); a ``0`` forward would
-        # raise ``TypeError`` on the direct path. The facade keeps the shared
-        # signature but ignores the arg on the direct path.
-        del timeout_ms
+    def poll_event(self) -> dict[str, Any] | None:
         return self._inner.poll_event()
 
     def load_ticks(
@@ -573,7 +587,9 @@ def create_session(
     if session.connect_mode == ConnectMode.GATEWAY:
         from rithmic_nt_connect.gateway_wire import create_gateway_wire_session
 
-        return create_gateway_wire_session(session)
+        # The façade delegates most members to the gateway client, which a type
+        # checker cannot see; tests/test_wire_session_parity.py proves the surface.
+        return cast(WireSession, create_gateway_wire_session(session))
 
     return create_rust_session(session, plants=plants)
 
