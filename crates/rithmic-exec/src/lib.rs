@@ -6,8 +6,16 @@
 
 pub mod commission;
 pub mod exposure;
+pub mod fills;
+pub mod ident;
+pub mod lru;
+pub mod notify;
 pub mod plant;
 
 pub use commission::CommissionTable;
 pub use exposure::{exposure_complete, matches_root, product_root, signed_net, PositionRow};
+pub use fills::{dedup_key, trade_id, FillParts};
+pub use ident::{event_ts_ns, instrument_id, split_instrument_id, IdentError};
+pub use lru::Lru;
+pub use notify::kind_from_notify;
 pub use plant::{PlantPolicy, PlantState};

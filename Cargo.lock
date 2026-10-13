@@ -694,6 +694,7 @@ name = "rithmic-plants"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "rithmic-exec",
  "rithmic-rs",
  "thiserror",
  "tokio",

@@ -16,10 +16,10 @@
 
 ## 4. Stage C: convert boundary and dedup
 
-- [ ] 4.1 Port instrument-id encoding/decoding, `format_price_str`, `_ts_ns`, and the closed-set coercions (`enum_int`, `sentinel_none`) with Rust tests from `tests/test_convert_ticks.py` and the mutation-corpus property test
-- [ ] 4.2 Port `fill_dedup_key`, `trade_id_from_fill_fields`, `SeenKeyCache`, `FillDedupStore`, `UntrackedStatusBook` with Rust tests from `tests/test_notification_intake.py`
-- [ ] 4.3 Port `order_notification_to_fields` and `kind_from_notify` (dict in, dict out) with venue-shaped fixtures
-- [ ] 4.4 Switch `_convert.py` / `_orders.py` to re-exports of the bindings; Nautilus-typed helpers (`nautilus_*_to_rithmic`, `notification_action`) stay in Python
+- [x] 4.1 Port the instrument-id codec and the event-time derivation with Rust tests (errors keep Python `repr` quoting) and a differential test against the original implementation. `enum_int`, `sentinel_none` and `format_price_str` stay Python by design (decision 5)
+- [x] 4.2 Port `fill_dedup_key`, `trade_id_from_fill_fields` and the bounded recency cache (`SeenKeyCache`) with Rust tests and differential tests; `FillDedupStore`/`UntrackedStatusBook` stay thin Python wrappers over the Rust cache
+- [x] 4.3 Move `kind_from_notify` to the crate and make the plant (`rithmic-plants`) use the same function, removing the duplicate mapping. `order_notification_to_fields` stays Python (heterogeneous dict pass-through, decision 5)
+- [x] 4.4 `_convert.py` / `_orders.py` call the bindings; Nautilus-typed helpers (`nautilus_*_to_rithmic`, `notification_action`) stay in Python
 
 ## 5. Stage D: drain decisions
 

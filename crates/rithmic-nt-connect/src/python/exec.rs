@@ -3,11 +3,11 @@
 //! Thin by design: every rule lives in the Rust crate; this file only converts
 //! Python values to and from it.
 
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyKeyError, PyValueError};
 use pyo3::prelude::*;
 use std::collections::BTreeMap;
 
-use rithmic_exec::{CommissionTable, PlantPolicy, PlantState, PositionRow};
+use rithmic_exec::{CommissionTable, FillParts, Lru, PlantPolicy, PlantState, PositionRow};
 
 fn parse_state(name: &str) -> PyResult<PlantState> {
     PlantState::parse(name)
@@ -175,9 +175,166 @@ impl PyCommissionTable {
     }
 }
 
+#[pyfunction]
+#[pyo3(signature = (source, notify_type_name, status = None, text = None))]
+fn kind_from_notify(
+    source: &str,
+    notify_type_name: &str,
+    status: Option<&str>,
+    text: Option<&str>,
+) -> Option<&'static str> {
+    rithmic_exec::kind_from_notify(source, notify_type_name, status, text)
+}
+
+/// Fill identity parts arrive as text: the printed form of a number is part of
+/// the identity, so the caller decides it.
+#[pyfunction]
+#[pyo3(signature = (fill_id, basket_id, exchange_order_id, fill_size, fill_price, ts_event))]
+fn fill_trade_id(
+    fill_id: Option<&str>,
+    basket_id: &str,
+    exchange_order_id: &str,
+    fill_size: &str,
+    fill_price: &str,
+    ts_event: i64,
+) -> String {
+    rithmic_exec::trade_id(
+        &FillParts {
+            fill_id,
+            basket_id,
+            exchange_order_id,
+            fill_size,
+            fill_price,
+        },
+        ts_event,
+    )
+}
+
+#[pyfunction]
+#[pyo3(signature = (account_id, instrument_id, fill_id, basket_id, exchange_order_id, fill_size, fill_price, ts_event))]
+#[allow(clippy::too_many_arguments)]
+fn fill_dedup_key(
+    account_id: &str,
+    instrument_id: &str,
+    fill_id: Option<&str>,
+    basket_id: &str,
+    exchange_order_id: &str,
+    fill_size: &str,
+    fill_price: &str,
+    ts_event: i64,
+) -> String {
+    rithmic_exec::dedup_key(
+        account_id,
+        instrument_id,
+        &FillParts {
+            fill_id,
+            basket_id,
+            exchange_order_id,
+            fill_size,
+            fill_price,
+        },
+        ts_event,
+    )
+}
+
+/// `ValueError` carrying the adapter's historical message; the Python wrapper
+/// re-raises it as `ConvertError`.
+#[pyfunction]
+#[pyo3(signature = (symbol, exchange, venue))]
+fn instrument_id_from_symbol(
+    symbol: &str,
+    exchange: Option<&str>,
+    venue: &str,
+) -> PyResult<String> {
+    rithmic_exec::instrument_id(symbol, exchange, venue)
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+#[pyfunction]
+fn symbol_and_exchange_from_instrument_id(
+    instrument_id: &str,
+    venue: &str,
+) -> PyResult<(String, Option<String>)> {
+    rithmic_exec::split_instrument_id(instrument_id, venue)
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+#[pyfunction]
+fn event_ts_ns(
+    ts_event_ns: Option<i128>,
+    ssboe: Option<i128>,
+    usecs: Option<i128>,
+) -> Option<i128> {
+    rithmic_exec::event_ts_ns(ts_event_ns, ssboe, usecs)
+}
+
+/// Bounded recency map; hits refresh recency, the oldest entry is evicted first.
+#[pyclass(name = "SeenKeyCache")]
+pub(super) struct PySeenKeyCache {
+    inner: Lru<Py<PyAny>>,
+}
+
+#[pymethods]
+impl PySeenKeyCache {
+    #[new]
+    #[pyo3(signature = (max_size = 10_000))]
+    fn new(max_size: usize) -> Self {
+        Self {
+            inner: Lru::new(max_size),
+        }
+    }
+
+    fn has_seen(&mut self, key: &str) -> bool {
+        self.inner.has(key)
+    }
+
+    #[pyo3(signature = (key, value = None))]
+    fn mark(&mut self, py: Python<'_>, key: &str, value: Option<Py<PyAny>>) {
+        self.inner.insert(key, value.unwrap_or_else(|| py.None()));
+    }
+
+    #[pyo3(signature = (key, default = None))]
+    fn get(&mut self, py: Python<'_>, key: &str, default: Option<Py<PyAny>>) -> Py<PyAny> {
+        match self.inner.get(key) {
+            Some(value) => value.clone_ref(py),
+            None => default.unwrap_or_else(|| py.None()),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.inner.clear();
+    }
+
+    fn __len__(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn __contains__(&mut self, key: &str) -> bool {
+        self.inner.has(key)
+    }
+
+    fn __getitem__(&mut self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
+        match self.inner.get(key) {
+            Some(value) => Ok(value.clone_ref(py)),
+            None => Err(PyKeyError::new_err(key.to_string())),
+        }
+    }
+
+    fn __setitem__(&mut self, key: &str, value: Py<PyAny>) {
+        self.inner.insert(key, value);
+    }
+}
+
 pub(super) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyOrderPlantPolicy>()?;
     m.add_class::<PyCommissionTable>()?;
+    m.add_class::<PySeenKeyCache>()?;
+    m.add_function(wrap_pyfunction!(kind_from_notify, m)?)?;
+    m.add_function(wrap_pyfunction!(fill_trade_id, m)?)?;
+    m.add_function(wrap_pyfunction!(fill_dedup_key, m)?)?;
+    m.add_function(wrap_pyfunction!(instrument_id_from_symbol, m)?)?;
+    m.add_function(wrap_pyfunction!(symbol_and_exchange_from_instrument_id, m)?)?;
+    m.add_function(wrap_pyfunction!(event_ts_ns, m)?)?;
     m.add_function(wrap_pyfunction!(product_root, m)?)?;
     m.add_function(wrap_pyfunction!(matches_root, m)?)?;
     m.add_function(wrap_pyfunction!(signed_net, m)?)?;

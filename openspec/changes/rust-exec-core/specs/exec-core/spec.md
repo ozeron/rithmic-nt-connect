@@ -48,12 +48,34 @@ The commission for a fill SHALL be the per-contract rate for the fill's product 
 - **WHEN** a fill's contract symbol is `MNQU6` and the rate table is keyed by product code `MNQ`
 - **THEN** the lookup SHALL use the instrument's product code and SHALL NOT silently charge zero
 
-### Requirement: Notification fields are coerced at one boundary
-Closed-set venue fields (price type, duration, transaction type, status) SHALL be normalized to an exact integer or absent by a single coercion; booleans and non-integral numerics SHALL NOT survive as integers, and the venue sentinel `-1.0` SHALL become absent.
+### Requirement: One notification-kind mapping for plant and adapter
+The mapping from a plant `notify_type_name` (with source, status and text) to a canonical action kind SHALL be a single Rust function used by the plant when it tags a notification and by the adapter for notifications that arrive without a kind. A name SHALL only be meaningful for its own source.
+
+#### Scenario: Stop order working state
+- **WHEN** a `rithmic` notification named `TRIGGER_PENDING` arrives
+- **THEN** its kind SHALL be `accepted`
+
+#### Scenario: Complete with text
+- **WHEN** a `rithmic` `COMPLETE` arrives with a non-blank text and a non-cancel status
+- **THEN** its kind SHALL be `rejected`, and with a cancel status it SHALL be `canceled`
+
+### Requirement: Closed-set and price coercion stays at one Python boundary
+Coercion of arbitrary Python objects (`enum_int`, the `-1.0` pending-price sentinel, price text formatting) depends on Python numeric semantics and SHALL stay a single function each at the converter boundary rather than being re-implemented in Rust. Booleans and non-integral numerics SHALL NOT survive as closed-set integers, and the venue sentinel `-1.0` SHALL become absent.
 
 #### Scenario: Boolean in an enum field
 - **WHEN** a notification carries `True` in a closed-set field
 - **THEN** the coerced value SHALL be absent, never `1`
+
+### Requirement: Instrument ids encode the exchange and reject ambiguous parts
+The instrument-id codec SHALL be a single Rust implementation: `{symbol}-{EXCHANGE}.{VENUE}` when an exchange is present, else `{symbol}.{VENUE}`, trimming the symbol, uppercasing the exchange, and rejecting `-` or `.` inside either part with the adapter's historical error text.
+
+#### Scenario: Round trip
+- **WHEN** an id is built from `NQU6` and `cme` and then parsed
+- **THEN** the parse SHALL return `("NQU6", "CME")`
+
+#### Scenario: Ambiguous symbol
+- **WHEN** the symbol contains `-`
+- **THEN** building the id SHALL fail naming the symbol
 
 ### Requirement: Fills are deduplicated by venue identity
 A fill's dedup key SHALL derive from the venue fill id when present, else from a stable composite of the fill's own fields, and SHALL NOT depend on the adapter clock. The seen-key stores SHALL be bounded and evict oldest first.

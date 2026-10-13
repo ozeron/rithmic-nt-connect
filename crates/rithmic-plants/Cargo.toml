@@ -11,6 +11,7 @@ testing = []
 
 [dependencies]
 async-trait = "0.1"
+rithmic-exec = { path = "../rithmic-exec" }
 rithmic-rs = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }

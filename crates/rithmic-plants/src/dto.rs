@@ -461,35 +461,8 @@ fn order_kind(
     status: Option<&str>,
     text: Option<&str>,
 ) -> Option<String> {
-    let name = notify_type_name?.to_ascii_uppercase();
-    let kind = match (source, name.as_str()) {
-        ("rithmic", "OPEN") => "accepted",
-        // Live-proven (Rithmic Test 2026-08-21): resting STOP_MARKET orders
-        // never receive OPEN — TRIGGER_PENDING is their working state, i.e.
-        // acceptance evidence (emitted guarded from SUBMITTED).
-        ("rithmic", "TRIGGER_PENDING") => "accepted",
-        ("rithmic", "MODIFIED") => "updated",
-        ("rithmic", "MODIFICATION_FAILED") => "modify_rejected",
-        ("rithmic", "CANCELLATION_FAILED") => "cancel_rejected",
-        ("rithmic", "COMPLETE") => {
-            let status_u = status.unwrap_or("").to_ascii_uppercase();
-            if status_u == "CANCELLED" || status_u == "CANCELED" {
-                "canceled"
-            } else if text.is_some_and(|t| !t.trim().is_empty()) {
-                "rejected"
-            } else {
-                return None;
-            }
-        }
-        ("exchange", "FILL") => "filled",
-        ("exchange", "REJECT") => "rejected",
-        ("exchange", "CANCEL") => "canceled",
-        ("exchange", "TRIGGER") => "triggered",
-        ("exchange", "NOT_MODIFIED") => "modify_rejected",
-        ("exchange", "NOT_CANCELLED" | "NOT_CANCELED") => "cancel_rejected",
-        _ => return None,
-    };
-    Some(kind.to_string())
+    // One mapping for plant and adapter: see `rithmic_exec::kind_from_notify`.
+    rithmic_exec::kind_from_notify(source, notify_type_name?, status, text).map(str::to_string)
 }
 
 impl From<&RithmicResponse> for PlantEvent {

@@ -34,7 +34,13 @@ Rules are exposed as PyO3 functions over `dict`/ints/strings (`product_root`, `s
 ### 4. Tests are ported with the code, not after it
 For each module the Rust unit tests are written from the Python test's cases (same inputs, same expected outputs, venue-shaped fixtures) before the Python implementation is deleted. The transition table in `tests/test_order_plant.py` becomes an exhaustive Rust test over every (state, transition) pair. The mutation-corpus property test for "bindable implies real closed-set terms" becomes a Rust property test over the same corpus.
 
-### 5. Order of work follows coupling, lowest first
+### 5. Python-object coercion stays in Python
+`enum_int`, `sentinel_none` and `format_price_str` encode what `int()`, `float()` and `str()` do to arbitrary Python objects (bool is an int, Decimal, numpy scalars, integral strings). Re-implementing those semantics in Rust would only mirror Python's, so they remain one function each at the converter boundary; the Rust crate owns rules over typed values. Likewise `order_notification_to_fields` is a heterogeneous dict pass-through, not a rule. Alternative: a Rust `Value` enum for every wire field; rejected as a large surface for no behavior.
+
+### 6. Differential tests are the porting oracle
+Each ported rule keeps its original Python implementation inside `tests/test_exec_rules_parity.py` as an oracle and is compared over exhaustive or seeded-random corpora (4000+ cases for `product_root` and the id codec, the full name x status x text grid for the kind mapping, random operation sequences for the cache). Where the old Python test suite already pins behavior it keeps running unchanged against the binding.
+
+### 7. Order of work follows coupling, lowest first
 A. order-plant policy; B. exposure and commission rules; C. convert boundary and dedup stores (`_convert.py`, `_orders.py` pure parts); D. drain row validation and recovery decisions (`recon.py`); E. inventory. Stage D splits `recon.py` at the point where a decision (is this row usable, which identity wins, may it bind) is separated from its effect (publish, cache write).
 
 ## Risks / Trade-offs
