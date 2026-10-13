@@ -5,7 +5,9 @@
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use rithmic_exec::{PlantPolicy, PlantState};
+use std::collections::BTreeMap;
+
+use rithmic_exec::{CommissionTable, PlantPolicy, PlantState, PositionRow};
 
 fn parse_state(name: &str) -> PyResult<PlantState> {
     PlantState::parse(name)
@@ -83,7 +85,103 @@ impl PyOrderPlantPolicy {
     }
 }
 
+#[pyfunction]
+fn product_root(symbol: &str) -> String {
+    rithmic_exec::product_root(symbol)
+}
+
+#[pyfunction]
+fn matches_root(symbol: &str, root: &str) -> bool {
+    rithmic_exec::matches_root(symbol, root)
+}
+
+/// `rows` are `(symbol, quantity, position_side)` triples.
+#[pyfunction]
+fn signed_net(rows: Vec<(String, i64, String)>, root: &str) -> i64 {
+    let rows: Vec<PositionRow<'_>> = rows
+        .iter()
+        .map(|(symbol, quantity, side)| PositionRow {
+            symbol,
+            quantity: *quantity,
+            side,
+        })
+        .collect();
+    rithmic_exec::signed_net(&rows, root)
+}
+
+#[pyfunction]
+fn exposure_complete(
+    net: Option<i64>,
+    open_orders: Option<i64>,
+    pnl_ts_ns: Option<i64>,
+    drain_ts_ns: Option<i64>,
+) -> bool {
+    rithmic_exec::exposure_complete(net, open_orders, pnl_ts_ns, drain_ts_ns)
+}
+
+/// Commission rates as decimal text; the caller owns the decimal arithmetic.
+#[pyclass(name = "CommissionTable")]
+pub(super) struct PyCommissionTable {
+    inner: CommissionTable,
+}
+
+#[pymethods]
+impl PyCommissionTable {
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: CommissionTable::new(),
+        }
+    }
+
+    /// `rows` are `(product_code, commission_fill_rate)` as text.
+    fn load_products(&mut self, rows: Vec<(Option<String>, Option<String>)>) {
+        self.inner.load_products(rows);
+    }
+
+    /// `rows` are `(account_id, default_commission)` as text.
+    #[pyo3(signature = (rows, active_account = None))]
+    fn load_account_default(
+        &mut self,
+        rows: Vec<(String, Option<String>)>,
+        active_account: Option<&str>,
+    ) {
+        self.inner.load_account_default(rows, active_account);
+    }
+
+    #[getter]
+    fn rates(&self) -> BTreeMap<String, String> {
+        self.inner.rates().clone()
+    }
+
+    #[setter]
+    fn set_rates(&mut self, rates: BTreeMap<String, String>) {
+        self.inner.set_rates(rates);
+    }
+
+    #[getter]
+    fn default_rate(&self) -> Option<String> {
+        self.inner.default_rate().map(str::to_string)
+    }
+
+    #[setter]
+    fn set_default_rate(&mut self, default: Option<String>) {
+        self.inner.set_default(default);
+    }
+
+    #[pyo3(signature = (product_code = None))]
+    fn rate_for(&self, product_code: Option<&str>) -> Option<String> {
+        self.inner.rate_for(product_code).map(str::to_string)
+    }
+}
+
 pub(super) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyOrderPlantPolicy>()?;
+    m.add_class::<PyCommissionTable>()?;
+    m.add_function(wrap_pyfunction!(product_root, m)?)?;
+    m.add_function(wrap_pyfunction!(matches_root, m)?)?;
+    m.add_function(wrap_pyfunction!(signed_net, m)?)?;
+    m.add_function(wrap_pyfunction!(exposure_complete, m)?)?;
+    m.add("PNL_SETTLE_NS", rithmic_exec::exposure::PNL_SETTLE_NS)?;
     Ok(())
 }

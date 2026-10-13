@@ -10,9 +10,9 @@
 
 ## 3. Stage B: exposure and commission rules
 
-- [ ] 3.1 Port `product_root`, `matches_root`, `signed_net`, and snapshot `complete` (settle interval) with Rust tests from `tests/test_exposure.py`
-- [ ] 3.2 Port the commission rate table (product rates, account default, per-fill lookup returning a decimal string) with Rust tests from `tests/test_commission_registry.py`
-- [ ] 3.3 Switch `exposure.py` and `commission.py` call sites to the bindings; keep `Money`/`Cache` handling in Python
+- [x] 3.1 Port `product_root`, `matches_root`, `signed_net`, and snapshot `complete` (settle interval) with Rust tests from `tests/test_exposure.py`
+- [x] 3.2 Port the commission rate table (product rates, account default, per-fill lookup returning a decimal string) with Rust tests from `tests/test_commission_registry.py`
+- [x] 3.3 Switch `exposure.py` and `commission.py` call sites to the bindings; keep `Money`/`Cache` handling in Python
 
 ## 4. Stage C: convert boundary and dedup
 
