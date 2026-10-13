@@ -127,3 +127,32 @@ fn proto_schema_has_ticker_reset_parity_with_plants() {
         );
     }
 }
+
+#[test]
+fn proto_schema_has_history_read_parity_with_plants() {
+    // Fill / order-history reads are plant RPCs on the direct path
+    // (`rithmic_plants::session::{load_fill_history_on, load_order_history_dates_on,
+    // load_order_history_on}`): the gateway wire must carry the same request,
+    // response, and Frame arms so the two paths cannot drift.
+    let proto = include_str!("../../../proto/rithmic_gateway/v1/session.proto");
+    for needle in [
+        "LoadFillHistoryRequest",
+        "LoadFillHistoryResponse",
+        "FillHistory ",
+        "LoadOrderHistoryDatesRequest",
+        "LoadOrderHistoryDatesResponse",
+        "LoadOrderHistoryRequest",
+        "LoadOrderHistoryResponse",
+        "load_fill_history = 43",
+        "load_order_history_dates = 44",
+        "load_order_history = 45",
+        "load_fill_history_response = 62",
+        "load_order_history_dates_response = 63",
+        "load_order_history_response = 64",
+    ] {
+        assert!(
+            proto.contains(needle),
+            "gateway proto must keep direct/gateway parity for {needle}"
+        );
+    }
+}

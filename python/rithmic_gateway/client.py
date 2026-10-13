@@ -344,6 +344,62 @@ class GatewayClient(FramedConnection):
             for r in resp.load_account_rms_info_response.rows
         ]
 
+    def load_fill_history(
+        self, start_date: int, finish_date: int
+    ) -> list[dict[str, Any]]:
+        """Fills for trade dates ``start_date..=finish_date`` (CCYYMMDD).
+
+        Read-only; requires parent trading enabled (order-plant login). Fails
+        closed with ``GatewayError`` code ``reconciliation_unavailable`` when the
+        venue's 10,000-row cap is reached: split the date range and retry.
+        """
+        resp = self._rpc(
+            pb.Frame(
+                load_fill_history=pb.LoadFillHistoryRequest(
+                    start_date=start_date, finish_date=finish_date
+                )
+            )
+        )
+        which = resp.WhichOneof("body")
+        if which != "load_fill_history_response":
+            raise GatewayError(
+                "protocol", f"expected load_fill_history_response, got {which}"
+            )
+        return [
+            _normalize_fill_history(_message_to_dict(r))
+            for r in resp.load_fill_history_response.rows
+        ]
+
+    def load_order_history_dates(self) -> list[str]:
+        """Trade dates (CCYYMMDD) the venue keeps order history for. Read-only."""
+        resp = self._rpc(
+            pb.Frame(load_order_history_dates=pb.LoadOrderHistoryDatesRequest())
+        )
+        which = resp.WhichOneof("body")
+        if which != "load_order_history_dates_response":
+            raise GatewayError(
+                "protocol", f"expected load_order_history_dates_response, got {which}"
+            )
+        return list(resp.load_order_history_dates_response.dates)
+
+    def load_order_history(self, date: str) -> list[dict[str, Any]]:
+        """Replay one trade date's order history (CCYYMMDD) as order notifications.
+
+        Read-only; best-effort drain like ``load_orders`` (same serialization).
+        """
+        resp = self._rpc(
+            pb.Frame(load_order_history=pb.LoadOrderHistoryRequest(date=date))
+        )
+        which = resp.WhichOneof("body")
+        if which != "load_order_history_response":
+            raise GatewayError(
+                "protocol", f"expected load_order_history_response, got {which}"
+            )
+        return [
+            _normalize_order_notification(_message_to_dict(e))
+            for e in resp.load_order_history_response.events
+        ]
+
     def load_ticks(
         self, symbol: str, exchange: str, start_ssboe: int, end_ssboe: int
     ) -> list[dict[str, Any]]:
@@ -870,6 +926,26 @@ def _message_to_dict(msg: Any) -> dict[str, Any]:
         "always_print_fields_with_no_presence": True,
     }
     return MessageToDict(msg, **flags)
+
+
+def _normalize_fill_history(d: dict[str, Any]) -> dict[str, Any]:
+    """Match PyO3 ``fill_history_dict``: type tag, and ``fill_size`` as an int
+    (proto-JSON renders uint64 as a string)."""
+    out = dict(d)
+    out["type"] = "fill_history"
+    if "fill_size" in out:
+        out["fill_size"] = int(out["fill_size"])
+    return out
+
+
+def _normalize_order_notification(d: dict[str, Any]) -> dict[str, Any]:
+    """Match PyO3 ``order_notification_dict``: type tag, and ``ts_event_ns`` as
+    an int (proto-JSON renders uint64 as a string)."""
+    out = dict(d)
+    out["type"] = "order_notification"
+    if "ts_event_ns" in out:
+        out["ts_event_ns"] = int(out["ts_event_ns"])
+    return out
 
 
 def _normalize_history_tick(d: dict[str, Any]) -> dict[str, Any]:
