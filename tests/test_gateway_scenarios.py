@@ -16,8 +16,14 @@ from typing import Any
 
 import pytest
 from gateway_fake import FakeParent, build_fake_gateway, running_fake
-from rithmic_gateway.client import GatewayClient, GatewayError
+from rithmic_gateway.client import GatewayClient
+from rithmic_gateway.client import GatewayError as LakeGatewayError
 from rithmic_gateway.runtime import GatewayRuntimeRegistry, create_gateway_client
+from rithmic_nt_connect.errors import GatewayError as ExtensionGatewayError
+
+# The Python clients raise the lake error, the Rust client the extension's; both
+# carry the wire ``code``.
+GatewayError = (LakeGatewayError, ExtensionGatewayError)
 
 NQ = "NQH6"
 EXCHANGE = "CME"
@@ -37,9 +43,26 @@ def _python_mux(parent: FakeParent) -> Any:
     return client
 
 
+def _rust(parent: FakeParent) -> Any:
+    from rithmic_nt_connect._lib import Session
+
+    cfg = parent.config()
+    client = Session(
+        user=cfg.user,
+        system_name=cfg.system_name,
+        url=cfg.url,
+        env=cfg.env,
+        connect_mode="gateway",
+        gateway_listen=cfg.listen,
+    )
+    client.connect()
+    return client
+
+
 CLIENTS: dict[str, MakeClient] = {
     "python-plain": _python_plain,
     "python-mux": _python_mux,
+    "rust": _rust,
 }
 
 
@@ -89,6 +112,7 @@ def reattach(make_client: ClientFactory, client: Any) -> None:
         client.disconnect()
         client.connect()
     else:
+        # The mux runtimes (Python and Rust) re-dial through ensure_transport_live.
         client.ensure_transport_live()
 
 
@@ -275,7 +299,8 @@ def test_ticker_reset_reissues_ticker_intents(fake_bin, make_client) -> None:
         client = make_client(parent)
         client.subscribe(NQ, EXCHANGE)
         parent.clear_calls()
-        client.reset_ticker_plant()
+        reset = getattr(client, "reset_ticker_plant", None) or client.reset_ticker
+        reset()
         calls = parent.calls()
         assert calls[0] == "reset_ticker", calls
         assert f"subscribe {NQ} {EXCHANGE}" in calls, calls
@@ -322,7 +347,7 @@ def test_a_slow_client_is_disconnected_without_hurting_its_peer(
         def slow_is_gone() -> bool:
             try:
                 slow.get_live_md_state()
-            except (GatewayError, OSError):
+            except (*GatewayError, OSError):
                 return True
             return False
 
@@ -334,7 +359,7 @@ def test_a_slow_client_is_disconnected_without_hurting_its_peer(
 
 
 def test_mux_client_recovers_after_the_parent_restarts(fake_bin, make_client) -> None:
-    if make_client.kind != "python-mux":
+    if make_client.kind == "python-plain":
         pytest.skip("transport recovery is a mux-runtime behavior")
     with running_fake(fake_bin) as parent:
         client = make_client(parent)

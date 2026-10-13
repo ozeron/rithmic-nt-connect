@@ -94,7 +94,33 @@ impl SessionLock {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// Like [`Self::try_acquire`], but retries `AlreadyHeld` for up to `grace`.
+    ///
+    /// Clients probe the flock (see [`flock_held`]) by briefly taking it, so a
+    /// parent that starts at that instant would otherwise refuse to start. A
+    /// lock that stays held past `grace` is a real second process and still fails.
+    pub fn try_acquire_patient(
+        user: &str,
+        system_name: &str,
+        url: &str,
+        env: &str,
+        grace: std::time::Duration,
+    ) -> Result<Self, SingletonError> {
+        let deadline = std::time::Instant::now() + grace;
+        loop {
+            match Self::try_acquire(user, system_name, url, env) {
+                Err(SingletonError::AlreadyHeld { .. }) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                other => return other,
+            }
+        }
+    }
 }
+
+/// How long a parent waits out a transient flock probe before refusing to start.
+pub const STARTUP_LOCK_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// True when another live process holds the credential flock.
 ///
@@ -150,6 +176,39 @@ mod tests {
         assert!(matches!(err, SingletonError::AlreadyHeld { .. }));
         drop(a);
         let _b = SessionLock::try_acquire(&user, system, url, env).expect("after drop");
+    }
+
+    #[test]
+    fn patient_acquire_rides_out_a_transient_probe_but_not_a_real_holder() {
+        let user = format!("patient-user-{}", std::process::id());
+        let (system, url, env) = ("LucidTrading", "wss://patient.example", "Live");
+        let grace = std::time::Duration::from_millis(500);
+
+        // A holder that lets go after 60ms (a probe): the patient acquire waits.
+        let holder = SessionLock::try_acquire(&user, system, url, env).expect("holder");
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            drop(holder);
+        });
+        let started = std::time::Instant::now();
+        let lock = SessionLock::try_acquire_patient(&user, system, url, env, grace)
+            .expect("acquired after the probe released it");
+        assert!(started.elapsed() >= std::time::Duration::from_millis(50));
+        release.join().unwrap();
+
+        // A real holder never lets go: it fails, but only after the grace.
+        let started = std::time::Instant::now();
+        let err = SessionLock::try_acquire_patient(
+            &user,
+            system,
+            url,
+            env,
+            std::time::Duration::from_millis(100),
+        )
+        .unwrap_err();
+        assert!(matches!(err, SingletonError::AlreadyHeld { .. }));
+        assert!(started.elapsed() >= std::time::Duration::from_millis(90));
+        drop(lock);
     }
 
     #[test]

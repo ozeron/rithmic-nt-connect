@@ -714,7 +714,7 @@ def test_transport_generation_bump_schedules_l3_rearm(
     async def _run() -> None:
         loop = asyncio.get_running_loop()
         client._loop = loop  # type: ignore[attr-defined]
-        from rithmic_gateway.transport_recovery import (
+        from rithmic_nt_connect.transport import (
             TransportDown,
             TransportFault,
             TransportFaultKind,

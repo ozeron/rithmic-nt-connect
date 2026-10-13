@@ -20,7 +20,7 @@ use rithmic_gateway::env_keys::{self, process_env_first};
 use rithmic_gateway::idle_exit::parse_idle_exit_sec;
 use rithmic_gateway::listen::{bind_unix, ListenEndpoint};
 use rithmic_gateway::server::{run_gateway, Fingerprint, GatewayParams, SessionHandle};
-use rithmic_gateway::singleton::SessionLock;
+use rithmic_gateway::singleton::{SessionLock, STARTUP_LOCK_GRACE};
 use rithmic_gateway::subscriptions::ParentGates;
 use rithmic_gateway::testing::serve_control;
 use rithmic_plants::fake::FakeSession;
@@ -50,8 +50,9 @@ async fn run() -> Result<(), String> {
     )?;
 
     // Same single-login discipline as production: hold the credential flock.
-    let _lock = SessionLock::try_acquire(&user, &system_name, &url, &env_name)
-        .map_err(|e| format!("credential flock: {e}"))?;
+    let _lock =
+        SessionLock::try_acquire_patient(&user, &system_name, &url, &env_name, STARTUP_LOCK_GRACE)
+            .map_err(|e| format!("credential flock: {e}"))?;
 
     let listen_raw =
         std::env::var("RITHMIC_GATEWAY_LISTEN").map_err(|_| "RITHMIC_GATEWAY_LISTEN required")?;

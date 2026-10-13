@@ -1,0 +1,272 @@
+"""Rust gateway client behind ``create_session``: selector, wrapper, callbacks."""
+
+from __future__ import annotations
+
+import threading
+import time
+from typing import Any
+
+import pytest
+from gateway_fake import FakeParent, build_fake_gateway, running_fake
+from rithmic_nt_connect import session as session_mod
+from rithmic_nt_connect.config import ConfigError, ConnectMode, SessionConfig
+from rithmic_nt_connect.errors import UnsupportedInGatewayModeError
+from rithmic_nt_connect.session import (
+    _gateway_client_choice,
+    _RustGatewaySession,
+    create_rust_gateway_session,
+    create_session,
+)
+from rithmic_nt_connect.transport import (
+    RecoveryFailed,
+    TransportDown,
+    TransportUp,
+    event_from_rust,
+)
+
+_lib = pytest.importorskip("rithmic_nt_connect._lib")
+
+
+def _gateway_cfg(**kwargs: Any) -> SessionConfig:
+    return SessionConfig(user="u-rust-gw", connect_mode=ConnectMode.GATEWAY, **kwargs)
+
+
+@pytest.fixture(scope="module")
+def fake_bin():
+    binary = build_fake_gateway()
+    if binary is None:
+        pytest.skip("rithmic-gateway-fake unavailable (no cargo / build failed)")
+    return binary
+
+
+# -- selector ---------------------------------------------------------------------
+
+
+def test_gateway_client_defaults_to_python_until_the_rust_client_is_proven(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("RITHMIC_GATEWAY_CLIENT", raising=False)
+    assert _gateway_client_choice() == "python"
+
+
+@pytest.mark.parametrize("value", ["rust", "RUST", " rust ", "python"])
+def test_gateway_client_selector_accepts_rust_and_python(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("RITHMIC_GATEWAY_CLIENT", value)
+    assert _gateway_client_choice() == value.strip().lower()
+
+
+def test_gateway_client_selector_rejects_anything_else(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("RITHMIC_GATEWAY_CLIENT", "go")
+    with pytest.raises(ConfigError, match="RITHMIC_GATEWAY_CLIENT"):
+        _gateway_client_choice()
+
+
+def test_rust_selector_routes_gateway_mode_to_the_extension(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("RITHMIC_GATEWAY_CLIENT", "rust")
+    created = create_session(_gateway_cfg())
+    assert isinstance(created, _RustGatewaySession)
+
+
+def test_python_selector_still_uses_the_python_gateway_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("RITHMIC_GATEWAY_CLIENT", "python")
+    from rithmic_nt_connect.gateway_wire import GatewayWireSession
+
+    assert isinstance(create_session(_gateway_cfg()), GatewayWireSession)
+
+
+# -- the extension in gateway mode (no network) ---------------------------------------
+
+
+def test_the_rust_gateway_session_needs_no_password_and_direct_still_does() -> None:
+    _lib.Session(user="u", connect_mode="gateway")  # no password: fine
+    with pytest.raises(ValueError, match="password"):
+        _lib.Session(user="u")  # direct mode requires one
+    with pytest.raises(ValueError, match="connect_mode"):
+        _lib.Session(user="u", password="pw", connect_mode="pooled")
+
+
+def test_gateway_mode_rejects_remote_listen_urls() -> None:
+    with pytest.raises(ValueError, match="not implemented"):
+        _lib.Session(
+            user="u", connect_mode="gateway", gateway_listen="tcp://127.0.0.1:7600"
+        )
+
+
+def test_history_replay_is_unreachable_in_gateway_mode() -> None:
+    session = _lib.Session(user="u", connect_mode="gateway")
+    for call in (
+        lambda: session.load_fill_history(20260101, 20260102),
+        lambda: session.load_order_history("20260101"),
+        lambda: session.load_order_history_dates(),
+    ):
+        with pytest.raises(UnsupportedInGatewayModeError):
+            call()
+
+
+def test_gateway_gates_are_read_only_and_none_in_direct_mode() -> None:
+    direct = _lib.Session(user="u", password="pw")
+    assert direct.trading_enabled is None
+    assert direct.cancel_all_enabled is None
+    assert direct.ensure_transport_live() == 0
+    assert direct.transport_connected() is True
+    assert direct.transport_generation() == 0
+
+    gateway = _lib.Session(user="u", connect_mode="gateway")
+    assert gateway.trading_enabled is False  # nothing advertised before connect
+    with pytest.raises(AttributeError):
+        gateway.trading_enabled = True  # type: ignore[misc]
+
+
+def test_a_gateway_session_before_connect_is_not_connected() -> None:
+    session = _lib.Session(user="u", connect_mode="gateway")
+    with pytest.raises(_lib.NotConnectedError):
+        session.subscribe("NQH6", "CME")
+    with pytest.raises(_lib.NotConnectedError):
+        session.poll_event()
+
+
+def test_a_missing_parent_is_a_typed_gateway_error_with_the_launcher_command(
+    tmp_path: Any,
+) -> None:
+    session = _lib.Session(
+        user="u-missing-parent",
+        connect_mode="gateway",
+        gateway_listen=f"unix:///tmp/rgw-missing-{id(tmp_path)}.sock",
+    )
+    with pytest.raises(_lib.GatewayError) as err:
+        session.connect()
+    assert err.value.code == "parent_not_running"
+    assert "python -m rithmic_gateway" in str(err.value)
+
+
+# -- the wrapper -----------------------------------------------------------------
+
+
+def test_the_wrapper_delegates_everything_else_to_the_extension() -> None:
+    class _Inner:
+        trading_enabled = False
+
+        def subscribe(self, symbol: str, exchange: str) -> str:
+            return f"{symbol}.{exchange}"
+
+    wrapper = _RustGatewaySession(_Inner())
+    assert wrapper.subscribe("NQ", "CME") == "NQ.CME"  # type: ignore[attr-defined]
+    # The adapter's pre-send gate reads exactly this attribute.
+    assert getattr(wrapper, "trading_enabled", True) is False
+
+
+def test_transport_events_are_built_for_the_adapter() -> None:
+    down = event_from_rust("down", 3, 0, None)
+    assert isinstance(down, TransportDown) and down.gen == 3
+    assert down.fault.kind.value == "unix_eof"
+    up = event_from_rust("up", 4, 0, None)
+    assert isinstance(up, TransportUp) and up.gen == 4
+    failed = event_from_rust("recovery_failed", 4, 8, "parent gone")
+    assert isinstance(failed, RecoveryFailed)
+    assert (failed.gen, failed.attempts) == (4, 8)
+    assert "parent gone" in str(failed.cause)
+    assert event_from_rust("nonsense", 1, 0, None) is None
+
+
+def test_the_wrapper_bridges_rust_callbacks_to_adapter_events() -> None:
+    seen: list[Any] = []
+
+    class _Inner:
+        def subscribe_transport_events(self, callback: Any) -> None:
+            callback("down", 1, 0, None)
+            callback("up", 2, 0, None)
+            callback("recovery_failed", 2, 8, "gone")
+
+    wrapper = _RustGatewaySession(_Inner())
+    unsubscribe = wrapper.subscribe_transport_events(seen.append)
+    assert [type(e).__name__ for e in seen] == [
+        "TransportDown",
+        "TransportUp",
+        "RecoveryFailed",
+    ]
+    assert callable(unsubscribe)
+
+
+def test_create_rust_gateway_session_never_passes_a_password(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class _Recorder:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(_lib, "Session", _Recorder)
+    create_rust_gateway_session(_gateway_cfg(gateway_listen="unix:///tmp/x.sock"))
+    assert "password" not in captured
+    assert captured["connect_mode"] == "gateway"
+    assert captured["gateway_listen"] == "unix:///tmp/x.sock"
+
+
+def test_the_transport_callback_reaches_python_from_a_runtime_thread(
+    fake_bin,
+) -> None:
+    """Down then Up (automatic recovery) arrive through the real extension."""
+    with running_fake(fake_bin) as parent:
+        wrapper: Any = create_rust_gateway_session(_session_cfg_for(parent))
+        wrapper.connect()
+        events: list[Any] = []
+        got_up = threading.Event()
+
+        def _listener(event: Any) -> None:
+            events.append((threading.current_thread().name, event))
+            if isinstance(event, TransportUp):
+                got_up.set()
+
+        wrapper.subscribe_transport_events(_listener)
+        wrapper.subscribe("NQH6", "CME")
+
+        parent.restart()
+        assert got_up.wait(30), events
+        kinds = [type(e).__name__ for _, e in events]
+        assert kinds[0] == "TransportDown"
+        assert "TransportUp" in kinds
+        # Delivered off the main thread, without deadlocking the interpreter.
+        assert all(name != threading.main_thread().name for name, _ in events)
+        up = next(e for _, e in events if isinstance(e, TransportUp))
+        assert up.gen >= 2
+        wrapper.disconnect()
+
+
+def _session_cfg_for(parent: FakeParent) -> SessionConfig:
+    cfg = parent.config()
+    return SessionConfig(
+        user=cfg.user,
+        connect_mode=ConnectMode.GATEWAY,
+        system_name=cfg.system_name,
+        url=cfg.url,
+        env="Live",
+        gateway_listen=cfg.listen,
+    )
+
+
+def test_a_gateway_session_round_trips_through_create_session(
+    fake_bin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("RITHMIC_GATEWAY_CLIENT", "rust")
+    with running_fake(fake_bin) as parent:
+        session = create_session(_session_cfg_for(parent))
+        session.connect()
+        session.subscribe("NQH6", "CME")
+        parent.push_last_trades("NQH6", 1)
+        deadline = time.monotonic() + 10
+        event = None
+        while event is None and time.monotonic() < deadline:
+            event = session.poll_event(100)
+        assert event is not None and event["symbol"] == "NQH6"
+        assert event["type"] == "last_trade"
+        session.disconnect()
+    assert session_mod._gateway_client_choice() == "rust"

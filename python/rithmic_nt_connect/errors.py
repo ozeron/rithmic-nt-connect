@@ -15,10 +15,21 @@ try:
         AlreadyConnectedError,
         ChannelClosedError,
         ChannelLaggedError,
+        GatewayError,
         NotConnectedError,
         ReconciliationUnavailableError,
+        UnsupportedInGatewayModeError,
     )
 except ImportError:  # pragma: no cover
+
+    class GatewayError(RuntimeError):
+        """Gateway-mode failure carrying the wire ``code`` and ``message``."""
+
+        code: str
+        message: str
+
+    class UnsupportedInGatewayModeError(RuntimeError):
+        """Direct-only call made in gateway mode."""
 
     class AlreadyConnectedError(RuntimeError):
         """Session already connected (idempotent connect is safe to suppress)."""

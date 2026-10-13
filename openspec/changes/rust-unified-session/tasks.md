@@ -40,8 +40,8 @@
 
 ## 5. Switch-over behind a temporary selector
 
-- [ ] 5.1 Add `RITHMIC_GATEWAY_CLIENT=rust|python` to `create_session` (default `python`); route `rust` through the PyO3 class in gateway mode
-- [ ] 5.2 Run the shared harness against both the Rust client and the Python lake client; both pass the same scenarios
+- [x] 5.1 Add `RITHMIC_GATEWAY_CLIENT=rust|python` to `create_session` (default `python`); route `rust` through the PyO3 class in gateway mode
+- [x] 5.2 Run the shared harness against both the Rust client and the Python lake client; both pass the same scenarios
 - [ ] 5.3 Live verification on Rithmic Test, gateway mode, `rust` selector, no live place, MotiveWave / R|Trader closed: `scripts/smoke_gateway_shared_ticks.py`, `tests/e2e/test_reconnect_live.py`, `tests/e2e/test_rms_commission_live.py`
 - [ ] 5.4 Flip the default to `rust`; keep `python` selector for one release
 

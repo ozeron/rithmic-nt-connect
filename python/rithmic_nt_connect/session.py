@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import threading
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
@@ -557,6 +558,75 @@ def _connect_once(session: Any) -> None:
         return
 
 
+_GATEWAY_CLIENTS = ("rust", "python")
+
+
+def _gateway_client_choice() -> str:
+    """Which gateway client backs gateway mode: ``rust`` or ``python``.
+
+    Temporary selector (``RITHMIC_GATEWAY_CLIENT``) while the Rust client rolls out;
+    the Python client is removed once the Rust one is the proven default.
+    """
+    raw = os.environ.get("RITHMIC_GATEWAY_CLIENT", "").strip().lower()
+    if not raw:
+        return "python"
+    if raw not in _GATEWAY_CLIENTS:
+        raise ConfigError(
+            f"invalid RITHMIC_GATEWAY_CLIENT {raw!r}; expected rust or python"
+        )
+    return raw
+
+
+class _RustGatewaySession:
+    """The Rust gateway client (one shared socket per process) as a ``WireSession``.
+
+    A thin shell over the extension's ``Session``: every call is the extension's.
+    It only adapts the extension's transport callback to the adapter's event types.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def subscribe_transport_events(self, listener: Any) -> Any:
+        from rithmic_nt_connect.transport import event_from_rust
+
+        def _bridge(
+            kind: str, generation: int, attempts: int, cause: str | None
+        ) -> None:
+            event = event_from_rust(kind, generation, attempts, cause)
+            if event is not None:
+                listener(event)
+
+        self._inner.subscribe_transport_events(_bridge)
+        # The listener lives as long as the session.
+        return lambda: None
+
+
+def create_rust_gateway_session(session: SessionConfig) -> WireSession:
+    """A gateway-mode session backed by the Rust client.
+
+    The client holds no password: only the parent (started explicitly) has it.
+    """
+    from rithmic_nt_connect._lib import Session
+
+    inner = Session(
+        user=session.user,
+        system_name=session.system_name,
+        url=session.url,
+        env=session.env,
+        account_id=session.account_id,
+        fcm_id=session.fcm_id,
+        ib_id=session.ib_id,
+        connect_mode="gateway",
+        gateway_listen=session.gateway_listen,
+        gateway_auth_token=session.gateway_auth_token or None,
+    )
+    return cast(WireSession, _RustGatewaySession(inner))
+
+
 def create_session(
     session: SessionConfig,
     *,
@@ -569,10 +639,12 @@ def create_session(
     ``connect_market_data_session`` share one in-process Rithmic login.
     Gateway attaches to an explicitly started ``rithmic-gateway`` parent (it
     never spawns one, never holds the password) and never opens plants locally.
-    Each call returns a **fresh** ``GatewayWireSession`` facade; data and exec
-    factories share one ``GatewayRuntime`` socket.
+    Each call returns a **fresh** facade; data and exec factories share one
+    gateway socket.
     """
     if session.connect_mode == ConnectMode.GATEWAY:
+        if _gateway_client_choice() == "rust":
+            return create_rust_gateway_session(session)
         from rithmic_nt_connect.gateway_wire import create_gateway_wire_session
 
         return create_gateway_wire_session(session)

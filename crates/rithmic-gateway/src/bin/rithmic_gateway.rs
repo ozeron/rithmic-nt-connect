@@ -8,7 +8,7 @@ use rithmic_gateway::env_keys::{self, process_env_first};
 use rithmic_gateway::idle_exit::parse_idle_exit_sec;
 use rithmic_gateway::listen::{bind_unix, default_unix_path, ListenEndpoint};
 use rithmic_gateway::server::{run_gateway, Fingerprint, GatewayParams, SessionHandle};
-use rithmic_gateway::singleton::SessionLock;
+use rithmic_gateway::singleton::{SessionLock, STARTUP_LOCK_GRACE};
 use rithmic_gateway::subscriptions::ParentGates;
 use rithmic_plants::{DirectSession, PlantSet, Session, SessionConfig};
 use rithmic_rs::RithmicEnv;
@@ -70,8 +70,9 @@ async fn run() -> Result<(), String> {
 
     // Flock first (R10 / AGENTS.md single-login): refuse before ever
     // touching Rithmic if a direct or parent process already holds it.
-    let _lock = SessionLock::try_acquire(&user, &system_name, &url, &env_name)
-        .map_err(|e| format!("credential flock: {e}"))?;
+    let _lock =
+        SessionLock::try_acquire_patient(&user, &system_name, &url, &env_name, STARTUP_LOCK_GRACE)
+            .map_err(|e| format!("credential flock: {e}"))?;
 
     let listen_raw = std::env::var("RITHMIC_GATEWAY_LISTEN").unwrap_or_else(|_| {
         format!(

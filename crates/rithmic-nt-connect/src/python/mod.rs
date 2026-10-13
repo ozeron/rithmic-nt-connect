@@ -8,6 +8,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use tokio::runtime::Runtime;
 
+use rithmic_gateway::client::{GatewayConfig, GatewaySession, TransportEvent};
 use rithmic_plants::config::{SessionConfig, DEFAULT_LUCID_URL};
 use rithmic_plants::dto::{
     AccountPnlDto, AccountRmsInfoDto, BboDto, FillHistoryDto, FrontMonthDto, HistoryBarDto,
@@ -23,6 +24,14 @@ use rithmic_plants::{
 pyo3::create_exception!(rithmic_nt_connect, ChannelLaggedError, PyRuntimeError);
 pyo3::create_exception!(rithmic_nt_connect, ChannelClosedError, PyRuntimeError);
 pyo3::create_exception!(rithmic_nt_connect, NotConnectedError, PyRuntimeError);
+// Raised by gateway-mode sessions; carries `.code` / `.message` like the
+// pure-Python gateway client's error, so the adapter classifies it the same way.
+pyo3::create_exception!(rithmic_nt_connect, GatewayError, PyRuntimeError);
+pyo3::create_exception!(
+    rithmic_nt_connect,
+    UnsupportedInGatewayModeError,
+    PyRuntimeError
+);
 pyo3::create_exception!(rithmic_nt_connect, AlreadyConnectedError, PyRuntimeError);
 pyo3::create_exception!(
     rithmic_nt_connect,
@@ -35,8 +44,35 @@ fn runtime() -> &'static Runtime {
     RT.get_or_init(|| Runtime::new().expect("failed to create tokio runtime"))
 }
 
+/// Wire code the adapter matches on; history refused under live MD is a capability denial.
+fn normalize_gateway_code(code: &str) -> &str {
+    if code == "history_denied_live_md" {
+        "capability_denied"
+    } else {
+        code
+    }
+}
+
+fn gateway_error(code: &str, message: &str) -> PyErr {
+    let code = normalize_gateway_code(code).to_string();
+    let message = message.to_string();
+    let err = GatewayError::new_err(format!("{code}: {message}"));
+    Python::attach(|py| {
+        let value = err.value(py);
+        let _ = value.setattr("code", &code);
+        let _ = value.setattr("message", &message);
+    });
+    err
+}
+
 fn to_py_err(err: Error) -> PyErr {
     match err {
+        Error::Gateway { code, message } => gateway_error(&code, &message),
+        // Written but unanswered: the order may or may not be live. The adapter
+        // latches the order plant on any failure after send.
+        Error::OutcomeUnknown(msg) => gateway_error("outcome_unknown", &msg),
+        // A transport failure is a reconnectable gateway code.
+        Error::Transport(msg) => gateway_error("transport_reset", &msg),
         Error::Config(msg) => PyValueError::new_err(msg),
         Error::AlreadyConnected => AlreadyConnectedError::new_err("already connected"),
         Error::ChannelLagged { plant, skipped } => {
@@ -434,6 +470,8 @@ pub struct PySession {
     session: Arc<dyn Session>,
     /// Fill / order history replay: direct-only, absent for gateway backends.
     history: Option<Arc<dyn HistoryReplay>>,
+    /// The gateway client, when `connect_mode` is `gateway` (transport hooks).
+    gateway: Option<Arc<GatewaySession>>,
 }
 
 impl PySession {
@@ -448,7 +486,7 @@ impl PySession {
 
     fn history(&self) -> PyResult<&Arc<dyn HistoryReplay>> {
         self.history.as_ref().ok_or_else(|| {
-            PyRuntimeError::new_err(
+            UnsupportedInGatewayModeError::new_err(
                 "unsupported in gateway mode: fill/order history is direct-only",
             )
         })
@@ -464,7 +502,7 @@ impl PySession {
     #[new]
     #[pyo3(signature = (
         user,
-        password,
+        password=None,
         system_name="LucidTrading",
         url="wss://rprotocol.rithmic.com:443",
         app_name="rithmic-nt-connect",
@@ -475,11 +513,14 @@ impl PySession {
         ib_id=None,
         beta_url=None,
         plants="market_data",
+        connect_mode="direct",
+        gateway_listen=None,
+        gateway_auth_token=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         user: String,
-        password: String,
+        password: Option<String>,
         system_name: &str,
         url: &str,
         app_name: &str,
@@ -490,44 +531,157 @@ impl PySession {
         ib_id: Option<String>,
         beta_url: Option<String>,
         plants: &str,
+        connect_mode: &str,
+        gateway_listen: Option<String>,
+        gateway_auth_token: Option<String>,
     ) -> PyResult<Self> {
-        let renv = match env {
-            "Live" | "live" => rithmic_rs::RithmicEnv::Live,
-            "Demo" | "demo" => rithmic_rs::RithmicEnv::Demo,
-            "Test" | "test" => rithmic_rs::RithmicEnv::Test,
+        let (renv, env_name) = match env {
+            "Live" | "live" => (rithmic_rs::RithmicEnv::Live, "Live"),
+            "Demo" | "demo" => (rithmic_rs::RithmicEnv::Demo, "Demo"),
+            "Test" | "test" => (rithmic_rs::RithmicEnv::Test, "Test"),
             other => {
                 return Err(PyValueError::new_err(format!(
                     "invalid env {other:?}; expected Live, Demo, or Test"
                 )));
             }
         };
-        let mut builder = SessionConfig::builder()
-            .user(user)
-            .password(password)
-            .system_name(system_name)
-            .url(url)
-            .app_name(app_name)
-            .app_version(app_version)
-            .env(renv);
-        if let Some(beta) = beta_url {
-            builder = builder.beta_url(beta);
+        match connect_mode {
+            "gateway" => {
+                // The gateway parent owns the Rithmic login: a gateway client has
+                // no password and never reads or sends one.
+                let mut cfg = GatewayConfig::new(&user, system_name, url, env_name);
+                cfg.account_id = account_id.unwrap_or_default();
+                cfg.fcm_id = fcm_id.unwrap_or_default();
+                cfg.ib_id = ib_id.unwrap_or_default();
+                if let Some(listen) = gateway_listen {
+                    cfg = cfg.with_listen(&listen).map_err(to_py_err)?;
+                }
+                if let Some(token) = gateway_auth_token {
+                    cfg = cfg.with_auth_token(&token);
+                }
+                let gateway = Arc::new(GatewaySession::new(cfg));
+                Ok(Self {
+                    session: gateway.clone(),
+                    history: None,
+                    gateway: Some(gateway),
+                })
+            }
+            "direct" => {
+                let password = password
+                    .ok_or_else(|| PyValueError::new_err("direct mode requires a password"))?;
+                let mut builder = SessionConfig::builder()
+                    .user(user)
+                    .password(password)
+                    .system_name(system_name)
+                    .url(url)
+                    .app_name(app_name)
+                    .app_version(app_version)
+                    .env(renv);
+                if let Some(beta) = beta_url {
+                    builder = builder.beta_url(beta);
+                }
+                if let Some(v) = account_id {
+                    builder = builder.account_id(v);
+                }
+                if let Some(v) = fcm_id {
+                    builder = builder.fcm_id(v);
+                }
+                if let Some(v) = ib_id {
+                    builder = builder.ib_id(v);
+                }
+                let config = builder.build().map_err(to_py_err)?;
+                let plants = PlantSet::parse(plants).map_err(to_py_err)?;
+                let direct = Arc::new(DirectSession::new(config, plants));
+                Ok(Self {
+                    session: direct.clone(),
+                    history: Some(direct),
+                    gateway: None,
+                })
+            }
+            other => Err(PyValueError::new_err(format!(
+                "invalid connect_mode {other:?}; expected 'direct' or 'gateway'"
+            ))),
         }
-        if let Some(v) = account_id {
-            builder = builder.account_id(v);
+    }
+
+    /// The parent's trading gate in gateway mode (read-only; clients cannot
+    /// elevate it). `None` in direct mode, where this process owns the gate.
+    #[getter]
+    fn trading_enabled(&self) -> Option<bool> {
+        self.gateway.as_ref().map(|g| g.trading_enabled())
+    }
+
+    /// The parent's plant-wide cancel-all gate (gateway mode); `None` in direct mode.
+    #[getter]
+    fn cancel_all_enabled(&self) -> Option<bool> {
+        self.gateway.as_ref().map(|g| g.cancel_all_enabled())
+    }
+
+    /// Incarnation of the gateway transport (bumps on every re-dial); 0 in direct mode.
+    fn transport_generation(&self) -> u64 {
+        self.gateway
+            .as_ref()
+            .map_or(0, |g| g.transport_generation())
+    }
+
+    /// Whether the gateway socket is up; always true in direct mode.
+    fn transport_connected(&self) -> bool {
+        self.gateway
+            .as_ref()
+            .is_none_or(|g| g.transport_connected())
+    }
+
+    /// Recover the gateway transport if it is down (single-flight) and return
+    /// its generation. A no-op returning 0 in direct mode.
+    fn ensure_transport_live(&self, py: Python<'_>) -> PyResult<u64> {
+        match &self.gateway {
+            Some(gateway) => py
+                .detach(|| runtime().block_on(gateway.ensure_transport_live()))
+                .map_err(to_py_err),
+            None => Ok(0),
         }
-        if let Some(v) = fcm_id {
-            builder = builder.fcm_id(v);
-        }
-        if let Some(v) = ib_id {
-            builder = builder.ib_id(v);
-        }
-        let config = builder.build().map_err(to_py_err)?;
-        let plants = PlantSet::parse(plants).map_err(to_py_err)?;
-        let direct = Arc::new(DirectSession::new(config, plants));
-        Ok(Self {
-            session: direct.clone(),
-            history: Some(direct),
-        })
+    }
+
+    /// Call `callback(kind, generation, attempts, cause)` on every gateway
+    /// transport event: `kind` is `"down"`, `"up"` or `"recovery_failed"`.
+    /// Fire-and-forget from a runtime thread; a no-op in direct mode.
+    fn subscribe_transport_events(&self, callback: Py<PyAny>) {
+        let Some(gateway) = &self.gateway else {
+            return;
+        };
+        let mut transport = gateway.subscribe_transport();
+        let mut failed = gateway.subscribe_recovery_failed();
+        let notify = move |kind: &'static str, generation: u64, attempts: u32, cause: String| {
+            Python::attach(|py| {
+                let cause = if cause.is_empty() { None } else { Some(cause) };
+                if let Err(err) = callback.call1(py, (kind, generation, attempts, cause)) {
+                    err.print(py);
+                }
+            });
+        };
+        runtime().spawn(async move {
+            loop {
+                tokio::select! {
+                    event = transport.recv() => match event {
+                        Ok(TransportEvent::Down { generation }) => {
+                            notify("down", generation, 0, String::new());
+                        }
+                        Ok(TransportEvent::Up { generation }) => {
+                            notify("up", generation, 0, String::new());
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                    },
+                    report = failed.recv() => match report {
+                        Ok(report) => {
+                            notify("recovery_failed", report.generation, report.attempts, report.cause);
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                    },
+                }
+            }
+        });
     }
 
     fn request_plants(&self, py: Python<'_>, plants: &str) -> PyResult<()> {
@@ -1043,6 +1197,11 @@ fn _lib(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.py().get_type::<ChannelClosedError>(),
     )?;
     m.add("NotConnectedError", m.py().get_type::<NotConnectedError>())?;
+    m.add("GatewayError", m.py().get_type::<GatewayError>())?;
+    m.add(
+        "UnsupportedInGatewayModeError",
+        m.py().get_type::<UnsupportedInGatewayModeError>(),
+    )?;
     m.add(
         "AlreadyConnectedError",
         m.py().get_type::<AlreadyConnectedError>(),

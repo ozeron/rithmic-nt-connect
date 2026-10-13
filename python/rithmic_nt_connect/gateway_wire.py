@@ -272,11 +272,34 @@ class GatewayWireSession:
         self._client.register_transport_generation_listener(callback)
 
     def subscribe_transport_events(self, listener: Any) -> Any:
-        return self._client.subscribe_transport_events(listener)
+        # The lake client emits its own event classes; hand the adapter its own.
+        return self._client.subscribe_transport_events(
+            lambda event: listener(_adapter_event(event))
+        )
 
     def ensure_transport_live(self) -> int:
         """Demand L3 recovery via the shared runtime (single-flight)."""
         return int(self._client.ensure_transport_live())
+
+
+def _adapter_event(event: Any) -> Any:
+    """Convert a lake ``transport_recovery`` event to the adapter's event type."""
+    from rithmic_nt_connect import transport as nt
+
+    name = type(event).__name__
+    if name == "TransportDown":
+        kind = nt.TransportFaultKind(event.fault.kind.value)
+        fault = nt.TransportFault(
+            kind, observed_gen=event.fault.observed_gen, cause=event.fault.cause
+        )
+        return nt.TransportDown(gen=event.gen, fault=fault)
+    if name == "TransportUp":
+        return nt.TransportUp(gen=event.gen)
+    if name == "RecoveryFailed":
+        return nt.RecoveryFailed(
+            gen=event.gen, attempts=event.attempts, cause=event.cause
+        )
+    return event
 
 
 def gateway_config_from_session(session: Any) -> GatewayConfig:

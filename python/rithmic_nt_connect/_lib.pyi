@@ -34,6 +34,19 @@ class NotConnectedError(ChannelError):
 class ReconciliationUnavailableError(RuntimeError):
     """Order-history reconciliation cannot be answered authoritatively."""
 
+class GatewayError(RuntimeError):
+    """Gateway-mode failure carrying the wire ``code`` and ``message``.
+
+    ``str(exc)`` is ``"<code>: <message>"``. A request written but not answered
+    has code ``outcome_unknown``; a transport failure has ``transport_reset``.
+    """
+
+    code: str
+    message: str
+
+class UnsupportedInGatewayModeError(RuntimeError):
+    """Direct-only call (fill / order history replay) made in gateway mode."""
+
 def list_systems(url: str | None = None) -> list[str]:
     """List Rithmic systems via the gateway (template 16); does not log in."""
 
@@ -43,18 +56,39 @@ class Session:
     def __init__(
         self,
         user: str,
-        password: str,
-        system_name: str,
-        url: str,
-        app_name: str,
-        app_version: str,
-        env: str,
-        account_id: str | None,
-        fcm_id: str | None,
-        ib_id: str | None,
-        beta_url: str | None,
-        plants: str,
-    ) -> None: ...
+        password: str | None = None,
+        system_name: str = ...,
+        url: str = ...,
+        app_name: str = ...,
+        app_version: str = ...,
+        env: str = ...,
+        account_id: str | None = ...,
+        fcm_id: str | None = ...,
+        ib_id: str | None = ...,
+        beta_url: str | None = ...,
+        plants: str = ...,
+        connect_mode: str = ...,
+        gateway_listen: str | None = ...,
+        gateway_auth_token: str | None = ...,
+    ) -> None:
+        """``connect_mode`` is ``"direct"`` (needs ``password``) or ``"gateway"``
+        (attach to a started parent; never takes a password).
+        """
+
+    # -- gateway-mode hooks (inert in direct mode) -------------------------
+    @property
+    def trading_enabled(self) -> bool | None:
+        """The parent's trading gate (gateway); ``None`` in direct mode."""
+    @property
+    def cancel_all_enabled(self) -> bool | None:
+        """The parent's cancel-all gate (gateway); ``None`` in direct mode."""
+    def transport_generation(self) -> int: ...
+    def transport_connected(self) -> bool: ...
+    def ensure_transport_live(self) -> int: ...
+    def subscribe_transport_events(self, callback: Any) -> None:
+        """``callback(kind, generation, attempts, cause)``; ``kind`` is
+        ``"down"``, ``"up"`` or ``"recovery_failed"``.
+        """
 
     # -- lifecycle ---------------------------------------------------------
     def connect(self) -> None: ...

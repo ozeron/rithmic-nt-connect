@@ -51,6 +51,17 @@ def _extension_methods() -> set[str]:
     }
 
 
+# Gateway-mode hooks the extension adds on top of the trait; inert in direct mode.
+GATEWAY_HOOKS = {
+    "trading_enabled",
+    "cancel_all_enabled",
+    "transport_generation",
+    "transport_connected",
+    "ensure_transport_live",
+    "subscribe_transport_events",
+}
+
+
 def _wire_methods() -> set[str]:
     """Members of the ``WireSession`` protocol (3.12-compatible)."""
     members = getattr(typing, "get_protocol_members", None)
@@ -69,7 +80,7 @@ def test_the_traits_were_parsed() -> None:
 
 
 def test_extension_stub_exposes_exactly_the_trait_surface() -> None:
-    expected = _session_trait() | _history_trait()
+    expected = _session_trait() | _history_trait() | GATEWAY_HOOKS
     actual = _extension_methods()
     assert actual - expected == set(), "extension methods with no trait method"
     assert expected - actual == set(), "trait methods the extension does not expose"

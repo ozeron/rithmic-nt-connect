@@ -575,7 +575,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         register(self._on_gateway_transport_generation_bump)
 
     def _on_transport_event(self, event: object) -> None:
-        from rithmic_gateway.transport_recovery import (
+        from rithmic_nt_connect.transport import (
             RecoveryFailed,
             TransportDown,
             TransportUp,

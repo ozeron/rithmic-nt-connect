@@ -677,6 +677,7 @@ name = "rithmic-nt-connect"
 version = "0.1.0"
 dependencies = [
  "pyo3",
+ "rithmic-gateway",
  "rithmic-plants",
  "rithmic-rs",
  "thiserror",
