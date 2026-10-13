@@ -8,6 +8,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use tokio::runtime::Runtime;
 
+mod exec;
+
 use rithmic_gateway::client::{GatewayConfig, GatewaySession, TransportEvent};
 use rithmic_plants::config::{SessionConfig, DEFAULT_LUCID_URL};
 use rithmic_plants::dto::{
@@ -1227,6 +1229,7 @@ fn list_systems(url: Option<&str>) -> PyResult<Vec<String>> {
 fn _lib(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySession>()?;
     m.add_class::<PySessionLock>()?;
+    exec::register(m)?;
     m.add("SessionLockError", m.py().get_type::<SessionLockError>())?;
     m.add_function(wrap_pyfunction!(list_systems, m)?)?;
     m.add(

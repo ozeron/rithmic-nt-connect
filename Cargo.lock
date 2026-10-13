@@ -655,6 +655,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
+name = "rithmic-exec"
+version = "0.1.0"
+
+[[package]]
 name = "rithmic-gateway"
 version = "0.1.0"
 dependencies = [
@@ -677,6 +681,7 @@ name = "rithmic-nt-connect"
 version = "0.1.0"
 dependencies = [
  "pyo3",
+ "rithmic-exec",
  "rithmic-gateway",
  "rithmic-plants",
  "rithmic-rs",

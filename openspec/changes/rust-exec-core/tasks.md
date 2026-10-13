@@ -1,12 +1,12 @@
 ## 1. Crate and binding scaffold
 
-- [ ] 1.1 Add pure crate `crates/rithmic-exec` (no `rithmic-plants`, `tokio`, or Nautilus dependency) to the workspace and CI test/clippy lists
-- [ ] 1.2 Add the PyO3 registration seam in `rithmic-nt-connect` (one `exec` submodule of functions and classes) and `_lib.pyi` stubs
+- [x] 1.1 Add pure crate `crates/rithmic-exec` (no `rithmic-plants`, `tokio`, or Nautilus dependency) to the workspace and CI test/clippy lists
+- [x] 1.2 Add the PyO3 registration seam in `rithmic-nt-connect` (one `exec` submodule of functions and classes) and `_lib.pyi` stubs
 
 ## 2. Stage A: order-plant policy
 
-- [ ] 2.1 Port `OrderPlantState` and `OrderPlantPolicy` with an exhaustive Rust test over every (state, transition) pair, taken from `tests/test_order_plant.py`
-- [ ] 2.2 Bind as a pyclass; `_order_plant.py` re-exports it with the Python `OrderPlantState` enum mapping; `tests/test_order_plant.py` passes unchanged
+- [x] 2.1 Port `OrderPlantState` and `OrderPlantPolicy` with an exhaustive Rust test over every (state, transition) pair, taken from `tests/test_order_plant.py`
+- [x] 2.2 Bind as a pyclass; `_order_plant.py` re-exports it with the Python `OrderPlantState` enum mapping; `tests/test_order_plant.py` passes unchanged
 
 ## 3. Stage B: exposure and commission rules
 

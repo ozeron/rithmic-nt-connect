@@ -128,7 +128,7 @@ uv sync --extra dev
 # locally via the hk hooks but is NOT a CI gate (the pre-commit hook enforces it).
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test -p rithmic-plants -p rithmic-gateway -p rithmic-nt-connect
+cargo test -p rithmic-plants -p rithmic-gateway -p rithmic-exec -p rithmic-nt-connect
 uv run ruff check .
 uv run ruff format --check .
 uv run ty check python/rithmic_nt_connect tests

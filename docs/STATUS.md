@@ -89,7 +89,7 @@ Not started (real leftover work): Phase 2 definition updates, Phase 7 recovery s
 
 | Harness | Role |
 | --- | --- |
-| `cargo test -p rithmic-plants -p rithmic-gateway -p rithmic-nt-connect` + `pytest -q` | Unit / conversion / gateway framing |
+| `cargo test -p rithmic-plants -p rithmic-gateway -p rithmic-exec -p rithmic-nt-connect` + `pytest -q` | Unit / conversion / gateway framing |
 | `scripts/smoke_lucid_nq.py` | Live MD (exit `2` if no creds) |
 | `scripts/smoke_gateway_shared_ticks.py` | Two consumers (NQ+MNQ) share one `rithmic-gateway` the harness starts via `scripts/_gateway_parent.py` (exit `2` if no creds) |
 | `scripts/gateway_tick_consumer.py` | Single-symbol gateway tick consumer (used by shared smoke) |

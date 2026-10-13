@@ -21,6 +21,7 @@ extension-module = ["python", "pyo3/extension-module"]
 
 [dependencies]
 rithmic-gateway = { path = "../rithmic-gateway" }
+rithmic-exec = { path = "../rithmic-exec" }
 rithmic-plants = { path = "../rithmic-plants" }
 rithmic-rs = "3"
 thiserror = "2"

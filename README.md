@@ -45,7 +45,7 @@ uv sync --extra dev
 uv run maturin develop
 
 # Unit tests (no live credentials)
-cargo test -p rithmic-plants -p rithmic-gateway -p rithmic-nt-connect
+cargo test -p rithmic-plants -p rithmic-gateway -p rithmic-exec -p rithmic-nt-connect
 uv run pytest -q
 
 # Live LucidTrading smoke (close MotiveWave first)
