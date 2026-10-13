@@ -62,6 +62,7 @@ Not started (real leftover work): Phase 2 definition updates, Phase 7 recovery s
 | Submit / cancel / modify + fills | Gated order plant | [~] see notes |
 | Order status reports | Venue recon when trading; cache-backed when read-only | [~] (best-effort) — `load_orders` = `show_orders` + bounded silence. Not provably complete (no end-of-list; 10k replay cap). Advisory, not authoritative. Read-only → cache-backed. **TC-E88 drain-by-identity live-proven on Test 2026-08-24.** |
 | Fill reports | Venue recon when trading; read-only declines | [~] (best-effort) — `generate_fill_reports` filters the same drain for filled rows. Working-order replays carry no historical fills; fills are live-stream only. Read-only declines. |
+| Fill / order history (read-only) | Offline account recon | [~] **direct `Session` only; gateway deferred.** `load_fill_history` (`RequestShowFillHistory`, 10k cap), `load_order_history_dates`, `load_order_history(date)` (summary replay, best-effort drain like `load_orders`). Not a live capability: absent from `WireSession`, `GatewayClient` and the exec client, so no book/runner/factory can call it in gateway mode (`tests/test_history_direct_only.py` fails if one path gains it without the other). Recon scripts use a one-shot direct login — not while a gateway parent or live node holds the credential. |
 | Reconnect + MD resubscribe | Planned | [~] see notes |
 | Session gateway (shared login) | `connect_mode` required (`direct` / `gateway`) | [~] see notes |
 | Python v2 / LiveNode | Not this support line | **N/A** |
