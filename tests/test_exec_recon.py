@@ -45,25 +45,21 @@ from rithmic_nt_connect.errors import (
     ReconciliationUnavailableError,
     VenueQueryUnavailable,
 )
-from rithmic_nt_connect.execution import (
-    RithmicExecutionClient,
+from rithmic_nt_connect.execution import RithmicExecutionClient
+from rithmic_nt_connect.notification_intake import intake_for
+from rithmic_nt_connect.order_rows import (
     order_status_from_fields,
+    trigger_type_from_fields,
 )
+from rithmic_nt_connect.recon import drain_for
 from rithmic_nt_connect.session import WireSession
 
 
 def _bind_untracked_methods(client: Any) -> None:
-    """Bind the split untracked phases (plus the publish guard) onto a stub."""
-    for name in (
-        "_publish_order_status_report",
-        "_publish_untracked_status",
-        "_publish_untracked_fill",
-    ):
-        setattr(
-            client,
-            name,
-            MethodType(getattr(RithmicExecutionClient, name), client),
-        )
+    """Bind the status-publish guard (the host seam intake/drain call) onto a stub."""
+    client._publish_order_status_report = MethodType(
+        RithmicExecutionClient._publish_order_status_report, client
+    )
 
 
 def _client() -> _TestClient:
@@ -79,8 +75,8 @@ def _client() -> _TestClient:
     client._cache = _CacheStub()
     client.account_id = None
     client._pnl_snapshot_observed = asyncio.Event()
-    client._commission_rates = {}
-    client._default_commission = None
+    client._commission_registry.rates = {}
+    client._commission_registry.default_commission = None
     return client
 
 
@@ -163,29 +159,18 @@ def _trading_client(
     client._session = cast(WireSession, source)
     client._seen_fill_keys = FillDedupStore()
     client._untracked_status_keys = UntrackedStatusBook()
-    client._commission_rates = {}
-    client._default_commission = None
+    client._commission_registry.rates = {}
+    client._commission_registry.default_commission = None
     return client
 
 
-def _report_client(
-    *,
-    order_type: OrderType,
-    tif: TimeInForce,
-    status: OrderStatus,
-    trigger_type: TriggerType = TriggerType.NO_TRIGGER,
-) -> SimpleNamespace:
-    """A stub whose ``_order_status_report_from_fields`` collaborators are fixed,
-    so a test varies only the wire fields."""
+def _report_client() -> SimpleNamespace:
+    """Minimal host for ``order_status_report_from_fields``; the report's
+    order type / TIF / status / trigger type come from the real wire fields."""
     client = SimpleNamespace(
         account_id="RITHMIC-ACC1",
         _clock=SimpleNamespace(timestamp_ns=lambda: 2),
         _seed_account_if_needed=lambda account_raw: None,
-        _client_order_id_for_tag=lambda tag: None,
-        _order_type_from_event=lambda fields: order_type,
-        _tif_from_event=lambda fields: tif,
-        _order_status_from_event=lambda fields: status,
-        _trigger_type_from_event=lambda fields: trigger_type,
     )
     client._instrument_id_from_order_fields = MethodType(
         RithmicExecutionClient._instrument_id_from_order_fields, client
@@ -277,9 +262,7 @@ def test_untracked_order_reports_status_without_strategy_ownership() -> None:
         "transaction_type": 1,
     }
 
-    RithmicExecutionClient._handle_untracked_notification(
-        cast(RithmicExecutionClient, client), fields
-    )
+    intake_for(client).handle_untracked_notification(fields)
 
     assert len(status_reports) == 1
     assert status_reports[0] is status_report
@@ -313,9 +296,9 @@ def test_untracked_status_suppresses_unchanged_re_push() -> None:
         "transaction_type": 1,
     }
 
-    handle = RithmicExecutionClient._handle_untracked_notification
-    handle(cast(RithmicExecutionClient, client), fields)
-    handle(cast(RithmicExecutionClient, client), fields)  # re-push
+    handle = intake_for(client).handle_untracked_notification
+    handle(fields)
+    handle(fields)  # re-push
 
     assert len(published) == 1
 
@@ -323,9 +306,7 @@ def test_untracked_status_suppresses_unchanged_re_push() -> None:
         venue_order_id="B-EXT", order_status="FILLED", filled_qty="1", avg_px="100.5"
     )
     client._drain_row_from_fields = lambda fields, ts_event: _drain_row_result(changed)
-    RithmicExecutionClient._handle_untracked_notification(
-        cast(RithmicExecutionClient, client), fields
-    )
+    intake_for(client).handle_untracked_notification(fields)
 
     assert len(published) == 2
 
@@ -373,26 +354,26 @@ def test_untracked_status_hot_key_survives_cache_churn() -> None:
         "total_fill_size": 0,
         "transaction_type": 1,
     }
-    handle = RithmicExecutionClient._handle_untracked_notification
-    handle(cast(RithmicExecutionClient, client), fields)
+    handle = intake_for(client).handle_untracked_notification
+    handle(fields)
     assert len(published) == 1
 
     other = _status("B-OTHER")
     client._drain_row_from_fields = lambda fields, ts_event: _drain_row_result(other)
-    handle(cast(RithmicExecutionClient, client), {**fields, "basket_id": "B-OTHER"})
+    handle({**fields, "basket_id": "B-OTHER"})
     assert len(published) == 2
 
     client._drain_row_from_fields = lambda fields, ts_event: _drain_row_result(hot)
-    handle(cast(RithmicExecutionClient, client), fields)  # suppress + touch
+    handle(fields)  # suppress + touch
     assert len(published) == 2
 
     churn = _status("B-CHURN")
     client._drain_row_from_fields = lambda fields, ts_event: _drain_row_result(churn)
-    handle(cast(RithmicExecutionClient, client), {**fields, "basket_id": "B-CHURN"})
+    handle({**fields, "basket_id": "B-CHURN"})
     assert len(published) == 3
 
     client._drain_row_from_fields = lambda fields, ts_event: _drain_row_result(hot)
-    handle(cast(RithmicExecutionClient, client), fields)
+    handle(fields)
     assert len(published) == 3
 
 
@@ -436,9 +417,9 @@ def test_untracked_status_re_push_with_changed_terms_reports() -> None:
         "transaction_type": 1,
     }
 
-    handle = RithmicExecutionClient._handle_untracked_notification
-    handle(cast(RithmicExecutionClient, client), fields)
-    handle(cast(RithmicExecutionClient, client), fields)
+    handle = intake_for(client).handle_untracked_notification
+    handle(fields)
+    handle(fields)
     assert len(published) == 1
 
     # Same status + fill data, but the order quantity changed: must re-publish.
@@ -452,9 +433,7 @@ def test_untracked_status_re_push_with_changed_terms_reports() -> None:
         avg_px="",
     )
     client._drain_row_from_fields = lambda fields, ts_event: _drain_row_result(changed)
-    RithmicExecutionClient._handle_untracked_notification(
-        cast(RithmicExecutionClient, client), fields
-    )
+    intake_for(client).handle_untracked_notification(fields)
 
     assert len(published) == 2
 
@@ -476,8 +455,7 @@ def test_untracked_status_publication_failure_does_not_escape_handler() -> None:
         status_report
     )
 
-    RithmicExecutionClient._handle_untracked_notification(
-        cast(RithmicExecutionClient, client),
+    intake_for(client).handle_untracked_notification(
         {
             "basket_id": "B-EXTERNAL",
             "symbol": "MNQU6",
@@ -564,8 +542,7 @@ def test_emit_accepted_only_while_submitted(
         client, "generate_order_accepted", lambda *args: accepted.append(args)
     )
 
-    RithmicExecutionClient._emit_accepted(
-        cast(RithmicExecutionClient, client),
+    intake_for(client).emit_accepted(
         _accepted_order(status),
         ClientOrderId("O-1"),
         VenueOrderId("B1"),
@@ -626,9 +603,7 @@ def test_resolve_updated_terms_fallback_matrix(
     order, action, want_qty, want_px, want_trig
 ) -> None:
     client = cast(RithmicExecutionClient, _client())
-    qty, price, trigger = RithmicExecutionClient._resolve_updated_terms(
-        client, order, action
-    )
+    qty, price, trigger = intake_for(client).resolve_updated_terms(order, action)
     assert int(qty) == want_qty
     assert (str(price) if price is not None else None) == want_px
     assert (str(trigger) if trigger is not None else None) == want_trig
@@ -646,8 +621,7 @@ def test_emit_triggered_guarded_suppresses_duplicate_trigger(
         client, "generate_order_triggered", lambda *args: triggered.append(args)
     )
 
-    RithmicExecutionClient._emit_triggered_guarded(
-        cast(RithmicExecutionClient, client),
+    intake_for(client).emit_triggered_guarded(
         order,
         ClientOrderId("O-1"),
         VenueOrderId("B1"),
@@ -738,9 +712,7 @@ def test_untracked_status_publish_failure_suppresses_fill() -> None:
         "transaction_type": 1,
     }
 
-    RithmicExecutionClient._handle_untracked_notification(
-        cast(RithmicExecutionClient, client), fields
-    )
+    intake_for(client).handle_untracked_notification(fields)
 
     assert fills == []
 
@@ -915,33 +887,26 @@ def test_replayed_fill_publishes_status_before_fill_and_is_idempotent(
 
 
 def test_partial_recovered_fill_maps_to_partial_status() -> None:
-    client = _client()
     fields = {
         "kind": "accepted",
         "status": "OPEN",
         "quantity": 2,
         "total_fill_size": 1,
     }
-    assert client._order_status_from_event(fields) is OrderStatus.PARTIALLY_FILLED
+    assert order_status_from_fields(fields) is OrderStatus.PARTIALLY_FILLED
 
 
 def test_recovered_external_fill_status_has_no_client_order_id() -> None:
-    client = _report_client(
-        order_type=OrderType.MARKET, tif=TimeInForce.DAY, status=OrderStatus.FILLED
-    )
+    client = _report_client()
     fields = _fill_event(fill_id="EXTERNAL-1", basket="EXTERNAL-BASKET")
     fields.pop("user_tag", None)
-    report = RithmicExecutionClient._order_status_report_from_fields(
-        cast(RithmicExecutionClient, client), fields, 2
-    )
+    report = drain_for(client).order_status_report_from_fields(fields, 2)
     assert report is not None
     assert report.client_order_id is None
 
 
 def test_recovered_reports_preserve_exact_instrument_and_account_identity() -> None:
-    client = _report_client(
-        order_type=OrderType.LIMIT, tif=TimeInForce.GTC, status=OrderStatus.ACCEPTED
-    )
+    client = _report_client()
     for symbol in ("NQU6", "MNQU6"):
         fields = {
             "basket_id": f"B-{symbol}",
@@ -956,9 +921,7 @@ def test_recovered_reports_preserve_exact_instrument_and_account_identity() -> N
             "total_fill_size": 0,
             "price": 21000.0,
         }
-        report = RithmicExecutionClient._order_status_report_from_fields(
-            cast(RithmicExecutionClient, client), fields, 2
-        )
+        report = drain_for(client).order_status_report_from_fields(fields, 2)
         assert report is not None
         assert str(report.instrument_id) == f"{symbol}.RITHMIC"
         assert str(report.account_id) == "RITHMIC-ACC1"
@@ -969,97 +932,72 @@ def test_recovered_reports_preserve_exact_instrument_and_account_identity() -> N
 # --------------------------------------------------------------------------- #
 
 
-def test_status_delegate_matches_module_function():
-    """The back-compat delegate and the hoisted pure classifier agree."""
-    client = _client()
-    fields = {
-        "kind": "cancel_rejected",
-        "status": "CANCELLATION_FAILED",
-        "quantity": 2,
-        "total_fill_size": 1,
-        "price_type": 3,
-        "duration": 2,
-    }
-    assert client._order_status_from_event(fields) is order_status_from_fields(fields)
-
-
 def test_cancel_rejected_with_reject_status_is_accepted():
-    client = _client()
     fields = {
         "kind": "cancel_rejected",
         "status": "REJECTED",
         "quantity": 1,
         "total_fill_size": 0,
     }
-    assert client._order_status_from_event(fields) == OrderStatus.ACCEPTED
+    assert order_status_from_fields(fields) == OrderStatus.ACCEPTED
 
 
 def test_cancel_rejected_with_cancellation_failed_is_accepted():
-    client = _client()
     fields = {
         "kind": "cancel_rejected",
         "status": "CANCELLATION_FAILED",
         "quantity": 1,
         "total_fill_size": 0,
     }
-    assert client._order_status_from_event(fields) == OrderStatus.ACCEPTED
+    assert order_status_from_fields(fields) == OrderStatus.ACCEPTED
 
 
 def test_modify_rejected_is_working_not_terminal_rejected() -> None:
     """Oracle #3: a venue modify rejection leaves the order working — the
     report must not map it to terminal REJECTED (which would let the OMS treat
     a live order as dead)."""
-    client = _client()
     fields = {
         "kind": "modify_rejected",
         "status": "NOT_MODIFIED",
         "quantity": 2,
         "total_fill_size": 0,
     }
-    assert client._order_status_from_event(fields) == OrderStatus.ACCEPTED
+    assert order_status_from_fields(fields) == OrderStatus.ACCEPTED
     # Partially filled and modify-rejected: still working, still partial.
     partial = dict(fields, total_fill_size=1)
-    assert client._order_status_from_event(partial) == OrderStatus.PARTIALLY_FILLED
+    assert order_status_from_fields(partial) == OrderStatus.PARTIALLY_FILLED
 
 
 def test_cancel_rejected_partial_keeps_partially_filled() -> None:
     """Oracle #3 sibling: a partially-filled working order with a rejected
     cancel must keep PARTIALLY_FILLED, not regress to ACCEPTED."""
-    client = _client()
     fields = {
         "kind": "cancel_rejected",
         "status": "NOT_CANCELLED",
         "quantity": 2,
         "total_fill_size": 1,
     }
-    assert client._order_status_from_event(fields) == OrderStatus.PARTIALLY_FILLED
+    assert order_status_from_fields(fields) == OrderStatus.PARTIALLY_FILLED
 
 
 def test_triggered_status_mapping_respects_order_type() -> None:
     """Oracle #2 second half: an exchange TRIGGER row maps to TRIGGERED for
     limit-style stops (the Nautilus TRIGGERED state exists) and stays ACCEPTED
     (working) for market-style stops (no TRIGGERED state, #3812)."""
-    client = _client()
     limit_style = {"kind": "triggered", "status": "TRIGGERED", "price_type": 3}
-    assert client._order_status_from_event(limit_style) == OrderStatus.TRIGGERED
+    assert order_status_from_fields(limit_style) == OrderStatus.TRIGGERED
     market_style = {"kind": "triggered", "status": "TRIGGERED", "price_type": 4}
-    assert client._order_status_from_event(market_style) == OrderStatus.ACCEPTED
+    assert order_status_from_fields(market_style) == OrderStatus.ACCEPTED
 
 
 def test_stop_order_reconciliation_preserves_trigger_type() -> None:
-    client = _client()
-    assert client._trigger_type_from_event({"price_type": 4}) is TriggerType.DEFAULT
-    assert client._trigger_type_from_event({"price_type": 3}) is TriggerType.DEFAULT
-    assert client._trigger_type_from_event({"price_type": 1}) is TriggerType.NO_TRIGGER
+    assert trigger_type_from_fields({"price_type": 4}) is TriggerType.DEFAULT
+    assert trigger_type_from_fields({"price_type": 3}) is TriggerType.DEFAULT
+    assert trigger_type_from_fields({"price_type": 1}) is TriggerType.NO_TRIGGER
 
 
 def test_stop_order_status_report_has_trigger_type() -> None:
-    client = _report_client(
-        order_type=OrderType.STOP_MARKET,
-        tif=TimeInForce.DAY,
-        status=OrderStatus.ACCEPTED,
-        trigger_type=TriggerType.DEFAULT,
-    )
+    client = _report_client()
     fields = {
         "basket_id": "B-STOP",
         "symbol": "MNQU6",
@@ -1074,9 +1012,7 @@ def test_stop_order_status_report_has_trigger_type() -> None:
         "trigger_price": 30263.25,
     }
 
-    report = RithmicExecutionClient._order_status_report_from_fields(
-        cast(RithmicExecutionClient, client), fields, 2
-    )
+    report = drain_for(client).order_status_report_from_fields(fields, 2)
 
     assert report is not None
     assert report.order_type.name == "STOP_MARKET"
@@ -1086,12 +1022,7 @@ def test_stop_order_status_report_has_trigger_type() -> None:
 
 def test_stop_query_replay_never_returns_none_trigger_type_or_attribute_error() -> None:
     """Regression for the prior stop ``query_order`` report failure."""
-    client = _report_client(
-        order_type=OrderType.STOP_LIMIT,
-        tif=TimeInForce.GTC,
-        status=OrderStatus.ACCEPTED,
-        trigger_type=TriggerType.DEFAULT,
-    )
+    client = _report_client()
     fields = {
         "basket_id": "B-QUERY-STOP",
         "symbol": "NQU6",
@@ -1106,9 +1037,7 @@ def test_stop_query_replay_never_returns_none_trigger_type_or_attribute_error() 
         "price": 21010.0,
         "trigger_price": 21005.0,
     }
-    report = RithmicExecutionClient._order_status_report_from_fields(
-        cast(RithmicExecutionClient, client), fields, 2
-    )
+    report = drain_for(client).order_status_report_from_fields(fields, 2)
     assert report is not None
     assert report.trigger_type is TriggerType.DEFAULT
     assert report.trigger_price == Price.from_str("21005.00")
@@ -1148,7 +1077,6 @@ def test_generate_order_status_reports_preserves_stop_trigger_type(
     client = _trading_client(_LoadOrdersSession([_stop_recon_event()]))
     client.account_id = "RITHMIC-ACC1"
     monkeypatch.setattr(client, "_seed_account_if_needed", lambda account_raw: None)
-    monkeypatch.setattr(client, "_client_order_id_for_tag", lambda tag: None)
 
     reports = asyncio.run(client.generate_order_status_reports(_status_cmd()))
 
@@ -1166,7 +1094,7 @@ def test_unknown_outcome_closes_order_gate_without_rejection() -> None:
     assert client._order_plant.state is OrderPlantState.LATCHED
     assert client._order_plant.latched
     assert (
-        client._order_status_from_event({"kind": "unknown", "status": "UNKNOWN"})
+        order_status_from_fields({"kind": "unknown", "status": "UNKNOWN"})
         is not OrderStatus.REJECTED
     )
 
@@ -1333,14 +1261,13 @@ def test_cached_submitted_stop_query_reports_accepted() -> None:
 
 
 def test_true_reject_still_terminal_rejected():
-    client = _client()
     fields = {
         "kind": "rejected",
         "status": "REJECTED",
         "quantity": 1,
         "total_fill_size": 0,
     }
-    assert client._order_status_from_event(fields) == OrderStatus.REJECTED
+    assert order_status_from_fields(fields) == OrderStatus.REJECTED
 
 
 # --------------------------------------------------------------------------- #
@@ -2324,7 +2251,7 @@ def _bare_client(
 def _handle_untracked(
     client: RithmicExecutionClient, fields: dict[str, object]
 ) -> None:
-    RithmicExecutionClient._handle_untracked_notification(client, fields)
+    intake_for(client).handle_untracked_notification(fields)
 
 
 @pytest.mark.parametrize("status", [OrderStatus.FILLED, OrderStatus.CANCELED])

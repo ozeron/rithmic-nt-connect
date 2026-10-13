@@ -67,6 +67,7 @@ from rithmic_nt_connect.errors import (
     VenueQueryUnavailable,
 )
 from rithmic_nt_connect.execution import RithmicExecutionClient
+from rithmic_nt_connect.recon import drain_for
 from rithmic_nt_connect.session import WireSession
 
 
@@ -76,8 +77,8 @@ def _client() -> _TestClient:
     client._clock = SimpleNamespace(timestamp_ns=lambda: 2)
     client._cache = _CacheStub()
     client.account_id = None
-    client._commission_rates = {}
-    client._default_commission = None
+    client._commission_registry.rates = {}
+    client._commission_registry.default_commission = None
     return client
 
 
@@ -99,8 +100,8 @@ def _trading_client(
     client._positions = {}
     client._account_seeded = True
     client.account_id = AccountId("RITHMIC-ACC1")
-    client._commission_rates = {}
-    client._default_commission = None
+    client._commission_registry.rates = {}
+    client._commission_registry.default_commission = None
     return client
 
 
@@ -706,10 +707,10 @@ def test_transport_generation_bump_schedules_l3_rearm(
     client = _connect_client(session, monkeypatch)
     client._order_plant = OrderPlantPolicy(OrderPlantState.LIVE)
     client._pnl_connected = True
-    client._l3_recovery_task = None
+    client._recovery.task = None
     client._order_poll_task = None
     client._poll_task = None
-    client._L3_PLANT_RESTORE_MAX_ATTEMPTS = 1
+    client._recovery.max_attempts = 1
 
     async def _run() -> None:
         loop = asyncio.get_running_loop()
@@ -721,16 +722,16 @@ def test_transport_generation_bump_schedules_l3_rearm(
             TransportUp,
         )
 
-        client._on_transport_event(
+        client._recovery.on_event(
             TransportDown(
                 gen=1,
                 fault=TransportFault(kind=TransportFaultKind.UNIX_EOF, observed_gen=1),
             )
         )
         assert client._order_plant.state is OrderPlantState.LATCHED
-        client._on_transport_event(TransportUp(gen=2))
+        client._recovery.on_event(TransportUp(gen=2))
         await asyncio.sleep(0)
-        task = client._l3_recovery_task
+        task = client._recovery.task
         assert task is not None
         await task
         assert client._order_plant.state is OrderPlantState.LIVE
@@ -739,6 +740,202 @@ def test_transport_generation_bump_schedules_l3_rearm(
     asyncio.run(_run())
     assert "subscribe_order_updates" in session.calls
     assert "load_orders" in session.calls
+
+
+class _FailingSubscribeSession(_ConnectSession):
+    """``subscribe_order_updates`` always fails: every restore attempt raises."""
+
+    def subscribe_order_updates(self) -> None:
+        self.calls.append("subscribe_order_updates")
+        raise ConnectionError("order plant unavailable")
+
+
+def _restore_client(
+    session: WireSessionStub,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    enable_trading: bool = True,
+) -> _TestClient:
+    client = _connect_client(session, monkeypatch)
+    client._config_local = cast(
+        Any, SimpleNamespace(enable_trading=enable_trading, soft_fail_pnl=False)
+    )
+    client._order_plant = OrderPlantPolicy(OrderPlantState.LIVE)
+    client._pnl_connected = True
+    client._recovery.task = None
+    client._order_poll_task = None
+    client._poll_task = None
+    client._recovery.max_attempts = 1
+    return client
+
+
+def _transport_down(gen: int = 1) -> Any:
+    from rithmic_gateway.transport_recovery import (
+        TransportDown,
+        TransportFault,
+        TransportFaultKind,
+    )
+
+    return TransportDown(
+        gen=gen,
+        fault=TransportFault(kind=TransportFaultKind.UNIX_EOF, observed_gen=gen),
+    )
+
+
+def test_recovery_failed_latches_the_order_plant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from rithmic_gateway.transport_recovery import RecoveryFailed
+
+    client = _restore_client(_ConnectSession(fail_load_orders=False), monkeypatch)
+
+    client._recovery.on_event(RecoveryFailed(gen=2, attempts=3, cause=None))
+
+    assert client._order_plant.state is OrderPlantState.LATCHED
+
+
+def test_up_while_a_restore_is_in_flight_is_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from rithmic_gateway.transport_recovery import TransportUp
+
+    session = _ConnectSession(fail_load_orders=False)
+    client = _restore_client(session, monkeypatch)
+
+    async def _run() -> None:
+        client._loop = asyncio.get_running_loop()  # type: ignore[attr-defined]
+        in_flight = asyncio.get_running_loop().create_future()
+        client._recovery.task = cast(Any, in_flight)
+        client._recovery.on_event(TransportUp(gen=3))
+        await asyncio.sleep(0)
+        assert client._recovery.task is in_flight
+
+    asyncio.run(_run())
+    assert "subscribe_order_updates" not in session.calls
+
+
+def test_restore_exhaustion_leaves_the_plant_latched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from rithmic_gateway.transport_recovery import TransportUp
+
+    session = _FailingSubscribeSession(fail_load_orders=False)
+    client = _restore_client(session, monkeypatch)
+    client._recovery.max_attempts = 2
+    real_sleep = asyncio.sleep
+
+    async def _sleep(delay: float) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", _sleep)
+
+    async def _run() -> None:
+        client._loop = asyncio.get_running_loop()  # type: ignore[attr-defined]
+        client._recovery.on_event(_transport_down())
+        client._recovery.on_event(TransportUp(gen=2))
+        await real_sleep(0)
+        task = client._recovery.task
+        assert task is not None
+        await task
+
+    asyncio.run(_run())
+    assert session.calls.count("subscribe_order_updates") == 2
+    assert client._order_plant.state is OrderPlantState.LATCHED
+
+
+def test_restore_is_skipped_when_trading_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from rithmic_gateway.transport_recovery import TransportUp
+
+    session = _ConnectSession(fail_load_orders=False)
+    client = _restore_client(session, monkeypatch, enable_trading=False)
+
+    async def _run() -> None:
+        client._loop = asyncio.get_running_loop()  # type: ignore[attr-defined]
+        client._recovery.on_event(_transport_down())
+        client._recovery.on_event(TransportUp(gen=2))
+        await asyncio.sleep(0)
+        task = client._recovery.task
+        assert task is not None
+        await task
+
+    asyncio.run(_run())
+    assert "subscribe_order_updates" not in session.calls
+    assert client._order_plant.state is OrderPlantState.LATCHED
+
+
+def test_exec_restores_once_per_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A repeated Up for an already-restored generation is dropped; the next
+    generation restores again (exec used to restore on every duplicate)."""
+    from rithmic_gateway.transport_recovery import TransportUp
+
+    session = _ConnectSession(fail_load_orders=False)
+    client = _restore_client(session, monkeypatch)
+
+    async def _run() -> None:
+        client._loop = asyncio.get_running_loop()  # type: ignore[attr-defined]
+        for gen in (2, 2, 3):
+            client._recovery.on_event(_transport_down(gen - 1))
+            client._recovery.on_event(TransportUp(gen=gen))
+            await asyncio.sleep(0)
+            task = client._recovery.task
+            assert task is not None
+            await task
+
+    asyncio.run(_run())
+    assert session.calls.count("subscribe_order_updates") == 2
+    assert client._recovery.last_generation == 3
+    assert client._order_plant.state is OrderPlantState.LIVE
+
+
+class _UnsubscribeCounting(_ConnectSession):
+    def __init__(self) -> None:
+        super().__init__(fail_load_orders=False)
+        self.unsubscribed = 0
+
+    def subscribe_transport_events(self, listener: Any) -> Any:
+        def _unsubscribe() -> None:
+            self.unsubscribed += 1
+
+        return _unsubscribe
+
+    def disconnect(self) -> None:
+        self.calls.append("disconnect")
+
+
+def test_disconnect_drops_the_listener_and_cancels_a_restore(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _UnsubscribeCounting()
+    client = _restore_client(session, monkeypatch)
+
+    async def _run() -> None:
+        client._loop = asyncio.get_running_loop()  # type: ignore[attr-defined]
+        client._recovery.attach(session)
+        in_flight = asyncio.ensure_future(asyncio.sleep(3600))
+        client._recovery.task = in_flight
+        await client._disconnect()
+        assert in_flight.cancelled()
+
+    asyncio.run(_run())
+    assert session.unsubscribed == 1
+    assert client._recovery.task is None
+    assert "disconnect" in session.calls
+
+
+def test_reconnect_does_not_stack_transport_listeners(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _UnsubscribeCounting()
+    client = _restore_client(session, monkeypatch)
+
+    asyncio.run(client._connect())
+    asyncio.run(client._connect())
+
+    assert session.unsubscribed == 1  # the first connect's listener was dropped
 
 
 def test_unlatched_reconnect_still_runs_rearm_barrier(
@@ -1477,7 +1674,7 @@ def test_sentinel_status_fields_are_none() -> None:
     client = _trading_client()
     fields = order_notification_to_fields(_sentinel_status_fields())
 
-    report = client._order_status_report_from_fields(fields, 2)
+    report = drain_for(client).order_status_report_from_fields(fields, 2)
 
     assert report is not None
     assert report.avg_px is None
@@ -1930,11 +2127,11 @@ def test_load_commission_rates_maps_venue_rows() -> None:
 
     asyncio.run(client._load_commission_rates())
 
-    assert client._commission_rates == {
+    assert client._commission_registry.rates == {
         "MNQ": Decimal("0.5"),
         "ES": Decimal("1.75"),
     }
-    assert client._default_commission == Decimal("0.25")
+    assert client._commission_registry.default_commission == Decimal("0.25")
     assert "load_product_rms_info" in session.calls
     assert "load_account_rms_info" in session.calls
 
@@ -1945,8 +2142,8 @@ def test_fill_commission_uses_venue_product_rate(
     """C2: a tracked fill reports the per-contract rate x qty (MNQ 0.5 x 2
     = 1.00 USD), not a hardcoded zero."""
     client = _trading_client()
-    client._commission_rates = {"MNQ": Decimal("0.5")}
-    client._default_commission = Decimal("0.25")
+    client._commission_registry.rates = {"MNQ": Decimal("0.5")}
+    client._commission_registry.default_commission = Decimal("0.25")
     order = _tracked_order(leaves=2)
     client._cache._orders[str(order.client_order_id)] = order
     filled = _capture_filled(client, monkeypatch)
@@ -1968,8 +2165,8 @@ def test_fill_commission_falls_back_to_account_default(
     commission (0.25 x 2 = 0.50 USD), even when the contract symbol resolves
     through the cached instrument to a product code that has no rate."""
     client = _trading_client()
-    client._commission_rates = {"MNQ": Decimal("0.5")}
-    client._default_commission = Decimal("0.25")
+    client._commission_registry.rates = {"MNQ": Decimal("0.5")}
+    client._commission_registry.default_commission = Decimal("0.25")
     order = _tracked_order(leaves=2)  # instrument_id NQ.GLBX
     client._cache._orders[str(order.client_order_id)] = order
     client._cache._instruments["NQ.GLBX"] = SimpleNamespace(
@@ -1993,8 +2190,8 @@ def test_fill_commission_resolves_contract_symbol_via_instrument(
     code (MNQ) through the cached instrument, so the per-product rate applies
     instead of silently falling back to the account default."""
     client = _trading_client()
-    client._commission_rates = {"MNQ": Decimal("0.5")}
-    client._default_commission = Decimal("0.25")
+    client._commission_registry.rates = {"MNQ": Decimal("0.5")}
+    client._commission_registry.default_commission = Decimal("0.25")
     order = _tracked_order(leaves=2)
     order.instrument_id = InstrumentId.from_str("MNQU6.GLBX")
     client._cache._orders[str(order.client_order_id)] = order
@@ -2040,8 +2237,8 @@ def test_load_commission_rates_fetch_failure_is_nonfatal() -> None:
 
     asyncio.run(client._load_commission_rates())
 
-    assert client._commission_rates == {}
-    assert client._default_commission is None
+    assert client._commission_registry.rates == {}
+    assert client._commission_registry.default_commission is None
     assert any("commission" in m and "unavailable" in m for m in log.messages)
 
 
@@ -2058,8 +2255,8 @@ def test_load_commission_rates_preserves_products_on_account_fetch_failure() -> 
 
     asyncio.run(client._load_commission_rates())
 
-    assert client._commission_rates == {"MNQ": Decimal("0.5")}
-    assert client._default_commission is None
+    assert client._commission_registry.rates == {"MNQ": Decimal("0.5")}
+    assert client._commission_registry.default_commission is None
     assert any("account commission default unavailable" in m for m in log.messages)
 
 
@@ -2069,8 +2266,8 @@ def test_untracked_fill_report_uses_venue_product_rate(
     """C8: untracked fill reports carry the same venue rate x qty commission,
     resolving the contract symbol through the cached instrument."""
     client = _trading_client(enable_trading=False)
-    client._commission_rates = {"MNQ": Decimal("0.5")}
-    client._default_commission = Decimal("0.25")
+    client._commission_registry.rates = {"MNQ": Decimal("0.5")}
+    client._commission_registry.default_commission = Decimal("0.25")
     client._cache._instruments["MNQU6.RITHMIC"] = SimpleNamespace(
         info={"rithmic_product_code": "MNQ"}
     )

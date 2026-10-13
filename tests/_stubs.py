@@ -21,6 +21,8 @@ from nautilus_trader.model.identifiers import (
     VenueOrderId,
 )
 from rithmic_gateway.types import AccountRmsInfo, ProductRmsInfo
+from rithmic_nt_connect.commission import CommissionRegistry
+from rithmic_nt_connect.data import RithmicDataClient
 from rithmic_nt_connect.execution import RithmicExecutionClient
 from rithmic_nt_connect.session import WireSession
 
@@ -100,11 +102,6 @@ class WireSessionStub:
     def request_plants(self, *args: Any, **kwargs: Any) -> None:
         raise NotImplementedError
 
-    def register_transport_generation_listener(
-        self, callback: Callable[..., Any], *args: Any, **kwargs: Any
-    ) -> None:
-        pass
-
     def subscribe_transport_events(
         self, listener: Callable[..., Any], *args: Any, **kwargs: Any
     ) -> Callable[[], None]:
@@ -112,6 +109,9 @@ class WireSessionStub:
 
     def ensure_transport_live(self, *args: Any, **kwargs: Any) -> int:
         return 0
+
+    def reconnect_transport(self, *args: Any, **kwargs: Any) -> None:
+        pass
 
     def subscribe_pnl(self, *args: Any, **kwargs: Any) -> None:
         raise NotImplementedError
@@ -217,11 +217,6 @@ class FaultInjectingSession(WireSessionStub):
 
     def connect(self) -> None:
         self.calls.append("connect")
-
-    def register_transport_generation_listener(
-        self, callback: Callable[..., Any]
-    ) -> None:
-        self.calls.append("register_transport_generation_listener")
 
     def subscribe_pnl(self) -> None:
         self.calls.append("subscribe_pnl")
@@ -343,6 +338,13 @@ class _TestClient(RithmicExecutionClient):
     cdef read-only ``_log`` / ``_clock`` / ``_cache`` / ``account_id`` as
     writable properties, so real adapter methods run on a bare instance."""
 
+    def __new__(cls) -> _TestClient:
+        # ``__init__`` is skipped, so seed the state production sets there.
+        self = super().__new__(cls)
+        self._commission_registry = CommissionRegistry()
+        self._recovery = self._build_recovery()
+        return self
+
     # The cdef base declares these read-only; re-expose as writable via
     # name-mangled storage. ``object.__getattribute__`` / ``__setattr__`` keep
     # the dynamic slots invisible to the type checker (no ``type: ignore``).
@@ -382,6 +384,19 @@ class _TestClient(RithmicExecutionClient):
     @account_id.setter
     def account_id(self, value: AccountId | None) -> None:
         object.__setattr__(self, "_TestClient__account_id", value)
+
+
+class _TestDataClient(RithmicDataClient):
+    """Test double: skips the Cython base's ``__init__`` and re-exposes the cdef
+    read-only ``_log`` as a writable property (same trick as ``_TestClient``)."""
+
+    @property
+    def _log(self) -> _Log:
+        return cast(_Log, object.__getattribute__(self, "_TestDataClient__log"))
+
+    @_log.setter
+    def _log(self, value: _Log) -> None:
+        object.__setattr__(self, "_TestDataClient__log", value)
 
 
 def _conforms() -> None:

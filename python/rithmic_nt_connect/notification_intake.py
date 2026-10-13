@@ -6,38 +6,21 @@ Owns routing and fill/status publish for live order-plant notifications.
 
 from __future__ import annotations
 
-from decimal import Decimal
 from typing import Any
 
 from nautilus_trader.execution.reports import OrderStatusReport
-from nautilus_trader.model.enums import LiquiditySide, OrderStatus, OrderType
+from nautilus_trader.model.enums import LiquiditySide, OrderStatus
 from nautilus_trader.model.identifiers import ClientOrderId, TradeId, VenueOrderId
-from nautilus_trader.model.objects import Currency, Price, Quantity
+from nautilus_trader.model.objects import Currency, Quantity
 
-from rithmic_nt_connect._convert import format_price_str
 from rithmic_nt_connect._orders import (
     fill_dedup_key,
     is_benign_bare_complete,
     notification_action,
     slim_order_fields,
 )
-
-# Order types that support the TRIGGERED order status (Nautilus #3812).
-# Market-style stops execute immediately on trigger and have no intermediate
-# TRIGGERED state.
-TRIGGERABLE_ORDER_TYPES = frozenset(
-    {
-        OrderType.STOP_LIMIT,
-        OrderType.TRAILING_STOP_LIMIT,
-        OrderType.LIMIT_IF_TOUCHED,
-    }
-)
-
-
-def _price(value: float | Decimal | str, precision: int | None = None) -> Price:
-    if precision is None:
-        return Price.from_str(format_price_str(value))
-    return Price.from_str(f"{float(value):.{int(precision)}f}")
+from rithmic_nt_connect._prices import price_from_wire
+from rithmic_nt_connect.order_rows import TRIGGERABLE_ORDER_TYPES
 
 
 class VenueNotificationIntake:
@@ -46,8 +29,6 @@ class VenueNotificationIntake:
     Holds the host client by reference (cache/clock/stores/emit stay on the
     client). Does not wrap Nautilus cache/clock/msgbus/session.
     """
-
-    __slots__ = ("_host",)
 
     def __init__(self, host: Any) -> None:
         self._host = host
@@ -59,11 +40,7 @@ class VenueNotificationIntake:
             host._seed_account_if_needed(str(account_hint))
         client_order_id = host._resolve_client_order_id(fields)
         if client_order_id is None:
-            untracked = getattr(host, "_handle_untracked_notification", None)
-            if untracked is not None:
-                untracked(fields)
-            else:
-                self.handle_untracked_notification(fields)
+            self.handle_untracked_notification(fields)
             return
         order = host._cache.order(client_order_id)
         if order is None:
@@ -84,11 +61,7 @@ class VenueNotificationIntake:
         strategy_id = order.strategy_id
         instrument_id = order.instrument_id
         if action.kind == "accepted":
-            emit = getattr(host, "_emit_accepted", None)
-            if emit is not None:
-                emit(order, client_order_id, venue_order_id, ts_event)
-            else:
-                self.emit_accepted(order, client_order_id, venue_order_id, ts_event)
+            self.emit_accepted(order, client_order_id, venue_order_id, ts_event)
         elif action.kind == "rejected":
             host.generate_order_rejected(
                 strategy_id,
@@ -116,11 +89,7 @@ class VenueNotificationIntake:
                 ts_event,
             )
         elif action.kind == "updated":
-            resolve = getattr(host, "_resolve_updated_terms", None)
-            if resolve is not None:
-                qty, price, trigger = resolve(order, action)
-            else:
-                qty, price, trigger = self.resolve_updated_terms(order, action)
+            qty, price, trigger = self.resolve_updated_terms(order, action)
             host.generate_order_updated(
                 strategy_id,
                 instrument_id,
@@ -136,33 +105,13 @@ class VenueNotificationIntake:
                 strategy_id, instrument_id, client_order_id, venue_order_id, ts_event
             )
         elif action.kind == "triggered":
-            emit_trig = getattr(host, "_emit_triggered_guarded", None)
-            if emit_trig is not None:
-                emit_trig(order, client_order_id, venue_order_id, ts_event)
-            else:
-                self.emit_triggered_guarded(
-                    order, client_order_id, venue_order_id, ts_event
-                )
+            self.emit_triggered_guarded(
+                order, client_order_id, venue_order_id, ts_event
+            )
         elif action.kind == "filled":
-            tracked_fill = getattr(host, "_handle_tracked_fill", None)
-            if tracked_fill is not None:
-                tracked_fill(
-                    order,
-                    client_order_id,
-                    venue_order_id,
-                    fields,
-                    ts_event,
-                    action,
-                )
-            else:
-                self.handle_tracked_fill(
-                    order,
-                    client_order_id,
-                    venue_order_id,
-                    fields,
-                    ts_event,
-                    action,
-                )
+            self.handle_tracked_fill(
+                order, client_order_id, venue_order_id, fields, ts_event, action
+            )
 
     def emit_accepted(
         self,
@@ -198,13 +147,13 @@ class VenueNotificationIntake:
         )
         prec = int(order.price.precision) if order.has_price else None
         if action.price is not None:
-            price = _price(action.price, prec)
+            price = price_from_wire(action.price, prec)
         elif order.has_price:
             price = order.price
         else:
             price = None
         if action.trigger is not None:
-            trigger = _price(action.trigger, prec)
+            trigger = price_from_wire(action.trigger, prec)
         elif order.has_trigger_price:
             trigger = order.trigger_price
         else:
@@ -378,16 +327,7 @@ class VenueNotificationIntake:
             )
             return
         # Status before fill: fail-closed if status publish fails.
-        publish_status = getattr(host, "_publish_untracked_status", None)
-        publish_fill = getattr(host, "_publish_untracked_fill", None)
-        if publish_status is not None:
-            if not publish_status(fields, ts_event):
-                return
-        elif not self.publish_untracked_status(fields, ts_event):
-            return
-        if publish_fill is not None:
-            publish_fill(fields, ts_event)
-        else:
+        if self.publish_untracked_status(fields, ts_event):
             self.publish_untracked_fill(fields, ts_event)
 
     def publish_order_status_report(

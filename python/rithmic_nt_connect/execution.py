@@ -7,7 +7,7 @@ import contextlib
 import time
 from collections.abc import Callable, Iterator
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from nautilus_trader.cache.cache import Cache
 from nautilus_trader.common.component import LiveClock, MessageBus
@@ -37,7 +37,6 @@ from nautilus_trader.model.enums import (
     OrderStatus,
     OrderType,
     PositionSide,
-    TimeInForce,
     TriggerType,
 )
 from nautilus_trader.model.identifiers import (
@@ -58,10 +57,12 @@ from nautilus_trader.model.objects import (
 )
 from nautilus_trader.model.orders import Order
 
+if TYPE_CHECKING:
+    from rithmic_gateway.transport_recovery import RecoveryFailed, TransportDown
+
 from rithmic_nt_connect._convert import (
     ConvertError,
     account_pnl_to_fields,
-    format_price_str,
     instrument_pnl_to_fields,
     rithmic_route_from_info,
     symbol_and_exchange_from_instrument_id,
@@ -71,7 +72,6 @@ from rithmic_nt_connect._orders import (
     DEFAULT_TRAIL_BY_PRICE_ID,
     FillDedupStore,
     UntrackedStatusBook,
-    is_benign_bare_complete,
     nautilus_order_type_to_rithmic,
     nautilus_side_to_rithmic,
     nautilus_tif_to_rithmic,
@@ -80,12 +80,7 @@ from rithmic_nt_connect._orders import (
     trade_id_from_fill_fields,
     trailing_ticks_from_order,
 )
-from rithmic_nt_connect._orders import (
-    RITHMIC_DURATION_TO_TIF as _RITHMIC_DURATION_TO_TIF,
-)
-from rithmic_nt_connect._orders import (
-    RITHMIC_PRICE_TYPE_TO_ORDER_TYPE as _RITHMIC_PRICE_TYPE_TO_ORDER_TYPE,
-)
+from rithmic_nt_connect._prices import price_from_wire
 from rithmic_nt_connect.commission import CommissionRegistry
 from rithmic_nt_connect.config import (
     RithmicExecClientConfig,
@@ -95,9 +90,6 @@ from rithmic_nt_connect.constants import ADAPTER_NAME, DEFAULT_ACCOUNT_CURRENCY,
 from rithmic_nt_connect.errors import (
     ReconciliationUnavailableError,
     VenueQueryUnavailable,
-)
-from rithmic_nt_connect.notification_intake import (
-    TRIGGERABLE_ORDER_TYPES as _TRIGGERABLE_ORDER_TYPES,
 )
 from rithmic_nt_connect.notification_intake import (
     intake_for,
@@ -111,6 +103,7 @@ from rithmic_nt_connect.recon import (
     apply_mass_status_report_window,
     drain_for,
 )
+from rithmic_nt_connect.recovery_bridge import TransportRecoveryBridge
 from rithmic_nt_connect.session import WireSession
 
 _POSITION_SIDE = {
@@ -126,85 +119,6 @@ ACCOUNT_CACHE_TIMEOUT_S = 10.0
 # Recon windows are clamped to this many days so a units mistake (epoch seconds
 # passed where ns-epoch is expected) cannot build a decades-wide query window.
 _MAX_RECON_SPAN_S = 32 * 86_400
-
-
-def order_type_from_fields(fields: dict[str, Any]) -> OrderType:
-    """Nautilus order type for a normalized notification row (pure)."""
-    raw = fields.get("price_type")
-    if raw is None:
-        return OrderType.MARKET
-    try:
-        return _RITHMIC_PRICE_TYPE_TO_ORDER_TYPE.get(int(raw), OrderType.MARKET)
-    except (TypeError, ValueError):
-        return OrderType.MARKET
-
-
-def tif_from_fields(fields: dict[str, Any]) -> TimeInForce:
-    """Nautilus time-in-force for a normalized notification row (pure)."""
-    raw = fields.get("duration")
-    if raw is None:
-        return TimeInForce.GTC
-    try:
-        return _RITHMIC_DURATION_TO_TIF.get(int(raw), TimeInForce.GTC)
-    except (TypeError, ValueError):
-        return TimeInForce.GTC
-
-
-def trigger_type_from_fields(fields: dict[str, Any]) -> TriggerType:
-    """Nautilus trigger type for a normalized notification row (pure)."""
-    raw = fields.get("price_type")
-    if raw is None:
-        return TriggerType.NO_TRIGGER
-    try:
-        if int(raw) in (3, 4):  # Rithmic StopLimit / StopMarket
-            return TriggerType.DEFAULT
-    except (TypeError, ValueError):
-        pass
-    return TriggerType.NO_TRIGGER
-
-
-def order_status_from_fields(fields: dict[str, Any]) -> OrderStatus:
-    """Venue drain/notification row -> Nautilus order status (pure).
-
-    Operation-rejection kinds leave the order working (never terminal
-    REJECTED for a live order); everything not recognizably terminal maps to
-    ACCEPTED so recon never fabricates a terminal outcome.
-    """
-    kind = fields.get("kind")
-    status_u = str(fields.get("status") or "").upper()
-    try:
-        qty = int(fields.get("quantity") or 0)
-        filled = int(fields.get("total_fill_size") or 0)
-    except (TypeError, ValueError):
-        qty = filled = 0
-    if kind == "filled" or (qty > 0 and filled >= qty):
-        return OrderStatus.FILLED
-    # PARTIALLY_FILLED when partial, else ACCEPTED (not PENDING_CANCEL:
-    # recon would leave the OMS believing a cancel is in flight forever).
-    if kind in ("modify_rejected", "cancel_rejected"):
-        if qty > 0 and 0 < filled < qty:
-            return OrderStatus.PARTIALLY_FILLED
-        return OrderStatus.ACCEPTED
-    # Check genuine reject kinds/status before the CANCEL substring so a
-    # rejected cancel (e.g. "CANCELLATION_FAILED") is not CANCELED.
-    if kind == "rejected" or "REJECT" in status_u:
-        return OrderStatus.REJECTED
-    if kind == "canceled" or status_u in ("CANCELLED", "CANCELED"):
-        return OrderStatus.CANCELED
-    if kind == "expired" or "EXPIRED" in status_u:
-        return OrderStatus.EXPIRED
-    if qty > 0 and 0 < filled < qty:
-        return OrderStatus.PARTIALLY_FILLED
-    if kind == "triggered":
-        # Only limit-style stops expose TRIGGERED (#3812); market-style
-        # stops execute straight through on trigger and stay ACCEPTED
-        # (working) until the fill arrives.
-        if order_type_from_fields(fields) in _TRIGGERABLE_ORDER_TYPES:
-            return OrderStatus.TRIGGERED
-        return OrderStatus.ACCEPTED
-    # Everything else defaults to working (ACCEPTED): a row that is not
-    # recognizably filled/rejected/canceled/expired is an open order.
-    return OrderStatus.ACCEPTED
 
 
 async def wait_account_in_cache(
@@ -237,12 +151,6 @@ async def wait_account_in_cache(
                 "(AccountState never applied; refuse set_connected)"
             )
         await asyncio.sleep(0.05)
-
-
-def _price(value: float | Decimal | str, precision: int | None = None) -> Price:
-    if precision is None:
-        return Price.from_str(format_price_str(value))
-    return Price.from_str(f"{float(value):.{int(precision)}f}")
 
 
 class RithmicExecutionClient(LiveExecutionClient):
@@ -302,8 +210,8 @@ class RithmicExecutionClient(LiveExecutionClient):
         # requires it before clearing the latch (positions ride that stream).
         self._pnl_snapshot_observed = asyncio.Event()
         self._account_seeded = False
-        # Single-flight L3 recovery after mux transport generation bumps.
-        self._l3_recovery_task: asyncio.Task | None = None
+        # Re-arms the order plant after gateway transport recovery (L3).
+        self._recovery = self._build_recovery()
         # PnL is streamed frequently; avoid publishing identical AccountState
         # events (and making Nautilus Portfolio log each one).
         self._last_account_state_key: tuple[str, str, Decimal] | None = None
@@ -313,34 +221,9 @@ class RithmicExecutionClient(LiveExecutionClient):
         # then report zero commission (allowed to be temporarily unavailable).
         self._commission_registry = CommissionRegistry()
 
-    @property
-    def _commission_registry(self) -> CommissionRegistry:
-        return self._commission_registry_inst
-
-    @_commission_registry.setter
-    def _commission_registry(self, value: CommissionRegistry) -> None:
-        self._commission_registry_inst = value
-
-    @property
-    def _commission_rates(self) -> dict[str, Decimal]:
-        return self._commission_registry.rates
-
-    @_commission_rates.setter
-    def _commission_rates(self, value: dict[str, Decimal]) -> None:
-        self._commission_registry.rates = value
-
-    @property
-    def _default_commission(self) -> Decimal | None:
-        return self._commission_registry.default_commission
-
-    @_default_commission.setter
-    def _default_commission(self, value: Decimal | None) -> None:
-        self._commission_registry.default_commission = value
-
     _MAX_SEEN_FILL_KEYS = 10_000
     _REARM_PNL_SNAPSHOT_TIMEOUT_S = 5.0
     _ORDER_POLL_MAX_TRANSIENT = 5
-    _L3_PLANT_RESTORE_MAX_ATTEMPTS = 5
 
     def _fill_key_seen(self, key: str) -> bool:
         return self._seen_fill_keys.has_seen(key)
@@ -382,7 +265,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         # from before the drop is not proof of current exposure.
         self._pnl_snapshot_observed.clear()
         await asyncio.to_thread(ensure_connected, self._session)
-        self._wire_gateway_transport_listener()
+        self._recovery.attach(self._session)
         self._log.info("Rithmic exec session ready (shared with data client)")
 
         # Whether the PnL poll loop is running for THIS connect: the re-arm
@@ -539,79 +422,40 @@ class RithmicExecutionClient(LiveExecutionClient):
             f"seeded account {self.account_id} currency={DEFAULT_ACCOUNT_CURRENCY}"
         )
 
-    def _wire_gateway_transport_listener(self) -> None:
-        subscribe = getattr(self._session, "subscribe_transport_events", None)
-        if callable(subscribe):
-            subscribe(self._on_transport_event)
-            return
-        register = getattr(
-            self._session, "register_transport_generation_listener", None
-        )
-        if register is None:
-            return
-        register(self._on_gateway_transport_generation_bump)
-
-    def _on_transport_event(self, event: object) -> None:
-        from rithmic_gateway.transport_recovery import (
-            RecoveryFailed,
-            TransportDown,
-            TransportUp,
+    def _build_recovery(self) -> TransportRecoveryBridge:
+        return TransportRecoveryBridge(
+            label="L3 plant restore",
+            task_name="rithmic_l3_plant_restore",
+            log=lambda: self._log,
+            get_loop=lambda: getattr(self, "_loop", None),
+            spawn=lambda loop, coro, name: self.create_task(coro, log_msg=name),
+            restore=self._restore_plants_after_transport_up,
+            on_down=self._on_transport_down,
+            on_failed=self._on_transport_recovery_failed,
+            on_attempt_failed=lambda exc: self._order_plant.latch(),
         )
 
-        if isinstance(event, TransportDown):
-            self._order_plant.latch()
-            self._log.error(
-                f"gateway TRANSPORT_DOWN gen={event.gen} "
-                f"fault={event.fault.kind.value}; order plant disarmed"
-            )
-            return
-        if isinstance(event, TransportUp):
-            self._log.warning(
-                f"gateway TRANSPORT_UP gen={event.gen}; scheduling plant restore"
-            )
-            self._schedule_plant_restore_after_transport_up(event.gen)
-            return
-        if isinstance(event, RecoveryFailed):
-            self._order_plant.latch()
-            self._log.error(
-                f"gateway TRANSPORT recovery failed gen={event.gen} "
-                f"attempts={event.attempts}: {event.cause}"
-            )
-
-    def _on_gateway_transport_generation_bump(self, generation: int) -> None:
-        """Legacy dual-path bridge (DOWN+UP collapsed into gen callbacks)."""
+    def _on_transport_down(self, event: TransportDown) -> None:
         self._order_plant.latch()
         self._log.error(
-            f"gateway transport generation bumped to {generation}; "
-            "order plant disarmed until plant restore"
+            f"gateway TRANSPORT_DOWN gen={event.gen} "
+            f"fault={event.fault.kind.value}; order plant disarmed"
         )
-        self._schedule_plant_restore_after_transport_up(generation)
 
-    def _schedule_plant_restore_after_transport_up(self, generation: int) -> None:
-        """Thread-safe: transport events may fire off the NT event loop."""
-        loop = getattr(self, "_loop", None)
-        if loop is None:
-            self._log.error("plant restore not scheduled: execution loop missing")
-            return
+    def _on_transport_recovery_failed(self, event: RecoveryFailed) -> None:
+        self._order_plant.latch()
+        self._log.error(
+            f"gateway TRANSPORT recovery failed gen={event.gen} "
+            f"attempts={event.attempts}: {event.cause}"
+        )
 
-        def _start() -> None:
-            task = self._l3_recovery_task
-            if task is not None and not task.done():
-                return
-            self._l3_recovery_task = self.create_task(
-                self._restore_plants_after_transport_up(generation),
-                log_msg="rithmic_l3_plant_restore",
-            )
-
-        try:
-            loop.call_soon_threadsafe(_start)
-        except Exception as exc:
-            self._log.error(f"plant restore schedule failed: {exc}")
-
-    async def _restore_plants_after_transport_up(self, generation: int) -> None:
+    async def _restore_plants_after_transport_up(
+        self, generation: int, attempt: int
+    ) -> None:
         """Transport is already LIVE; resubscribe plants + drain/PnL + rearm.
 
-        ``TransportRecovery`` owns dial. Mid-session plant resync never clears
+        ``TransportRecovery`` owns dial; ``TransportRecoveryBridge`` owns retry
+        (each failed attempt re-latches). Mid-session plant resync never clears
         a latch — only ``begin_connect`` + ``rearm`` after fresh observation.
         """
         if not self.enable_trading:
@@ -619,77 +463,53 @@ class RithmicExecutionClient(LiveExecutionClient):
                 f"plant restore skipped (trading disabled) generation={generation}"
             )
             return
-        backoff = 0.5
-        last_exc: BaseException | None = None
-        for attempt in range(1, self._L3_PLANT_RESTORE_MAX_ATTEMPTS + 1):
+        self._pnl_snapshot_observed.clear()
+        self._order_plant.begin_connect()
+        if self._pnl_connected:
             try:
-                self._pnl_snapshot_observed.clear()
-                self._order_plant.begin_connect()
-                if self._pnl_connected:
-                    try:
-                        await asyncio.to_thread(self._session.disconnect_pnl_plant)
-                    except Exception as teardown_exc:
-                        self._log.warning(
-                            f"L3 PnL disconnect before resubscribe: {teardown_exc}"
-                        )
-                    await asyncio.to_thread(self._session.subscribe_pnl)
-                try:
-                    await asyncio.to_thread(self._session.disconnect_order_plant)
-                except Exception as teardown_exc:
-                    self._log.warning(
-                        f"L3 order disconnect before resubscribe: {teardown_exc}"
-                    )
-                await asyncio.to_thread(self._session.subscribe_order_updates)
-                await asyncio.to_thread(self._session.subscribe_bracket_updates)
-                if self._order_poll_task is None or self._order_poll_task.done():
-                    self._order_poll_task = self.create_task(
-                        self._plant_poll_loop(
-                            name="order",
-                            poll_fn=self._session.poll_order_event,
-                            on_event=self._dispatch_order_event,
-                            on_resync=self._resync_order_subscription,
-                        ),
-                        log_msg="rithmic_order_poll",
-                    )
-                if self._pnl_connected and (
-                    self._poll_task is None or self._poll_task.done()
-                ):
-                    self._poll_task = self.create_task(
-                        self._plant_poll_loop(
-                            name="pnl",
-                            poll_fn=self._session.poll_pnl_event,
-                            on_event=self._dispatch_pnl_event,
-                            on_resync=self._resync_pnl_subscription,
-                        ),
-                        log_msg="rithmic_pnl_poll",
-                    )
-                await self._rearm_after_reconnect()
-                poll_alive = self._order_poll_task is not None and not (
-                    self._order_poll_task.done()
-                )
-                if not self._order_plant.rearm(poll_alive=poll_alive):
-                    raise RuntimeError(
-                        "re-arm refused "
-                        f"(state={self._order_plant.state.value}, "
-                        f"poll_alive={poll_alive})"
-                    )
+                await asyncio.to_thread(self._session.disconnect_pnl_plant)
+            except Exception as teardown_exc:
                 self._log.warning(
-                    f"L3 plant restore re-armed "
-                    f"(generation={generation}, attempt={attempt})"
+                    f"L3 PnL disconnect before resubscribe: {teardown_exc}"
                 )
-                return
-            except Exception as exc:
-                last_exc = exc
-                self._order_plant.latch()
-                self._log.error(
-                    f"L3 plant restore attempt {attempt}/"
-                    f"{self._L3_PLANT_RESTORE_MAX_ATTEMPTS} failed: {exc}"
-                )
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2.0, 8.0)
-        self._log.error(
-            f"L3 plant restore exhausted; order plant stays latched "
-            f"(generation={generation}): {last_exc}"
+            await asyncio.to_thread(self._session.subscribe_pnl)
+        try:
+            await asyncio.to_thread(self._session.disconnect_order_plant)
+        except Exception as teardown_exc:
+            self._log.warning(f"L3 order disconnect before resubscribe: {teardown_exc}")
+        await asyncio.to_thread(self._session.subscribe_order_updates)
+        await asyncio.to_thread(self._session.subscribe_bracket_updates)
+        if self._order_poll_task is None or self._order_poll_task.done():
+            self._order_poll_task = self.create_task(
+                self._plant_poll_loop(
+                    name="order",
+                    poll_fn=self._session.poll_order_event,
+                    on_event=self._dispatch_order_event,
+                    on_resync=self._resync_order_subscription,
+                ),
+                log_msg="rithmic_order_poll",
+            )
+        if self._pnl_connected and (self._poll_task is None or self._poll_task.done()):
+            self._poll_task = self.create_task(
+                self._plant_poll_loop(
+                    name="pnl",
+                    poll_fn=self._session.poll_pnl_event,
+                    on_event=self._dispatch_pnl_event,
+                    on_resync=self._resync_pnl_subscription,
+                ),
+                log_msg="rithmic_pnl_poll",
+            )
+        await self._rearm_after_reconnect()
+        poll_alive = self._order_poll_task is not None and not (
+            self._order_poll_task.done()
+        )
+        if not self._order_plant.rearm(poll_alive=poll_alive):
+            raise RuntimeError(
+                "re-arm refused "
+                f"(state={self._order_plant.state.value}, poll_alive={poll_alive})"
+            )
+        self._log.warning(
+            f"L3 plant restore re-armed (generation={generation}, attempt={attempt})"
         )
 
     async def _resync_order_subscription(self) -> None:
@@ -828,6 +648,7 @@ class RithmicExecutionClient(LiveExecutionClient):
 
     async def _disconnect(self) -> None:
         self._order_plant.disconnect()
+        await self._recovery.detach()
         for task_attr in ("_order_poll_task", "_poll_task"):
             task = getattr(self, task_attr)
             if task is not None:
@@ -945,7 +766,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         instrument = self._cache.instrument(instrument_id)
         if instrument is not None:
             return instrument.make_price(value)
-        return _price(value)
+        return price_from_wire(value)
 
     def _route(self, instrument_id: InstrumentId) -> tuple[str, str]:
         instrument = self._cache.instrument(instrument_id)
@@ -1055,48 +876,6 @@ class RithmicExecutionClient(LiveExecutionClient):
     def _handle_order_notification(self, fields: dict[str, Any]) -> None:
         intake_for(self).handle_order_notification(fields)
 
-    def _emit_accepted(
-        self,
-        order: Any,
-        client_order_id: ClientOrderId,
-        venue_order_id: VenueOrderId,
-        ts_event: int,
-    ) -> None:
-        """Emit OrderAccepted only while local status is SUBMITTED (LAP-42)."""
-        intake_for(self).emit_accepted(order, client_order_id, venue_order_id, ts_event)
-
-    def _resolve_updated_terms(
-        self, order: Any, action: Any
-    ) -> tuple[Quantity, Any, Any]:
-        """Resolve UPDATED-branch qty/price/trigger from the action or order."""
-        return intake_for(self).resolve_updated_terms(order, action)
-
-    def _emit_triggered_guarded(
-        self,
-        order: Any,
-        client_order_id: ClientOrderId,
-        venue_order_id: VenueOrderId,
-        ts_event: int,
-    ) -> None:
-        """Emit OrderTriggered for triggerable types not already triggered (#3812)."""
-        intake_for(self).emit_triggered_guarded(
-            order, client_order_id, venue_order_id, ts_event
-        )
-
-    def _handle_tracked_fill(
-        self,
-        order: Any,
-        client_order_id: ClientOrderId,
-        venue_order_id: VenueOrderId,
-        fields: dict[str, Any],
-        ts_event: int,
-        action: Any,
-    ) -> None:
-        """Emit one venue-priced tracked fill; dedup by venue trade id."""
-        intake_for(self).handle_tracked_fill(
-            order, client_order_id, venue_order_id, fields, ts_event, action
-        )
-
     def _instrument_id_from_order_fields(
         self, fields: dict[str, Any]
     ) -> InstrumentId | None:
@@ -1157,21 +936,6 @@ class RithmicExecutionClient(LiveExecutionClient):
             ts_event=report_ts,
             ts_init=self._clock.timestamp_ns(),
         )
-
-    def _is_benign_bare_complete(self, fields: dict[str, Any], order: Any) -> bool:
-        return is_benign_bare_complete(fields, order)
-
-    def _publish_untracked_status(self, fields: dict[str, Any], ts_event: int) -> bool:
-        """Publish untracked status; False aborts the fill phase (fail-closed)."""
-        return intake_for(self).publish_untracked_status(fields, ts_event)
-
-    def _publish_untracked_fill(self, fields: dict[str, Any], ts_event: int) -> None:
-        """Publish one untracked fill after status succeeded."""
-        intake_for(self).publish_untracked_fill(fields, ts_event)
-
-    def _handle_untracked_notification(self, fields: dict[str, Any]) -> None:
-        """Report external venue activity without strategy ownership."""
-        intake_for(self).handle_untracked_notification(fields)
 
     def _publish_order_status_report(
         self,
@@ -1887,34 +1651,6 @@ class RithmicExecutionClient(LiveExecutionClient):
         if want_exch is None or ev_exch is None:
             return True
         return want_exch == ev_exch
-
-    def _order_type_from_event(self, fields: dict[str, Any]) -> OrderType:
-        return order_type_from_fields(fields)
-
-    def _tif_from_event(self, fields: dict[str, Any]) -> TimeInForce:
-        return tif_from_fields(fields)
-
-    def _trigger_type_from_event(self, fields: dict[str, Any]) -> TriggerType:
-        return trigger_type_from_fields(fields)
-
-    def _order_status_from_event(self, fields: dict[str, Any]) -> OrderStatus:
-        return order_status_from_fields(fields)
-
-    def _client_order_id_for_tag(self, tag: Any) -> ClientOrderId | None:
-        # user_tag == client_order_id.value for orders this client placed, so
-        # the tag is the client order id. External orders keep their tag as the
-        # report's client_order_id (honest: it is the id on the wire).
-        if not tag:
-            return None
-        return ClientOrderId(str(tag))
-
-    def _order_status_report_from_fields(
-        self,
-        fields: dict[str, Any],
-        ts_event: int,
-    ) -> OrderStatusReport | None:
-        """Build an advisory ``OrderStatusReport`` from normalized wire fields."""
-        return drain_for(self).order_status_report_from_fields(fields, ts_event)
 
     async def generate_order_status_reports(
         self,

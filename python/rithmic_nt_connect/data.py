@@ -7,7 +7,7 @@ import contextlib
 import itertools
 import os
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from nautilus_trader.cache.cache import Cache
 from nautilus_trader.common.component import LiveClock, MessageBus
@@ -41,20 +41,24 @@ from nautilus_trader.model.enums import (
     RecordFlag,
 )
 from nautilus_trader.model.identifiers import ClientId, InstrumentId, TradeId, Venue
-from nautilus_trader.model.objects import Price, Quantity
+from nautilus_trader.model.objects import Quantity
+
+if TYPE_CHECKING:
+    from rithmic_gateway.transport_recovery import RecoveryFailed, TransportDown
 
 from rithmic_nt_connect._convert import (
     ConvertError,
     bbo_to_fields,
-    format_price_str,
     last_trade_to_fields,
     order_book_to_fields,
     time_bar_to_fields,
 )
+from rithmic_nt_connect._prices import price_from_wire
 from rithmic_nt_connect.config import RithmicDataClientConfig
 from rithmic_nt_connect.constants import ADAPTER_NAME, VENUE
 from rithmic_nt_connect.errors import is_reconnectable_poll_error
 from rithmic_nt_connect.providers import RithmicInstrumentProvider
+from rithmic_nt_connect.recovery_bridge import TransportRecoveryBridge
 from rithmic_nt_connect.session import WireSession
 
 # Last RequestBars failure reason for qgw hydrate fail-closed messaging.
@@ -121,14 +125,6 @@ def _aggressor(value: Any) -> AggressorSide:
     if value is None:
         return AggressorSide.NO_AGGRESSOR
     raise ValueError(f"unknown aggressor value: {value!r}")
-
-
-def _price(value: float, precision: int | None = None) -> Price:
-    if precision is None:
-        return Price.from_str(format_price_str(value))
-    if precision < 0:
-        raise ConvertError(f"price_precision must be >= 0, got {precision}")
-    return Price.from_str(f"{float(value):.{int(precision)}f}")
 
 
 def _validate_history_identity(
@@ -267,7 +263,7 @@ def fields_to_trade_tick(
         raise ConvertError(f"trade size must be >= 1, got {size}")
     return TradeTick(
         InstrumentId.from_str(fields["instrument_id"]),
-        _price(fields["price"], price_precision),
+        price_from_wire(fields["price"], price_precision),
         Quantity.from_int(size),
         _aggressor(fields.get("aggressor")),
         _trade_id(fields),
@@ -290,8 +286,8 @@ def fields_to_quote_tick(
         )
     return QuoteTick(
         InstrumentId.from_str(fields["instrument_id"]),
-        _price(fields["bid_price"], price_precision),
-        _price(fields["ask_price"], price_precision),
+        price_from_wire(fields["bid_price"], price_precision),
+        price_from_wire(fields["ask_price"], price_precision),
         Quantity.from_int(bid_size),
         Quantity.from_int(ask_size),
         int(fields["ts_event"]),
@@ -341,7 +337,7 @@ def fields_to_order_book_deltas(
         adds.append(
             BookOrder(
                 side,
-                _price(level["price"], price_precision),
+                price_from_wire(level["price"], price_precision),
                 Quantity.from_int(size),
                 int(level["order_id"]),
             )
@@ -479,10 +475,10 @@ def fields_to_bar(
     ts_event = int(fields["ts_event"]) - _bar_type_duration_ns(bar_type)
     return Bar(
         bar_type,
-        _price(fields["open"], price_precision),
-        _price(fields["high"], price_precision),
-        _price(fields["low"], price_precision),
-        _price(fields["close"], price_precision),
+        price_from_wire(fields["open"], price_precision),
+        price_from_wire(fields["high"], price_precision),
+        price_from_wire(fields["low"], price_precision),
+        price_from_wire(fields["close"], price_precision),
         Quantity.from_int(volume),
         ts_event,
         ts_init,
@@ -632,22 +628,18 @@ class RithmicDataClient(LiveMarketDataClient):
         self._history_poll_task: asyncio.Task | None = None
         self._resync_lock = asyncio.Lock()
         self._resync_generation = 0
-        # Single-flight MD replay after TRANSPORT_UP (dedupe on transport gen).
-        self._l3_md_recovery_task: asyncio.Task | None = None
-        self._last_replayed_transport_gen = 0
+        self._recovery = self._build_recovery()
         # One-sided BestBidOffer merge state, keyed by symbol[:exchange].
         self._bbo_state: dict[str, dict[str, Any]] = {}
         # Rate-limited skip diagnostics (Rithmic push feed is presence-bit based).
         self._skip_counts: dict[str, int] = {}
         self._skip_last_flush = 0.0
 
-    _L3_MD_REPLAY_MAX_ATTEMPTS = 5
-
     async def _connect(self) -> None:
         from rithmic_nt_connect.session import ensure_connected
 
         await asyncio.to_thread(ensure_connected, self._session)
-        self._wire_gateway_transport_listener()
+        self._recovery.attach(self._session)
         await self._instrument_provider.initialize()
         for instrument in self._instrument_provider.list_all():
             self._handle_data(instrument)
@@ -703,101 +695,44 @@ class RithmicDataClient(LiveMarketDataClient):
         if exc is not None:
             self._log.error(f"{name} died: {exc}")
 
-    def _wire_gateway_transport_listener(self) -> None:
-        subscribe = getattr(self._session, "subscribe_transport_events", None)
-        if callable(subscribe):
-            subscribe(self._on_transport_event)
-            return
-        register = getattr(
-            self._session, "register_transport_generation_listener", None
-        )
-        if register is None:
-            return
-        register(self._on_gateway_transport_generation_bump)
-
-    def _on_transport_event(self, event: object) -> None:
-        from rithmic_gateway.transport_recovery import (
-            RecoveryFailed,
-            TransportDown,
-            TransportUp,
+    def _build_recovery(self) -> TransportRecoveryBridge:
+        return TransportRecoveryBridge(
+            label="L3 MD replay",
+            task_name="rithmic_l3_md_replay",
+            log=lambda: self._log,
+            get_loop=lambda: getattr(self, "_loop", None),
+            spawn=lambda loop, coro, name: loop.create_task(coro, name=name),
+            restore=self._replay_md_after_transport_up,
+            on_down=self._on_transport_down,
+            on_failed=self._on_transport_recovery_failed,
         )
 
-        if isinstance(event, TransportDown):
-            self._log.warning(
-                f"gateway TRANSPORT_DOWN gen={event.gen} "
-                f"fault={event.fault.kind.value}; pausing MD trust"
-            )
-            return
-        if isinstance(event, TransportUp):
-            self._log.warning(
-                f"gateway TRANSPORT_UP gen={event.gen}; scheduling MD replay"
-            )
-            self._schedule_md_replay_after_transport_up(event.gen)
-            return
-        if isinstance(event, RecoveryFailed):
-            self._log.error(
-                f"gateway TRANSPORT recovery failed gen={event.gen} "
-                f"attempts={event.attempts}: {event.cause}"
-            )
-
-    def _on_gateway_transport_generation_bump(self, generation: int) -> None:
+    def _on_transport_down(self, event: TransportDown) -> None:
         self._log.warning(
-            f"gateway transport generation bumped to {generation}; "
-            "scheduling MD subscription replay"
+            f"gateway TRANSPORT_DOWN gen={event.gen} "
+            f"fault={event.fault.kind.value}; pausing MD trust"
         )
-        self._schedule_md_replay_after_transport_up(generation)
 
-    def _schedule_md_replay_after_transport_up(self, generation: int) -> None:
-        loop = getattr(self, "_loop", None)
-        if loop is None:
-            self._log.error("MD replay not scheduled: data client loop missing")
-            return
+    def _on_transport_recovery_failed(self, event: RecoveryFailed) -> None:
+        self._log.error(
+            f"gateway TRANSPORT recovery failed gen={event.gen} "
+            f"attempts={event.attempts}: {event.cause}"
+        )
 
-        def _start() -> None:
-            if generation <= self._last_replayed_transport_gen:
-                return
-            task = self._l3_md_recovery_task
-            if task is not None and not task.done():
-                return
-            self._l3_md_recovery_task = loop.create_task(
-                self._replay_md_after_transport_up(generation),
-                name="rithmic_l3_md_replay",
-            )
-
-        try:
-            loop.call_soon_threadsafe(_start)
-        except Exception as exc:
-            self._log.error(f"MD replay schedule failed: {exc}")
-
-    async def _replay_md_after_transport_up(self, generation: int) -> None:
+    async def _replay_md_after_transport_up(
+        self, generation: int, attempt: int
+    ) -> None:
         """Transport is LIVE; replay ticker/book/bar intents (L0-L2)."""
-        if generation <= self._last_replayed_transport_gen:
-            return
-        backoff = 0.5
-        last_exc: BaseException | None = None
-        for attempt in range(1, self._L3_MD_REPLAY_MAX_ATTEMPTS + 1):
-            try:
-                await self._resync_ticker_subscription()
-                if self._bar_types:
-                    self._ensure_history_poll_task()
-                self._last_replayed_transport_gen = generation
-                self._log.warning(
-                    f"L3 MD replayed subscriptions "
-                    f"(generation={generation}, attempt={attempt})"
-                )
-                return
-            except Exception as exc:
-                last_exc = exc
-                self._log.error(
-                    f"L3 MD replay attempt {attempt}/"
-                    f"{self._L3_MD_REPLAY_MAX_ATTEMPTS} failed: {exc}"
-                )
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2.0, 8.0)
-        self._log.error(f"L3 MD replay exhausted (generation={generation}): {last_exc}")
+        await self._resync_ticker_subscription()
+        if self._bar_types:
+            self._ensure_history_poll_task()
+        self._log.warning(
+            f"L3 MD replayed subscriptions (generation={generation}, attempt={attempt})"
+        )
 
     async def _disconnect(self) -> None:
         self._poll_closing = True
+        await self._recovery.detach()
         for attr in ("_poll_task", "_history_poll_task"):
             task = getattr(self, attr)
             if task is not None:
