@@ -1,0 +1,804 @@
+//! `GatewaySession`: the Rust gateway client behind the [`Session`] trait.
+//!
+//! Attach-only (it never starts the parent) and credential-free (a client has
+//! an auth token and a fingerprint, never the Rithmic password). All sessions in
+//! a process for one fingerprint share one socket and one reader (`runtime`);
+//! each `GatewaySession` is a facade with its own event queues.
+//!
+//! Outcome classes: a failure before send is a plain error; a failure after a
+//! state-changing request was written is [`Error::OutcomeUnknown`] and is never
+//! retried; read-only requests are retried once after a re-dial.
+
+mod attach;
+pub mod convert;
+mod runtime;
+
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use async_trait::async_trait;
+use rithmic_plants::dto::{
+    AccountRmsInfoDto, FrontMonthDto, HistoryBarDto, HistoryTickDto, OrderNotificationDto,
+    PlantEvent, ProductRmsInfoDto, ReferenceDataDto, TimeBarProbeRow,
+};
+use rithmic_plants::history::{bar_slice_secs, parse_time_bar_type, window_slices};
+use rithmic_plants::{
+    AccountTriple, Error, ModifyOrder, PlaceBracketOrder, PlaceOrder, PlantSet, Result, Session,
+};
+use tokio::sync::broadcast;
+
+use self::convert::Channel;
+use self::runtime::{CallError, Queues, Runtime, Take};
+pub use self::runtime::{ReadyInfo, TransportEvent, EVENT_QUEUE_CAP};
+use crate::listen::{default_unix_path, ListenEndpoint};
+use crate::pb::{self, frame::Body, Frame};
+
+const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(30);
+/// One plant history slice can exceed the normal dial timeout.
+const DEFAULT_HISTORY_RPC_TIMEOUT: Duration = Duration::from_secs(300);
+const DEFAULT_ATTACH_TIMEOUT: Duration = Duration::from_secs(90);
+/// Bounded retries of one history slice that timed out in transport.
+const SLICE_RETRIES: u32 = 2;
+
+/// How the gateway client identifies the parent it attaches to. There is
+/// deliberately no password field: only the parent holds Rithmic credentials.
+#[derive(Clone)]
+pub struct GatewayConfig {
+    pub user: String,
+    pub system_name: String,
+    pub url: String,
+    /// `Live` | `Demo` | `Test`.
+    pub env: String,
+    pub account_id: String,
+    pub fcm_id: String,
+    pub ib_id: String,
+    auth_token: String,
+    socket: PathBuf,
+    /// Bounded wait for an already-starting parent and for a silent parent's Ready.
+    pub attach_timeout: Duration,
+    pub rpc_timeout: Duration,
+    pub history_rpc_timeout: Duration,
+    /// Require the credential flock to be held before accepting `Ready`
+    /// (disable only for mock-parent tests).
+    pub attest_flock: bool,
+}
+
+impl std::fmt::Debug for GatewayConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GatewayConfig")
+            .field("user", &self.user)
+            .field("system_name", &self.system_name)
+            .field("url", &self.url)
+            .field("env", &self.env)
+            .field("socket", &self.socket)
+            .finish_non_exhaustive()
+    }
+}
+
+impl GatewayConfig {
+    /// A client config; the listen path defaults to the fingerprint's path.
+    pub fn new(user: &str, system_name: &str, url: &str, env: &str) -> Self {
+        Self {
+            user: user.into(),
+            system_name: system_name.into(),
+            url: url.into(),
+            env: env.into(),
+            account_id: String::new(),
+            fcm_id: String::new(),
+            ib_id: String::new(),
+            auth_token: String::new(),
+            socket: default_unix_path(user, system_name, url, env),
+            attach_timeout: DEFAULT_ATTACH_TIMEOUT,
+            rpc_timeout: DEFAULT_RPC_TIMEOUT,
+            history_rpc_timeout: DEFAULT_HISTORY_RPC_TIMEOUT,
+            attest_flock: true,
+        }
+    }
+
+    /// Use an explicit listen URL. Only `unix://` (or a bare absolute path) is
+    /// supported; `tcp://` / `tls://` fail with a not-implemented error.
+    pub fn with_listen(mut self, listen: &str) -> Result<Self> {
+        let ListenEndpoint::Unix(path) =
+            ListenEndpoint::parse(listen).map_err(|e| Error::Config(e.to_string()))?;
+        self.socket = path;
+        Ok(self)
+    }
+
+    pub fn with_auth_token(mut self, token: &str) -> Self {
+        self.auth_token = token.into();
+        self
+    }
+
+    pub fn socket_path(&self) -> &Path {
+        &self.socket
+    }
+
+    pub(crate) fn auth_token(&self) -> &str {
+        &self.auth_token
+    }
+}
+
+/// How a request treats failure and retry.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// Idempotent read: retried once after a re-dial.
+    Read,
+    /// State-changing command: never retried; post-send failure is unknown.
+    Command,
+    /// Subscription / lifecycle intent: not retried by the client (the parent
+    /// refcounts intent and the adapter replays it after a transport re-arm).
+    Intent,
+}
+
+/// A facade over the shared gateway runtime.
+pub struct GatewaySession {
+    runtime: Arc<Runtime>,
+    queues: Arc<Queues>,
+    facade_id: AtomicU64,
+    connected: AtomicBool,
+}
+
+impl GatewaySession {
+    /// Create a session facade. No I/O happens until [`Session::connect`].
+    pub fn new(cfg: GatewayConfig) -> Self {
+        Self {
+            runtime: Runtime::for_config(&cfg),
+            queues: Arc::new(Queues::new()),
+            facade_id: AtomicU64::new(0),
+            connected: AtomicBool::new(false),
+        }
+    }
+
+    /// Whether the parent has trading enabled (read-only; clients cannot elevate).
+    pub fn trading_enabled(&self) -> bool {
+        self.runtime.ready().trading_enabled
+    }
+
+    pub fn cancel_all_enabled(&self) -> bool {
+        self.runtime.ready().cancel_all_enabled
+    }
+
+    pub fn scopes(&self) -> Vec<String> {
+        self.runtime.ready().scopes
+    }
+
+    pub fn gateway_instance_id(&self) -> u64 {
+        self.runtime.ready().gateway_instance_id
+    }
+
+    /// Incarnation of this process's connection; bumps on every (re)connect.
+    pub fn transport_generation(&self) -> u64 {
+        self.runtime.generation()
+    }
+
+    /// True while the shared socket to the parent is up.
+    pub fn transport_connected(&self) -> bool {
+        !self.runtime.is_down()
+    }
+
+    /// Down / Up notifications, so an adapter can re-arm intent after a re-dial.
+    pub fn subscribe_transport(&self) -> broadcast::Receiver<TransportEvent> {
+        self.runtime.subscribe_transport()
+    }
+
+    /// Recover the transport if it is down (single-flight across all sessions)
+    /// and return the current generation.
+    pub async fn ensure_transport_live(&self) -> Result<u64> {
+        self.runtime.ensure_live().await?;
+        Ok(self.runtime.generation())
+    }
+
+    fn require_connected(&self) -> Result<()> {
+        if self.connected.load(Ordering::SeqCst) {
+            Ok(())
+        } else {
+            Err(Error::NotConnected { plant: "gateway" })
+        }
+    }
+
+    fn timeout_for(&self, history: bool) -> Duration {
+        if history {
+            self.runtime.cfg.history_rpc_timeout
+        } else {
+            self.runtime.cfg.rpc_timeout
+        }
+    }
+
+    /// Send `body`, applying the retry / outcome rules for `mode`.
+    async fn call(&self, body: Body, mode: Mode, history: bool) -> Result<Frame> {
+        self.require_connected()?;
+        let timeout = self.timeout_for(history);
+        // At most one retry: a read after a lost reply, or any request that
+        // never left (the connection closed before it was written).
+        let mut retried = false;
+        loop {
+            let conn = self.runtime.ensure_live().await?;
+            match conn.call(body.clone(), timeout).await {
+                Ok(frame) => return map_reply(frame),
+                Err(CallError::NotSent(err)) => {
+                    if retried {
+                        return Err(err);
+                    }
+                    retried = true;
+                }
+                Err(CallError::Sent(err)) => {
+                    if mode == Mode::Read && !retried {
+                        retried = true;
+                        continue;
+                    }
+                    return Err(match mode {
+                        Mode::Command => Error::OutcomeUnknown(err.to_string()),
+                        _ => err,
+                    });
+                }
+            }
+        }
+    }
+
+    async fn ack(&self, body: Body, mode: Mode) -> Result<()> {
+        match self.call(body, mode, false).await?.body {
+            Some(Body::Ack(_)) => Ok(()),
+            other => Err(unexpected("ack", other)),
+        }
+    }
+
+    async fn poll(&self, channel: Channel, timeout: Duration) -> Result<Option<PlantEvent>> {
+        self.require_connected()?;
+        let queue = self.queues.get(channel);
+        let deadline = Instant::now() + timeout;
+        loop {
+            // Arm the wakeup before checking, so a push between the check and
+            // the wait cannot be missed.
+            let notified = queue.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            match queue.take() {
+                Take::Event(event) => return Ok(Some(*event)),
+                Take::Lagged(skipped) => {
+                    return Err(Error::ChannelLagged {
+                        plant: channel.plant(),
+                        skipped,
+                    })
+                }
+                Take::Empty => {}
+            }
+            if self.runtime.is_down() {
+                return Err(Error::ChannelClosed {
+                    plant: channel.plant(),
+                });
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Ok(None);
+            }
+            let _ = tokio::time::timeout(deadline - now, notified).await;
+        }
+    }
+
+    async fn load_bar_slice(
+        &self,
+        symbol: &str,
+        exchange: &str,
+        start: i32,
+        end: i32,
+        bar_type: i32,
+        period: i32,
+    ) -> Result<Vec<HistoryBarDto>> {
+        let body = Body::LoadTimeBars(pb::LoadTimeBarsRequest {
+            symbol: symbol.into(),
+            exchange: exchange.into(),
+            bar_type,
+            period,
+            start_time_sec: start,
+            end_time_sec: end,
+        });
+        let mut last: Option<Error> = None;
+        for _ in 0..=SLICE_RETRIES {
+            match self.call(body.clone(), Mode::Read, true).await {
+                Ok(frame) => {
+                    return match frame.body {
+                        Some(Body::LoadTimeBarsResponse(r)) => Ok(r
+                            .bars
+                            .into_iter()
+                            .map(convert::history_bar_from_pb)
+                            .collect()),
+                        other => Err(unexpected("load_time_bars_response", other)),
+                    }
+                }
+                // A transport timeout is transient: retry the slice a bounded
+                // number of times. A typed gateway error is not.
+                Err(err @ Error::Transport(_)) => last = Some(err),
+                Err(other) => return Err(other),
+            }
+        }
+        Err(last.unwrap_or_else(|| Error::Transport("history slice failed".into())))
+    }
+}
+
+impl Drop for GatewaySession {
+    fn drop(&mut self) {
+        let id = self.facade_id.load(Ordering::SeqCst);
+        if id != 0 {
+            self.runtime.unregister(id);
+        }
+    }
+}
+
+fn unexpected(want: &str, got: Option<Body>) -> Error {
+    Error::Protocol(format!("expected {want}, got {got:?}"))
+}
+
+/// Map an error frame to a typed error; pass every other reply through.
+fn map_reply(frame: Frame) -> Result<Frame> {
+    match frame.body {
+        Some(Body::Error(e)) if e.code == "reconciliation_unavailable" => {
+            Err(Error::ReconciliationUnavailable(e.message))
+        }
+        Some(Body::Error(e)) => Err(Error::Gateway {
+            code: e.code,
+            message: e.message,
+        }),
+        _ => Ok(frame),
+    }
+}
+
+#[async_trait]
+impl Session for GatewaySession {
+    async fn connect(&self) -> Result<()> {
+        if self.connected.load(Ordering::SeqCst) {
+            return Err(Error::AlreadyConnected);
+        }
+        let id = self.runtime.register(Arc::clone(&self.queues));
+        self.facade_id.store(id, Ordering::SeqCst);
+        match self.runtime.ensure_live().await {
+            Ok(_) => {
+                self.connected.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+            Err(err) => {
+                // Partial connect tears down what started.
+                self.runtime.unregister(id);
+                self.facade_id.store(0, Ordering::SeqCst);
+                Err(err)
+            }
+        }
+    }
+
+    async fn disconnect(&self) -> Result<()> {
+        self.connected.store(false, Ordering::SeqCst);
+        let id = self.facade_id.swap(0, Ordering::SeqCst);
+        if id != 0 && self.runtime.unregister(id) {
+            // Last facade in the process: close the socket; the parent stays up.
+            self.runtime.close().await;
+        }
+        Ok(())
+    }
+
+    async fn request_plants(&self, extra: PlantSet) -> Result<()> {
+        self.ack(
+            Body::RequestPlants(pb::RequestPlantsRequest {
+                plants: extra.wire_name().into(),
+            }),
+            Mode::Intent,
+        )
+        .await
+    }
+
+    async fn ensure_order_plant(&self) -> Result<()> {
+        self.ack(Body::EnsureOrder(pb::EnsureOrderRequest {}), Mode::Intent)
+            .await
+    }
+
+    async fn ensure_pnl_plant(&self) -> Result<()> {
+        self.ack(Body::EnsurePnl(pb::EnsurePnlRequest {}), Mode::Intent)
+            .await
+    }
+
+    async fn disconnect_order_plant(&self) -> Result<()> {
+        self.ack(
+            Body::DisconnectOrder(pb::DisconnectOrderRequest {}),
+            Mode::Intent,
+        )
+        .await
+    }
+
+    async fn disconnect_pnl_plant(&self) -> Result<()> {
+        self.ack(
+            Body::DisconnectPnl(pb::DisconnectPnlRequest {}),
+            Mode::Intent,
+        )
+        .await
+    }
+
+    async fn reset_ticker(&self) -> Result<()> {
+        self.ack(
+            Body::ResetTickerPlant(pb::ResetTickerPlantRequest {}),
+            Mode::Intent,
+        )
+        .await
+    }
+
+    async fn resolved_account(&self) -> Option<AccountTriple> {
+        let frame = self
+            .call(
+                Body::ResolvedAccount(pb::ResolvedAccountRequest {}),
+                Mode::Read,
+                false,
+            )
+            .await
+            .ok()?;
+        match frame.body {
+            Some(Body::ResolvedAccountResponse(r)) => convert::resolved_account_from_pb(r),
+            _ => None,
+        }
+    }
+
+    async fn subscribe(&self, symbol: &str, exchange: &str) -> Result<()> {
+        self.ack(
+            Body::Subscribe(pb::SubscribeRequest {
+                symbol: symbol.into(),
+                exchange: exchange.into(),
+            }),
+            Mode::Intent,
+        )
+        .await
+    }
+
+    async fn unsubscribe(&self, symbol: &str, exchange: &str) -> Result<()> {
+        self.ack(
+            Body::Unsubscribe(pb::UnsubscribeRequest {
+                symbol: symbol.into(),
+                exchange: exchange.into(),
+            }),
+            Mode::Intent,
+        )
+        .await
+    }
+
+    async fn subscribe_order_book_summary(&self, symbol: &str, exchange: &str) -> Result<()> {
+        self.ack(
+            Body::SubscribeBook(pb::SubscribeBookRequest {
+                symbol: symbol.into(),
+                exchange: exchange.into(),
+            }),
+            Mode::Intent,
+        )
+        .await
+    }
+
+    async fn unsubscribe_order_book_summary(&self, symbol: &str, exchange: &str) -> Result<()> {
+        self.ack(
+            Body::UnsubscribeBook(pb::UnsubscribeBookRequest {
+                symbol: symbol.into(),
+                exchange: exchange.into(),
+            }),
+            Mode::Intent,
+        )
+        .await
+    }
+
+    async fn subscribe_time_bars(
+        &self,
+        symbol: &str,
+        exchange: &str,
+        bar_type: i32,
+        period: i32,
+    ) -> Result<()> {
+        self.ack(
+            Body::SubscribeTimeBars(pb::SubscribeTimeBarsRequest {
+                symbol: symbol.into(),
+                exchange: exchange.into(),
+                bar_type,
+                period,
+            }),
+            Mode::Intent,
+        )
+        .await
+    }
+
+    async fn unsubscribe_time_bars(
+        &self,
+        symbol: &str,
+        exchange: &str,
+        bar_type: i32,
+        period: i32,
+    ) -> Result<()> {
+        self.ack(
+            Body::UnsubscribeTimeBars(pb::UnsubscribeTimeBarsRequest {
+                symbol: symbol.into(),
+                exchange: exchange.into(),
+                bar_type,
+                period,
+            }),
+            Mode::Intent,
+        )
+        .await
+    }
+
+    async fn subscribe_pnl(&self) -> Result<()> {
+        self.ack(Body::SubscribePnl(pb::SubscribePnlRequest {}), Mode::Intent)
+            .await
+    }
+
+    async fn subscribe_order_updates(&self) -> Result<()> {
+        self.ack(
+            Body::SubscribeOrderUpdates(pb::SubscribeOrderUpdatesRequest {}),
+            Mode::Intent,
+        )
+        .await
+    }
+
+    async fn subscribe_bracket_updates(&self) -> Result<()> {
+        self.ack(
+            Body::SubscribeBracketUpdates(pb::SubscribeBracketUpdatesRequest {}),
+            Mode::Intent,
+        )
+        .await
+    }
+
+    async fn get_front_month(&self, symbol: &str, exchange: &str) -> Result<FrontMonthDto> {
+        let body = Body::GetFrontMonth(pb::GetFrontMonthRequest {
+            symbol: symbol.into(),
+            exchange: exchange.into(),
+        });
+        match self.call(body, Mode::Read, false).await?.body {
+            Some(Body::FrontMonthResponse(r)) => Ok(convert::front_month_from_pb(r)),
+            other => Err(unexpected("front_month_response", other)),
+        }
+    }
+
+    async fn get_reference_data(&self, symbol: &str, exchange: &str) -> Result<ReferenceDataDto> {
+        let body = Body::GetReferenceData(pb::GetReferenceDataRequest {
+            symbol: symbol.into(),
+            exchange: exchange.into(),
+        });
+        match self.call(body, Mode::Read, false).await?.body {
+            Some(Body::ReferenceDataResponse(r)) => Ok(convert::reference_data_from_pb(r)),
+            other => Err(unexpected("reference_data_response", other)),
+        }
+    }
+
+    async fn load_ticks(
+        &self,
+        symbol: &str,
+        exchange: &str,
+        start_time_sec: i32,
+        end_time_sec: i32,
+    ) -> Result<Vec<HistoryTickDto>> {
+        let body = Body::LoadTicks(pb::LoadTicksRequest {
+            symbol: symbol.into(),
+            exchange: exchange.into(),
+            start_time_sec,
+            end_time_sec,
+        });
+        match self.call(body, Mode::Read, true).await?.body {
+            Some(Body::LoadTicksResponse(r)) => Ok(r
+                .ticks
+                .into_iter()
+                .map(convert::history_tick_from_pb)
+                .collect()),
+            other => Err(unexpected("load_ticks_response", other)),
+        }
+    }
+
+    /// Wide windows are split into calendar slices (the same lengths the direct
+    /// path uses), each fetched with its own timeout, so one RPC never holds the
+    /// parent's session lock for a whole multi-month window. The merged result
+    /// is sorted by time with duplicate markers removed.
+    async fn load_time_bars(
+        &self,
+        symbol: &str,
+        exchange: &str,
+        start_time_sec: i32,
+        end_time_sec: i32,
+        bar_type: i32,
+        period: i32,
+    ) -> Result<Vec<HistoryBarDto>> {
+        let period = period.max(1);
+        let step = bar_slice_secs(parse_time_bar_type(bar_type)?, period);
+        let mut merged: Vec<HistoryBarDto> = Vec::new();
+        for (start, end) in window_slices(start_time_sec, end_time_sec, step) {
+            merged.extend(
+                self.load_bar_slice(symbol, exchange, start, end, bar_type, period)
+                    .await?,
+            );
+        }
+        merged.sort_by_key(|b| b.marker.unwrap_or(i32::MAX));
+        // Adjacent slices share their boundary second: keep the first bar per marker.
+        merged.dedup_by(|later, first| later.marker.is_some() && later.marker == first.marker);
+        Ok(merged)
+    }
+
+    async fn probe_time_bars(
+        &self,
+        symbol: &str,
+        exchange: &str,
+        start_time_sec: i32,
+        end_time_sec: i32,
+        bar_type: i32,
+        period: i32,
+    ) -> Result<Vec<TimeBarProbeRow>> {
+        let body = Body::ProbeTimeBars(pb::ProbeTimeBarsRequest {
+            symbol: symbol.into(),
+            exchange: exchange.into(),
+            bar_type,
+            period: period.max(1),
+            start_time_sec,
+            end_time_sec,
+        });
+        match self.call(body, Mode::Read, true).await?.body {
+            Some(Body::ProbeTimeBarsResponse(r)) => Ok(r
+                .rows
+                .into_iter()
+                .map(convert::time_bar_probe_row_from_pb)
+                .collect()),
+            other => Err(unexpected("probe_time_bars_response", other)),
+        }
+    }
+
+    async fn load_orders(&self, start_sec: i32, end_sec: i32) -> Result<Vec<OrderNotificationDto>> {
+        let body = Body::LoadOrders(pb::LoadOrdersRequest {
+            start_time_sec: start_sec,
+            end_time_sec: end_sec,
+        });
+        match self.call(body, Mode::Read, false).await?.body {
+            Some(Body::LoadOrdersResponse(r)) => Ok(r
+                .events
+                .into_iter()
+                .map(convert::order_notification_from_pb)
+                .collect()),
+            other => Err(unexpected("load_orders_response", other)),
+        }
+    }
+
+    async fn load_product_rms_info(&self) -> Result<Vec<ProductRmsInfoDto>> {
+        let body = Body::LoadProductRmsInfo(pb::LoadProductRmsInfoRequest {});
+        match self.call(body, Mode::Read, false).await?.body {
+            Some(Body::LoadProductRmsInfoResponse(r)) => Ok(r
+                .rows
+                .into_iter()
+                .map(convert::product_rms_info_from_pb)
+                .collect()),
+            other => Err(unexpected("load_product_rms_info_response", other)),
+        }
+    }
+
+    async fn load_account_rms_info(&self) -> Result<Vec<AccountRmsInfoDto>> {
+        let body = Body::LoadAccountRmsInfo(pb::LoadAccountRmsInfoRequest {});
+        match self.call(body, Mode::Read, false).await?.body {
+            Some(Body::LoadAccountRmsInfoResponse(r)) => Ok(r
+                .rows
+                .into_iter()
+                .map(convert::account_rms_info_from_pb)
+                .collect()),
+            other => Err(unexpected("load_account_rms_info_response", other)),
+        }
+    }
+
+    async fn place_order(&self, o: &PlaceOrder) -> Result<()> {
+        self.ack(
+            Body::PlaceOrder(pb::PlaceOrderRequest {
+                symbol: o.symbol.clone(),
+                exchange: o.exchange.clone(),
+                side: o.side.clone(),
+                price_type: o.price_type.clone(),
+                quantity: o.quantity,
+                user_tag: o.user_tag.clone(),
+                price: o.price,
+                trigger_price: o.trigger_price,
+                duration: o.duration.clone(),
+                trail_by_ticks: o.trail_by_ticks,
+                trail_by_price_id: o.trail_by_price_id,
+            }),
+            Mode::Command,
+        )
+        .await
+    }
+
+    async fn place_bracket_order(&self, o: &PlaceBracketOrder) -> Result<()> {
+        self.ack(
+            Body::PlaceBracketOrder(pb::PlaceBracketOrderRequest {
+                symbol: o.symbol.clone(),
+                exchange: o.exchange.clone(),
+                side: o.side.clone(),
+                price_type: o.price_type.clone(),
+                quantity: o.quantity,
+                localid: o.localid.clone(),
+                price: o.price,
+                trigger_price: o.trigger_price,
+                duration: o.duration.clone(),
+                stop_ticks: o.stop_ticks,
+                target_ticks: o.target_ticks,
+            }),
+            Mode::Command,
+        )
+        .await
+    }
+
+    async fn adjust_bracket_stop(
+        &self,
+        basket_id: &str,
+        ticks: i32,
+        level: Option<i32>,
+    ) -> Result<()> {
+        self.ack(
+            Body::AdjustBracketStop(pb::AdjustBracketStopRequest {
+                basket_id: basket_id.into(),
+                ticks,
+                level,
+            }),
+            Mode::Command,
+        )
+        .await
+    }
+
+    async fn adjust_bracket_target(
+        &self,
+        basket_id: &str,
+        ticks: i32,
+        level: Option<i32>,
+    ) -> Result<()> {
+        self.ack(
+            Body::AdjustBracketTarget(pb::AdjustBracketTargetRequest {
+                basket_id: basket_id.into(),
+                ticks,
+                level,
+            }),
+            Mode::Command,
+        )
+        .await
+    }
+
+    async fn cancel_order(&self, basket_id: &str) -> Result<()> {
+        self.ack(
+            Body::CancelOrder(pb::CancelOrderRequest {
+                basket_id: basket_id.into(),
+            }),
+            Mode::Command,
+        )
+        .await
+    }
+
+    async fn modify_order(&self, o: &ModifyOrder) -> Result<()> {
+        self.ack(
+            Body::ModifyOrder(pb::ModifyOrderRequest {
+                basket_id: o.basket_id.clone(),
+                symbol: o.symbol.clone(),
+                exchange: o.exchange.clone(),
+                quantity: o.quantity,
+                price_type: o.price_type.clone(),
+                price: o.price,
+                trigger_price: o.trigger_price,
+                trail_by_ticks: o.trail_by_ticks,
+            }),
+            Mode::Command,
+        )
+        .await
+    }
+
+    async fn cancel_all_orders(&self) -> Result<()> {
+        self.ack(
+            Body::CancelAllOrders(pb::CancelAllOrdersRequest {}),
+            Mode::Command,
+        )
+        .await
+    }
+
+    async fn poll_event(&self, timeout: Duration) -> Result<Option<PlantEvent>> {
+        self.poll(Channel::Market, timeout).await
+    }
+
+    async fn poll_history_event(&self, timeout: Duration) -> Result<Option<PlantEvent>> {
+        self.poll(Channel::History, timeout).await
+    }
+
+    async fn poll_pnl_event(&self, timeout: Duration) -> Result<Option<PlantEvent>> {
+        self.poll(Channel::Pnl, timeout).await
+    }
+
+    async fn poll_order_event(&self, timeout: Duration) -> Result<Option<PlantEvent>> {
+        self.poll(Channel::Order, timeout).await
+    }
+}

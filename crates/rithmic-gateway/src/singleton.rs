@@ -96,6 +96,31 @@ impl SessionLock {
     }
 }
 
+/// True when another live process holds the credential flock.
+///
+/// Probes without taking ownership: it never truncates the lock file or writes
+/// a pid (unlike [`SessionLock::try_acquire`]), so a client can attest that a
+/// parent is alive without disturbing it.
+pub fn flock_held(user: &str, system_name: &str, url: &str, env: &str) -> bool {
+    let path = SessionLock::lock_path(user, system_name, url, env);
+    let Ok(file) = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+    else {
+        return false;
+    };
+    match file.try_lock_exclusive() {
+        Ok(()) => {
+            let _ = fs2::FileExt::unlock(&file);
+            false
+        }
+        Err(_) => true,
+    }
+}
+
 fn simple_hash(s: &str) -> u64 {
     let mut hash: u64 = 0xcbf29ce484222325;
     for b in s.as_bytes() {
@@ -125,6 +150,24 @@ mod tests {
         assert!(matches!(err, SingletonError::AlreadyHeld { .. }));
         drop(a);
         let _b = SessionLock::try_acquire(&user, system, url, env).expect("after drop");
+    }
+
+    #[test]
+    fn flock_held_probes_without_taking_the_lock() {
+        let user = format!("probe-user-{}", std::process::id());
+        let (system, url, env) = ("LucidTrading", "wss://probe.example", "Live");
+        assert!(!flock_held(&user, system, url, env), "free before acquire");
+        // Probing must leave the lock acquirable.
+        let lock = SessionLock::try_acquire(&user, system, url, env).expect("acquire");
+        assert!(flock_held(&user, system, url, env), "held while owned");
+        let pid = std::fs::read_to_string(lock.path()).expect("pid file");
+        assert_eq!(
+            pid,
+            std::process::id().to_string(),
+            "probe must not rewrite the pid"
+        );
+        drop(lock);
+        assert!(!flock_held(&user, system, url, env), "free after release");
     }
 
     #[test]

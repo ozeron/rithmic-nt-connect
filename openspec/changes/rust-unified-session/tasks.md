@@ -27,16 +27,16 @@
 
 ## 4. Rust GatewaySession
 
-- [ ] 4.1 Port attach-only: dial existing socket, flock check, bounded wait for a starting parent, `parent_not_running` error (from `attach.py`, `flock.py`; reuse `singleton`, `runtime_dir`, `env_keys`). Prerequisite: `simplify-gateway-modes` landed
-- [ ] 4.2 Confirm no spawn or binary-resolution code is ported (it stays in the Python launcher only)
-- [ ] 4.3 Port handshake: auth token only, fingerprint match, scopes, read-only `trading_enabled` / `cancel_all_enabled`
-- [ ] 4.4 Implement the single reader task with pending-reply slots and bounded per-channel queues (md, history, pnl, order); surface an overflow disconnect as a transport error (the parent closes the connection; no overflow frame)
-- [ ] 4.5 Implement single-flight re-dial with transport generation; unknown-outcome error for in-flight state-changing RPCs; at most one retry for read-only RPCs
-- [ ] 4.6 Implement every trait RPC over the proto; add `pb::Event` → `PlantEvent` conversion (inverse of `convert.rs`)
-- [ ] 4.7 Implement client-side chunked `load_time_bars_range` with per-slice timeout, bounded slice retry, merge, sort, dedup
-- [ ] 4.8 Port the behavior of `test_gateway_mux.py`, `test_gateway_runtime.py`, `test_transport_recovery.py`, `test_gateway_attach.py` as Rust tests against the fake binary
-- [ ] 4.9 Test: identical scripted event stream through Direct and Gateway yields equal dicts
-- [ ] 4.10 Test: concurrent `poll_event(timeout)` and RPC from multiple threads do not deadlock (GIL released)
+- [x] 4.1 Port attach-only: dial existing socket, flock check, bounded wait for a starting parent, `parent_not_running` error (from `attach.py`, `flock.py`; reuse `singleton`, `runtime_dir`, `env_keys`). Prerequisite: `simplify-gateway-modes` landed
+- [x] 4.2 Confirm no spawn or binary-resolution code is ported (it stays in the Python launcher only)
+- [x] 4.3 Port handshake: auth token only, fingerprint match, scopes, read-only `trading_enabled` / `cancel_all_enabled`
+- [x] 4.4 Implement the single reader task with pending-reply slots and bounded per-channel queues (md, history, pnl, order); surface an overflow disconnect as a transport error (the parent closes the connection; no overflow frame)
+- [x] 4.5 Implement single-flight re-dial with transport generation; unknown-outcome error for in-flight state-changing RPCs; at most one retry for read-only RPCs
+- [x] 4.6 Implement every trait RPC over the proto; add `pb::Event` → `PlantEvent` conversion (inverse of `convert.rs`)
+- [x] 4.7 Implement client-side chunked `load_time_bars_range` with per-slice timeout, bounded slice retry, merge, sort, dedup
+- [x] 4.8 Port the behavior of `test_gateway_mux.py`, `test_gateway_runtime.py`, `test_transport_recovery.py`, `test_gateway_attach.py` as Rust tests against the fake binary
+- [x] 4.9 Test: identical scripted event stream through Direct and Gateway yields equal dicts
+- [x] 4.10 Test: concurrent `poll_event(timeout)` and RPC from multiple threads do not deadlock (GIL released)
 
 ## 5. Switch-over behind a temporary selector
 

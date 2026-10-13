@@ -5,6 +5,7 @@
 
 #![allow(missing_docs)]
 
+pub mod client;
 pub mod codec;
 pub mod convert;
 pub mod env_keys;
