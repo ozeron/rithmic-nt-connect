@@ -43,19 +43,19 @@
 - [x] 5.1 Add `RITHMIC_GATEWAY_CLIENT=rust|python` to `create_session` (default `python`); route `rust` through the PyO3 class in gateway mode
 - [x] 5.2 Run the shared harness against both the Rust client and the Python lake client; both pass the same scenarios
 - [ ] 5.3 Live verification on Rithmic Test, gateway mode, `rust` selector, no live place, MotiveWave / R|Trader closed: `scripts/smoke_gateway_shared_ticks.py`, `tests/e2e/test_reconnect_live.py`, `tests/e2e/test_rms_commission_live.py`. **Partial (2026-10-13):** verified live with the Rust client: attach to a harness-started parent, handshake, typed `trading_disabled` gate, typed Rithmic errors through the order plant (`[13] permission denied` on RMS and order updates, identical for the Python client), recovery from a real parent restart (`tests/e2e/test_gateway_live.py`), `parent_not_running`. NOT verified: tick delivery and the reconnect smoke — the Rithmic Test account has no reference data and fails the history-ready probe even in direct mode. Needs a market-data account.
-- [ ] 5.4 Flip the default to `rust`; keep `python` selector for one release
+- [x] 5.4 Flip the default to `rust`. **Decision (2026-10-13, operator):** flip on offline + partial live evidence (5.3 stays open); the `python` selector was NOT kept for a release — 6.1 removed it in the same series (nothing was released with the selector, so no consumer depends on it)
 
 ## 6. Remove the Python gateway path from the adapter
 
-- [ ] 6.1 Delete `python/rithmic_nt_connect/gateway_wire.py` and the selector; make `create_session` use the PyO3 class for both modes
-- [ ] 6.2 Remove adapter imports of `rithmic_gateway`; add the "imports without protobuf" test
-- [ ] 6.3 Confirm no `dual`, spawn, or retired-knob code remains (removed by `simplify-gateway-modes`)
-- [ ] 6.4 Confirm `python/rithmic_gateway` still imports without Nautilus or the extension and its tests still pass against the harness
-- [ ] 6.5 Update `_lib.pyi`, `docs/references/gateway-remote.md`, and `scripts/build_wheel.sh` expectations
+- [x] 6.1 Delete `python/rithmic_nt_connect/gateway_wire.py` and the selector; make `create_session` use the PyO3 class for both modes
+- [x] 6.2 Remove adapter imports of `rithmic_gateway`; add the "imports without protobuf" test
+- [x] 6.3 Confirm no `dual`, spawn, or retired-knob code remains (removed by `simplify-gateway-modes`)
+- [x] 6.4 Confirm `python/rithmic_gateway` still imports without Nautilus or the extension and its tests still pass against the harness
+- [x] 6.5 Update `_lib.pyi`, `docs/references/gateway-remote.md`, and `scripts/build_wheel.sh` expectations
 
 ## 7. Docs and close-out
 
-- [ ] 7.1 Rewrite the AGENTS.md "Direct ↔ gateway plant-surface parity" section around the trait and RPC table (keep the RPC-kinds learning)
-- [ ] 7.2 Update `docs/STATUS.md` session-gateway row and marks; fix the existing scoreboard drift; run `python scripts/status_progress.py` and `--check`
-- [ ] 7.3 Run the full verification list from AGENTS.md (fmt, clippy, cargo test, ruff, ty, pytest, qlty, status check) and record results
-- [ ] 7.4 File the follow-up change for moving Nautilus-independent exec logic to Rust (state machine, drain pipeline, dedup, commission, exposure, bar hygiene) with its test-porting requirements
+- [x] 7.1 Rewrite the AGENTS.md "Direct ↔ gateway plant-surface parity" section around the trait and RPC table (keep the RPC-kinds learning)
+- [x] 7.2 Update `docs/STATUS.md` session-gateway row and marks; fix the existing scoreboard drift; run `python scripts/status_progress.py` and `--check`
+- [x] 7.3 Run the full verification list from AGENTS.md (fmt, clippy, cargo test, ruff, ty, pytest, qlty, status check) and record results. **2026-10-13:** cargo fmt/clippy (workspace, `python`, `testing`) clean; cargo tests all pass; ruff, ruff format, ty clean; pytest 657 passed / 91 skipped; qlty clean; status check OK; `openspec validate --strict` valid
+- [x] 7.4 File the follow-up change for moving Nautilus-independent exec logic to Rust (state machine, drain pipeline, dedup, commission, exposure, bar hygiene) with its test-porting requirements
