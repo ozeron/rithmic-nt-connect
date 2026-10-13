@@ -167,6 +167,15 @@ class WireSessionStub:
     def load_account_rms_info(self, *args: Any, **kwargs: Any) -> Any:
         raise NotImplementedError
 
+    def load_fill_history(self, *args: Any, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
+    def load_order_history_dates(self, *args: Any, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
+    def load_order_history(self, *args: Any, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
     def poll_order_event(self, *args: Any, **kwargs: Any) -> Any:
         raise NotImplementedError
 

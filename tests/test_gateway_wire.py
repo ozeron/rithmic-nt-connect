@@ -96,6 +96,9 @@ def test_create_session_gateway_returns_adapter_without_pyo3() -> None:
         "resolved_account",
         "load_product_rms_info",
         "load_account_rms_info",
+        "load_fill_history",
+        "load_order_history_dates",
+        "load_order_history",
         "reset_ticker",
         "reset_ticker_plant",
     ):
@@ -137,6 +140,18 @@ class _RecordingGatewayClient:
 
     def load_account_rms_info(self) -> list[AccountRmsInfo]:
         self.calls.append(("load_account_rms_info", ()))
+        return []
+
+    def load_fill_history(self, start_date: int, finish_date: int) -> list[Any]:
+        self.calls.append(("load_fill_history", (start_date, finish_date)))
+        return []
+
+    def load_order_history_dates(self) -> list[str]:
+        self.calls.append(("load_order_history_dates", ()))
+        return []
+
+    def load_order_history(self, date: str) -> list[Any]:
+        self.calls.append(("load_order_history", (date,)))
         return []
 
     def disconnect_order_plant(self) -> None:
@@ -209,6 +224,42 @@ def test_gateway_wire_forwards_rms_fetches() -> None:
         ("load_product_rms_info", ()),
         ("load_account_rms_info", ()),
     ]
+
+
+def test_gateway_wire_forwards_history_reads() -> None:
+    """Parity: fill / order-history reads reach the client through the same
+    façade as the direct session (one-shot queries, no intent bookkeeping)."""
+    inner = _RecordingGatewayClient()
+    session = GatewayWireSession(inner)  # type: ignore[arg-type]
+
+    assert session.load_fill_history(20260901, 20260930) == []
+    assert session.load_order_history_dates() == []
+    assert session.load_order_history("20260930") == []
+    assert inner.calls == [
+        ("load_fill_history", (20260901, 20260930)),
+        ("load_order_history_dates", ()),
+        ("load_order_history", ("20260930",)),
+    ]
+
+
+def test_gateway_client_and_wire_expose_history_reads() -> None:
+    """Replaces the old direct-only pin: the gateway client and the wire façade
+    both expose the three history reads (direct Session parity is enforced by
+    tests/test_wire_session_parity.py against _lib.pyi and the built extension)."""
+    from rithmic_gateway.client import GatewayClient
+    from rithmic_gateway.config import GatewayConfig
+
+    client = GatewayClient(
+        GatewayConfig(user="u", system_name="s", url="wss://x", env="Test")
+    )
+    wire = GatewayWireSession(client)
+    for name in (
+        "load_fill_history",
+        "load_order_history_dates",
+        "load_order_history",
+    ):
+        assert callable(getattr(GatewayClient, name, None)), name
+        assert callable(getattr(wire, name, None)), name
 
 
 def test_gateway_wire_reset_ticker_prefers_plant_rpc() -> None:

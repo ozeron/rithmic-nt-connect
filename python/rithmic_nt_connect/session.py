@@ -137,6 +137,11 @@ class OrderSession(Protocol):
     ) -> list[dict[str, Any]]: ...
     def load_product_rms_info(self) -> list[ProductRmsInfo]: ...
     def load_account_rms_info(self) -> list[AccountRmsInfo]: ...
+    def load_fill_history(
+        self, start_date: int, finish_date: int
+    ) -> list[dict[str, Any]]: ...
+    def load_order_history_dates(self) -> list[str]: ...
+    def load_order_history(self, date: str) -> list[dict[str, Any]]: ...
     def poll_order_event(self) -> dict[str, Any] | None: ...
 
 
@@ -533,6 +538,17 @@ class _FlockedDirectSession:
 
     def load_account_rms_info(self) -> list[AccountRmsInfo]:
         return self._inner.load_account_rms_info()
+
+    def load_fill_history(
+        self, start_date: int, finish_date: int
+    ) -> list[dict[str, Any]]:
+        return self._inner.load_fill_history(start_date, finish_date)
+
+    def load_order_history_dates(self) -> list[str]:
+        return self._inner.load_order_history_dates()
+
+    def load_order_history(self, date: str) -> list[dict[str, Any]]:
+        return self._inner.load_order_history(date)
 
     def poll_order_event(self) -> dict[str, Any] | None:
         return self._inner.poll_order_event()

@@ -37,6 +37,9 @@ use crate::plants::PlantSet;
 const ORDER_DRAIN_SETTLE_MS: u64 = 1_000;
 /// Hard cap (ms) on the `load_orders` drain against continuous live traffic.
 const ORDER_DRAIN_MAX_MS: u64 = 10_000;
+/// Venue cap on one fill-history reply. A reply that reaches it may be
+/// truncated and carries no truncation marker, so it fails closed.
+const FILL_HISTORY_MAX_RECORDS: usize = 10_000;
 
 fn noop_waker() -> Waker {
     fn clone(_: *const ()) -> RawWaker {
@@ -664,41 +667,23 @@ impl RithmicSession {
 
     /// Load the account's fills for trade dates `start..=finish` (CCYYMMDD).
     ///
-    /// Read-only order-plant query (never places or cancels). The venue caps a
-    /// reply at 10,000 fills; callers needing more must split the window.
+    /// Read-only order-plant query (never places or cancels). Fails closed with
+    /// [`Error::ReconciliationUnavailable`] when the reply reaches the venue's
+    /// 10,000-row cap, because a full page may be truncated; callers must split
+    /// the date range and retry.
     pub async fn load_fill_history(
         &mut self,
         start: i32,
         finish: i32,
     ) -> Result<Vec<FillHistoryDto>> {
         self.ensure_order_plant().await?;
-        let responses = self
-            .order_handle()?
-            .show_fill_history(FillHistoryRange::trade_date(start, finish), Some(10_000))
-            .await?;
-        collect_history_rows(
-            responses,
-            "load_fill_history",
-            FillHistoryDto::from_response,
-        )
+        load_fill_history_on(self.order_handle()?, start, finish).await
     }
 
     /// Trade dates (CCYYMMDD) for which the venue keeps order history. Read-only.
     pub async fn load_order_history_dates(&mut self) -> Result<Vec<String>> {
         self.ensure_order_plant().await?;
-        let responses = self.order_handle()?.show_order_history_dates().await?;
-        let mut dates = collect_history_rows(responses, "load_order_history_dates", |resp| {
-            match &resp.message {
-                rithmic_rs::rti::messages::RithmicMessage::ResponseShowOrderHistoryDates(m) => {
-                    Some(m.date.clone())
-                }
-                _ => None,
-            }
-        })?
-        .concat();
-        dates.sort();
-        dates.dedup();
-        Ok(dates)
+        load_order_history_dates_on(self.order_handle()?).await
     }
 
     /// Disconnect only the order plant (leaves ticker/history/PnL connected).
@@ -1331,6 +1316,67 @@ pub async fn load_order_history_on(
     Ok(out)
 }
 
+/// Fetch one fill-history range (`start..=finish`, CCYYMMDD) from an
+/// already-connected order-plant handle (no session lock). Read-only.
+///
+/// Fails closed at the venue cap: a reply of [`FILL_HISTORY_MAX_RECORDS`] rows
+/// may be truncated, so it becomes [`Error::ReconciliationUnavailable`].
+pub async fn load_fill_history_on(
+    handle: &RithmicOrderPlantHandle,
+    start: i32,
+    finish: i32,
+) -> Result<Vec<FillHistoryDto>> {
+    let responses = handle
+        .show_fill_history(
+            FillHistoryRange::trade_date(start, finish),
+            Some(FILL_HISTORY_MAX_RECORDS as i32),
+        )
+        .await?;
+    let rows = collect_history_rows(
+        responses,
+        "load_fill_history",
+        FillHistoryDto::from_response,
+    )?;
+    check_fill_history_cap(rows.len())?;
+    Ok(rows)
+}
+
+/// Pure cap check for [`load_fill_history_on`]: a count at or above the venue
+/// cap means the reply may be incomplete, so it is refused.
+fn check_fill_history_cap(row_count: usize) -> Result<()> {
+    if row_count >= FILL_HISTORY_MAX_RECORDS {
+        return Err(Error::ReconciliationUnavailable(format!(
+            "fill history reached the {FILL_HISTORY_MAX_RECORDS}-row venue cap; \
+             split the trade-date range and retry"
+        )));
+    }
+    Ok(())
+}
+
+/// Trade dates (CCYYMMDD) the venue keeps order history for, from an
+/// already-connected order-plant handle (no session lock). Read-only.
+pub async fn load_order_history_dates_on(handle: &RithmicOrderPlantHandle) -> Result<Vec<String>> {
+    let responses = handle.show_order_history_dates().await?;
+    let dates = collect_history_rows(responses, "load_order_history_dates", |resp| {
+        match &resp.message {
+            rithmic_rs::rti::messages::RithmicMessage::ResponseShowOrderHistoryDates(m) => {
+                Some(m.date.clone())
+            }
+            _ => None,
+        }
+    })?
+    .concat();
+    Ok(normalize_history_dates(dates))
+}
+
+/// Sort and dedup CCYYMMDD dates. CCYYMMDD strings sort chronologically, so a
+/// lexical sort is the date order.
+fn normalize_history_dates(mut dates: Vec<String>) -> Vec<String> {
+    dates.sort();
+    dates.dedup();
+    dates
+}
+
 /// Fetch product-level RMS info from an already-connected order-plant handle
 /// (no session lock). Read-only venue config — never places or cancels.
 pub async fn load_product_rms_info_on(
@@ -1567,6 +1613,42 @@ where
         check_response_ref(resp, ctx)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod history_read_tests {
+    use super::*;
+
+    #[test]
+    fn fill_history_below_cap_is_returned() {
+        assert!(check_fill_history_cap(0).is_ok());
+        assert!(check_fill_history_cap(FILL_HISTORY_MAX_RECORDS - 1).is_ok());
+    }
+
+    #[test]
+    fn fill_history_at_cap_fails_closed_as_reconciliation_unavailable() {
+        let err = check_fill_history_cap(FILL_HISTORY_MAX_RECORDS).unwrap_err();
+        assert!(
+            matches!(err, Error::ReconciliationUnavailable(ref msg) if msg.contains("10000-row")),
+            "a full page may be truncated and must not be returned as complete: {err:?}"
+        );
+    }
+
+    #[test]
+    fn history_dates_are_sorted_and_deduped() {
+        let got = normalize_history_dates(vec![
+            "20260930".into(),
+            "20260928".into(),
+            "20260930".into(),
+            "20261001".into(),
+        ]);
+        assert_eq!(got, vec!["20260928", "20260930", "20261001"]);
+    }
+
+    #[test]
+    fn history_dates_empty_stays_empty() {
+        assert!(normalize_history_dates(Vec::new()).is_empty());
+    }
 }
 
 #[cfg(test)]
