@@ -6,7 +6,7 @@ use rithmic_plants::dto::{
     InstrumentPnlDto, LastTradeDto, OrderBookDto, OrderNotificationDto, PlantEvent,
     ProductRmsInfoDto, ReferenceDataDto, TimeBarProbeRow,
 };
-use rithmic_rs::RithmicAccount;
+use rithmic_plants::AccountTriple;
 
 use crate::pb;
 use crate::subscriptions::SubKey;
@@ -210,7 +210,7 @@ pub fn reference_data_to_pb(r: ReferenceDataDto) -> pb::ReferenceDataResponse {
     }
 }
 
-pub fn resolved_account_to_pb(a: RithmicAccount) -> pb::ResolvedAccountResponse {
+pub fn resolved_account_to_pb(a: AccountTriple) -> pb::ResolvedAccountResponse {
     pb::ResolvedAccountResponse {
         account_id: Some(a.account_id),
         fcm_id: Some(a.fcm_id),

@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Shared Rithmic plant session façade over rithmic-rs"
 
+[features]
+# Scripted in-memory `Session` for gateway tests. Never enabled in the shipped wheel.
+testing = []
+
 [dependencies]
 async-trait = "0.1"
 rithmic-rs = "3"

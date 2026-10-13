@@ -9,12 +9,12 @@
 
 ## 2. Generic gateway server, fake plant, real-binary harness
 
-- [ ] 2.1 Make `GatewayState` and dispatch hold the session as the `Session` trait object instead of `RithmicSession`
-- [ ] 2.2 Implement `FakeSession` (scripted events, injectable plant drop, injectable error codes, recorded calls)
-- [ ] 2.3 Add the `rithmic-gateway-fake` bin target behind `required-features = ["testing"]`; confirm no env switch on the production binary selects a fake plant
-- [ ] 2.4 Build the integration harness: spawn the fake binary in a temp runtime dir, expose a client-agnostic scenario list (subscribe + fan-out, trading gates, order/bracket restore after plant drop, ticker reset, overflow, history refusal under live ticker, transport drop)
-- [ ] 2.5 Run the harness against the existing Python `GatewayClient` and fix or record any current-behavior surprises before porting
-- [ ] 2.6 Add a packaging test asserting the wheel contains `rithmic-gateway` and not `rithmic-gateway-fake`
+- [x] 2.1 Make `GatewayState` and dispatch hold the session as the `Session` trait object instead of `RithmicSession`
+- [x] 2.2 Implement `FakeSession` (scripted events, injectable plant drop, injectable error codes, recorded calls)
+- [x] 2.3 Add the `rithmic-gateway-fake` bin target behind `required-features = ["testing"]`; confirm no env switch on the production binary selects a fake plant
+- [x] 2.4 Build the integration harness: spawn the fake binary in a temp runtime dir, expose a client-agnostic scenario list (subscribe + fan-out, trading gates, order/bracket restore after plant drop, ticker reset, overflow, history refusal under live ticker, transport drop)
+- [x] 2.5 Run the harness against the existing Python `GatewayClient` and fix or record any current-behavior surprises before porting
+- [x] 2.6 Add a packaging test asserting the wheel contains `rithmic-gateway` and not `rithmic-gateway-fake`
 
 ## 3. RPC table and parity tests
 
@@ -30,7 +30,7 @@
 - [ ] 4.1 Port attach-only: dial existing socket, flock check, bounded wait for a starting parent, `parent_not_running` error (from `attach.py`, `flock.py`; reuse `singleton`, `runtime_dir`, `env_keys`). Prerequisite: `simplify-gateway-modes` landed
 - [ ] 4.2 Confirm no spawn or binary-resolution code is ported (it stays in the Python launcher only)
 - [ ] 4.3 Port handshake: auth token only, fingerprint match, scopes, read-only `trading_enabled` / `cancel_all_enabled`
-- [ ] 4.4 Implement the single reader task with pending-reply slots and bounded per-channel queues (md, history, pnl, order); surface fan-out overflow as an error
+- [ ] 4.4 Implement the single reader task with pending-reply slots and bounded per-channel queues (md, history, pnl, order); surface an overflow disconnect as a transport error (the parent closes the connection; no overflow frame)
 - [ ] 4.5 Implement single-flight re-dial with transport generation; unknown-outcome error for in-flight state-changing RPCs; at most one retry for read-only RPCs
 - [ ] 4.6 Implement every trait RPC over the proto; add `pb::Event` → `PlantEvent` conversion (inverse of `convert.rs`)
 - [ ] 4.7 Implement client-side chunked `load_time_bars_range` with per-slice timeout, bounded slice retry, merge, sort, dedup

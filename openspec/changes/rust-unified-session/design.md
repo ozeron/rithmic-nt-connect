@@ -116,6 +116,27 @@ inherit direct-only locking. A test asserts `disconnect` waits for an in-flight 
 that an order op started during disconnect is rejected (the existing behavior, now at the
 `DirectSession` seam).
 
+## Current-behavior findings (task 2.5, harness vs the Python clients)
+
+Pinned by `tests/test_gateway_scenarios.py` against the real server over a fake plant. These are
+what the Rust client must reproduce (or consciously change); none alters the server.
+
+1. **A plant reconnect disconnects every client.** The parent restores intents on the new plant,
+   then bumps its transport epoch, which makes each client task end; client teardown leaves the
+   venue topics (`unsubscribe`, `disconnect_order_plant`) and the clients must re-attach and
+   re-issue intent (adapter-owned replay keyed off the transport generation). For the last peer the
+   restore is therefore undone immediately. Not changed here; the Rust client implements the same
+   re-attach + generation contract.
+2. **Mux facades do not refcount against each other.** All facades in a process share one parent
+   connection, so the parent sees one client; the first facade's `unsubscribe` leaves the venue
+   topic even if another facade still wants it. The Rust client keeps this (per-facade refcount is
+   a possible follow-up, tracked as an open question).
+3. **Overflow is a disconnect, not a signal.** When a client's outbound queue overflows the
+   parent logs and closes the connection; there is no overflow frame. The client therefore sees
+   the closed connection (`eof`). The `gateway-client` spec is corrected accordingly.
+4. **Readiness probes are noisy.** A connect-and-close probe logs `client closed before
+   handshake` on the parent; cosmetic, left alone.
+
 ## Risks / Trade-offs
 
 - [Transport recovery / attach races regress when reimplemented] → Port the behavior encoded in `test_transport_recovery.py`, `test_gateway_attach.py`, `test_gateway_mux.py`, `test_gateway_runtime.py` as Rust tests against the fake binary before deleting the Python path; run both clients through one harness.

@@ -7,18 +7,43 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rithmic_plants::RithmicSession;
-use tokio::sync::Mutex as TokioMutex;
+use rithmic_plants::dto::PlantEvent;
+use rithmic_plants::Session;
 
 use crate::reconnect::ReconnectController;
 use crate::subscriptions::FanoutHub;
 
 use super::dispatch::TopicIntent;
-use super::{publish_plant_event, GatewayState};
+use super::{publish_plant_event, GatewayState, SessionHandle};
 
-/// Signature shared by all four plant poll methods.
-type PlantPollFn =
-    fn(&mut RithmicSession) -> rithmic_plants::Result<Option<rithmic_plants::dto::PlantEvent>>;
+/// The four plant event streams, polled in this fixed order.
+#[derive(Clone, Copy)]
+enum PlantStream {
+    Ticker,
+    History,
+    Pnl,
+    Order,
+}
+
+impl PlantStream {
+    const ALL: [(&'static str, Self); 4] = [
+        ("ticker", Self::Ticker),
+        ("history", Self::History),
+        ("pnl", Self::Pnl),
+        ("order", Self::Order),
+    ];
+
+    /// Non-blocking drain of one event (`Duration::ZERO`).
+    async fn poll(self, session: &dyn Session) -> rithmic_plants::Result<Option<PlantEvent>> {
+        let now = Duration::ZERO;
+        match self {
+            Self::Ticker => session.poll_event(now).await,
+            Self::History => session.poll_history_event(now).await,
+            Self::Pnl => session.poll_pnl_event(now).await,
+            Self::Order => session.poll_order_event(now).await,
+        }
+    }
+}
 
 /// True for the subset of `rithmic_plants::Error` that the session
 /// constructor maps `is_connection_issue()` errors onto (see
@@ -38,14 +63,13 @@ fn is_not_connected(e: &rithmic_plants::Error) -> bool {
 }
 
 /// One plant poll + fan-out; returns whether the error is a connection issue.
-/// The four poll methods share one signature, so a plain fn pointer suffices.
 async fn poll_and_publish(
-    guard: &mut RithmicSession,
+    guard: &dyn Session,
     hub: &FanoutHub,
     label: &str,
-    poll_fn: PlantPollFn,
+    stream: PlantStream,
 ) -> bool {
-    match poll_fn(guard) {
+    match stream.poll(guard).await {
         Ok(Some(event)) => publish_plant_event(hub, event).await,
         Ok(None) => {}
         Err(e) => {
@@ -63,7 +87,7 @@ async fn poll_and_publish(
 /// Clients never see this — they keep their broker connection and simply
 /// stop receiving events until plants are back.
 pub async fn run_event_pump(
-    session: Arc<TokioMutex<RithmicSession>>,
+    session: SessionHandle,
     hub: Arc<FanoutHub>,
     reconnect: Arc<ReconnectController>,
     state: Arc<GatewayState>,
@@ -71,16 +95,10 @@ pub async fn run_event_pump(
     loop {
         let mut connection_issue = state.force_reconnect.swap(false, Ordering::SeqCst);
         {
-            let mut guard = session.lock().await;
+            let guard = session.lock().await;
             // MD / history / pnl / order plants, polled in that fixed order.
-            let polls: [(&str, PlantPollFn); 4] = [
-                ("ticker", RithmicSession::poll_event),
-                ("history", RithmicSession::poll_history_event),
-                ("pnl", RithmicSession::poll_pnl_event),
-                ("order", RithmicSession::poll_order_event),
-            ];
-            for (label, poll_fn) in polls {
-                if poll_and_publish(&mut guard, &hub, label, poll_fn).await {
+            for (label, stream) in PlantStream::ALL {
+                if poll_and_publish(&*guard, &hub, label, stream).await {
                     connection_issue = true;
                 }
             }
@@ -95,7 +113,7 @@ pub async fn run_event_pump(
 }
 
 async fn reconnect_loop(
-    session: &Arc<TokioMutex<RithmicSession>>,
+    session: &SessionHandle,
     reconnect: &ReconnectController,
     state: &GatewayState,
 ) {
@@ -103,7 +121,7 @@ async fn reconnect_loop(
     state.ready.store(false, Ordering::SeqCst);
     loop {
         {
-            let mut guard = session.lock().await;
+            let guard = session.lock().await;
             let _ = guard.disconnect().await;
             if let Err(e) = guard.connect().await {
                 drop(guard);
@@ -116,8 +134,8 @@ async fn reconnect_loop(
         // tearing TLS down. If still incomplete, full-reconnect (outer loop)
         // while staying Ready=false — never claim Ready with half-restored intent.
         for attempt in 1..=6u32 {
-            let mut guard = session.lock().await;
-            let (restored, attempted) = restore_intents(&mut guard, reconnect).await;
+            let guard = session.lock().await;
+            let (restored, attempted) = restore_intents(&*guard, reconnect).await;
             drop(guard);
             eprintln!(
                 "rithmic-gateway: restore attempt {attempt}: {restored}/{attempted} subscriptions"
@@ -134,10 +152,7 @@ async fn reconnect_loop(
     }
 }
 
-async fn restore_intents(
-    guard: &mut RithmicSession,
-    reconnect: &ReconnectController,
-) -> (usize, usize) {
+async fn restore_intents(guard: &dyn Session, reconnect: &ReconnectController) -> (usize, usize) {
     let plan = reconnect.restore_plan().await;
     let mut restored = 0usize;
     let mut attempted = 0usize;
@@ -207,13 +222,13 @@ mod tests {
     use super::*;
     use crate::reconnect::TimeBarIntent;
     use crate::subscriptions::{FanoutHub, SharedFanout, SubKey};
-    use rithmic_plants::PlantSet;
+    use rithmic_plants::{DirectSession, PlantSet};
     use std::str::FromStr;
 
     /// An unconnected session: every venue call fails fast, so restore
     /// tallies are exercised without any network. The pump's log-and-
     /// continue policy means every attempt is counted and nothing restored.
-    fn offline_session() -> RithmicSession {
+    fn offline_session() -> DirectSession {
         let cfg = rithmic_plants::SessionConfig::builder()
             .user("tally-test")
             .password("pw")
@@ -222,7 +237,7 @@ mod tests {
             .env(rithmic_rs::RithmicEnv::from_str("live").expect("env"))
             .build()
             .expect("config");
-        RithmicSession::with_plants(cfg, PlantSet::MARKET_DATA)
+        DirectSession::new(cfg, PlantSet::MARKET_DATA)
     }
 
     fn runtime() -> tokio::runtime::Runtime {
@@ -245,8 +260,8 @@ mod tests {
         rt.block_on(async {
             let hub: SharedFanout = Arc::new(FanoutHub::new(8));
             let reconnect = ReconnectController::new(hub);
-            let mut session = offline_session();
-            let (restored, attempted) = restore_intents(&mut session, &reconnect).await;
+            let session = offline_session();
+            let (restored, attempted) = restore_intents(&session, &reconnect).await;
             assert_eq!((restored, attempted), (0, 0));
         });
     }
@@ -267,8 +282,8 @@ mod tests {
                     period: 60,
                 })
                 .await;
-            let mut session = offline_session();
-            let (restored, attempted) = restore_intents(&mut session, &reconnect).await;
+            let session = offline_session();
+            let (restored, attempted) = restore_intents(&session, &reconnect).await;
             // All three MD kinds attempted in plan order; all fail offline.
             assert_eq!((restored, attempted), (0, 3));
         });
@@ -282,8 +297,8 @@ mod tests {
             let reconnect = ReconnectController::new(hub);
             reconnect.note_order().await;
             reconnect.note_brackets().await;
-            let mut session = offline_session();
-            let (restored, attempted) = restore_intents(&mut session, &reconnect).await;
+            let session = offline_session();
+            let (restored, attempted) = restore_intents(&session, &reconnect).await;
             // Order updates counted + failed; brackets still counted even
             // though their venue call is skipped to avoid a partial restore.
             assert_eq!(attempted, 2);

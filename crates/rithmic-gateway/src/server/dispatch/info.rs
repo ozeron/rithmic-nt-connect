@@ -18,7 +18,7 @@ pub(super) async fn request_plants(
             let Some(session) = &state.session else {
                 return no_session_frame(request_id);
             };
-            let mut guard = session.lock().await;
+            let guard = session.lock().await;
             if let Err(e) = guard.request_plants(extra).await {
                 return err_to_frame(request_id, "request_plants_failed", e);
             }
@@ -72,8 +72,8 @@ pub(super) async fn resolved_account(state: &GatewayState, request_id: u64) -> F
     // None (not yet resolved) is a valid answer: an empty response lets
     // the client fall back to its configured account id, mirroring the
     // direct path's `resolved_account() -> None`.
-    let body = match guard.resolved_account() {
-        Some(acct) => Body::ResolvedAccountResponse(resolved_account_to_pb(acct.clone())),
+    let body = match guard.resolved_account().await {
+        Some(acct) => Body::ResolvedAccountResponse(resolved_account_to_pb(acct)),
         None => Body::ResolvedAccountResponse(pb::ResolvedAccountResponse::default()),
     };
     Frame {

@@ -42,8 +42,8 @@ For a given credential fingerprint, a process SHALL use one gateway socket and o
 - **THEN** order events SHALL still be delivered to the order queue
 
 #### Scenario: Consumer lags past capacity
-- **WHEN** the parent signals fan-out overflow for this client
-- **THEN** the client SHALL surface an explicit overflow error and SHALL NOT silently drop events
+- **WHEN** the parent drops this client because its outbound queue overflowed (the parent closes the connection; it sends no overflow frame)
+- **THEN** the client SHALL surface the closed connection as a transport error on the next call or poll, SHALL NOT silently continue, and SHALL re-attach through the normal recovery path
 
 ### Requirement: Single-flight transport recovery with generation
 On socket loss the client SHALL perform one shared re-dial for all waiters, SHALL increment a transport generation, and SHALL expose the generation so the adapter can re-arm order-plant state and replay market-data intent. Subscription restore after plant reconnect SHALL remain the parent's responsibility.

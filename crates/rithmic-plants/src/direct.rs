@@ -25,7 +25,8 @@ use crate::history::parse_time_bar_type;
 use crate::plants::PlantSet;
 use crate::session::{
     adjust_bracket_stop_on, adjust_bracket_target_on, cancel_all_orders_on, cancel_order_on,
-    modify_order_on, place_bracket_order_on, place_order_on, RithmicSession,
+    load_account_rms_info_on, load_orders_on, load_product_rms_info_on, modify_order_on,
+    place_bracket_order_on, place_order_on, RithmicSession,
 };
 
 /// How long `disconnect` waits for in-flight order operations to finish.
@@ -308,20 +309,26 @@ impl Session for DirectSession {
             .await
     }
 
-    async fn load_orders(&self, start_sec: i32, end_sec: i32) -> Result<Vec<OrderNotificationDto>> {
-        self.inner
-            .lock()
-            .await
-            .load_orders(start_sec, end_sec)
-            .await
+    async fn load_orders(
+        &self,
+        _start_sec: i32,
+        _end_sec: i32,
+    ) -> Result<Vec<OrderNotificationDto>> {
+        // Detached handle: the drain can run for seconds and must not block the
+        // event pump / pollers on the session lock. The window is ignored: only
+        // the current working set is requested.
+        let handle = self.order_handle().await?;
+        load_orders_on(&handle).await
     }
 
     async fn load_product_rms_info(&self) -> Result<Vec<ProductRmsInfoDto>> {
-        self.inner.lock().await.load_product_rms_info().await
+        let handle = self.order_handle().await?;
+        load_product_rms_info_on(&handle).await
     }
 
     async fn load_account_rms_info(&self) -> Result<Vec<AccountRmsInfoDto>> {
-        self.inner.lock().await.load_account_rms_info().await
+        let handle = self.order_handle().await?;
+        load_account_rms_info_on(&handle).await
     }
 
     async fn place_order(&self, o: &PlaceOrder) -> Result<()> {

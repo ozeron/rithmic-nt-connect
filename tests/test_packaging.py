@@ -12,6 +12,7 @@ from __future__ import annotations
 import subprocess  # nosec B404 - runs the launcher under test
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -80,3 +81,33 @@ def test_bundled_gateway_binary_is_launchable_via_the_launcher() -> None:
     assert "rithmic_gateway:" not in proc.stderr  # launcher did not fail to resolve
     assert "RITHMIC_USER" in proc.stderr  # the real binary ran and refused to start
     assert proc.returncode != 0
+
+
+def test_wheel_bundles_the_production_gateway_and_never_the_fake() -> None:
+    """The fake-plant gateway is test-only: never built, bundled, or selectable."""
+    manifest = (REPO_ROOT / "crates" / "rithmic-gateway" / "Cargo.toml").read_text()
+    # The fake bin only builds with the `testing` feature.
+    fake_bin = manifest.split('name = "rithmic-gateway-fake"')[1].split("[[bin]]")[0]
+    assert 'required-features = ["testing"]' in fake_bin
+
+    # The wheel script builds the production binary only, without features.
+    script = (REPO_ROOT / "scripts" / "build_wheel.sh").read_text()
+    assert "cargo build -p rithmic-gateway --release" in script
+    assert "fake" not in script.lower()
+    build_line = script.split("cargo build -p rithmic-gateway")[1].split("\n")[0]
+    assert "--features" not in build_line
+
+    # The production binary has no switch that selects a fake plant.
+    prod = REPO_ROOT / "crates/rithmic-gateway/src/bin/rithmic_gateway.rs"
+    assert "fake" not in prod.read_text().lower()
+
+    # Whatever is bundled (mirror) or built into a wheel contains no fake binary.
+    bin_dir = MIRROR / "bin"
+    if bin_dir.is_dir():
+        assert not [p.name for p in bin_dir.iterdir() if "fake" in p.name]
+    for wheel in sorted(
+        (REPO_ROOT / "target" / "wheels").glob("rithmic_nt_connect-*.whl")
+    ):
+        with zipfile.ZipFile(wheel) as zf:
+            names = zf.namelist()
+        assert not [n for n in names if "rithmic-gateway-fake" in n], wheel

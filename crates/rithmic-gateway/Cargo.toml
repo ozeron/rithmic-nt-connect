@@ -10,6 +10,17 @@ build = "build.rs"
 name = "rithmic-gateway"
 path = "src/bin/rithmic_gateway.rs"
 
+# Test-only: the real server over a scripted fake plant. Never built by default,
+# never bundled into the wheel (scripts/build_wheel.sh builds -p rithmic-gateway
+# --release only), and the production binary cannot select it.
+[[bin]]
+name = "rithmic-gateway-fake"
+path = "src/bin/rithmic_gateway_fake.rs"
+required-features = ["testing"]
+
+[features]
+testing = ["rithmic-plants/testing"]
+
 [dependencies]
 rithmic-plants = { path = "../rithmic-plants" }
 rithmic-rs = "3"
@@ -24,6 +35,7 @@ libc = "0.2"
 prost-build = "0.14"
 
 [dev-dependencies]
+rithmic-plants = { path = "../rithmic-plants", features = ["testing"] }
 bytes = "1"
 tokio = { version = "1", features = ["net", "io-util", "macros", "sync", "rt-multi-thread", "time", "test-util"] }
 tempfile = "3"
