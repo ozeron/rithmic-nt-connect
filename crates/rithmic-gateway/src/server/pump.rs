@@ -152,7 +152,13 @@ async fn reconnect_loop(
     }
 }
 
-async fn restore_intents(guard: &dyn Session, reconnect: &ReconnectController) -> (usize, usize) {
+/// Re-issue every remembered intent on a freshly reconnected session; returns
+/// `(restored, attempted)`. Public so the RPC-table tests can prove each
+/// subscription intent is re-issued.
+pub async fn restore_intents(
+    guard: &dyn Session,
+    reconnect: &ReconnectController,
+) -> (usize, usize) {
     let plan = reconnect.restore_plan().await;
     let mut restored = 0usize;
     let mut attempted = 0usize;

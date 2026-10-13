@@ -94,36 +94,6 @@ fn proto_schema_has_auth_token_not_password_field() {
     }
 }
 
-#[test]
-fn proto_schema_has_bracket_rpcs_parity_with_plants() {
-    let proto = include_str!("../../../proto/rithmic_gateway/v1/session.proto");
-    for needle in [
-        "SubscribeBracketUpdatesRequest",
-        "PlaceBracketOrderRequest",
-        "AdjustBracketStopRequest",
-        "AdjustBracketTargetRequest",
-        "place_bracket_order",
-        "subscribe_bracket_updates",
-        "adjust_bracket_stop",
-        "adjust_bracket_target",
-    ] {
-        assert!(
-            proto.contains(needle),
-            "gateway proto must keep direct/gateway parity for {needle}"
-        );
-    }
-}
-
-#[test]
-fn proto_schema_has_ticker_reset_parity_with_plants() {
-    // The data client's ticker resync is a plant RPC on the direct path
-    // (``RithmicSession::reset_ticker_plant``): the gateway wire must expose
-    // the same surface so the two paths cannot drift.
-    let proto = include_str!("../../../proto/rithmic_gateway/v1/session.proto");
-    for needle in ["ResetTickerPlantRequest", "reset_ticker_plant"] {
-        assert!(
-            proto.contains(needle),
-            "gateway proto must keep direct/gateway parity for {needle}"
-        );
-    }
-}
+// Direct/gateway RPC parity (bracket RPCs, ticker reset, every request variant)
+// is checked structurally by `tests/rpc_table.rs` against `rpc_table::RPC_TABLE`,
+// the `Session` trait, `RestorePlan`, and the gates; string greps are retired.

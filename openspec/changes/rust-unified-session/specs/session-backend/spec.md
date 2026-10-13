@@ -23,7 +23,7 @@ The system SHALL select `DirectSession` or `GatewaySession` only from an explici
 - **THEN** creation SHALL fail before any socket or plant is opened
 
 ### Requirement: RPC kinds are declared and enforced
-The system SHALL classify every RPC as either a one-shot command or a subscription intent in a single RPC table. A one-shot command SHALL apply the trading gate (if gated), call the plant, and map errors, with no fan-out, no intent bookkeeping, and no restore. A subscription intent SHALL attach fan-out, note a refcounted intent, call the plant only on the 0→1 transition, roll back on failure, and be re-issued after a plant reconnect. Order updates and bracket updates SHALL be subscription intents carried on the order-plant stream.
+The system SHALL classify every RPC in a single RPC table as a one-shot command, a subscription intent, or an intent release (the matching unsubscribe / plant disconnect, which drops the refcount and leaves the venue only on the last peer). A one-shot command SHALL apply the trading gate (if gated), call the plant, and map errors, with no fan-out, no intent bookkeeping, and no restore. A subscription intent SHALL attach fan-out, note a refcounted intent, call the plant only on the 0→1 transition, roll back on failure, and be re-issued after a plant reconnect. Order updates and bracket updates SHALL be subscription intents carried on the order-plant stream.
 
 #### Scenario: Subscription intent missing from restore
 - **WHEN** an RPC is classified as a subscription intent but has no corresponding restore-plan field and re-issue

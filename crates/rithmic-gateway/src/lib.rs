@@ -12,6 +12,7 @@ pub mod framing;
 pub mod idle_exit;
 pub mod listen;
 pub mod reconnect;
+pub mod rpc_table;
 pub mod runtime_dir;
 pub mod server;
 pub mod singleton;

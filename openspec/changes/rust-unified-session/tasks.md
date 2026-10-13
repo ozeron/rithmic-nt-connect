@@ -18,12 +18,12 @@
 
 ## 3. RPC table and parity tests
 
-- [ ] 3.1 Add `RPC_TABLE` (trait method, proto `Body` variant, kind OneShot/SubscriptionIntent, gate None/Trading/CancelAll)
-- [ ] 3.2 Test: every `session.proto` request variant and every trait method appears in the table
-- [ ] 3.3 Test: every SubscriptionIntent row maps to a `RestorePlan` field and a `restore_intents` re-issue (including order and bracket on the order-plant stream)
-- [ ] 3.4 Test: every Trading-gated row is denied under `ParentGates` with trading off; cancel-all gate independent of trading
-- [ ] 3.5 Test: Python `WireSession` protocol method set equals the trait's method set (via `_lib.pyi`)
-- [ ] 3.6 Retire the proto-string-grep parity tests in `framing.rs` once 3.2–3.4 cover them
+- [x] 3.1 Add `RPC_TABLE` (trait method, proto `Body` variant, kind OneShot/SubscriptionIntent/IntentRelease, gate None/Trading/CancelAll)
+- [x] 3.2 Test: every `session.proto` request variant and every trait method appears in the table
+- [x] 3.3 Test: every SubscriptionIntent row maps to a `RestorePlan` field and a `restore_intents` re-issue (including order and bracket on the order-plant stream)
+- [x] 3.4 Test: every Trading-gated row is denied under `ParentGates` with trading off; cancel-all gate independent of trading
+- [x] 3.5 Test: Python `WireSession` protocol method set equals the trait's method set (via `_lib.pyi`)
+- [x] 3.6 Retire the proto-string-grep parity tests in `framing.rs` once 3.2–3.4 cover them
 
 ## 4. Rust GatewaySession
 
