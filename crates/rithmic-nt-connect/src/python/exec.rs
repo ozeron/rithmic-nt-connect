@@ -7,7 +7,9 @@ use pyo3::exceptions::{PyKeyError, PyValueError};
 use pyo3::prelude::*;
 use std::collections::BTreeMap;
 
-use rithmic_exec::{CommissionTable, FillParts, Lru, PlantPolicy, PlantState, PositionRow};
+use rithmic_exec::{
+    CommissionTable, FillParts, Lru, PlantPolicy, PlantState, PositionRow, RowTerms, StaleFacts,
+};
 
 fn parse_state(name: &str) -> PyResult<PlantState> {
     PlantState::parse(name)
@@ -325,6 +327,108 @@ impl PySeenKeyCache {
     }
 }
 
+/// Closed-set values beyond i64 cannot be real enums: treat them as unknown.
+fn exact(value: Option<i128>) -> Option<i64> {
+    value.and_then(|v| i64::try_from(v).ok())
+}
+
+#[pyfunction]
+#[pyo3(signature = (side_known, price_type, duration, kind, status))]
+fn row_is_trustworthy(
+    side_known: bool,
+    price_type: Option<i128>,
+    duration: Option<i128>,
+    kind: Option<&str>,
+    status: &str,
+) -> bool {
+    rithmic_exec::row_is_trustworthy(&RowTerms {
+        side_known,
+        price_type: exact(price_type),
+        duration: exact(duration),
+        kind,
+        status,
+    })
+}
+
+/// `rows` are `(key, timestamp)`; returns the winning row index per key, in
+/// order of each key's first appearance.
+#[pyfunction]
+fn freshest_per_key(rows: Vec<(String, i128)>) -> Vec<usize> {
+    let borrowed: Vec<(&str, i128)> = rows.iter().map(|(k, ts)| (k.as_str(), *ts)).collect();
+    rithmic_exec::freshest_per_key(&borrowed)
+}
+
+#[pyfunction]
+fn stale_reason(
+    order_closed: bool,
+    live_stream_authoritative: bool,
+    report_non_terminal: bool,
+    row_ts_ns: i128,
+    order_ts_last_ns: i128,
+) -> Option<&'static str> {
+    rithmic_exec::stale_reason(&StaleFacts {
+        order_closed,
+        live_stream_authoritative,
+        report_non_terminal,
+        row_ts_ns,
+        order_ts_last_ns,
+    })
+}
+
+/// `class` is one of `working`, `filled`, `other_terminal`.
+#[pyfunction]
+fn order_is_gone(
+    class: &str,
+    unfilled: Option<i64>,
+    quantity: Option<i64>,
+    total_fill: Option<i64>,
+) -> PyResult<bool> {
+    let class = match class {
+        "working" => rithmic_exec::StatusClass::Working,
+        "filled" => rithmic_exec::StatusClass::Filled,
+        "other_terminal" => rithmic_exec::StatusClass::OtherTerminal,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "unknown status class {other:?}"
+            )))
+        }
+    };
+    Ok(rithmic_exec::order_is_gone(
+        class, unfilled, quantity, total_fill,
+    ))
+}
+
+/// `"unknown"`, `"flat"`, or the non-zero net as an int.
+#[pyfunction]
+fn position_change(py: Python<'_>, net: Option<i64>) -> Py<PyAny> {
+    use rithmic_exec::PositionChange;
+    match rithmic_exec::position_change(net) {
+        PositionChange::Unknown => "unknown".into_pyobject(py).unwrap().into_any().unbind(),
+        PositionChange::Flat => "flat".into_pyobject(py).unwrap().into_any().unbind(),
+        PositionChange::Net(n) => n.into_pyobject(py).unwrap().into_any().unbind(),
+    }
+}
+
+#[pyfunction]
+fn pnl_live(
+    first_seen_s: Option<f64>,
+    observed_until_s: Option<f64>,
+    any_unreadable: bool,
+    settle_s: f64,
+) -> bool {
+    rithmic_exec::pnl_live(first_seen_s, observed_until_s, any_unreadable, settle_s)
+}
+
+#[pyfunction]
+fn side_from_txn(code: Option<i64>, text: &str) -> Option<&'static str> {
+    rithmic_exec::side_from_txn(code, text)
+}
+
+#[pyfunction]
+fn flatten_side(net: i64) -> &'static str {
+    rithmic_exec::flatten_side(net)
+}
+
 pub(super) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyOrderPlantPolicy>()?;
     m.add_class::<PyCommissionTable>()?;
@@ -335,6 +439,22 @@ pub(super) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(instrument_id_from_symbol, m)?)?;
     m.add_function(wrap_pyfunction!(symbol_and_exchange_from_instrument_id, m)?)?;
     m.add_function(wrap_pyfunction!(event_ts_ns, m)?)?;
+    m.add_function(wrap_pyfunction!(row_is_trustworthy, m)?)?;
+    m.add_function(wrap_pyfunction!(freshest_per_key, m)?)?;
+    m.add_function(wrap_pyfunction!(stale_reason, m)?)?;
+    m.add_function(wrap_pyfunction!(order_is_gone, m)?)?;
+    m.add_function(wrap_pyfunction!(position_change, m)?)?;
+    m.add_function(wrap_pyfunction!(pnl_live, m)?)?;
+    m.add_function(wrap_pyfunction!(side_from_txn, m)?)?;
+    m.add_function(wrap_pyfunction!(flatten_side, m)?)?;
+    m.add(
+        "TRUSTWORTHY_PRICE_TYPES",
+        rithmic_exec::TRUSTWORTHY_PRICE_TYPES.to_vec(),
+    )?;
+    m.add(
+        "TRUSTWORTHY_DURATIONS",
+        rithmic_exec::TRUSTWORTHY_DURATIONS.to_vec(),
+    )?;
     m.add_function(wrap_pyfunction!(product_root, m)?)?;
     m.add_function(wrap_pyfunction!(matches_root, m)?)?;
     m.add_function(wrap_pyfunction!(signed_net, m)?)?;

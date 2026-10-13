@@ -78,6 +78,40 @@ def event_ts_ns(
     ts_event_ns: int | None, ssboe: int | None, usecs: int | None
 ) -> int | None: ...
 
+TRUSTWORTHY_PRICE_TYPES: list[int]
+TRUSTWORTHY_DURATIONS: list[int]
+
+def row_is_trustworthy(
+    side_known: bool,
+    price_type: int | None,
+    duration: int | None,
+    kind: str | None,
+    status: str,
+) -> bool: ...
+def freshest_per_key(rows: list[tuple[str, int]]) -> list[int]: ...
+def stale_reason(
+    order_closed: bool,
+    live_stream_authoritative: bool,
+    report_non_terminal: bool,
+    row_ts_ns: int,
+    order_ts_last_ns: int,
+) -> str | None: ...
+def order_is_gone(
+    class_: str,
+    unfilled: int | None,
+    quantity: int | None,
+    total_fill: int | None,
+) -> bool: ...
+def position_change(net: int | None) -> str | int: ...
+def pnl_live(
+    first_seen_s: float | None,
+    observed_until_s: float | None,
+    any_unreadable: bool,
+    settle_s: float,
+) -> bool: ...
+def side_from_txn(code: int | None, text: str) -> str | None: ...
+def flatten_side(net: int) -> str: ...
+
 class SeenKeyCache:
     """Bounded recency map: hits refresh recency, the oldest is evicted first."""
 

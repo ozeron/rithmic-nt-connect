@@ -41,6 +41,22 @@ Gateway plant RPCs are **not** all the same shape. Shipping a new stream as a ba
 
 Bracket notifications ride the **order-plant** stream. Use `subscribe_order_plant_stream` in `server/dispatch/subscriptions.rs` (order and/or brackets flags) — never a one-shot plant call. Extend `RestorePlan` + `restore_intents` and the table row; `intent_rows_cover_exactly_the_restore_plan_fields` and `every_subscription_intent_is_reissued_by_restore_intents` fail otherwise. Proto string greps alone are not enough.
 
+### Execution rules live in `rithmic-exec`
+
+Venue-semantics rules that do not need Nautilus are implemented once, in the pure
+`crates/rithmic-exec` crate (no plants, tokio, or Nautilus): the order-plant
+lifecycle policy, exposure and commission lookup, the notification-kind mapping
+(shared with `rithmic-plants`), fill identity and dedup, the instrument-id codec,
+the bounded recency cache, drain-row trust / freshest-row / stale-row decisions,
+and inventory rules. The Python modules (`_order_plant.py`, `exposure.py`,
+`commission.py`, `_convert.py`, `_orders.py`, `recon.py`, `inventory.py`) keep
+only Nautilus translation, Python-object coercion (`enum_int`, `sentinel_none`,
+`format_price_str`) and effects (publish, cache write, ordering).
+
+- Change a ported rule in Rust, with a Rust test. Do not re-add it in Python.
+- `tests/test_exec_rules_parity.py` keeps the original Python of each ported rule as an oracle; extend it when a rule gains inputs.
+- New rule over typed values with no Nautilus dependency: add it to the crate. Rule that depends on what Python does to an arbitrary object: keep it at the Python boundary.
+
 Related:
 
 | Doc | Use |

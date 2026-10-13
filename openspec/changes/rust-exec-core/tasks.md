@@ -23,16 +23,16 @@
 
 ## 5. Stage D: drain decisions
 
-- [ ] 5.1 Split `recon.py` at the decision/effect seam: row trust (`row_is_trustworthy`), identity choice, bind/skip decision become pure functions over dicts
-- [ ] 5.2 Port those decisions with Rust tests from `tests/test_working_orders_drain.py` and `tests/test_exec_recon.py`; effects (publish, cache write, report building) stay in Python
-- [ ] 5.3 Switch `recon.py` to the bindings; `test_exec_transport_e2e.py` stays green
+- [x] 5.1 Split `recon.py` at the decision/effect seam: row trust (`row_is_trustworthy`), freshest-row-per-order selection and the stale-row decision become pure functions over typed values; the Python-object coercions (`enum_int`, side) stay at the call site
+- [x] 5.2 Port those decisions with Rust tests (from `tests/test_working_orders_drain.py`) and differential tests against the original Python over full term grids; effects (publish, cache write, report building, publish-before-bind ordering) stay in Python
+- [x] 5.3 `recon.py` calls the bindings; `test_exec_transport_e2e.py` stays green. The empty-drain honesty branch stays in Python (it is a logging and raise decision tied to the host log)
 
 ## 6. Stage E: inventory
 
-- [ ] 6.1 Port the inventory arithmetic (side from transaction type, gone-order test, open-position fold) with Rust tests; `inventory.py` keeps the session polling
+- [x] 6.1 Port the inventory rules (side from transaction type, gone-order test, position fold, PnL-live window, flatten side) with Rust tests and differential tests; `inventory.py` keeps the event reduction, session polling and Python-object parsing
 
 ## 7. Close-out
 
-- [ ] 7.1 Confirm no ported rule has a second Python implementation (search for the removed function names)
-- [ ] 7.2 Update AGENTS.md (review checklist rows now point at the Rust tests), `docs/STATUS.md`, and regenerate the scoreboard
-- [ ] 7.3 Run the full verification list (fmt, clippy for workspace and `python`/`testing` features, cargo test, ruff, ty, pytest, qlty, status check) and record results
+- [x] 7.1 Confirm no ported rule has a second Python implementation (search for the removed function names)
+- [x] 7.2 Update AGENTS.md (review checklist rows now point at the Rust tests), `docs/STATUS.md`, and regenerate the scoreboard
+- [x] 7.3 Run the full verification list (fmt, clippy for workspace and `python`/`testing` features, cargo test, ruff, ty, pytest, qlty, status check) and record results. **2026-10-14:** cargo fmt/clippy (workspace, `python`, `testing`) clean; cargo tests pass (rithmic-exec 53); ruff, ruff format, ty clean; pytest 670 passed / 91 skipped; qlty clean; status check OK

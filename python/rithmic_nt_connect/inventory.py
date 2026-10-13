@@ -14,10 +14,11 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from nautilus_trader.model.enums import OrderStatus
 
+from rithmic_nt_connect import _lib
 from rithmic_nt_connect._orders import order_notification_to_fields
 from rithmic_nt_connect.execution import order_status_from_fields
 from rithmic_nt_connect.exposure import PNL_SETTLE_NS
@@ -56,17 +57,7 @@ def _as_float(raw: object) -> float | None:
 
 
 def _side_from_txn(raw: object) -> str | None:
-    value = _as_int(raw)
-    if value == 1:
-        return "BUY"
-    if value == 2:
-        return "SELL"
-    text = str(raw or "").strip().upper()
-    if text in {"BUY", "B", "1"}:
-        return "BUY"
-    if text in {"SELL", "S", "2"}:
-        return "SELL"
-    return None
+    return _lib.side_from_txn(_as_int(raw), str(raw or ""))
 
 
 @dataclass
@@ -108,7 +99,7 @@ class OpenPosition:
             "symbol": self.symbol,
             "exchange": self.exchange,
             "net_qty": self.net_qty,
-            "flatten_side": "SELL" if self.net_qty > 0 else "BUY",
+            "flatten_side": _lib.flatten_side(self.net_qty),
             "flatten_qty": abs(self.net_qty),
         }
 
@@ -136,11 +127,13 @@ class Inventory:
         The first row is often an account row that lands before the instrument burst;
         positions read before the settle window may still be missing (never flat).
         """
-        if self._pnl_first_s is None or self._observed_until_s is None:
-            return False
-        if self._unknown_positions:
-            return False  # a position row we could not read is not flat
-        return self._observed_until_s - self._pnl_first_s >= PNL_SETTLE_S
+        # A position row we could not read is not flat (rule in ``rithmic-exec``).
+        return _lib.pnl_live(
+            self._pnl_first_s,
+            self._observed_until_s,
+            bool(self._unknown_positions),
+            PNL_SETTLE_S,
+        )
 
     def mark_observed(self, now_s: float) -> None:
         """The stream was watched until ``now_s`` (monotonic seconds)."""
@@ -220,17 +213,19 @@ class Inventory:
             return
         exchange = str(event.get("exchange") or "CME")
         key = f"{symbol}.{exchange}"
-        net = _as_int(event.get("net_quantity"))
-        if net is None:
+        change = _lib.position_change(_as_int(event.get("net_quantity")))
+        if change == "unknown":
             self._positions.pop(key, None)
             self._unknown_positions.add(key)
             return
         self._unknown_positions.discard(key)
-        if net == 0:
+        if change == "flat":
             self._positions.pop(key, None)
             return
         self._positions[key] = OpenPosition(
-            symbol=symbol, exchange=exchange, net_qty=net
+            symbol=symbol,
+            exchange=exchange,
+            net_qty=cast(int, change),  # non-zero net
         )
 
     def adopt_positions(self, other: Inventory) -> None:
@@ -252,14 +247,17 @@ def _is_gone(fields: dict[str, Any], unfilled: int | None) -> bool:
     """
     status = order_status_from_fields(fields)
     if status not in TERMINAL_ORDER_STATUSES:
-        return False
-    if status is not OrderStatus.FILLED:
-        return True
-    if unfilled is not None:
-        return unfilled <= 0
-    qty = _as_int(fields.get("quantity"))
-    filled = _as_int(fields.get("total_fill_size"))
-    return qty is not None and qty > 0 and filled is not None and filled >= qty
+        status_class = "working"
+    elif status is OrderStatus.FILLED:
+        status_class = "filled"
+    else:
+        status_class = "other_terminal"
+    return _lib.order_is_gone(
+        status_class,
+        unfilled,
+        _as_int(fields.get("quantity")),
+        _as_int(fields.get("total_fill_size")),
+    )
 
 
 def poll_into(session: InventorySession, inventory: Inventory, seconds: float) -> int:

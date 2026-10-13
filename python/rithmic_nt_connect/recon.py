@@ -22,13 +22,8 @@ from nautilus_trader.model.enums import OrderSide, OrderStatus
 from nautilus_trader.model.identifiers import ClientOrderId, VenueOrderId
 from nautilus_trader.model.objects import Price, Quantity
 
+from rithmic_nt_connect import _lib
 from rithmic_nt_connect._convert import format_price_str
-from rithmic_nt_connect._orders import (
-    TRUSTWORTHY_DURATIONS as _TRUSTWORTHY_DURATIONS,
-)
-from rithmic_nt_connect._orders import (
-    TRUSTWORTHY_PRICE_TYPES as _TRUSTWORTHY_PRICE_TYPES,
-)
 from rithmic_nt_connect._orders import (
     enum_int,
     fill_dedup_key,
@@ -37,29 +32,6 @@ from rithmic_nt_connect._orders import (
     slim_order_fields,
 )
 from rithmic_nt_connect.errors import VenueQueryUnavailable
-
-# Canonical notification kinds that describe a real order state (see
-# ``kind_from_notify`` in ``_orders.py``) — the strict trust boundary for
-# binding a venue id from a drain row.
-_RECOGNIZABLE_KINDS = frozenset(
-    {
-        "accepted",
-        "updated",
-        "canceled",
-        "filled",
-        "rejected",
-        "modify_rejected",
-        "cancel_rejected",
-        "expired",
-        "triggered",
-    }
-)
-
-# Status substrings that mark a drain row as a real venue order state.
-# "TRIGGER" covers resting stop rows ("TRIGGER_PENDING" / "trigger pending"):
-# live-proven on Rithmic Test 2026-08-21 — stops never emit an OPEN
-# notification, so this is the only state their drain rows ever carry.
-_STATUS_MARKERS = ("OPEN", "WORKING", "CANCEL", "REJECT", "EXPIRED", "TRIGGER")
 
 TERMINAL_ORDER_STATUSES = frozenset(
     {
@@ -76,25 +48,19 @@ def row_is_trustworthy(fields: dict[str, Any]) -> bool:
     are real: side present, ``price_type``/``duration`` present and mappable,
     and a recognizable order state. Never fabricates terms (a row with
     missing/unknown closed-set values is advisory-only).
+
+    The decision lives in the ``rithmic-exec`` crate; here the Python-object
+    coercions (``enum_int``, the side) are applied and the result passed on.
+    The closed-set values are exact integers or None, so a bool/non-integral
+    value can never coerce into a valid enum.
     """
-    if order_side_from_notification(fields) is None:
-        return False
-    # The closed-set values are exact integers or None (``enum_int`` at the
-    # convert boundary; the same whitelist defends raw fields here too, so a
-    # bool/non-integral value can never coerce into a valid enum).
-    price_type = enum_int(fields.get("price_type"))
-    duration = enum_int(fields.get("duration"))
-    if (
-        price_type is None
-        or duration is None
-        or price_type not in _TRUSTWORTHY_PRICE_TYPES
-        or duration not in _TRUSTWORTHY_DURATIONS
-    ):
-        return False
     kind = fields.get("kind")
-    status_u = str(fields.get("status") or "").upper()
-    return kind in _RECOGNIZABLE_KINDS or any(
-        marker in status_u for marker in _STATUS_MARKERS
+    return _lib.row_is_trustworthy(
+        order_side_from_notification(fields) is not None,
+        enum_int(fields.get("price_type")),
+        enum_int(fields.get("duration")),
+        kind if isinstance(kind, str) else None,
+        str(fields.get("status") or ""),
     )
 
 
@@ -293,17 +259,16 @@ class WorkingOrdersDrain:
         """Keep only the freshest drain row per basket id (optionally
         filtered to one instrument — ``None`` matches every instrument)."""
         host = self._host
-        latest: dict[str, DrainRowResult] = {}
+        candidates: list[DrainRowResult] = []
         for row in self.iter_drain_rows(events):
-            if not host._matches_instrument(row.fields, instrument_id, None):
-                continue
-            key = str(row.fields["basket_id"])
-            # Keep the latest row; on an equal timestamp (e.g. both 0 when
-            # ts_event is missing) prefer the last-arrived row so a terminal
-            # status following an earlier non-terminal is not masked.
-            if key not in latest or row.ts_event >= latest[key].ts_event:
-                latest[key] = row
-        return latest
+            if host._matches_instrument(row.fields, instrument_id, None):
+                candidates.append(row)
+        # Rows are keyed by basket id; the freshest per key wins, and on an equal
+        # timestamp the last-arrived row does (rule in ``rithmic-exec``).
+        winners = _lib.freshest_per_key(
+            [(str(row.fields["basket_id"]), row.ts_event) for row in candidates]
+        )
+        return {str(candidates[i].fields["basket_id"]): candidates[i] for i in winners}
 
     def row_stale_reason(
         self,
@@ -332,27 +297,20 @@ class WorkingOrdersDrain:
         """
         if client_order_id is None:
             return None
-        host = self._host
-        order = host._cache.order(client_order_id)
+        order = self._host._cache.order(client_order_id)
         if order is None:
             return None
-        if getattr(order, "is_closed", False):
-            if live_stream_authoritative:
-                return "order closed locally"
-            report = row.report
-            if report is None or report.order_status in TERMINAL_ORDER_STATUSES:
-                return None
-            return "non-terminal snapshot for locally closed order"
-        if (
-            live_stream_authoritative
-            and row.ts_event
-            and int(getattr(order, "ts_last", 0) or 0) > row.ts_event
-        ):
-            # ``row.ts_event == 0`` is the iterator's synthetic missing-ts
-            # value: skipping on it would drop a valid snapshot whenever the
-            # tracked order has any live history.
-            return "live stream advanced past the snapshot"
-        return None
+        closed = bool(getattr(order, "is_closed", False))
+        report = row.report
+        non_terminal = (
+            report is not None and report.order_status not in TERMINAL_ORDER_STATUSES
+        )
+        # Only read the order's last event time when the rule can use it.
+        needs_age = not closed and live_stream_authoritative and row.ts_event
+        ts_last = int(getattr(order, "ts_last", 0) or 0) if needs_age else 0
+        return _lib.stale_reason(
+            closed, live_stream_authoritative, non_terminal, row.ts_event, ts_last
+        )
 
     def apply_drain_rows(self, events: list[dict[str, Any]]) -> None:
         """Apply a working-orders drain to the local cache before re-arming.
