@@ -95,6 +95,27 @@ Phase the work so each step is shippable and reversible:
 
 Rollback at any step before 5 is the selector; after 5 it is a revert.
 
+### 11. Poll methods take an explicit timeout; Direct keeps `0` as today
+
+Found while doing task 1.1 (`rpc-inventory.md`): Direct `poll_*` is non-blocking and the Python
+direct wrapper discards `timeout_ms`, while the gateway client blocks up to `timeout_ms`. The
+trait therefore declares `poll_*(&self, timeout: Duration)`. `DirectSession` implements
+`timeout == 0` exactly as today (`try_recv` / `now_or_never`) and waits on its receiver for
+`timeout > 0`; `GatewaySession` waits on its channel queue. The PyO3 class forwards
+`timeout_ms` (default `0`), so existing callers and the `WireSession` protocol are unchanged
+and task 1 stays "no behavior change". Calling with `timeout > 0` still releases the GIL.
+
+### 12. Order-op safety moves into `DirectSession`; the trait is `&self`
+
+`session_ops` (held for the whole place/cancel/modify), the `disconnecting` flag, and
+`acquire_order_handle` (clone the order handle under a short lock so I/O does not block
+`poll_order_event`) are semantics of the direct plants, not of Python. They move from `PySession`
+into `DirectSession`, which uses interior mutability so the whole trait takes `&self`. The PyO3
+class is then a thin `Box<dyn Session>` plus dict conversion, and `GatewaySession` does not
+inherit direct-only locking. A test asserts `disconnect` waits for an in-flight order op and
+that an order op started during disconnect is rejected (the existing behavior, now at the
+`DirectSession` seam).
+
 ## Risks / Trade-offs
 
 - [Transport recovery / attach races regress when reimplemented] → Port the behavior encoded in `test_transport_recovery.py`, `test_gateway_attach.py`, `test_gateway_mux.py`, `test_gateway_runtime.py` as Rust tests against the fake binary before deleting the Python path; run both clients through one harness.

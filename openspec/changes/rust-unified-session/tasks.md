@@ -1,6 +1,6 @@
 ## 1. Session trait and DirectSession (no behavior change)
 
-- [ ] 1.1 Inventory every `WireSession` method and every `#[pymethods]` entry in `rithmic-nt-connect/src/python/mod.rs`; record the list as the seed of the RPC table
+- [x] 1.1 Inventory every `WireSession` method and every `#[pymethods]` entry in `rithmic-nt-connect/src/python/mod.rs`; record the list as the seed of the RPC table
 - [ ] 1.2 Define the `Session` trait (async RPCs, timeout-bounded `poll_*`) in `rithmic-plants` and the separate `HistoryReplay` trait for direct-only fill/order history
 - [ ] 1.3 Implement `DirectSession` as a wrapper over `RithmicSession`, keeping the process-wide singleton and flock release-on-last-holder behavior
 - [ ] 1.4 Add the single `PlantEvent` → dict conversion in the extension and route all direct polls through it
