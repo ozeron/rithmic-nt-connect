@@ -28,7 +28,7 @@ def test_direct_session_has_history_queries() -> None:
 def test_gateway_and_wire_protocol_do_not_expose_them_yet() -> None:
     for name in HISTORY_QUERIES:
         assert not hasattr(GatewayClient, name), (
-            f"GatewayClient.{name} added: wire proto + dispatch + gateway_wire, "
+            f"GatewayClient.{name} added: wire proto + dispatch + Rust client, "
             "then drop the deferral in docs/STATUS.md and this test"
         )
         assert not hasattr(WireSession, name), (

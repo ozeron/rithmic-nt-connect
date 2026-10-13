@@ -7,6 +7,7 @@ production R|Protocol URL. Passwords are never included in ``repr`` or error tex
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from collections.abc import Mapping, MutableMapping
@@ -72,6 +73,65 @@ def env_truthy(value: str | None, *, default: bool = False) -> bool:
     return value.strip().lower() in _ENV_TRUTHY
 
 
+# The gateway client is attach-only and mux-only. A value asking for removed
+# behavior (``dual`` client mode, client-side spawn) raises; a value equal to the
+# sole remaining behavior (``mux``, ``never``, ``AUTO_SPAWN=0``) is accepted as a
+# deprecated no-op. The pure-Python ``rithmic_gateway`` library keeps its own copy
+# (it must not import the adapter); ``tests/test_gateway_retired_knobs.py`` fails
+# if the two tables drift.
+_LOG = logging.getLogger(__name__)
+_DEPRECATION_WARNED: set[str] = set()
+
+_SPAWN_REMOVED = (
+    "the gateway client no longer spawns the parent; start the parent explicitly "
+    "with `python -m rithmic_gateway` (or a service manager) and remove {name}"
+)
+_DUAL_REMOVED = "dual was removed; mux is the only gateway client mode, remove {name}"
+
+# name -> (values requesting removed behavior, why, values equal to the sole
+# remaining behavior).
+_RETIRED_KNOBS: dict[str, tuple[frozenset[str], str, frozenset[str]]] = {
+    "RITHMIC_GATEWAY_CLIENT_MODE": (
+        frozenset({"dual"}),
+        _DUAL_REMOVED,
+        frozenset({"mux"}),
+    ),
+    "RITHMIC_GATEWAY_SPAWN_POLICY": (
+        frozenset({"if_missing", "auto", "default"}),
+        _SPAWN_REMOVED,
+        frozenset({"never"}),
+    ),
+    "RITHMIC_GATEWAY_AUTO_SPAWN": (
+        frozenset({"1", "true", "yes", "on"}),
+        _SPAWN_REMOVED,
+        frozenset({"0", "false", "no", "off"}),
+    ),
+}
+
+
+def _reject_retired_client_knobs(env: Mapping[str, str]) -> None:
+    for name, (removed, why, accepted) in _RETIRED_KNOBS.items():
+        raw = _env_first(env, name)
+        if raw is None:
+            continue
+        key = raw.lower()
+        if key in removed:
+            raise ConfigError(f"{name}={raw}: " + why.format(name=name))
+        if key not in accepted:
+            raise ConfigError(
+                f"invalid {name} {raw!r}; retired knob, only "
+                f"{'/'.join(sorted(accepted))} is accepted"
+            )
+        if name not in _DEPRECATION_WARNED:
+            _DEPRECATION_WARNED.add(name)
+            _LOG.warning(
+                "%s=%s is deprecated and has no effect (attach-only, mux-only "
+                "gateway client); remove it from your environment",
+                name,
+                key,
+            )
+
+
 def _connect_mode_fields(env: Mapping[str, str]) -> dict[str, Any]:
     raw = _env_first(env, "RITHMIC_CONNECT_MODE")
     if raw is None or not str(raw).strip():
@@ -79,12 +139,7 @@ def _connect_mode_fields(env: Mapping[str, str]) -> dict[str, Any]:
             "missing RITHMIC_CONNECT_MODE; set to 'direct' (in-process plants) "
             "or 'gateway' (shared rithmic-gateway)"
         )
-    from rithmic_gateway.config import GatewayConfigError, reject_retired_client_knobs
-
-    try:
-        reject_retired_client_knobs(env)
-    except GatewayConfigError as exc:
-        raise ConfigError(str(exc)) from exc
+    _reject_retired_client_knobs(env)
     try:
         mode = parse_connect_mode(raw)
     except ConfigError as exc:

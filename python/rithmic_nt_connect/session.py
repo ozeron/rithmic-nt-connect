@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import os
 import threading
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
@@ -11,20 +10,12 @@ from rithmic_nt_connect.config import ConfigError, ConnectMode, SessionConfig
 from rithmic_nt_connect.errors import AlreadyConnectedError
 
 if TYPE_CHECKING:
-    from rithmic_gateway.types import AccountRmsInfo, ProductRmsInfo
+    from rithmic_nt_connect.wire_types import AccountRmsInfo, ProductRmsInfo
 
 
 def _load_session_lock() -> Any:
-    """Load ``SessionLock`` from the pure-Python gateway package.
-
-    The ``rithmic_gateway`` gencode is generated with protoc 5.29.6 to match
-    the ``nautilus_trader[ib]==1.231.0`` pin of ``protobuf==5.29.6``, so the
-    wire client imports on that runtime (and any newer one).
-    ``rithmic_gateway/__init__.py`` imports ``GatewayClient`` lazily via
-    ``__getattr__``, so importing
-    ``SessionLock`` from ``flock`` does not trigger protobuf at all.
-    """
-    from rithmic_gateway.flock import SessionLock
+    """The credential flock, from the extension (the gateway parent's own Rust code)."""
+    from rithmic_nt_connect._lib import SessionLock
 
     return SessionLock
 
@@ -558,25 +549,6 @@ def _connect_once(session: Any) -> None:
         return
 
 
-_GATEWAY_CLIENTS = ("rust", "python")
-
-
-def _gateway_client_choice() -> str:
-    """Which gateway client backs gateway mode: ``rust`` or ``python``.
-
-    Temporary selector (``RITHMIC_GATEWAY_CLIENT``) while the Rust client rolls out;
-    the Python client is removed once the Rust one is the proven default.
-    """
-    raw = os.environ.get("RITHMIC_GATEWAY_CLIENT", "").strip().lower()
-    if not raw:
-        return "python"
-    if raw not in _GATEWAY_CLIENTS:
-        raise ConfigError(
-            f"invalid RITHMIC_GATEWAY_CLIENT {raw!r}; expected rust or python"
-        )
-    return raw
-
-
 class _RustGatewaySession:
     """The Rust gateway client (one shared socket per process) as a ``WireSession``.
 
@@ -643,12 +615,7 @@ def create_session(
     gateway socket.
     """
     if session.connect_mode == ConnectMode.GATEWAY:
-        if _gateway_client_choice() == "rust":
-            return create_rust_gateway_session(session)
-        from rithmic_nt_connect.gateway_wire import create_gateway_wire_session
-
-        return create_gateway_wire_session(session)
-
+        return create_rust_gateway_session(session)
     return create_rust_session(session, plants=plants)
 
 

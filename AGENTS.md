@@ -13,25 +13,33 @@ Read that file (or the sections you are touching) before implementing or reviewi
 
 ### Direct ↔ gateway plant-surface parity (hard)
 
-`rithmic-plants` / PyO3 **direct** and **gateway** (`proto` → dispatch → `GatewayClient` → `gateway_wire`) must stay capability-compatible for every plant order/exec surface.
+Direct and gateway are two implementations of one Rust trait, `Session`
+(`crates/rithmic-plants/src/backend.rs`): `DirectSession` (in-process plants, owns
+the order-op gate) and `GatewaySession` (`crates/rithmic-gateway/src/client`,
+attach-only, one socket per fingerprint). The PyO3 `Session` and the gateway
+**server** (`crates/rithmic-gateway/src/server`) are both generic over that trait,
+so the adapter has one call surface in either mode. Direct-only history replay is a
+separate `HistoryReplay` trait that gateway mode refuses with
+`UnsupportedInGatewayModeError`.
 
 When you add or change a plant RPC (place / cancel / modify / brackets / ensure / subscribe / …):
 
-1. Wire it on **both** paths in the same change (plants + PyO3 **and** `session.proto` + gateway dispatch + Python client + `gateway_wire`).
-2. Do not ship “direct-only” for a new live capability unless STATUS explicitly marks gateway as deferred **and** book/runners refuse that mode.
+1. Add it to the `Session` trait, with `DirectSession` and `FakeSession` (feature `testing`) implementations.
+2. Add its row to the RPC table (`crates/rithmic-gateway/src/rpc_table.rs`: kind + gate), then the `session.proto` message, the server dispatch, the `GatewaySession` call (with its call mode: Read / Command / Intent), and the PyO3 method plus `_lib.pyi`.
 3. Keep request field names and semantics aligned (e.g. bracket `localid` / `stop_ticks` / `target_ticks`).
-4. Add or extend a test that would fail if one path drifts (proto framing, client method, or wire façade).
+4. Tests that fail on drift: `tests/rpc_table.rs` (proto ↔ trait ↔ table ↔ `RestorePlan`), `tests/client_scenarios.rs` + `tests/test_gateway_scenarios.py` (same scenarios through every client), `tests/test_wire_trait_parity.py` (PyO3 ↔ `WireSession`).
+5. Do not ship “direct-only” for a new live capability unless STATUS marks gateway as deferred **and** book/runners refuse that mode.
 
 #### Learning: gateway RPC kinds (do not confuse)
 
-Gateway plant RPCs are **not** all the same shape. Shipping a new stream as a bare `session.subscribe_*` + Ack is how bracket updates lost fan-out delivery and reconnect restore.
+Gateway plant RPCs are **not** all the same shape. Shipping a new stream as a bare `session.subscribe_*` + Ack is how bracket updates lost fan-out delivery and reconnect restore. The RPC table's `kind` column is the single place this is decided, and its tests enforce it.
 
 | Kind | Examples | Must include |
 | --- | --- | --- |
-| **One-shot command** | `place_*`, `adjust_*`, `cancel_*`, `modify_*` | Trading gate → plant call → map error. No fanout / `note_*` / restore. |
+| **One-shot command** | `place_*`, `adjust_*`, `cancel_*`, `modify_*` | Trading gate → plant call → map error. No fanout / `note_*` / restore. Client side: never retried after the request was written (`OutcomeUnknown`). |
 | **Subscription intent** | ticker, book, time bars, PnL, **order updates**, **bracket updates** | Gate → attach hub fanout → `note_*` refcount → plant only on 0→1 → rollback on fail → **`restore_intents` re-issues after plant reconnect**. |
 
-Bracket notifications ride the **order-plant** stream. Use `subscribe_order_plant_stream` in `dispatch.rs` (order and/or brackets flags) — never a one-shot plant call. Extend `RestorePlan` + `restore_intents` and add a gate/reconnect test that asserts the new intent bit (see `gates` / `reconnect` tests). Proto string greps alone are not enough.
+Bracket notifications ride the **order-plant** stream. Use `subscribe_order_plant_stream` in `server/dispatch/subscriptions.rs` (order and/or brackets flags) — never a one-shot plant call. Extend `RestorePlan` + `restore_intents` and the table row; `intent_rows_cover_exactly_the_restore_plan_fields` and `every_subscription_intent_is_reissued_by_restore_intents` fail otherwise. Proto string greps alone are not enough.
 
 Related:
 

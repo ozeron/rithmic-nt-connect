@@ -101,12 +101,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         from _gateway_parent import (
             ParentStartError,
+            gateway_config_from_session,
             password_from_env,
             start_parent,
             stop_parent,
         )
         from rithmic_nt_connect.config import SessionConfig
-        from rithmic_nt_connect.gateway_wire import gateway_config_from_session
     except Exception as exc:
         print(f"import failed: {exc}", file=sys.stderr)
         return 1

@@ -64,10 +64,10 @@ def main(argv: list[str] | None = None) -> int:
     os.environ.setdefault("RITHMIC_CONNECT_MODE", "gateway")
 
     try:
+        from _gateway_parent import gateway_config_from_session
         from rithmic_gateway import GatewayClient
         from rithmic_gateway.flock import SessionLock, SessionLockError
         from rithmic_nt_connect.config import SessionConfig
-        from rithmic_nt_connect.gateway_wire import gateway_config_from_session
     except Exception as exc:
         print(f"[{label}] import failed: {exc}", file=sys.stderr)
         return 1

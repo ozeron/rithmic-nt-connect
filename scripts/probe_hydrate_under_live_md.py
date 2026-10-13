@@ -152,8 +152,8 @@ def _gap_stats(times: list[float]) -> tuple[float, float]:
 
 
 def _gateway_config() -> Any:
+    from _gateway_parent import gateway_config_from_session
     from rithmic_nt_connect.config import SessionConfig
-    from rithmic_nt_connect.gateway_wire import gateway_config_from_session
 
     return gateway_config_from_session(SessionConfig.from_env())
 

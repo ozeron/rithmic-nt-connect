@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import os
 
 import pytest
@@ -343,3 +344,20 @@ def test_live_data_client_config_is_nautilus_config() -> None:
 
     cfg = RithmicLiveDataClientConfig()
     assert isinstance(cfg, LiveDataClientConfig)
+
+
+def test_connect_mode_carries_no_default() -> None:
+    params = inspect.signature(SessionConfig).parameters
+    assert params["connect_mode"].default is inspect.Parameter.empty
+
+
+def test_gateway_connect_mode_and_listen_come_from_env() -> None:
+    cfg = SessionConfig.from_env(
+        {
+            "RITHMIC_USER": "alice",
+            "RITHMIC_CONNECT_MODE": "gateway",
+            "RITHMIC_GATEWAY_LISTEN": "unix:///tmp/rgw.sock",
+        }
+    )
+    assert cfg.connect_mode is ConnectMode.GATEWAY
+    assert cfg.gateway_listen == "unix:///tmp/rgw.sock"

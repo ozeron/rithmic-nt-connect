@@ -8,6 +8,7 @@ import logging
 import pytest
 from rithmic_gateway import config as gw_config
 from rithmic_gateway.config import GatewayConfig, GatewayConfigError
+from rithmic_nt_connect import config as nt_config
 from rithmic_nt_connect.config import ConfigError, SessionConfig
 
 _GATEWAY_ENV = {
@@ -34,6 +35,12 @@ def _session(**extra: str) -> SessionConfig:
 @pytest.fixture(autouse=True)
 def _reset_deprecation_state() -> None:
     gw_config._DEPRECATION_WARNED.clear()
+    nt_config._DEPRECATION_WARNED.clear()
+
+
+def test_the_adapter_and_the_lake_reject_the_same_knobs() -> None:
+    """Each package keeps its own table (neither may import the other)."""
+    assert nt_config._RETIRED_KNOBS == gw_config._RETIRED_KNOBS
 
 
 # -- removed behavior: fail fast ------------------------------------------------

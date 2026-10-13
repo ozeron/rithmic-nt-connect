@@ -14,12 +14,12 @@ import threading
 from pathlib import Path
 
 import pytest
+from _gateway_parent import gateway_config_from_session
 from rithmic_gateway.client import GatewayClient
 from rithmic_gateway.config import GatewayConfig
 from rithmic_gateway.framing import encode_frame
 from rithmic_gateway.v1 import session_pb2 as pb
 from rithmic_nt_connect.config import ConfigError, ConnectMode, SessionConfig
-from rithmic_nt_connect.gateway_wire import gateway_config_from_session
 
 SENTINEL = "sentinel-pw-7f3a91"
 

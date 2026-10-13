@@ -81,11 +81,11 @@ def _gateway_parent(test_env) -> Iterator[None]:
     env says ``RITHMIC_CONNECT_MODE=gateway`` needs a parent. Only this process's
     parent holds the Rithmic password. Direct mode needs none.
     """
+    from _gateway_parent import gateway_config_from_session
     from rithmic_nt_connect.config import (
         parse_connect_mode,
         session_config_from_explicit_test_env,
     )
-    from rithmic_nt_connect.gateway_wire import gateway_config_from_session
 
     mode = (test_env or {}).get("RITHMIC_CONNECT_MODE", "")
     if not test_env or not mode or parse_connect_mode(mode) != ConnectMode.GATEWAY:

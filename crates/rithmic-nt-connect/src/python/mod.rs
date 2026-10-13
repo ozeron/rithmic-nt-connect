@@ -39,6 +39,45 @@ pyo3::create_exception!(
     PyRuntimeError
 );
 
+// Another live process holds the credential flock (direct-mode singleton).
+pyo3::create_exception!(rithmic_nt_connect, SessionLockError, PyRuntimeError);
+
+/// The credential flock shared with the gateway parent (same Rust implementation,
+/// so the lock file can never drift from the parent's). Released on `close()` or drop.
+#[pyclass(name = "SessionLock")]
+struct PySessionLock {
+    lock: std::sync::Mutex<Option<rithmic_gateway::singleton::SessionLock>>,
+    path: String,
+}
+
+#[pymethods]
+impl PySessionLock {
+    #[staticmethod]
+    #[pyo3(signature = (user, system_name, url, env = "Live"))]
+    fn try_acquire(user: &str, system_name: &str, url: &str, env: &str) -> PyResult<Self> {
+        let lock =
+            rithmic_gateway::singleton::SessionLock::try_acquire(user, system_name, url, env)
+                .map_err(|e| SessionLockError::new_err(e.to_string()))?;
+        let path = lock.path().display().to_string();
+        Ok(Self {
+            lock: std::sync::Mutex::new(Some(lock)),
+            path,
+        })
+    }
+
+    #[getter]
+    fn path(&self) -> &str {
+        &self.path
+    }
+
+    fn close(&self) {
+        self.lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+    }
+}
+
 fn runtime() -> &'static Runtime {
     static RT: OnceLock<Runtime> = OnceLock::new();
     RT.get_or_init(|| Runtime::new().expect("failed to create tokio runtime"))
@@ -1187,6 +1226,8 @@ fn list_systems(url: Option<&str>) -> PyResult<Vec<String>> {
 #[pymodule]
 fn _lib(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySession>()?;
+    m.add_class::<PySessionLock>()?;
+    m.add("SessionLockError", m.py().get_type::<SessionLockError>())?;
     m.add_function(wrap_pyfunction!(list_systems, m)?)?;
     m.add(
         "ChannelLaggedError",

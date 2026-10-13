@@ -9,7 +9,21 @@ from __future__ import annotations
 
 from typing import Any
 
-from rithmic_gateway.types import AccountRmsInfo, ProductRmsInfo
+from rithmic_nt_connect.wire_types import AccountRmsInfo, ProductRmsInfo
+
+class SessionLockError(RuntimeError):
+    """Another live process holds the credential flock."""
+
+class SessionLock:
+    """Exclusive credential flock shared with the gateway parent (Rust)."""
+
+    @staticmethod
+    def try_acquire(
+        user: str, system_name: str, url: str, env: str = "Live"
+    ) -> SessionLock: ...
+    @property
+    def path(self) -> str: ...
+    def close(self) -> None: ...
 
 # NOTE: the Rust exceptions (pyo3 ``create_exception!``) all subclass
 # PyRuntimeError directly. The hierarchy below deliberately mirrors the

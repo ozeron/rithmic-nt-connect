@@ -8,11 +8,9 @@ from typing import Any
 
 import pytest
 from gateway_fake import FakeParent, build_fake_gateway, running_fake
-from rithmic_nt_connect import session as session_mod
-from rithmic_nt_connect.config import ConfigError, ConnectMode, SessionConfig
+from rithmic_nt_connect.config import ConnectMode, SessionConfig
 from rithmic_nt_connect.errors import UnsupportedInGatewayModeError
 from rithmic_nt_connect.session import (
-    _gateway_client_choice,
     _RustGatewaySession,
     create_rust_gateway_session,
     create_session,
@@ -39,47 +37,24 @@ def fake_bin():
     return binary
 
 
-# -- selector ---------------------------------------------------------------------
+# -- factory ----------------------------------------------------------------------
 
 
-def test_gateway_client_defaults_to_python_until_the_rust_client_is_proven(
+def test_gateway_mode_is_always_the_rust_client() -> None:
+    assert isinstance(create_session(_gateway_cfg()), _RustGatewaySession)
+
+
+def test_a_retired_client_selector_is_ignored(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("RITHMIC_GATEWAY_CLIENT", raising=False)
-    assert _gateway_client_choice() == "python"
-
-
-@pytest.mark.parametrize("value", ["rust", "RUST", " rust ", "python"])
-def test_gateway_client_selector_accepts_rust_and_python(
-    monkeypatch: pytest.MonkeyPatch, value: str
-) -> None:
-    monkeypatch.setenv("RITHMIC_GATEWAY_CLIENT", value)
-    assert _gateway_client_choice() == value.strip().lower()
-
-
-def test_gateway_client_selector_rejects_anything_else(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("RITHMIC_GATEWAY_CLIENT", "go")
-    with pytest.raises(ConfigError, match="RITHMIC_GATEWAY_CLIENT"):
-        _gateway_client_choice()
-
-
-def test_rust_selector_routes_gateway_mode_to_the_extension(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("RITHMIC_GATEWAY_CLIENT", "rust")
-    created = create_session(_gateway_cfg())
-    assert isinstance(created, _RustGatewaySession)
-
-
-def test_python_selector_still_uses_the_python_gateway_client(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+    # RITHMIC_GATEWAY_CLIENT=python selected the removed Python client during rollout.
     monkeypatch.setenv("RITHMIC_GATEWAY_CLIENT", "python")
-    from rithmic_nt_connect.gateway_wire import GatewayWireSession
+    assert isinstance(create_session(_gateway_cfg()), _RustGatewaySession)
 
-    assert isinstance(create_session(_gateway_cfg()), GatewayWireSession)
+
+def test_each_gateway_session_is_a_fresh_facade() -> None:
+    cfg = _gateway_cfg()
+    assert create_session(cfg) is not create_session(cfg)
 
 
 # -- the extension in gateway mode (no network) ---------------------------------------
@@ -253,10 +228,7 @@ def _session_cfg_for(parent: FakeParent) -> SessionConfig:
     )
 
 
-def test_a_gateway_session_round_trips_through_create_session(
-    fake_bin, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("RITHMIC_GATEWAY_CLIENT", "rust")
+def test_a_gateway_session_round_trips_through_create_session(fake_bin) -> None:
     with running_fake(fake_bin) as parent:
         session = create_session(_session_cfg_for(parent))
         session.connect()
@@ -269,4 +241,3 @@ def test_a_gateway_session_round_trips_through_create_session(
         assert event is not None and event["symbol"] == "NQH6"
         assert event["type"] == "last_trade"
         session.disconnect()
-    assert session_mod._gateway_client_choice() == "rust"

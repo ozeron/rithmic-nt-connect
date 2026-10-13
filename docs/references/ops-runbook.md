@@ -124,6 +124,8 @@ RITHMIC_GATEWAY_BIN=$PWD/target/release/rithmic-gateway python -m rithmic_gatewa
 #   RITHMIC_GATEWAY_CLIENT_MODE=dual, RITHMIC_GATEWAY_SPAWN_POLICY=if_missing|auto|default
 #   and RITHMIC_GATEWAY_AUTO_SPAWN=1 raise ConfigError (start the parent explicitly).
 #   mux / never / AUTO_SPAWN=0 are accepted as deprecated no-ops (one warning); delete them.
+# Adapter gateway mode always uses the Rust client; the rollout selector
+#   RITHMIC_GATEWAY_CLIENT=rust|python no longer exists and is ignored.
 # Trading / cancel_all are parent-gated (independent toggles):
 #   RITHMIC_ENABLE_TRADING=1          # place / modify / cancel / order updates
 #   RITHMIC_GATEWAY_CANCEL_ALL=1      # plant-wide cancel_all panic button (does not require trading)

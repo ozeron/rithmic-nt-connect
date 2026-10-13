@@ -19,6 +19,7 @@ from pathlib import Path
 from rithmic_gateway.attach import config_flock_held, socket_listening
 from rithmic_gateway.binary import resolve_gateway_bin
 from rithmic_gateway.config import GatewayConfig
+from rithmic_nt_connect.config import SessionConfig
 
 # Env forwarded to the parent. The parent's fingerprint comes only from the
 # GatewayConfig (below), never from alias keys such as RITHMIC_GATEWAY or
@@ -51,14 +52,27 @@ class ParentStartError(RuntimeError):
     """The harness could not bring up an attachable parent."""
 
 
+def gateway_config_from_session(session: SessionConfig) -> GatewayConfig:
+    """The ``GatewayConfig`` fingerprint for a gateway-mode ``SessionConfig``."""
+    return GatewayConfig(
+        user=session.user,
+        system_name=session.system_name,
+        url=session.url,
+        env=session.env,
+        account_id=session.account_id or "",
+        fcm_id=session.fcm_id or "",
+        ib_id=session.ib_id or "",
+        auth_token=session.gateway_auth_token or "",
+        listen=session.gateway_listen,
+    )
+
+
 def password_from_env(environ: Mapping[str, str] | None = None) -> str:
     """The parent's Rithmic password, resolved with ``SessionConfig`` alias rules.
 
     Gateway-mode ``SessionConfig`` deliberately holds no password, so the harness
     resolves it through direct mode's lookup and hands it only to the parent.
     """
-    from rithmic_nt_connect.config import SessionConfig
-
     source = os.environ if environ is None else environ
     cfg = SessionConfig.from_env({**source, "RITHMIC_CONNECT_MODE": "direct"})
     if cfg.password is None:

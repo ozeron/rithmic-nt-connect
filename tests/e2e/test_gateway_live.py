@@ -22,7 +22,7 @@ from collections.abc import Callable, Iterator
 from typing import Any, Literal, Protocol, cast
 
 import pytest
-from _gateway_parent import start_parent, stop_parent
+from _gateway_parent import gateway_config_from_session, start_parent, stop_parent
 from conftest import parent_trading_env
 from rithmic_gateway import GatewayClient
 from rithmic_gateway.attach import config_flock_held
@@ -33,7 +33,6 @@ from rithmic_nt_connect.config import (
     session_config_from_explicit_test_env,
 )
 from rithmic_nt_connect.errors import GatewayError as ExtensionGatewayError
-from rithmic_nt_connect.gateway_wire import gateway_config_from_session
 from rithmic_nt_connect.session import create_rust_gateway_session
 from rithmic_nt_connect.transport import TransportUp
 
