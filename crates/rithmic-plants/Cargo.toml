@@ -6,6 +6,7 @@ license.workspace = true
 description = "Shared Rithmic plant session façade over rithmic-rs"
 
 [dependencies]
+async-trait = "0.1"
 rithmic-rs = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }

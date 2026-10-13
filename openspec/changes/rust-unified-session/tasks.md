@@ -1,11 +1,11 @@
 ## 1. Session trait and DirectSession (no behavior change)
 
 - [x] 1.1 Inventory every `WireSession` method and every `#[pymethods]` entry in `rithmic-nt-connect/src/python/mod.rs`; record the list as the seed of the RPC table
-- [ ] 1.2 Define the `Session` trait (async RPCs, timeout-bounded `poll_*`) in `rithmic-plants` and the separate `HistoryReplay` trait for direct-only fill/order history
-- [ ] 1.3 Implement `DirectSession` as a wrapper over `RithmicSession`, keeping the process-wide singleton and flock release-on-last-holder behavior
-- [ ] 1.4 Add the single `PlantEvent` → dict conversion in the extension and route all direct polls through it
-- [ ] 1.5 Rebase the PyO3 `Session` class on `Box<dyn Session>`; keep `block_on` inside the extension and release the GIL on every blocking call
-- [ ] 1.6 Verify no behavior change: `cargo clippy -D warnings`, `cargo test`, `pytest -q`, `ty check`, `ruff` all green
+- [x] 1.2 Define the `Session` trait (async RPCs, timeout-bounded `poll_*`) in `rithmic-plants` and the separate `HistoryReplay` trait for direct-only fill/order history
+- [x] 1.3 Implement `DirectSession` as a wrapper over `RithmicSession`, keeping the process-wide singleton and flock release-on-last-holder behavior
+- [x] 1.4 Add the single `PlantEvent` → dict conversion in the extension and route all direct polls through it
+- [x] 1.5 Rebase the PyO3 `Session` class on `Box<dyn Session>`; keep `block_on` inside the extension and release the GIL on every blocking call
+- [x] 1.6 Verify no behavior change: `cargo clippy -D warnings`, `cargo test`, `pytest -q`, `ty check`, `ruff` all green
 
 ## 2. Generic gateway server, fake plant, real-binary harness
 
