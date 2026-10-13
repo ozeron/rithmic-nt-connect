@@ -1432,6 +1432,7 @@ def test_publish_account_suppresses_unchanged_state() -> None:
         _pnl_snapshot_observed=asyncio.Event(),
         generate_account_state=lambda **kwargs: published.append(kwargs),
     )
+    client._note_pnl_observed = client._pnl_snapshot_observed.set
     event = {"type": "account_pnl", "account_id": "ACC1", "cash_on_hand": "49977.00"}
 
     publish = RithmicExecutionClient._publish_account

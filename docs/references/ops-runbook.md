@@ -112,7 +112,11 @@ cargo run -p rithmic-gateway --bin rithmic-gateway
 # Child / lake (no maturin / no Nautilus):
 #   cd python && uv pip install -e .
 #   # or: PYTHONPATH=<repo>/python  +  pip install 'protobuf>=5'
-# Env aliases (WSS URL): RITHMIC_GATEWAY or RITHMIC_URL
+# Env aliases (WSS URL): RITHMIC_GATEWAY, else RITHMIC_URL; system: RITHMIC_SYSTEM,
+#   else RITHMIC_SYSTEM_NAME; user: RITHMIC_USER, else RITHMIC_USERNAME. Parent binary
+#   and Python clients share this precedence (`rithmic_gateway::env_keys`), so one env
+#   file is one login — the binary used to read only RITHMIC_URL and sent a
+#   RITHMIC_GATEWAY test login to production.
 # Listen socket:        RITHMIC_GATEWAY_LISTEN=unix://…  (never use as WSS URL)
 # Optional: RITHMIC_GATEWAY_SPAWN_POLICY=if_missing (local dev) or never (Kamal/live)
 # RITHMIC_GATEWAY_CLIENT_MODE=mux (default) or dual (rollback)
@@ -161,6 +165,9 @@ cargo run -p rithmic-gateway --bin rithmic-gateway
 # live ticker intents are up; qgw fail-closes empty mid-session lookback (no
 # arm). Optional: raise RITHMIC_REQUEST_TIMEOUT_SECS only if cold plant needs
 # >30s before first byte (global; slows every plant).
+# Accounts without market data (e.g. Rithmic Test: no CME front month / bars)
+# never answer the probe; RITHMIC_HISTORY_READY_PROBE=0 skips it so the order and
+# PnL plants are still reachable. Never set it for a node that hydrates.
 #
 # Daemonize a long-lived live parent (agent shells / nohup without a new
 # session die on SIGHUP when the parent Cursor/tool shell exits):

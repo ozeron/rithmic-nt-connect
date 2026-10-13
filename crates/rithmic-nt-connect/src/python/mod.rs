@@ -11,8 +11,8 @@ use tokio::runtime::Runtime;
 
 use rithmic_plants::config::{SessionConfig, DEFAULT_LUCID_URL};
 use rithmic_plants::dto::{
-    AccountPnlDto, AccountRmsInfoDto, BboDto, FrontMonthDto, HistoryBarDto, HistoryTickDto,
-    InstrumentPnlDto, LastTradeDto, OrderBookDto, OrderNotificationDto, PlantEvent,
+    AccountPnlDto, AccountRmsInfoDto, BboDto, FillHistoryDto, FrontMonthDto, HistoryBarDto,
+    HistoryTickDto, InstrumentPnlDto, LastTradeDto, OrderBookDto, OrderNotificationDto, PlantEvent,
     ProductRmsInfoDto, ReferenceDataDto, TimeBarProbeRow,
 };
 use rithmic_plants::error::Error;
@@ -233,6 +233,29 @@ fn account_rms_info_dict(py: Python<'_>, r: AccountRmsInfoDto) -> PyResult<Py<Py
     set_opt_str(&d, "account_id", r.account_id)?;
     set_opt_f64(&d, "default_commission", r.default_commission)?;
     set_opt_u32(&d, "presence_bits", r.presence_bits)?;
+    Ok(d.unbind())
+}
+
+fn fill_history_dict(py: Python<'_>, r: FillHistoryDto) -> PyResult<Py<PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("type", "fill_history")?;
+    set_opt_str(&d, "account_id", r.account_id)?;
+    set_opt_str(&d, "basket_id", r.basket_id)?;
+    set_opt_str(&d, "symbol", r.symbol)?;
+    set_opt_str(&d, "exchange", r.exchange)?;
+    set_opt_str(&d, "transaction_type", r.transaction_type)?;
+    set_opt_str(&d, "price_type", r.price_type)?;
+    set_opt_str(&d, "duration", r.duration)?;
+    set_opt_str(&d, "manual_or_auto", r.manual_or_auto)?;
+    set_opt_str(&d, "fill_id", r.fill_id)?;
+    set_opt_str(&d, "fill_date", r.fill_date)?;
+    set_opt_str(&d, "fill_time", r.fill_time)?;
+    set_opt_f64(&d, "fill_price", r.fill_price)?;
+    set_opt_u64(&d, "fill_size", r.fill_size)?;
+    set_opt_f64(&d, "price", r.price)?;
+    set_opt_f64(&d, "trigger_price", r.trigger_price)?;
+    set_opt_i32(&d, "ssboe", r.ssboe)?;
+    set_opt_i32(&d, "usecs", r.usecs)?;
     Ok(d.unbind())
 }
 
@@ -917,6 +940,21 @@ impl PySession {
             .collect()
     }
 
+    /// Replay one trade date's order history (CCYYMMDD) as order notifications. Read-only.
+    fn load_order_history(&self, py: Python<'_>, date: &str) -> PyResult<Vec<Py<PyDict>>> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let events = runtime()
+            .block_on(inner.load_order_history(date))
+            .map_err(to_py_err)?;
+        events
+            .into_iter()
+            .map(|n| order_notification_dict(py, n))
+            .collect()
+    }
+
     fn subscribe_bracket_updates(&self) -> PyResult<()> {
         let mut inner = self
             .inner
@@ -953,6 +991,34 @@ impl PySession {
         rows.into_iter()
             .map(|r| account_rms_info_dict(py, r))
             .collect()
+    }
+
+    /// Fetch the account's fills for trade dates `start..=finish` (CCYYMMDD). Read-only.
+    fn load_fill_history(
+        &self,
+        py: Python<'_>,
+        start_date: i32,
+        finish_date: i32,
+    ) -> PyResult<Vec<Py<PyDict>>> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let rows = runtime()
+            .block_on(inner.load_fill_history(start_date, finish_date))
+            .map_err(to_py_err)?;
+        rows.into_iter().map(|r| fill_history_dict(py, r)).collect()
+    }
+
+    /// Trade dates (CCYYMMDD) for which the venue keeps order history. Read-only.
+    fn load_order_history_dates(&self) -> PyResult<Vec<String>> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        runtime()
+            .block_on(inner.load_order_history_dates())
+            .map_err(to_py_err)
     }
 
     #[pyo3(signature = (

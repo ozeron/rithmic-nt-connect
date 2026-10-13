@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use rithmic_rs::rti::request_time_bar_update;
 use rithmic_rs::SubscriptionFilter;
 use rithmic_rs::{
-    ConnectStrategy, ManualOrAutoEntry, OrderSide, OrderType, RithmicAccount,
+    ConnectStrategy, FillHistoryRange, ManualOrAutoEntry, OrderSide, OrderType, RithmicAccount,
     RithmicBracketLevelAdjustment, RithmicBracketOrder, RithmicCancelAllOrders, RithmicCancelOrder,
     RithmicConfig, RithmicHistoryPlant, RithmicHistoryPlantHandle, RithmicModifyOrder,
     RithmicOrder, RithmicOrderPlant, RithmicOrderPlantHandle, RithmicPnlPlant,
@@ -22,13 +22,14 @@ use tokio::sync::broadcast::error::TryRecvError;
 use crate::account::{pick_account, rows_from_account_list};
 use crate::config::SessionConfig;
 use crate::dto::{
-    AccountRmsInfoDto, FrontMonthDto, HistoryBarDto, HistoryTickDto, OrderNotificationDto,
-    PlantEvent, ProductRmsInfoDto, ReferenceDataDto, TimeBarProbeRow,
+    AccountRmsInfoDto, FillHistoryDto, FrontMonthDto, HistoryBarDto, HistoryTickDto,
+    OrderNotificationDto, PlantEvent, ProductRmsInfoDto, ReferenceDataDto, TimeBarProbeRow,
 };
 use crate::error::{Error, Result};
 use crate::history::{
-    bar_replay_index, bar_slice_secs, dedup_bars, dedup_ticks, history_ready_probe_root,
-    load_sliced, looks_like_listed_contract, parse_time_bar_type, DEFAULT_TICK_SLICE_SECS,
+    bar_replay_index, bar_slice_secs, dedup_bars, dedup_ticks, history_ready_probe_enabled,
+    history_ready_probe_root, load_sliced, looks_like_listed_contract, parse_time_bar_type,
+    DEFAULT_TICK_SLICE_SECS,
 };
 use crate::plants::PlantSet;
 
@@ -218,9 +219,10 @@ impl RithmicSession {
     ///
     /// Empty rows are success (plant answered). `RequestTimeout` retries via
     /// [`crate::history::is_transient`]. Probe root defaults to ES/CME (env
-    /// overrides — see [`history_ready_probe_root`]).
+    /// overrides — see [`history_ready_probe_root`]); opt out with
+    /// `RITHMIC_HISTORY_READY_PROBE=0` ([`history_ready_probe_enabled`]).
     pub async fn prove_history_ready(&self) -> Result<()> {
-        if self.history.is_none() {
+        if self.history.is_none() || !history_ready_probe_enabled() {
             return Ok(());
         }
         let (root, exchange) = history_ready_probe_root();
@@ -649,6 +651,54 @@ impl RithmicSession {
     pub async fn load_account_rms_info(&mut self) -> Result<Vec<AccountRmsInfoDto>> {
         self.ensure_order_plant().await?;
         load_account_rms_info_on(self.order_handle()?).await
+    }
+
+    /// Replay one trade date's order history (CCYYMMDD) as order notifications.
+    ///
+    /// Read-only; best-effort drain like [`Self::load_orders`]. Works on
+    /// accounts where fill history is not permitted (e.g. Lucid evals).
+    pub async fn load_order_history(&mut self, date: &str) -> Result<Vec<OrderNotificationDto>> {
+        self.ensure_order_plant().await?;
+        load_order_history_on(self.order_handle()?, date).await
+    }
+
+    /// Load the account's fills for trade dates `start..=finish` (CCYYMMDD).
+    ///
+    /// Read-only order-plant query (never places or cancels). The venue caps a
+    /// reply at 10,000 fills; callers needing more must split the window.
+    pub async fn load_fill_history(
+        &mut self,
+        start: i32,
+        finish: i32,
+    ) -> Result<Vec<FillHistoryDto>> {
+        self.ensure_order_plant().await?;
+        let responses = self
+            .order_handle()?
+            .show_fill_history(FillHistoryRange::trade_date(start, finish), Some(10_000))
+            .await?;
+        collect_history_rows(
+            responses,
+            "load_fill_history",
+            FillHistoryDto::from_response,
+        )
+    }
+
+    /// Trade dates (CCYYMMDD) for which the venue keeps order history. Read-only.
+    pub async fn load_order_history_dates(&mut self) -> Result<Vec<String>> {
+        self.ensure_order_plant().await?;
+        let responses = self.order_handle()?.show_order_history_dates().await?;
+        let mut dates = collect_history_rows(responses, "load_order_history_dates", |resp| {
+            match &resp.message {
+                rithmic_rs::rti::messages::RithmicMessage::ResponseShowOrderHistoryDates(m) => {
+                    Some(m.date.clone())
+                }
+                _ => None,
+            }
+        })?
+        .concat();
+        dates.sort();
+        dates.dedup();
+        Ok(dates)
     }
 
     /// Disconnect only the order plant (leaves ticker/history/PnL connected).
@@ -1255,6 +1305,30 @@ pub async fn load_orders_on(handle: &RithmicOrderPlantHandle) -> Result<Vec<Orde
     let rx = handle.subscription_receiver.resubscribe();
     check_response(handle.show_orders().await?, "show_orders")?;
     drain_order_notifications(rx).await
+}
+
+/// Replay one trade date's order history (`date` = CCYYMMDD). Read-only.
+///
+/// Like `show_orders`, the summary replays order notifications on the
+/// subscription channel with no end marker, so this uses the same bounded
+/// silence-window drain (best-effort; see [`load_orders_on`]). Notifications
+/// carried in the request's own responses are included first.
+pub async fn load_order_history_on(
+    handle: &RithmicOrderPlantHandle,
+    date: &str,
+) -> Result<Vec<OrderNotificationDto>> {
+    let rx = handle.subscription_receiver.resubscribe();
+    let responses = handle.show_order_history_summary(date).await?;
+    check_responses(&responses, "show_order_history_summary")?;
+    let mut out: Vec<OrderNotificationDto> = responses
+        .iter()
+        .filter_map(|r| match PlantEvent::from(r) {
+            PlantEvent::OrderNotification(dto) => Some(dto),
+            _ => None,
+        })
+        .collect();
+    out.extend(drain_order_notifications(rx).await?);
+    Ok(out)
 }
 
 /// Fetch product-level RMS info from an already-connected order-plant handle

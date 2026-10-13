@@ -84,6 +84,63 @@ impl AccountRmsInfoDto {
     }
 }
 
+/// One historical fill from the order plant (`RequestShowFillHistory`). Read-only.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FillHistoryDto {
+    pub account_id: Option<String>,
+    pub basket_id: Option<String>,
+    pub symbol: Option<String>,
+    pub exchange: Option<String>,
+    /// `BUY` / `SELL`.
+    pub transaction_type: Option<String>,
+    pub price_type: Option<String>,
+    pub duration: Option<String>,
+    /// `MANUAL` / `AUTO` — who entered the order.
+    pub manual_or_auto: Option<String>,
+    pub fill_id: Option<String>,
+    pub fill_date: Option<String>,
+    pub fill_time: Option<String>,
+    pub fill_price: Option<f64>,
+    pub fill_size: Option<u64>,
+    pub price: Option<f64>,
+    pub trigger_price: Option<f64>,
+    pub ssboe: Option<i32>,
+    pub usecs: Option<i32>,
+}
+
+impl FillHistoryDto {
+    pub(crate) fn from_response(resp: &RithmicResponse) -> Option<Self> {
+        match &resp.message {
+            RithmicMessage::ResponseShowFillHistory(m) => Self::from_message(m),
+            _ => None,
+        }
+    }
+
+    /// The terminal response carries only rp_code; rows without a fill id are skipped.
+    fn from_message(m: &rithmic_rs::rti::ResponseShowFillHistory) -> Option<Self> {
+        m.fill_id.as_ref()?;
+        Some(Self {
+            account_id: m.account_id.clone(),
+            basket_id: m.basket_id.clone(),
+            symbol: m.symbol.clone(),
+            exchange: m.exchange.clone(),
+            transaction_type: m.transaction_type.clone(),
+            price_type: m.price_type.clone(),
+            duration: m.duration.clone(),
+            manual_or_auto: m.manual_or_auto.clone(),
+            fill_id: m.fill_id.clone(),
+            fill_date: m.fill_date.clone(),
+            fill_time: m.fill_time.clone(),
+            fill_price: m.fill_price,
+            fill_size: m.fill_size,
+            price: m.price,
+            trigger_price: m.trigger_price,
+            ssboe: m.ssboe,
+            usecs: m.usecs,
+        })
+    }
+}
+
 /// Order notification fields from Rithmic or exchange plants.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OrderNotificationDto {
@@ -968,5 +1025,30 @@ mod history_bar_tests {
         assert_eq!(bar.low_price, Some(98.5));
         assert_eq!(bar.close_price, Some(100.0));
         assert_eq!(bar.volume, Some(12));
+    }
+}
+
+#[cfg(test)]
+mod fill_history_tests {
+    use super::FillHistoryDto;
+    use rithmic_rs::rti::ResponseShowFillHistory;
+
+    #[test]
+    fn fill_row_maps_fields() {
+        let mut m = ResponseShowFillHistory::default();
+        m.fill_id = Some("F1".into());
+        m.symbol = Some("MNQZ6".into());
+        m.manual_or_auto = Some("AUTO".into());
+        m.fill_price = Some(30666.0);
+        m.fill_size = Some(1);
+        let row = FillHistoryDto::from_message(&m).expect("fill row");
+        assert_eq!(row.symbol.as_deref(), Some("MNQZ6"));
+        assert_eq!(row.fill_price, Some(30666.0));
+        assert_eq!(row.manual_or_auto.as_deref(), Some("AUTO"));
+    }
+
+    #[test]
+    fn terminal_response_without_fill_is_skipped() {
+        assert!(FillHistoryDto::from_message(&ResponseShowFillHistory::default()).is_none());
     }
 }

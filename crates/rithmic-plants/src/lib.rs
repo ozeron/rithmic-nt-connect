@@ -21,9 +21,9 @@ pub use config::{
     DEFAULT_SYSTEM_NAME,
 };
 pub use dto::{
-    AccountPnlDto, BboDto, FrontMonthDto, HistoryBarDto, HistoryTickDto, InstrumentPnlDto,
-    LastTradeDto, OrderBookDto, OrderNotificationDto, PlantEvent, ReferenceDataDto,
-    TimeBarProbeRow,
+    AccountPnlDto, BboDto, FillHistoryDto, FrontMonthDto, HistoryBarDto, HistoryTickDto,
+    InstrumentPnlDto, LastTradeDto, OrderBookDto, OrderNotificationDto, PlantEvent,
+    ReferenceDataDto, TimeBarProbeRow,
 };
 pub use error::{Error, Result};
 pub use plants::PlantSet;
