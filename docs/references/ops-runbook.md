@@ -150,11 +150,15 @@ RITHMIC_GATEWAY_BIN=$PWD/target/release/rithmic-gateway python -m rithmic_gatewa
 # --- Live XOR heavy history ingest (2026-08-25 MY043 / RC2) ---
 # Do NOT run multi-year catalog ingest (or other long LoadTicks/LoadTimeBars)
 # on the same gateway process that serves live ticker/book/time-bar clients.
-# History RPCs hold the plant session mutex for the whole load; the event pump
-# cannot drain ticker while the lock is held → silent live MD, then lag.
+# History RPCs used to hold the plant session mutex for the whole load, so the
+# event pump could not drain ticker → silent live MD, then lag. That lock is
+# gone; heavy history still competes with live MD for the same plant login.
 # The gateway refuses Load*/probe with error code `history_denied_live_md`
 # while any ticker/book/time-bar intent is live — lake/qgw must use a
-# separate gateway (or stop live MD) for heavy history.
+# separate gateway (or stop live MD) for heavy history. The live-MD gate is
+# held only for that check (2026-10-14): a subscribe arriving mid-load goes
+# ahead instead of waiting for the load, and loads are serialized by their own
+# history lock, which never blocks subscribes, places or cancels.
 # Read-only barrier: GatewayClient.get_live_md_state() / GetLiveMdState RPC
 # (no plant lock). Deploy handoff: wait until live_md=false before hydrate.
 # qgw RequestBars retries capability_denied for RITHMIC_HISTORY_LIVE_MD_WAIT_SEC

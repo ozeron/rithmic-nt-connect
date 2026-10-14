@@ -444,7 +444,8 @@ def test_a_transport_listener_may_call_the_session_synchronously(
         def listener(kind: str, generation: int, attempts: int, cause: Any) -> None:
             try:
                 answers.append((kind, client.resolved_account()))
-            except BaseException as exc:
+            # A pyo3 PanicException is a BaseException: catch it to fail the test.
+            except BaseException as exc:  # NOSONAR
                 errors.append(exc)
 
         subscription = client.subscribe_transport_events(listener)

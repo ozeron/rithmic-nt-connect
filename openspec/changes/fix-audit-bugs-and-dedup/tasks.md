@@ -88,10 +88,10 @@
 
 ## 8. Docs and verification
 
-- [ ] 8.1 STATUS: book update types, bar timestamp default, history lock wording, distribution; regenerate with `scripts/status_progress.py` and `--check`
-- [ ] 8.2 ops-runbook lines 151-162: the lock is no longer held during the load; refusal unchanged
-- [ ] 8.3 AGENTS.md conventions checklist reviewed for the data/exec changes; note any row that can't be marked
-- [ ] 8.4 Full verify set: fmt, clippy `-D warnings`, cargo tests, ruff, ty, pytest, qlty, status check
+- [x] 8.1 STATUS: book update types, bar timestamp default, history lock wording, distribution; regenerate with `scripts/status_progress.py` and `--check`
+- [x] 8.2 ops-runbook lines 151-162: the lock is no longer held during the load; refusal unchanged
+- [x] 8.3 AGENTS.md conventions checklist reviewed for the data/exec changes; note any row that can't be marked
+- [x] 8.4 Full verify set: fmt, clippy `-D warnings`, cargo tests, ruff, ty, pytest, qlty, status check
 - [ ] 8.5 Live on the Rithmic test account (MotiveWave closed, no live place): `tests/e2e`, `smoke_gateway_shared_ticks.py`, `verify_order_dry_run.py`, `rithmic-load` S3 place latency
 
 ## 9. market-data-lake (separate repo and PR)
