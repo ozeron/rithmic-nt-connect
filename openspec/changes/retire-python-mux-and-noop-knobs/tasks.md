@@ -12,12 +12,9 @@
 - [x] 2.4 Drop the `python-mux` client from `tests/test_gateway_scenarios.py`; fix comments in `framed_conn.py`, `recovery_bridge.py`, `client.py`
 - [x] 2.5 Test that `rithmic_gateway` imports without Nautilus and exposes no mux names
 
-## 3. Skipped behavior fixes (code-only, one commit each)
+## 3. Skipped behavior fixes (moved)
 
-- [ ] 3.1 Arm facade event queues on first subscribe/poll; `deliver` skips unarmed queues (`crates/rithmic-gateway/src/client/runtime.rs`); tests: unarmed channel receives nothing, subscribe then immediate event arrives
-- [ ] 3.2 Compute `ts_event_ns` in the Rust event dict builder; `_convert.py` reads the field; cache `symbol_and_exchange_from_instrument_id`; extend `tests/test_exec_rules_parity.py` for `event_ts_ns`
-- [ ] 3.3 `subscribe_transport_events` returns a cancel handle; Python wrapper cancels on last listener and close; update `_lib.pyi`; test the task ends and the session is freed
-- [ ] 3.4 Event pump locks once per iteration and publishes outside the gate (`server/pump.rs`, `direct.rs`); reconnect/restore tests still pass
+Moved to `harden-gateway-runtime` (tasks 2.x to 5.x): they overlap its event-path, lock and copy work and need its load harness to prove them.
 
 ## 4. Docs and specs
 
@@ -42,6 +39,6 @@
 - [ ] 6.7 Decide: `request_bars_error` registry, Python `GatewayClient` order/PnL methods, `scripts/spike_bracket_order.py` + test (need owner decision)
 - [ ] 6.8 Verify then delete the unused `RithmicSession` place/cancel/modify/load wrappers in `session.rs` (~170 lines; only two tests call them)
 
-## 7. Deferred to a separate change (architecture review 2026-10-14)
+## 7. Deferred (architecture review 2026-10-14)
 
-Not part of this change: gateway pump drains one event per 10 ms (H1), per-connection serial dispatch and non-cancel-safe frame read (H2), session gate / `DirectSession` mutex held across network I/O (H3), direct-mode Rust trading gate (M1), error taxonomy `Rejected`/`NotSent`/`Unknown` (M2), epoch-bump vs `restore_intents` (M3). Tasks 3.1 to 3.4 stay here because they are narrow; H1 and H3 widen 3.4 and should move to the new change.
+The architecture findings are planned in `harden-gateway-runtime`.

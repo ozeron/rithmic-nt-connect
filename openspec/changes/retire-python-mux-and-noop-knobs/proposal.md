@@ -9,7 +9,8 @@
 - `load_time_bars_range` becomes sequential-only; the `max_workers > 1` peer path that depended on the mux is removed.
 - Fill the placeholder `Purpose` text in the six main specs.
 - Sweep stale docs (STATUS, runbook, AGENTS, ADR 0001, superseded plans) to match.
-- Out of scope as spec changes: the four behavior fixes (unread facade queues, per-tick timestamp codec, transport-callback unsubscribe, double gate lock in the event pump). They are implementation fixes with tests and are tracked in `tasks.md` only.
+- The four skipped behavior fixes (unread facade queues, per-tick timestamp codec, transport-callback unsubscribe, double gate lock in the event pump) moved to `harden-gateway-runtime`.
+- Delete verified dead code, one-off probes and duplicate tests found by the 2026-10-14 audit.
 
 ## Capabilities
 
@@ -26,4 +27,4 @@
 - Tests: delete `tests/test_gateway_mux.py`, `tests/test_gateway_runtime.py`, `tests/test_transport_recovery.py`; drop the `python-mux` scenario client in `tests/test_gateway_scenarios.py`; rewrite `tests/test_gateway_retired_knobs.py` and the `mux` env in `tests/test_import_isolation.py`.
 - Docs: `AGENTS.md`, `docs/STATUS.md`, `docs/references/ops-runbook.md`, ADR 0001, six main-spec Purpose lines.
 - External: the market-data-lake owner must confirm it does not call `create_gateway_client` or pass `max_workers > 1` (extends open task 6.4 of `simplify-gateway-modes`).
-- Rust: unaffected by the retirement. The behavior fixes touch `rithmic-gateway` (`client/runtime.rs`, `server/pump.rs`), `rithmic-nt-connect` (`python/mod.rs`) and `_convert.py`.
+- Rust: only dead-code deletions; no behavior change.

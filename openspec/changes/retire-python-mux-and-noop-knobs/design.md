@@ -5,13 +5,11 @@ After `simplify-gateway-modes` (attach-only, credential-free clients) and `rust-
 - `mux.py` / `runtime.py` / `transport_recovery.py` (~950 lines): the Python single-socket multiplexer. Its only production caller is the `max_workers > 1` peer path of `GatewayClient.load_time_bars_range` (default 1, documented "for experiments").
 - Two copies of the retired-knob table (`rithmic_gateway/config.py`, `rithmic_nt_connect/config.py`) that still accept `mux`, `never`, `0` as no-ops with a one-time warning.
 
-The Rust client also carries four known inefficiencies from review that were skipped as out of scope for the earlier changes.
 
 ## Goals / Non-Goals
 
 **Goals:**
 - Remove the Python mux stack and the no-op knob acceptance without changing the wire protocol or the lake-facing `GatewayClient`.
-- Fix the four skipped behavior issues in the Rust client/gateway with tests that fail if they regress.
 - Leave docs and specs describing only what exists.
 
 **Non-Goals:**
@@ -25,13 +23,7 @@ The Rust client also carries four known inefficiencies from review that were ski
 
 **2. Delete the mux rather than shrink it.** `load_time_bars_range(max_workers>1)` is the only live use. Make it sequential-only and drop `max_workers` from the signature, so passing it is a `TypeError` instead of silent single-threading. Alternative: dial a plain `GatewayClient` per worker; rejected, the parent serializes history on its session mutex anyway, so parallel peers add sockets without throughput (see the chunked-history requirement).
 
-**3. Unread facade queues: arm on first use.** `Runtime::deliver` clones each market/history/pnl/order event into every facade's queue. Add an `armed` flag per `EventQueue`, set by the first subscribe or poll of that channel; `deliver` skips unarmed queues. Alternative: store `Arc<PlantEvent>` so the fan-out is a refcount bump. Do both only if profiling still shows clone cost; arming removes the dead work and the 4096-cap churn (`lagged` bumps) first.
-
-**4. Timestamp codec: compute where the dict is built.** `event_ts_ns` crosses the PyO3 boundary once per tick for two lines of arithmetic. Compute `ts_event_ns` in the Rust event-to-dict builder so Python reads a field. The id codec stays a single call per instrument (already `lru_cache`d); add the same cache to `symbol_and_exchange_from_instrument_id`. `tests/test_exec_rules_parity.py` stays the guard.
-
-**5. Transport callback: return a cancel handle.** `subscribe_transport_events` spawns a task owning the Python callback and receivers and returns `()`. The task holds the bound method, which holds the `PySession` and the `Runtime` that owns the senders, so `Closed` never arrives. Return a `#[pyclass] TransportSubscription` with `cancel()` (abort handle); the Python wrapper cancels when the last listener leaves and on close.
-
-**6. Event pump: hold the gate once.** `run_event_pump` takes the `SessionHandle` gate, and each `DirectSession::poll_with` then takes `inner` again (4 polls per iteration), and publishing runs under the gate. Poll the four streams through one session method that locks once, and release the gate before `publish_plant_event`. Reconnect and restore must still exclude the pump; keep that covered by the `FakeSession` restore tests.
+**3. Behavior fixes moved.** The unread-queue, per-tick timestamp, transport-callback and pump-lock fixes are planned in `harden-gateway-runtime`, which adds a load harness to prove them.
 
 ## Risks / Trade-offs
 
