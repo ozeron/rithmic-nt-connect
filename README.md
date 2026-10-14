@@ -19,9 +19,37 @@ Trading is **off by default** (`enable_trading=False` / unset `RITHMIC_ENABLE_TR
 
 **Connect mode (required):** set `RITHMIC_CONNECT_MODE` / `SessionConfig.connect_mode` (`ConnectMode.DIRECT` \| `ConnectMode.GATEWAY`) — this process + flock + plants, or dial `rithmic-gateway` over `unix://…` for a shared login. No silent default — see [`docs/references/ops-runbook.md`](docs/references/ops-runbook.md). Gateway mode is a Rust client inside the extension (no Python protobuf on the adapter path); it only attaches to a parent you start. Remote TLS is not shipped — [`docs/references/gateway-remote.md`](docs/references/gateway-remote.md).
 
-**Lake / shared history (no Nautilus):** install the pure-Python client from `python/` (`uv pip install -e python` or `PYTHONPATH=python` + `protobuf`). Use `GatewayClient` + `load_time_bars_range` against a parent you start explicitly (`python -m rithmic_gateway`, a service, or Kamal); the client never spawns it and holds no password. market-data-lake hardcodes this path.
+**Lake / shared history (no Nautilus):** install the `rithmic-gateway` wheel (below). Use `GatewayClient` + `load_time_bars_range` against a parent you start explicitly (`rithmic-gateway`, a service, or Kamal); the client never spawns it and holds no password. market-data-lake hardcodes this path.
 
-**Self-contained wheel:** `scripts/build_wheel.sh` produces a wheel that carries the adapter, the `rithmic_gateway` client, **and** the `rithmic-gateway` binary — consumers `pip install` one artifact and the gateway binary is resolved from `rithmic_gateway/bin/` (no `RITHMIC_GATEWAY_BIN`, no `cargo build`).
+## Install
+
+Prebuilt wheels, the way NautilusTrader ships: CI builds them on every push to `main` (and on `v*` tags) for Linux x86_64 / ARM64 (glibc ≥ 2.35) and macOS ARM64, attests provenance, and lists them in a PEP 503 index on GitHub Pages. No Rust, protoc or maturin on the installing machine. Not on PyPI; no Windows (unix sockets + flock).
+
+| Wheel | Carries |
+| --- | --- |
+| `rithmic-gateway` | the `rithmic-gateway` parent binary (installed into the venv's `bin/`) + the pure-Python `rithmic_gateway` client; depends only on `protobuf` |
+| `rithmic-nt-connect` | the Nautilus adapter + Rust extension (cp312–cp314); `rithmic-nt-connect[gateway]` adds the gateway wheel |
+
+```toml
+# pyproject.toml of the consuming project
+[[tool.uv.index]]
+name = "rithmic"
+url = "https://ozeron.github.io/rithmic-nt-connect/simple/"
+explicit = true
+
+[tool.uv.sources]
+rithmic-gateway = { index = "rithmic" }
+rithmic-nt-connect = { index = "rithmic" }
+```
+
+```bash
+uv add --prerelease allow rithmic-gateway        # lake / parent host
+uv add --prerelease allow rithmic-nt-connect     # trading node
+uv lock --upgrade-package rithmic-gateway        # move to the newest main build
+rithmic-gateway --version
+```
+
+Dev builds are versioned `X.Y.Z.devYYYYMMDDNNNNN`; the lock pins the exact build. The index keeps the last 30 dev builds plus every tagged release; the wheels themselves are assets of the rolling `main-dev` GitHub prerelease. Building from source (`uv add "rithmic-gateway @ git+https://github.com/ozeron/rithmic-nt-connect#subdirectory=python"`) is the fallback and needs Rust plus `protoc`.
 
 Paper-trade a simple NQ strategy with **live Rithmic data** and Nautilus **Sandbox** execution (no Rithmic orders):
 

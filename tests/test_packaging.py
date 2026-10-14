@@ -65,6 +65,7 @@ def test_built_wheels_never_contain_the_fake_gateway() -> None:
         with zipfile.ZipFile(wheel) as zf:
             names = zf.namelist()
         assert not [n for n in names if "rithmic-gateway-fake" in n], wheel
-        if wheel.name.startswith("rithmic_gateway-"):
+        editable = any(n.endswith(".pth") for n in names)  # `uv sync` dev build
+        if wheel.name.startswith("rithmic_gateway-") and not editable:
             assert [n for n in names if n.endswith("/scripts/rithmic-gateway")], wheel
             assert "rithmic_gateway/client.py" in names, wheel

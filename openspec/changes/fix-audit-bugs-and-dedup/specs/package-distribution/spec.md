@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Prebuilt platform wheels on every push to main
-CI SHALL build `rithmic-gateway` and `rithmic-nt-connect` wheels on every push to `main` and on every tag, for Linux x86_64, Linux ARM64 and macOS ARM64. Dev builds SHALL be versioned `X.Y.Z.devYYYYMMDD+<run>`. Every wheel SHALL carry a build provenance attestation.
+CI SHALL build `rithmic-gateway` and `rithmic-nt-connect` wheels on every push to `main` and on every tag, for Linux x86_64, Linux ARM64 and macOS ARM64. Dev builds SHALL be versioned `X.Y.Z.devYYYYMMDDNNNNN` (date, then the zero-padded run number; no `+local` segment because GitHub renames release assets with special characters). Every wheel SHALL carry a build provenance attestation.
 
 #### Scenario: Merge to main
 - **WHEN** a commit lands on `main`

@@ -73,20 +73,20 @@ Closed (kept for archaeology — do not re-open without new venue evidence):
 | P0.2 resync blocked on silent ticker | 2026-08-24 | `test_reconnect_live.py` PASSED; `[8] already exists` tolerated in `replay_subscription_intent` |
 | P1 E88/E89 blocked on Test routing | 2026-08-24 | Drain + MY043 canary PASSED on Test |
 
-## Building a self-contained wheel
+## Wheels
 
-The wheel carries the adapter, the `rithmic_gateway` pure-Python client, **and** the
-`rithmic-gateway` native binary in one artifact — consumers `pip install` it and the
-binary is auto-resolved from `rithmic_gateway/bin/` by `python -m rithmic_gateway`, no
-`RITHMIC_GATEWAY_BIN`, no `cargo build`, no `target/` on their disk.
+`.github/workflows/wheels.yml` builds both wheels on every push to `main` and on
+`v*` tags (Linux x86_64 / ARM64, macOS ARM64), installs them into a clean venv
+with `--no-build` and runs the python-client scenarios against the fake parent,
+then uploads them to the rolling `main-dev` prerelease (or the tag's release)
+and regenerates the PEP 503 index on GitHub Pages (`scripts/publish_index.py`,
+last 30 dev builds). Consumer setup: README "Install". One-time repo setting:
+Pages source = GitHub Actions.
 
-```bash
-scripts/build_wheel.sh            # cargo build -p rithmic-gateway --release, bundle, maturin build
-scripts/build_wheel.sh --install  # also pip install the built wheel into the current env
-```
-
-`maturin develop` (step 4 above) leaves the binary out; `resolve_gateway_bin` then
-falls back to `PATH` / `target/{release,debug}` for local dev.
+`rithmic-gateway` is a maturin bin wheel: the binary lands in the venv's `bin/`
+next to the client. Build one locally with `cd python && uvx maturin build --release`.
+`maturin develop` (step 4 above) builds only the adapter; in a checkout
+`resolve_gateway_bin` falls back to `PATH` and then `target/{release,debug}`.
 
 ## Connect mode (required for Nautilus adapter)
 
@@ -104,15 +104,14 @@ Unset or any other value → `ConfigError` in the **adapter**. There is no silen
 # Start the parent explicitly: it owns the flock + plants and needs RITHMIC_PASSWORD
 # in ITS environment. Gateway clients never spawn it and never hold the password.
 # Leave RITHMIC_GATEWAY_IDLE_EXIT_SEC unset/-1 so the parent stays up (service default).
-python -m rithmic_gateway     # installed wheel: execs the bundled binary, env unchanged
+rithmic-gateway               # installed wheel (or: python -m rithmic_gateway), env unchanged
 # From a checkout (no wheel):
 cargo build -p rithmic-gateway --release
 RITHMIC_GATEWAY_BIN=$PWD/target/release/rithmic-gateway python -m rithmic_gateway
 # (or run the binary directly: cargo run -p rithmic-gateway --bin rithmic-gateway)
 
-# Child / lake (no maturin / no Nautilus):
-#   cd python && uv pip install -e .
-#   # or: PYTHONPATH=<repo>/python  +  pip install 'protobuf>=5'
+# Child / lake (no maturin / no Nautilus): the rithmic-gateway wheel (README "Install"),
+#   or from a checkout: PYTHONPATH=<repo>/python  +  pip install 'protobuf==5.29.6'
 # Env aliases (WSS URL): RITHMIC_GATEWAY, else RITHMIC_URL; system: RITHMIC_SYSTEM,
 #   else RITHMIC_SYSTEM_NAME; user: RITHMIC_USER, else RITHMIC_USERNAME. Parent binary
 #   and Python clients share this precedence (`rithmic_gateway::env_keys`), so one env
@@ -184,10 +183,12 @@ RITHMIC_GATEWAY_BIN=$PWD/target/release/rithmic-gateway python -m rithmic_gatewa
 
 ## Running the parent as a service
 
-The parent is started by its operator, never by a client. `python -m rithmic_gateway`
-resolves the bundled binary (`RITHMIC_GATEWAY_BIN`, then `rithmic_gateway/bin/`, then
-`PATH`/`target/`) and `exec`s it with the caller's environment: it does not detach and
-does not set `RITHMIC_GATEWAY_IDLE_EXIT_SEC`. Put the credentials in the unit's
+The parent is started by its operator, never by a client. The wheel installs a
+`rithmic-gateway` executable in the venv's `bin/`; run it directly, or use
+`python -m rithmic_gateway`, which resolves the binary (`RITHMIC_GATEWAY_BIN`, then the
+wheel's scripts dir, then `PATH`, then a checkout's `target/`) and `exec`s it with the
+caller's environment: it does not detach and does not set
+`RITHMIC_GATEWAY_IDLE_EXIT_SEC`. Put the credentials in the unit's
 environment (the parent needs `RITHMIC_PASSWORD`; clients do not). If no binary
 resolves it exits `2` naming `RITHMIC_GATEWAY_BIN`.
 
@@ -200,7 +201,7 @@ Description=Rithmic gateway parent (one Rithmic login)
 [Service]
 # RITHMIC_USER, RITHMIC_PASSWORD, RITHMIC_SYSTEM_NAME, RITHMIC_URL, ...
 EnvironmentFile=%h/.config/rithmic-gateway.env
-ExecStart=/usr/bin/env python -m rithmic_gateway
+ExecStart=%h/.venvs/rithmic/bin/rithmic-gateway
 Restart=on-failure
 
 [Install]
@@ -208,11 +209,11 @@ WantedBy=default.target
 ```
 
 **launchd** (`~/Library/LaunchAgents/com.example.rithmic-gateway.plist`): `ProgramArguments`
-= `[<venv>/bin/python, -m, rithmic_gateway]`, credentials under `EnvironmentVariables`,
+= `[<venv>/bin/rithmic-gateway]`, credentials under `EnvironmentVariables`,
 `KeepAlive` true.
 
 **Kamal accessory**: run the same command as the accessory `cmd`
-(`python -m rithmic_gateway`), pass the secrets as accessory `env.secret`, and mount
+(`rithmic-gateway`), pass the secrets as accessory `env.secret`, and mount
 the runtime directory so book and lake containers see the same
 `RITHMIC_GATEWAY_LISTEN` socket path. Clients carry no password and fail with
 `parent_not_running` until the accessory is up.

@@ -82,9 +82,9 @@
 - [x] 7.1 `python/pyproject.toml` becomes a maturin `bindings = "bin"` package (crate `rithmic-gateway`, `python-source` for `rithmic_gateway`, deps `protobuf` only); local build test
 - [x] 7.2 `binary.py` lookup: explicit → `RITHMIC_GATEWAY_BIN` → wheel scripts dir (`sysconfig`, then the interpreter's dir) → `PATH` → cargo `target/` (kept as the dev-checkout fallback for smokes); error names the wheel; tests updated
 - [x] 7.3 `rithmic-nt-connect` offers `rithmic-gateway` as its `gateway` extra; retire `wheel-data` binary bundling and `scripts/build_wheel.sh`; update `tests/test_packaging.py`
-- [ ] 7.4 `.github/workflows/wheels.yml`: maturin-action matrix (Linux x86_64/aarch64 manylinux, macOS arm64), protoc, dev versioning, no-Rust install smoke, provenance attestation, rolling `main` prerelease plus tag releases; actions pinned by SHA
-- [ ] 7.5 `scripts/publish_index.py` plus a Pages job: PEP 503 index with sha256 fragments, keeps the last 30 dev builds
-- [ ] 7.6 README install section (index config, `uv add`, source fallback); `gateway-remote.md` and `ops-runbook.md` start the parent with `rithmic-gateway`
+- [x] 7.4 `.github/workflows/wheels.yml`: maturin-action matrix (Linux x86_64/aarch64 manylinux, macOS arm64), protoc, dev versioning, no-Rust install smoke, provenance attestation, rolling `main` prerelease plus tag releases; actions pinned by SHA
+- [x] 7.5 `scripts/publish_index.py` plus a Pages job: PEP 503 index with sha256 fragments, keeps the last 30 dev builds
+- [x] 7.6 README install section (index config, `uv add`, source fallback); `gateway-remote.md` and `ops-runbook.md` start the parent with `rithmic-gateway`
 
 ## 8. Docs and verification
 

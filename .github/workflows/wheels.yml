@@ -1,0 +1,211 @@
+name: wheels
+
+# Prebuilt platform wheels, the NautilusTrader way: every push to `main` and
+# every `v*` tag builds `rithmic-gateway` (maturin bin wheel: the parent binary
+# plus the pure-Python client) and `rithmic-nt-connect` (cp312-cp314) for
+# Linux x86_64 / ARM64 and macOS ARM64, smoke-tests the install, attests
+# provenance, uploads to a GitHub release and regenerates the PEP 503 index on
+# GitHub Pages. Nothing goes to PyPI; Windows is unsupported (unix sockets,
+# flock). Consumer setup: README "Install".
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - ".github/workflows/wheels.yml"
+      - "pyproject.toml"
+      - "python/pyproject.toml"
+      - "scripts/publish_index.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wheels-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - id: v
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          base=$(sed -n 's/^version = "\(.*\)"$/\1/p' python/pyproject.toml | head -1)
+          if [ "$REF_TYPE" = tag ]; then
+            version="${REF_NAME#v}"
+            if [ "$version" != "$base" ]; then
+              echo "tag $REF_NAME does not match python/pyproject.toml version $base" >&2
+              exit 1
+            fi
+          else
+            # devYYYYMMDD + zero-padded run number: sortable, and no `+local`
+            # segment (GitHub renames release assets with special characters,
+            # which would break the filename/metadata version match).
+            version="${base}.dev$(date -u +%Y%m%d)$(printf '%05d' "$RUN_NUMBER")"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Ubuntu 22.04 is glibc 2.35: maturin audits and tags manylinux_2_35.
+          - name: linux-x86_64
+            runner: ubuntu-22.04
+            compat: --compatibility manylinux_2_35
+          - name: linux-aarch64
+            runner: ubuntu-22.04-arm
+            compat: --compatibility manylinux_2_35
+          - name: macos-arm64
+            runner: macos-14
+            compat: ""
+    runs-on: ${{ matrix.runner }}
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: |
+            3.12
+            3.13
+            3.14
+      # No cache: these wheels are published (zizmor cache-poisoning).
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          enable-cache: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
+        with:
+          version: "29.3"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Stamp version
+        run: |
+          sed -i.bak "s/^version = \".*\"$/version = \"$VERSION\"/" pyproject.toml python/pyproject.toml
+          rm -f pyproject.toml.bak python/pyproject.toml.bak
+          grep -H '^version' pyproject.toml python/pyproject.toml
+      - name: Build rithmic-gateway (bin wheel)
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          working-directory: python
+          args: --release --out ../dist ${{ matrix.compat }}
+      - name: Build rithmic-nt-connect (cp312-cp314)
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          args: --release --out dist -i python3.12 python3.13 python3.14 ${{ matrix.compat }}
+      # Install smoke: a clean venv that may not compile anything (`--no-build`),
+      # so a wheel that needs Rust, protoc or maturin fails here. Rust below
+      # only builds the test-only fake parent the client scenarios dial.
+      - name: Install smoke (no source builds)
+        run: |
+          ls -l dist
+          uv venv --python 3.13 /tmp/smoke
+          VIRTUAL_ENV=/tmp/smoke uv pip install --no-build --find-links dist \
+            rithmic-gateway "rithmic-nt-connect[gateway]" pytest
+          test -x /tmp/smoke/bin/rithmic-gateway
+          /tmp/smoke/bin/rithmic-gateway --version
+          /tmp/smoke/bin/python -m rithmic_gateway --help
+          /tmp/smoke/bin/python -c "from rithmic_gateway import GatewayClient; from rithmic_nt_connect import _lib"
+          if unzip -l 'dist/*.whl' | grep -q rithmic-gateway-fake; then
+            echo "a wheel ships the fake gateway" >&2; exit 1
+          fi
+      - name: Client scenarios against the fake parent (installed wheels)
+        run: |
+          cargo build -p rithmic-gateway --features testing --bin rithmic-gateway-fake
+          # `-o pythonpath=` drops the source tree from sys.path: the clients
+          # under test are the installed wheels.
+          RITHMIC_GATEWAY_FAKE_BIN="$PWD/target/debug/rithmic-gateway-fake" \
+            /tmp/smoke/bin/python -m pytest -q -p no:cacheprovider -o pythonpath= \
+            tests/test_gateway_scenarios.py -k "python-plain"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wheels-${{ matrix.name }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'push'
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      REF_TYPE: ${{ github.ref_type }}
+      REF_NAME: ${{ github.ref_name }}
+      SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*.whl
+      - name: Upload to the GitHub release
+        run: |
+          if [ "$REF_TYPE" = tag ]; then
+            tag="$REF_NAME"
+            gh release view "$tag" >/dev/null 2>&1 || \
+              gh release create "$tag" --verify-tag --title "$tag" --notes "Wheels for $tag."
+          else
+            # Rolling dev release; each build's wheels carry their own version.
+            tag=main-dev
+            gh release view "$tag" >/dev/null 2>&1 || \
+              gh release create "$tag" --prerelease --target "$SHA" \
+                --title "main (rolling dev builds)" --notes "Dev wheels from main."
+            gh release edit "$tag" --notes "Dev wheels from main. Latest: $VERSION ($SHA)."
+          fi
+          gh release upload "$tag" dist/*.whl --clobber
+
+  index:
+    if: github.event_name == 'push'
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.13"
+      - name: Prune old dev builds and write the PEP 503 index
+        run: python scripts/publish_index.py --repo "$GH_REPO" --out site --keep 30 --prune
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
