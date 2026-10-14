@@ -117,6 +117,28 @@ impl SessionLock {
             }
         }
     }
+
+    /// [`Self::try_acquire_patient`] for async startup: the retry sleeps run on a
+    /// blocking thread instead of stalling an executor worker.
+    pub async fn acquire_patient(
+        user: &str,
+        system_name: &str,
+        url: &str,
+        env: &str,
+        grace: std::time::Duration,
+    ) -> Result<Self, SingletonError> {
+        let (user, system_name, url, env) = (
+            user.to_string(),
+            system_name.to_string(),
+            url.to_string(),
+            env.to_string(),
+        );
+        tokio::task::spawn_blocking(move || {
+            Self::try_acquire_patient(&user, &system_name, &url, &env, grace)
+        })
+        .await
+        .expect("flock acquisition task panicked")
+    }
 }
 
 /// How long a parent waits out a transient flock probe before refusing to start.

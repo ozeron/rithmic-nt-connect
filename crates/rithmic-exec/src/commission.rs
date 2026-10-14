@@ -19,8 +19,8 @@ impl CommissionTable {
     }
 
     /// Replace the product table from RMS rows `(product_code, commission_fill_rate)`.
-    /// A row without a (non-empty) code or without a rate is skipped; a rate of
-    /// zero is a real rate.
+    /// A row without a (non-empty) code or without a (non-empty) rate is skipped;
+    /// a rate of zero is a real rate.
     pub fn load_products<I>(&mut self, rows: I)
     where
         I: IntoIterator<Item = (Option<String>, Option<String>)>,
@@ -28,7 +28,9 @@ impl CommissionTable {
         self.rates = rows
             .into_iter()
             .filter_map(|(code, rate)| match (code, rate) {
-                (Some(code), Some(rate)) if !code.is_empty() => Some((code, rate)),
+                (Some(code), Some(rate)) if !code.is_empty() && !rate.is_empty() => {
+                    Some((code, rate))
+                }
                 _ => None,
             })
             .collect();
@@ -106,6 +108,7 @@ mod tests {
             (None, s("1")),
             (s(""), s("1")),
             (s("NORATE"), None),
+            (s("EMPTYRATE"), s("")),
         ]);
         assert_eq!(t.rate_for(Some("ZERO")), Some("0"));
         assert_eq!(t.rates().len(), 1);

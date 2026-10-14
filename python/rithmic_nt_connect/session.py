@@ -593,6 +593,9 @@ class _RustGatewaySession:
         self._registered = False
 
     def __getattr__(self, name: str) -> Any:
+        # Private names are never the extension's surface; probes must see them absent.
+        if name.startswith("_"):
+            raise AttributeError(name)
         return getattr(self._inner, name)
 
     def _fan_out(

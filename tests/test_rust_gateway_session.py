@@ -270,3 +270,9 @@ def test_a_gateway_session_round_trips_through_create_session(fake_bin) -> None:
         assert event is not None and event["symbol"] == "NQH6"
         assert event["type"] == "last_trade"
         session.disconnect()
+
+
+def test_private_names_are_not_delegated_to_the_extension() -> None:
+    wrapper = _RustGatewaySession(_TransportInner())
+    assert not hasattr(wrapper, "_missing")
+    assert hasattr(wrapper, "subscribe_transport_events")

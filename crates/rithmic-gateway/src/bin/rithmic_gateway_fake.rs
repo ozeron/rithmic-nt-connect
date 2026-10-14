@@ -51,7 +51,8 @@ async fn run() -> Result<(), String> {
 
     // Same single-login discipline as production: hold the credential flock.
     let _lock =
-        SessionLock::try_acquire_patient(&user, &system_name, &url, &env_name, STARTUP_LOCK_GRACE)
+        SessionLock::acquire_patient(&user, &system_name, &url, &env_name, STARTUP_LOCK_GRACE)
+            .await
             .map_err(|e| format!("credential flock: {e}"))?;
 
     let listen_raw =

@@ -71,7 +71,8 @@ async fn run() -> Result<(), String> {
     // Flock first (R10 / AGENTS.md single-login): refuse before ever
     // touching Rithmic if a direct or parent process already holds it.
     let _lock =
-        SessionLock::try_acquire_patient(&user, &system_name, &url, &env_name, STARTUP_LOCK_GRACE)
+        SessionLock::acquire_patient(&user, &system_name, &url, &env_name, STARTUP_LOCK_GRACE)
+            .await
             .map_err(|e| format!("credential flock: {e}"))?;
 
     let listen_raw = std::env::var("RITHMIC_GATEWAY_LISTEN").unwrap_or_else(|_| {
