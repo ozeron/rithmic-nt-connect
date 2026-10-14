@@ -185,6 +185,39 @@ async fn a_facade_that_disconnects_releases_only_what_it_held() {
 }
 
 #[tokio::test]
+async fn a_facade_dropped_without_disconnect_still_releases_what_only_it_held() {
+    let parent = FakeParent::start(Opts::default()).await;
+    let a = session_for(&parent).await;
+    let b = session_for(&parent).await;
+    a.subscribe("ESZ6", CME).await.unwrap();
+    a.subscribe(NQ, CME).await.unwrap();
+    b.subscribe(NQ, CME).await.unwrap();
+
+    drop(a);
+    assert!(
+        wait_until_async(Duration::from_secs(5), || async {
+            parent.count(&format!("unsubscribe ESZ6 {CME}")).await == 1
+        })
+        .await,
+        "the dropped facade's sole intent is released: {:?}",
+        parent.calls().await
+    );
+    assert_eq!(parent.count(&format!("unsubscribe {NQ} {CME}")).await, 0);
+
+    // The dropped facade no longer counts as a holder, so b's release reaches
+    // the parent.
+    b.unsubscribe(NQ, CME).await.unwrap();
+    assert!(
+        wait_until_async(Duration::from_secs(5), || async {
+            parent.count(&format!("unsubscribe {NQ} {CME}")).await == 1
+        })
+        .await,
+        "{:?}",
+        parent.calls().await
+    );
+}
+
+#[tokio::test]
 async fn two_connections_share_one_venue_subscription_by_refcount() {
     let parent = FakeParent::start(Opts::default()).await;
     let a = session_for(&parent).await;
@@ -614,6 +647,33 @@ async fn events_arrive_equal_to_what_the_plant_emitted() {
     assert_eq!(
         drain(&s, 1, order).await[0],
         scripted::bracket_update("basket-9", 8, 16)
+    );
+}
+
+#[tokio::test]
+async fn bracket_updates_reach_only_connections_that_subscribed_to_them() {
+    let parent = FakeParent::start(Opts {
+        trading: true,
+        ..Opts::default()
+    })
+    .await;
+    let orders_only = session_for(&parent).await;
+    let with_brackets = second_connection(&parent).await;
+    orders_only.subscribe_order_updates().await.unwrap();
+    with_brackets.subscribe_order_updates().await.unwrap();
+    with_brackets.subscribe_bracket_updates().await.unwrap();
+
+    parent.command("push bracket basket-9 8 16").await;
+    parent
+        .command("push order accepted basket-9 tag-9 NQH6")
+        .await;
+
+    let got = drain(&with_brackets, 2, order).await;
+    assert_eq!(got[0], scripted::bracket_update("basket-9", 8, 16));
+    // The order-only connection gets the order update and nothing before it.
+    assert_eq!(
+        drain(&orders_only, 1, order).await[0],
+        scripted::order_notification("accepted", "basket-9", "tag-9", NQ)
     );
 }
 

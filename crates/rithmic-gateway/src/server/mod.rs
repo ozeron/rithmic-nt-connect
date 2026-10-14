@@ -158,7 +158,8 @@ pub struct GatewayState {
     /// Serializes history admission vs live MD intent creation (ticker /
     /// book / time bars): held for a load's live-MD check (only the check, never
     /// the load) and across MD subscribe note + venue join, so a load cannot
-    /// start between a subscribe's check and its intent (RC2.3).
+    /// start between a subscribe's check and its intent (RC2.3). The rule holds
+    /// when a load starts; a subscribe during a running load is admitted.
     pub md_history_gate: Arc<TokioMutex<()>>,
     /// History / probe loads run one at a time against the venue.
     pub history_load_lock: Arc<TokioMutex<()>>,
@@ -497,6 +498,9 @@ impl ClientCtx {
         {
             mask |= Kind::Bars.bit();
         }
+        if self.brackets && *key == crate::convert::order_key() {
+            mask |= Kind::Brackets.bit();
+        }
         if mask == 0 && !self.forwarders.contains_key(key) {
             // Nothing forwarded and nothing wanted: keep no empty entry around.
             self.kinds.remove(key);
@@ -685,8 +689,8 @@ fn encode_event(event: pb::Event, kind: Kind) -> Option<Fan> {
 
 /// Encode a wire event and publish it to `key`'s topic (a gap on the ticker or
 /// history stream goes to every symbol topic).
-pub async fn publish_event(hub: &FanoutHub, key: &SubKey, event: pb::Event) -> usize {
-    let Some(fan) = encode_event(event, Kind::Any) else {
+pub async fn publish_event(hub: &FanoutHub, key: &SubKey, event: pb::Event, kind: Kind) -> usize {
+    let Some(fan) = encode_event(event, kind) else {
         return 0;
     };
     if key.symbol == crate::convert::GAP_BROADCAST {
@@ -1127,9 +1131,15 @@ pub async fn publish_plant_event(hub: &FanoutHub, event: rithmic_plants::dto::Pl
             }
         }
         // Account-level events and order/PnL gaps ride their sentinel topics.
+        // Bracket updates share the order topic but reach only the clients that
+        // subscribed to them.
         Route::Pnl | Route::Order | Route::Other | Route::Gap(_) => {
+            let kind = match event {
+                rithmic_plants::dto::PlantEvent::BracketUpdate(_) => Kind::Brackets,
+                _ => Kind::Any,
+            };
             let (key, wire_event) = crate::convert::plant_event_to_routed(event);
-            publish_event(hub, &key, wire_event).await;
+            publish_event(hub, &key, wire_event, kind).await;
         }
     }
 }

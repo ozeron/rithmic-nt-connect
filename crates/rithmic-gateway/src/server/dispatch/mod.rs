@@ -61,8 +61,8 @@ fn err_to_frame(request_id: u64, code: &str, err: impl std::fmt::Display) -> Fra
 
 /// The wire class of a failed one-shot command (place, cancel, modify, bracket,
 /// cancel-all). Only a failure known to precede the send is definitive: a venue
-/// reject, a not-sent, a configuration error, or a gate's own denial (which keeps
-/// its code). Anything else may have reached the venue, so it is
+/// reject, a not-sent, a configuration error, a plant that is not connected, or a
+/// gate's own denial (which keeps its code). Anything else may have reached the venue, so it is
 /// `venue_unknown`: the adapter must treat the order as in flight, never as
 /// rejected.
 pub(super) fn plant_err_frame(request_id: u64, e: rithmic_plants::Error) -> Frame {
@@ -74,18 +74,20 @@ pub(super) fn command_error_code(e: &rithmic_plants::Error) -> String {
     use rithmic_plants::Error as E;
     match e {
         E::Rejected(_) => "venue_rejected".into(),
-        E::NotSent(_) | E::Config(_) => "not_sent".into(),
+        // A plant that is not connected (or a connect refused as redundant) is
+        // found before any request is written, as direct mode reports it.
+        E::NotSent(_) | E::Config(_) | E::NotConnected { .. } | E::AlreadyConnected => {
+            "not_sent".into()
+        }
         E::Gateway { code, .. } => code.clone(),
         E::ReconciliationUnavailable(_) => "reconciliation_unavailable".into(),
         E::OutcomeUnknown(_)
         | E::Rithmic(_)
         | E::ChannelClosed { .. }
         | E::ChannelLagged { .. }
-        | E::NotConnected { .. }
         | E::Session(_)
         | E::Protocol(_)
-        | E::Transport(_)
-        | E::AlreadyConnected => "venue_unknown".into(),
+        | E::Transport(_) => "venue_unknown".into(),
     }
 }
 
@@ -368,8 +370,8 @@ mod command_error_tests {
             (E::Protocol("bad".into()), "venue_unknown"),
             (E::Transport("io".into()), "venue_unknown"),
             (E::ChannelClosed { plant: "order" }, "venue_unknown"),
-            (E::NotConnected { plant: "order" }, "venue_unknown"),
-            (E::AlreadyConnected, "venue_unknown"),
+            (E::NotConnected { plant: "order" }, "not_sent"),
+            (E::AlreadyConnected, "not_sent"),
         ];
         for (err, want) in cases {
             assert_eq!(command_error_code(&err), want, "{err}");

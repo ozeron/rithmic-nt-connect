@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Intents are refcounted per facade
-The Rust client runtime SHALL count each subscription intent (ticker, book, time bars, PnL, order, brackets) per facade. It SHALL send a subscribe only on the process-wide 0→1 transition and an unsubscribe only on 1→0. A facade's disconnect or drop SHALL release only that facade's intents. The runtime key SHALL include `account_id`.
+The Rust client runtime SHALL count each subscription intent (ticker, book, time bars, PnL, order, brackets) per facade. It SHALL send an unsubscribe only when no facade holds the intent any more (1→0). Every subscribe SHALL be sent (the parent treats a repeat as a no-op; a repeat is how a client re-joins a degraded or lost intent). A facade's disconnect or drop SHALL release only that facade's intents, including when the facade is dropped without disconnecting. Requests for one intent SHALL reach the parent in the order they were decided, and a slow request for one intent SHALL NOT hold up requests for another. The runtime key SHALL include `account_id`, `fcm_id` and `ib_id`.
 
 #### Scenario: Two facades share a symbol
 - **WHEN** facades A and B both subscribe ES and A unsubscribes

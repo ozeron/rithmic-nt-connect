@@ -15,7 +15,7 @@ mod runtime;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -31,7 +31,7 @@ use tokio::sync::broadcast;
 use tokio::time::Instant;
 
 use self::convert::Channel;
-use self::runtime::{CallError, IntentKey, Intents, Queues, Release, Runtime, Take};
+use self::runtime::{CallError, IntentKey, Queues, Release, Runtime, Take};
 pub use self::runtime::{ReadyInfo, RecoveryFailed, TransportEvent, EVENT_QUEUE_CAP};
 use crate::listen::{default_unix_path, ListenEndpoint};
 use crate::pb::{self, frame::Body, Frame};
@@ -168,6 +168,9 @@ pub struct GatewaySession {
     queues: Arc<Queues>,
     facade_id: AtomicU64,
     connected: AtomicBool,
+    /// The runtime `connect` ran on; `Drop` (which may run outside any runtime,
+    /// e.g. from Python) spawns the facade's last releases there.
+    rt_handle: StdMutex<Option<tokio::runtime::Handle>>,
 }
 
 impl GatewaySession {
@@ -178,6 +181,7 @@ impl GatewaySession {
             queues: Arc::new(Queues::new()),
             facade_id: AtomicU64::new(0),
             connected: AtomicBool::new(false),
+            rt_handle: StdMutex::new(None),
         }
     }
 
@@ -291,35 +295,31 @@ impl GatewaySession {
 
     /// Send a subscription intent and record this facade's hold once the parent
     /// acknowledged it. Always sent, even when another facade holds the intent:
-    /// a repeat subscribe is how a client retries a join a rebuild left degraded.
+    /// a repeat subscribe is how a client retries a join a rebuild left degraded,
+    /// and how it re-joins a parent that lost the connection's intents.
     async fn hold_intent(&self, key: IntentKey, body: Body) -> Result<()> {
-        let mut intents = self.runtime.intents.lock().await;
+        let _ordered = self.runtime.intent_lock(&key).await;
         self.ack(body, Mode::Intent).await?;
-        intents.hold(self.facade(), key);
+        self.runtime.intents().hold(self.facade(), key);
         Ok(())
     }
 
     /// Drop this facade's hold on an intent; the parent is told only when no
     /// other facade on the shared socket still holds it.
     async fn release_intent(&self, key: IntentKey, body: Body) -> Result<()> {
-        let mut intents = self.runtime.intents.lock().await;
-        self.release_locked(&mut intents, key, body).await
-    }
-
-    async fn release_locked(
-        &self,
-        intents: &mut Intents,
-        key: IntentKey,
-        body: Body,
-    ) -> Result<()> {
+        let _ordered = self.runtime.intent_lock(&key).await;
         let facade = self.facade();
-        let held_here = intents.holds(facade, &key);
-        if intents.release(facade, &key) == Release::Keep {
-            return Ok(());
-        }
+        let held_here = {
+            let mut intents = self.runtime.intents();
+            let held_here = intents.holds(facade, &key);
+            if intents.release(facade, &key) == Release::Keep {
+                return Ok(());
+            }
+            held_here
+        };
         let sent = self.ack(body, Mode::Intent).await;
         if sent.is_err() && held_here {
-            intents.hold(facade, key);
+            self.runtime.intents().hold(facade, key);
         }
         sent
     }
@@ -328,24 +328,27 @@ impl GatewaySession {
     /// together (`DisconnectOrder`), so it is told only when no other facade
     /// holds either; otherwise the order plant, and any bracket subscription on
     /// it, stay for the others.
-    async fn release_order_locked(&self, intents: &mut Intents) -> Result<()> {
+    async fn release_order(&self) -> Result<()> {
+        let _ordered = self.runtime.intent_lock(&IntentKey::Order).await;
         let facade = self.facade();
-        let had = [IntentKey::Order, IntentKey::Brackets]
-            .into_iter()
-            .filter(|k| intents.holds(facade, k))
-            .collect::<Vec<_>>();
-        intents.release(facade, &IntentKey::Order);
-        intents.release(facade, &IntentKey::Brackets);
-        if intents.is_held(&IntentKey::Order) || intents.is_held(&IntentKey::Brackets) {
-            return Ok(());
-        }
+        let had = {
+            let mut intents = self.runtime.intents();
+            let had = [IntentKey::Order, IntentKey::Brackets]
+                .into_iter()
+                .filter(|k| intents.holds(facade, k))
+                .collect::<Vec<_>>();
+            intents.release(facade, &IntentKey::Order);
+            intents.release(facade, &IntentKey::Brackets);
+            if intents.order_group_held() {
+                return Ok(());
+            }
+            had
+        };
         let sent = self
-            .ack(
-                Body::DisconnectOrder(pb::DisconnectOrderRequest {}),
-                Mode::Intent,
-            )
+            .ack(IntentKey::Order.release_body(), Mode::Intent)
             .await;
         if sent.is_err() {
+            let mut intents = self.runtime.intents();
             for key in had {
                 intents.hold(facade, key);
             }
@@ -353,43 +356,16 @@ impl GatewaySession {
         sent
     }
 
-    /// Release everything this facade holds (it is leaving while other facades
-    /// keep the socket). Best effort: the parent drops every intent on the
-    /// socket anyway when the last facade closes it.
-    async fn release_all_intents(&self) {
-        let mut intents = self.runtime.intents.lock().await;
-        let mut order = false;
-        for key in intents.held_by(self.facade()) {
-            let body = match &key {
-                IntentKey::Ticker(symbol, exchange) => Body::Unsubscribe(pb::UnsubscribeRequest {
-                    symbol: symbol.clone(),
-                    exchange: exchange.clone(),
-                }),
-                IntentKey::Book(symbol, exchange) => {
-                    Body::UnsubscribeBook(pb::UnsubscribeBookRequest {
-                        symbol: symbol.clone(),
-                        exchange: exchange.clone(),
-                    })
-                }
-                IntentKey::TimeBars(symbol, exchange, bar_type, period) => {
-                    Body::UnsubscribeTimeBars(pb::UnsubscribeTimeBarsRequest {
-                        symbol: symbol.clone(),
-                        exchange: exchange.clone(),
-                        bar_type: *bar_type,
-                        period: *period,
-                    })
-                }
-                IntentKey::Pnl => Body::DisconnectPnl(pb::DisconnectPnlRequest {}),
-                IntentKey::Order | IntentKey::Brackets => {
-                    order = true;
-                    continue;
-                }
-            };
-            let _ = self.release_locked(&mut intents, key, body).await;
+    /// This facade is leaving: drop its holds and return whether it was the
+    /// last facade, plus the releases the parent still needs (the intents only
+    /// this facade held). Shared by `disconnect` and `Drop`.
+    fn leave(&self) -> Option<(bool, Vec<IntentKey>)> {
+        let id = self.facade_id.swap(0, Ordering::SeqCst);
+        if id == 0 {
+            return None;
         }
-        if order {
-            let _ = self.release_order_locked(&mut intents).await;
-        }
+        let freed = self.runtime.intents().drop_facade(id);
+        Some((self.runtime.unregister(id), freed))
     }
 
     /// Compatibility poll: a gap reads as [`Error::ChannelLagged`].
@@ -472,10 +448,21 @@ impl GatewaySession {
 }
 
 impl Drop for GatewaySession {
+    /// A facade dropped without `disconnect` still releases what only it held,
+    /// or the parent would keep those subscriptions (and keep fanning them to
+    /// this socket) until the last facade closed it. The releases run on the
+    /// runtime the facade connected on.
     fn drop(&mut self) {
-        let id = self.facade_id.load(Ordering::SeqCst);
-        if id != 0 {
-            self.runtime.unregister(id);
+        let Some((last, freed)) = self.leave() else {
+            return;
+        };
+        if last || freed.is_empty() {
+            return;
+        }
+        let handle = self.rt_handle.lock().expect("rt handle").take();
+        if let Some(handle) = handle.or_else(|| tokio::runtime::Handle::try_current().ok()) {
+            let runtime = Arc::clone(&self.runtime);
+            handle.spawn(async move { runtime.send_releases(freed).await });
         }
     }
 }
@@ -522,6 +509,7 @@ impl Session for GatewaySession {
         }
         let id = self.runtime.register(Arc::clone(&self.queues));
         self.facade_id.store(id, Ordering::SeqCst);
+        *self.rt_handle.lock().expect("rt handle") = tokio::runtime::Handle::try_current().ok();
         self.runtime.allow_recovery();
         match self.runtime.ensure_live().await {
             Ok(_) => {
@@ -538,15 +526,14 @@ impl Session for GatewaySession {
     }
 
     async fn disconnect(&self) -> Result<()> {
-        if self.connected.load(Ordering::SeqCst) && self.runtime.facade_count() > 1 {
-            // Other facades keep the socket: release what only this one held.
-            self.release_all_intents().await;
-        }
         self.connected.store(false, Ordering::SeqCst);
-        let id = self.facade_id.swap(0, Ordering::SeqCst);
-        if id != 0 && self.runtime.unregister(id) {
-            // Last facade in the process: close the socket; the parent stays up.
-            self.runtime.close().await;
+        match self.leave() {
+            // Last facade in the process: close the socket; the parent drops its
+            // intents and stays up.
+            Some((true, _)) => self.runtime.close().await,
+            // Other facades keep the socket: release what only this one held.
+            Some((false, freed)) => self.runtime.send_releases(freed).await,
+            None => {}
         }
         Ok(())
     }
@@ -572,8 +559,7 @@ impl Session for GatewaySession {
     }
 
     async fn disconnect_order_plant(&self) -> Result<()> {
-        let mut intents = self.runtime.intents.lock().await;
-        self.release_order_locked(&mut intents).await
+        self.release_order().await
     }
 
     async fn disconnect_pnl_plant(&self) -> Result<()> {

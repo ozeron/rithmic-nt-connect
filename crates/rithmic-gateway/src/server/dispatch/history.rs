@@ -3,7 +3,9 @@
 //!
 //! While continuous MD intents (ticker / book / live time bars) are live,
 //! `Load*` / probe RPCs are refused so the event pump is not starved
-//! (2026-08-25 MY043 incident RC2.3 — live XOR heavy ingest).
+//! (2026-08-25 MY043 incident RC2.3). The rule is checked when a load starts:
+//! a subscribe that arrives during a running load is admitted, so live MD and
+//! that load can overlap until it finishes (see "Admission" below).
 //!
 //! Cold history plant after login can stay silent until rithmic-rs request
 //! timeout (RC4 / 2026-08-31): `RithmicSession::connect` proves a tiny Load*

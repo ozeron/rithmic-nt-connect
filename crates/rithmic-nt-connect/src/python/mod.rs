@@ -753,8 +753,13 @@ impl PySession {
     /// Call `callback(kind, generation, attempts, cause)` on every gateway
     /// transport event: `kind` is `"down"`, `"up"` or `"recovery_failed"`.
     /// Fire-and-forget from a runtime thread; a no-op in direct mode.
-    fn subscribe_transport_events(&self, callback: Py<PyAny>) -> Option<PyTransportSubscription> {
-        let gateway = self.gateway.as_ref()?;
+    fn subscribe_transport_events(
+        &self,
+        callback: Py<PyAny>,
+    ) -> PyResult<Option<PyTransportSubscription>> {
+        let Some(gateway) = self.gateway.as_ref() else {
+            return Ok(None);
+        };
         let mut transport = gateway.subscribe_transport();
         let mut failed = gateway.subscribe_recovery_failed();
         // Python is called from a dedicated thread, never from a tokio worker: a
@@ -773,9 +778,11 @@ impl PySession {
                     });
                 }
             });
-        if delivery.is_err() {
-            return None;
-        }
+        // `None` means direct mode; a thread that cannot start is an error, not
+        // a silent subscription that never delivers.
+        delivery.map_err(|e| {
+            PyRuntimeError::new_err(format!("transport event thread did not start: {e}"))
+        })?;
         let notify = move |kind: &'static str, generation: u64, attempts: u32, cause: String| {
             let _ = tx.send((kind, generation, attempts, cause));
         };
@@ -802,9 +809,9 @@ impl PySession {
                 }
             }
         });
-        Some(PyTransportSubscription {
+        Ok(Some(PyTransportSubscription {
             task: task.abort_handle(),
-        })
+        }))
     }
 
     fn request_plants(&self, py: Python<'_>, plants: &str) -> PyResult<()> {

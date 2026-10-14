@@ -267,6 +267,10 @@ pub(super) async fn subscribe_topic(
     let lock = topic_lock(state, &key).await;
     let _guard = lock.lock().await;
     let had_forwarder = attach_shared_topic(state, client, &key).await;
+    // Count first, then record on the connection. A failure between the two
+    // leaks one count (the venue join outlives its holders until the parent's
+    // next rebuild); the reverse order would let teardown release a count that
+    // was never taken and end another client's subscription.
     let is_first = intent.note(&state.reconnect).await;
     intent.client_insert(client);
     // A later client joining an intent a rebuild left degraded retries the venue
@@ -460,6 +464,7 @@ async fn rollback_order_plant_stream_introductions(
 ) {
     if introduced_brackets {
         client.brackets = false;
+        client.sync_kinds(&crate::convert::order_key());
         let _ = state.reconnect.forget_brackets().await;
     }
     if !introduced_order {
@@ -542,6 +547,7 @@ pub(in crate::server) async fn clear_client_brackets(
         return false;
     }
     client.brackets = false;
+    client.sync_kinds(&crate::convert::order_key());
     state.reconnect.forget_brackets().await
 }
 
@@ -583,6 +589,7 @@ pub(super) async fn subscribe_order_plant_stream(
     }
     if need_brackets {
         client.brackets = true;
+        client.sync_kinds(&crate::convert::order_key());
     }
 
     let Some(session) = &state.session else {
@@ -668,6 +675,7 @@ pub(in crate::server) async fn leave_order(
                         if had_brackets {
                             state.reconnect.note_brackets().await;
                             client.brackets = true;
+                            client.sync_kinds(&crate::convert::order_key());
                         }
                     }
                     return Err(("disconnect_order_failed", e));
