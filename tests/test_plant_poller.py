@@ -105,3 +105,37 @@ def test_plant_poller_gap_runs_on_gap_until_it_succeeds_and_keeps_the_batch() ->
     assert failed.call_count == 2
     resync.assert_not_called()
     assert handled == [{"type": "order_notification", "status": "open"}]
+
+
+def test_an_unreadable_event_triggers_recovery_and_the_stream_continues() -> None:
+    """One notification the adapter cannot read must not stop the order stream:
+    the venue state is re-read (as after a gap) and later events are handled."""
+    from rithmic_nt_connect.errors import UnreadableEventError
+
+    handled: list[str] = []
+    recoveries: list[int] = []
+
+    def on_event(ev):
+        if ev["status"] == "garbled":
+            raise UnreadableEventError("missing symbol")
+        handled.append(ev["status"])
+
+    async def on_gap():
+        recoveries.append(1)
+
+    poller = PlantPoller(
+        name="order",
+        poll_fn=Mock(),
+        batch_fn=lambda: [
+            {"type": "order_notification", "status": "garbled"},
+            {"type": "order_notification", "status": "open"},
+        ],
+        on_event=on_event,
+        on_resync=Mock(),
+        on_gap=on_gap,
+        on_latch=lambda *a: (_ for _ in ()).throw(AssertionError("latched")),
+    )
+    res = asyncio.run(poller.poll_iteration(0.05, 0))
+    assert res is not None, "the poller keeps running"
+    assert handled == ["open"]
+    assert recoveries == [1]

@@ -99,7 +99,7 @@ An order notification that fails conversion SHALL be logged with its payload and
 - **THEN** no poll task or recovery listener from that attempt SHALL remain
 
 ### Requirement: Bar timestamps follow the configured convention
-The data client config SHALL expose `bars_timestamp_on_close: bool`, default `True`. When `True`, EXTERNAL bars SHALL be stamped at the venue bar close; when `False`, at bar open. The client SHALL warn when the setting disagrees with the data engine's `time_bars_timestamp_on_close`. Unsubscribing a bar type SHALL unsubscribe its period at the venue when no other subscription for that period remains.
+The data client config SHALL expose `bars_timestamp_on_close: bool`, default `True`. When `True`, EXTERNAL bars SHALL be stamped at the venue bar close; when `False`, at bar open. The client SHALL log its convention at start, naming the data engine's `time_bars_timestamp_on_close` that must match (a data client cannot read the engine's config). Unsubscribing a bar type SHALL unsubscribe its period at the venue when no other subscription for that period remains.
 
 #### Scenario: Default close stamping
 - **WHEN** a 1-minute bar with venue marker 10:01:00 arrives with the default config

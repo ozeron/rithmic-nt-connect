@@ -4,6 +4,7 @@
 //! `rust-exec-core`). Nothing here knows about Nautilus, plants, or an async
 //! runtime.
 
+pub mod book;
 pub mod commission;
 pub mod drain;
 pub mod exposure;
@@ -14,6 +15,7 @@ pub mod lru;
 pub mod notify;
 pub mod plant;
 
+pub use book::{book_update_kind, BookUpdate};
 pub use commission::CommissionTable;
 pub use drain::{
     freshest_per_key, row_is_trustworthy, stale_reason, RowTerms, StaleFacts,

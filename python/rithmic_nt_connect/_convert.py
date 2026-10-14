@@ -213,7 +213,10 @@ def account_pnl_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
 def order_book_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
     """Map an OrderBook venue dict to OrderBookDeltas-oriented fields.
 
-    Produces a CLEAR + ADD snapshot for the provided bid/ask level arrays.
+    ``update_kind`` says what the levels are (``rithmic_exec::BookUpdate``): the
+    whole book (``snapshot``), a reset (``clear`` / ``no_book``), or changed
+    levels (``solo``, or ``begin`` / ``middle`` / ``end`` parts of one update).
+    An ``update_type`` outside the venue's set is rejected.
     """
     _require(d, "symbol")
     symbol = str(d["symbol"])
@@ -264,12 +267,21 @@ def order_book_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
             }
         )
 
+    update_type = d.get("update_type")
+    if update_type is None:
+        # Older payloads without the field are whole-book summaries.
+        update_kind = "snapshot"
+    else:
+        update_kind = _lib.book_update_kind(int(update_type))
+        if update_kind is None:
+            raise ConvertError(f"unknown order book update_type: {update_type}")
     return {
         "type": "order_book",
         "instrument_id": instrument_id_from_symbol(symbol, exchange),
         "symbol": symbol,
         "exchange": exchange,
-        "update_type": d.get("update_type"),
+        "update_type": update_type,
+        "update_kind": update_kind,
         "levels": levels,
         "ts_event": ts,
         "venue": VENUE,

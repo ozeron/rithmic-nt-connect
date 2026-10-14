@@ -8,6 +8,7 @@ import itertools
 import os
 import time
 from collections import OrderedDict
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from nautilus_trader.cache.cache import Cache
@@ -190,8 +191,14 @@ def payloads_to_trade_ticks(
     exchange: str,
     price_precision: int,
     ts_init: int,
+    on_invalid_row: Callable[[ConvertError], None] | None = None,
 ) -> list[TradeTick]:
-    """Convert venue history/live dicts to ``TradeTick`` (one convert boundary)."""
+    """Convert venue history/live dicts to ``TradeTick`` (one convert boundary).
+
+    A row for another instrument fails the whole reply. A row that cannot be
+    converted fails it too unless ``on_invalid_row`` is given, which then gets
+    the error and the row is skipped.
+    """
     ticks: list[TradeTick] = []
     for raw in raw_ticks:
         payload = dict(raw)
@@ -200,14 +207,19 @@ def payloads_to_trade_ticks(
             payload["symbol"] = symbol
         if payload.get("exchange") is None:
             payload["exchange"] = exchange
-        fields = last_trade_to_fields(payload)
-        ticks.append(
-            fields_to_trade_tick(
+        try:
+            fields = last_trade_to_fields(payload)
+            tick = fields_to_trade_tick(
                 fields,
                 ts_init=ts_init,
                 price_precision=price_precision,
             )
-        )
+        except ConvertError as exc:
+            if on_invalid_row is None:
+                raise
+            on_invalid_row(exc)
+            continue
+        ticks.append(tick)
     ticks.sort(key=lambda tick: tick.ts_event)
     return ticks
 
@@ -220,8 +232,11 @@ def payloads_to_bars(
     bar_type: BarType,
     price_precision: int,
     ts_init: int,
+    on_invalid_row: Callable[[ConvertError], None] | None = None,
+    timestamp_on_close: bool = True,
 ) -> list[Bar]:
-    """Convert venue history/live dicts to ``Bar`` (one convert boundary)."""
+    """Convert venue history/live dicts to ``Bar`` (one convert boundary); see
+    ``payloads_to_trade_ticks`` for ``on_invalid_row``."""
     bars: list[Bar] = []
     expected_rtype = bar_type_to_rithmic(bar_type)[0]
     for raw in raw_bars:
@@ -236,15 +251,21 @@ def payloads_to_bars(
             payload["symbol"] = symbol
         if payload.get("exchange") is None:
             payload["exchange"] = exchange
-        fields = time_bar_to_fields(payload)
-        bars.append(
-            fields_to_bar(
+        try:
+            fields = time_bar_to_fields(payload)
+            bar = fields_to_bar(
                 fields,
                 bar_type,
                 ts_init,
                 price_precision=price_precision,
+                timestamp_on_close=timestamp_on_close,
             )
-        )
+        except ConvertError as exc:
+            if on_invalid_row is None:
+                raise
+            on_invalid_row(exc)
+            continue
+        bars.append(bar)
     bars.sort(key=lambda bar: bar.ts_event)
     return bars
 
@@ -393,6 +414,105 @@ def fields_to_order_book_deltas(
     return OrderBookDeltas(instrument_id=instrument_id, deltas=deltas)
 
 
+def _changed_levels(
+    fields: dict[str, Any],
+    ts_init: int,
+    price_precision: int | None,
+) -> list[OrderBookDelta]:
+    """UPDATE / DELETE deltas (no flags yet) for the levels an update changed.
+
+    A level with size 0 left the book. An L2 book keys levels by price, so an
+    UPDATE for a price it lacks adds it.
+    """
+    instrument_id = InstrumentId.from_str(fields["instrument_id"])
+    ts_event = int(fields["ts_event"])
+    out: list[OrderBookDelta] = []
+    for level in fields["levels"]:
+        side = OrderSide.BUY if level["side"] == "BUY" else OrderSide.SELL
+        size = int(level["size"])
+        if size < 0:
+            raise ConvertError(f"order book level size must be >= 0, got {size}")
+        order = BookOrder(
+            side,
+            price_from_wire(level["price"], price_precision),
+            Quantity.from_int(size),
+            int(level["order_id"]),
+        )
+        action = BookAction.DELETE if size == 0 else BookAction.UPDATE
+        out.append(_book_delta(instrument_id, action, order, 0, ts_event, ts_init))
+    return out
+
+
+def _closed_batch(
+    instrument_id: InstrumentId, deltas: list[OrderBookDelta]
+) -> OrderBookDeltas:
+    """One batch whose last delta carries ``F_LAST``."""
+    last = deltas[-1]
+    deltas[-1] = OrderBookDelta(
+        last.instrument_id,
+        last.action,
+        last.order,
+        int(last.flags) | _F_LAST,
+        last.sequence,
+        last.ts_event,
+        last.ts_init,
+    )
+    return OrderBookDeltas(instrument_id=instrument_id, deltas=deltas)
+
+
+class BookAssembler:
+    """Turns venue order-book messages into Nautilus delta batches.
+
+    A snapshot image replaces the book; clear / no-book empty it; a solo update
+    is one batch of changed levels; begin / middle / end parts are collected per
+    instrument and emitted together when the end arrives, so a multi-message
+    update is one batch whose only ``F_LAST`` is on its last delta. A snapshot
+    or reset drops a half-received update for that instrument.
+    """
+
+    def __init__(self) -> None:
+        self._pending: dict[str, list[OrderBookDelta]] = {}
+
+    def feed(
+        self,
+        fields: dict[str, Any],
+        ts_init: int,
+        *,
+        price_precision: int | None = None,
+    ) -> OrderBookDeltas | None:
+        key = str(fields["instrument_id"])
+        instrument_id = InstrumentId.from_str(key)
+        kind = fields.get("update_kind", "snapshot")
+        if kind == "snapshot":
+            self._pending.pop(key, None)
+            return fields_to_order_book_deltas(
+                fields, ts_init, price_precision=price_precision
+            )
+        if kind in ("clear", "no_book"):
+            self._pending.pop(key, None)
+            reset = _book_delta(
+                instrument_id,
+                BookAction.CLEAR,
+                None,
+                _F_SNAPSHOT_LAST,
+                int(fields["ts_event"]),
+                ts_init,
+            )
+            return OrderBookDeltas(instrument_id=instrument_id, deltas=[reset])
+        changed = _changed_levels(fields, ts_init, price_precision)
+        if kind == "begin":
+            self._pending[key] = changed
+            return None
+        if kind == "middle":
+            self._pending.setdefault(key, []).extend(changed)
+            return None
+        if kind == "end":
+            changed = self._pending.pop(key, []) + changed
+        if not changed:
+            return None
+        return _closed_batch(instrument_id, changed)
+
+
 def _is_duplicate_subscribe_error(exc: BaseException) -> bool:
     """True for venue ``[8] already exists`` (intent survived ticker reset)."""
     msg = str(exc).lower()
@@ -483,14 +603,22 @@ def fields_to_bar(
     ts_init: int,
     *,
     price_precision: int | None = None,
+    timestamp_on_close: bool = True,
 ) -> Bar:
+    """A venue bar as a Nautilus ``Bar``.
+
+    Rithmic's marker is the bar CLOSE time. By default (``timestamp_on_close``)
+    it is kept, the Nautilus default (``DataEngineConfig.time_bars_timestamp_on_close``)
+    and the faithful stamp: a bar is only known at its close. With ``False`` an
+    intraday bar is shifted back by its duration to its OPEN time, for nodes
+    configured to stamp bars at open. Calendar bars keep their date marker.
+    """
     volume = int(fields["volume"])
     if volume < 0:
         raise ConvertError(f"bar volume must be >= 0, got {volume}")
-    # Rithmic ts_event/marker is the bar CLOSE time; Nautilus Bar.ts_event is
-    # the OPEN time. Shift intraday bars back by their duration so the tape
-    # aligns with the lake / IBKR / Databento open-time convention.
-    ts_event = int(fields["ts_event"]) - _bar_type_duration_ns(bar_type)
+    ts_event = int(fields["ts_event"])
+    if not timestamp_on_close:
+        ts_event -= _bar_type_duration_ns(bar_type)
     return Bar(
         bar_type,
         price_from_wire(fields["open"], price_precision),
@@ -503,15 +631,24 @@ def fields_to_bar(
     )
 
 
-def closed_bars(bars: list[Bar], bar_type: BarType, end_ns: int) -> list[Bar]:
+def closed_bars(
+    bars: list[Bar],
+    bar_type: BarType,
+    end_ns: int,
+    *,
+    timestamp_on_close: bool = True,
+) -> list[Bar]:
     """History bars whose CLOSE is at or before ``end_ns``.
 
     Rithmic serves the still-forming bar when ``end`` falls inside it; a consumer
     that hydrates from history and then subscribes live would otherwise see that
     minute twice (forming from history, final from live). Calendar bars (no
-    duration) must be a full period old.
+    duration) must be a full period old. ``timestamp_on_close`` says how the
+    bars were stamped (see ``fields_to_bar``).
     """
     dur = _bar_type_duration_ns(bar_type)
+    if dur and timestamp_on_close:
+        return [b for b in bars if int(b.ts_event) <= end_ns]
     if dur == 0:
         # Calendar bars carry a date marker, not an open time: keep only those a full
         # period old, so today's (still forming) daily bar is never served.
@@ -650,6 +787,9 @@ class RithmicDataClient(LiveMarketDataClient):
     only registers the client (no ``isinstance`` check).
     """
 
+    # Class default for doubles built without __init__ (set per config there).
+    _bars_timestamp_on_close = True
+
     def __init__(
         self,
         loop: asyncio.AbstractEventLoop,
@@ -690,6 +830,17 @@ class RithmicDataClient(LiveMarketDataClient):
         self._recovery = self._build_recovery()
         # One-sided BestBidOffer merge state, keyed by symbol[:exchange].
         self._bbo_state: dict[str, dict[str, Any]] = {}
+        self._books = BookAssembler()
+        # EXTERNAL bars: venue close time (default) or shifted to open.
+        self._bars_timestamp_on_close = bool(
+            getattr(config, "bars_timestamp_on_close", True)
+        )
+        self._log.info(
+            "EXTERNAL bars stamped at the bar "
+            f"{'close' if self._bars_timestamp_on_close else 'open'} "
+            "(bars_timestamp_on_close); keep DataEngineConfig."
+            "time_bars_timestamp_on_close equal so INTERNAL bars match"
+        )
         self._bar_seq = BarSequenceGuard()
         # Rate-limited skip diagnostics (Rithmic push feed is presence-bit based).
         self._skip_counts: dict[str, int] = {}
@@ -968,9 +1119,9 @@ class RithmicDataClient(LiveMarketDataClient):
                 prec = self._price_precision(
                     InstrumentId.from_str(fields["instrument_id"])
                 )
-                self._handle_data(
-                    fields_to_order_book_deltas(fields, ts_init, price_precision=prec)
-                )
+                batch = self._books.feed(fields, ts_init, price_precision=prec)
+                if batch is not None:
+                    self._handle_data(batch)
             elif etype == "time_bar":
                 bar_types = self._bar_types_for_event(event)
                 if not bar_types:
@@ -979,7 +1130,13 @@ class RithmicDataClient(LiveMarketDataClient):
                 fields = time_bar_to_fields(event)
                 for bar_type in bar_types:
                     prec = self._price_precision(bar_type.instrument_id)
-                    bar = fields_to_bar(fields, bar_type, ts_init, price_precision=prec)
+                    bar = fields_to_bar(
+                        fields,
+                        bar_type,
+                        ts_init,
+                        price_precision=prec,
+                        timestamp_on_close=self._bars_timestamp_on_close,
+                    )
                     if not self._bar_seq.admit(bar):
                         self._count_skip("time_bar_repeat")
                         continue
@@ -1125,9 +1282,11 @@ class RithmicDataClient(LiveMarketDataClient):
                 mapped.discard(bar_type)
                 if not mapped:
                     del self._bar_types[key]
+        # Another subscription of the same period (in either wire unit) keeps the
+        # venue feed; a different period on the same symbol does not.
         still_registered = any(
-            k[0] == symbol and k[1] == exchange and k[2] == rtype and self._bar_types[k]
-            for k in self._bar_types
+            (symbol, exchange, rtype, p) in self._bar_types
+            for p in bar_wire_period_keys(bar_type)
         )
         if not still_registered:
             try:
@@ -1144,7 +1303,19 @@ class RithmicDataClient(LiveMarketDataClient):
                 raise
 
     async def _request_trade_ticks(self, request: RequestTradeTicks) -> None:
-        symbol, exchange = self._route(request.instrument_id)
+        try:
+            symbol, exchange = self._route(request.instrument_id)
+        except ValueError as exc:
+            self._log.error(f"RequestTradeTicks: {exc}")
+            self._handle_trade_ticks(
+                request.instrument_id,
+                [],
+                request.id,
+                request.start,
+                request.end,
+                request.params,
+            )
+            return
         if request.start is None or request.end is None:
             self._log.error("RequestTradeTicks requires start and end")
             self._handle_trade_ticks(
@@ -1189,6 +1360,7 @@ class RithmicDataClient(LiveMarketDataClient):
                 exchange=exchange,
                 price_precision=prec,
                 ts_init=ts_init,
+                on_invalid_row=lambda _exc: self._count_skip("history_tick_invalid"),
             )
         except ValueError as exc:
             self._log.error(f"Invalid history tick for {request.instrument_id}: {exc}")
@@ -1217,8 +1389,8 @@ class RithmicDataClient(LiveMarketDataClient):
 
     async def _request_bars(self, request: RequestBars) -> None:
         bar_type = request.bar_type
-        symbol, exchange = self._route(bar_type.instrument_id)
         try:
+            symbol, exchange = self._route(bar_type.instrument_id)
             rithmic_type, period = bar_type_to_rithmic(bar_type)
         except ValueError as exc:
             self._log.error(str(exc))
@@ -1304,6 +1476,8 @@ class RithmicDataClient(LiveMarketDataClient):
                 bar_type=bar_type,
                 price_precision=prec,
                 ts_init=ts_init,
+                on_invalid_row=lambda _exc: self._count_skip("history_bar_invalid"),
+                timestamp_on_close=self._bars_timestamp_on_close,
             )
         except ValueError as exc:
             self._log.error(f"Invalid history bar for {bar_type}: {exc}")
@@ -1317,7 +1491,12 @@ class RithmicDataClient(LiveMarketDataClient):
             )
             return
 
-        bars = closed_bars(bars, bar_type, int(request.end.timestamp() * 1_000_000_000))
+        bars = closed_bars(
+            bars,
+            bar_type,
+            int(request.end.timestamp() * 1_000_000_000),
+            timestamp_on_close=self._bars_timestamp_on_close,
+        )
         # Order: FORWARDS + session sort by ts_event_ns (NT does not re-sort).
         if request.limit:
             bars = bars[-request.limit :]

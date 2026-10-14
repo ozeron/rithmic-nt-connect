@@ -80,8 +80,11 @@ def load_time_bars(
     start: datetime | int,
     end: datetime | int,
     bar_type: BarType,
+    *,
+    timestamp_on_close: bool = True,
 ) -> list[Bar]:
-    """Load venue time bars for ``bar_type`` only (no finer aggregation)."""
+    """Load venue time bars for ``bar_type`` only (no finer aggregation), stamped
+    at the bar close unless ``timestamp_on_close`` is False (see ``fields_to_bar``)."""
     symbol, exchange = rithmic_route_from_info(
         instrument.info or {},
         instrument_id=str(instrument.id),
@@ -103,4 +106,5 @@ def load_time_bars(
         bar_type=bar_type,
         price_precision=int(instrument.price_precision),
         ts_init=ts_init,
+        timestamp_on_close=timestamp_on_close,
     )

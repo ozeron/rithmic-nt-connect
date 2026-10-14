@@ -15,6 +15,7 @@ from nautilus_trader.model.objects import Currency, Quantity
 
 from rithmic_nt_connect._orders import (
     fill_dedup_key,
+    fill_identity_ts,
     is_benign_bare_complete,
     notification_action,
     slim_order_fields,
@@ -200,7 +201,7 @@ class VenueNotificationIntake:
         if action.fill_qty is None or action.trade_id is None:
             host._log.error(f"fill action missing fields: {slim_order_fields(fields)}")
             return
-        dedup = fill_dedup_key(fields, ts_event=ts_event)
+        dedup = fill_dedup_key(fields, ts_event=fill_identity_ts(fields))
         if host._fill_key_seen(dedup):
             return
         try:
@@ -291,10 +292,13 @@ class VenueNotificationIntake:
         host = self._host
         if fields.get("kind") != "filled":
             return
-        dedup = fill_dedup_key(fields, ts_event=ts_event)
+        identity_ts = fill_identity_ts(fields)
+        dedup = fill_dedup_key(fields, ts_event=identity_ts)
         if host._fill_key_seen(dedup):
             return
-        report = host._fill_report_from_fields(fields, ts_event)
+        # The builder applies the clock fallback to the report time itself;
+        # the TradeId stays on the venue's time, as in recon.
+        report = host._fill_report_from_fields(fields, identity_ts)
         if report is None:
             host._log.error(
                 f"untracked fill suppressed (build failed): {slim_order_fields(fields)}"

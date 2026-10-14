@@ -43,20 +43,20 @@
 
 ## 5. Python fixes (each test-first)
 
-- [ ] 5.1 Cache `resolved_account` via `asyncio.to_thread` in `_connect` / `_rearm_after_reconnect`; `_account_raw` reads the cache; `_seed_account_if_needed` checks `_account_seeded` first; test with a blocking stub
-- [ ] 5.2 Gate position reports on live PnL, filter by `_position_seen_ns`, skip unreadable roots; skip flat augmentation when not live; tests
-- [ ] 5.3 Rust closed-set `update_type`; Python snapshot vs incremental conversion with `F_LAST` rules; venue-shaped fixtures for every type; e2e test records the live `update_type` histogram
-- [ ] 5.4 `_route` inside `try` in `_request_trade_ticks` / `_request_bars`; bad rows skipped and counted; tests
-- [ ] 5.5 Brackets: strict recognition, events for all legs, deny the list on any missing leg; tests
-- [ ] 5.6 Clock-free fill dedup key and trade id in live intake; live-then-recon dedup test
-- [ ] 5.7 Clear `_pnl_snapshot_observed` in `_recover_order_gap` and `_resync_pnl_subscription`; test
-- [ ] 5.8 Bad order notification is logged and triggers a re-drain; the poll task survives; test
-- [ ] 5.9 `_connect` failure cancels its poll tasks and detaches recovery; test
-- [ ] 5.10 Bar unsubscribe compares the period; test
-- [ ] 5.11 `_restore_plants_after_transport_up` restores PnL with trading off; test
-- [ ] 5.12 Recovery bridge: `_on_down` / `_on_failed` work hops onto the loop, latch stays immediate; test
-- [ ] 5.13 Pure-Python `GatewayClient`: buffered partial reads, bounded pending replies, not-sent vs unknown classification; tests
-- [ ] 5.14 `bars_timestamp_on_close` config (default `True`), mismatch warning against the data engine, `closed_bars` / `BarSequenceGuard` adapted, comment fixed; `test_bar_seam_parity.py` and `test_bar_hygiene.py` parametrised; ADR `docs/adr/0003-bar-timestamp-convention.md`
+- [x] 5.1 Cache `resolved_account` via `asyncio.to_thread` in `_connect` / `_rearm_after_reconnect`; `_account_raw` reads the cache; `_seed_account_if_needed` checks `_account_seeded` first; test with a blocking stub
+- [x] 5.2 Gate position reports on live PnL, filter by `_position_seen_ns`, skip unreadable roots; skip flat augmentation when not live; tests
+- [x] 5.3 Rust closed-set `update_type`; Python snapshot vs incremental conversion with `F_LAST` rules; venue-shaped fixtures for every type; e2e test records the live `update_type` histogram
+- [x] 5.4 `_route` inside `try` in `_request_trade_ticks` / `_request_bars`; bad rows skipped and counted; tests
+- [x] 5.5 Brackets: strict recognition, events for all legs, deny the list on any missing leg; tests
+- [x] 5.6 Clock-free fill dedup key and trade id in live intake; live-then-recon dedup test
+- [x] 5.7 Clear `_pnl_snapshot_observed` in `_recover_order_gap` and `_resync_pnl_subscription`; test
+- [x] 5.8 Bad order notification is logged and triggers a re-drain; the poll task survives; test
+- [x] 5.9 `_connect` failure cancels its poll tasks and detaches recovery; test
+- [x] 5.10 Bar unsubscribe compares the period; test
+- [x] 5.11 `_restore_plants_after_transport_up` restores PnL with trading off; test
+- [x] 5.12 Recovery bridge: `_on_down` / `_on_failed` work hops onto the loop, latch stays immediate; test
+- [x] 5.13 Pure-Python `GatewayClient`: buffered partial reads, bounded pending replies, not-sent vs unknown classification; tests
+- [x] 5.14 `bars_timestamp_on_close` config (default `True`), convention logged at start (the client cannot read the engine config), `closed_bars` / `BarSequenceGuard` adapted, comment fixed; `test_bar_seam_parity.py` and `test_bar_hygiene.py` parametrised; ADR `docs/adr/0003-bar-timestamp-convention.md`
 
 ## 6. Duplication
 

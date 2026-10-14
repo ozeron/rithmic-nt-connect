@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from nautilus_trader.model.data import Bar, BarType
 from nautilus_trader.model.objects import Price, Quantity
 from rithmic_nt_connect.data import BarSequenceGuard, closed_bars
@@ -16,19 +17,28 @@ def _bar(bt: BarType, ts_open: int) -> Bar:
     return Bar(bt, px, px, px, px, Quantity.from_int(1), ts_open, ts_open)
 
 
-def test_forming_bar_is_cut_from_history() -> None:
-    bars = [_bar(M1, 0), _bar(M1, MIN), _bar(M1, 2 * MIN)]
+def _stamped(bt: BarType, ts_open: int, dur: int, on_close: bool) -> Bar:
+    return _bar(bt, ts_open + dur if on_close else ts_open)
+
+
+@pytest.mark.parametrize(
+    "on_close", [True, False], ids=["close-stamped", "open-stamped"]
+)
+def test_forming_bar_is_cut_from_history(on_close: bool) -> None:
+    bars = [_stamped(M1, t, MIN, on_close) for t in (0, MIN, 2 * MIN)]
     # end at 2m30s: the 2m bar closes at 3m, still forming
-    assert [
-        int(b.ts_event) for b in closed_bars(bars, M1, 2 * MIN + 30_000_000_000)
-    ] == [0, MIN]
+    kept = closed_bars(bars, M1, 2 * MIN + 30_000_000_000, timestamp_on_close=on_close)
+    assert len(kept) == 2
     # end exactly on a close keeps that bar
-    assert len(closed_bars(bars, M1, 3 * MIN)) == 3
+    assert len(closed_bars(bars, M1, 3 * MIN, timestamp_on_close=on_close)) == 3
 
 
-def test_forming_hour_is_cut_from_history() -> None:
-    bars = [_bar(H1, 0), _bar(H1, 60 * MIN)]
-    assert len(closed_bars(bars, H1, 90 * MIN)) == 1
+@pytest.mark.parametrize(
+    "on_close", [True, False], ids=["close-stamped", "open-stamped"]
+)
+def test_forming_hour_is_cut_from_history(on_close: bool) -> None:
+    bars = [_stamped(H1, t, 60 * MIN, on_close) for t in (0, 60 * MIN)]
+    assert len(closed_bars(bars, H1, 90 * MIN, timestamp_on_close=on_close)) == 1
 
 
 def test_live_bar_repeating_history_is_dropped() -> None:

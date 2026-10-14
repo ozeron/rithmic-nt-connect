@@ -102,7 +102,7 @@ Distribution today:
 - [The fake venue drifts from real Rithmic behaviour] → replies are built from the same `rti` prost types `rithmic-rs` decodes, its scripts mirror captured live sequences where available, and live e2e still runs before release.
 - [Order-handle cache goes stale after a plant drop] → cleared on every disconnect path and on `ChannelClosed`; the stale-handle case is covered by the contract suite.
 - [Subscribe during history adds load on the venue] → loads still refuse to start while live data exists, and loads stay serialised.
-- [Close-time default changes live bar timestamps for existing nodes] → **BREAKING** in the proposal; the opt-out is documented and the adapter warns when it disagrees with the data engine.
+- [Close-time default changes live bar timestamps for existing nodes] → **BREAKING** in the proposal; the opt-out is documented and the adapter logs its convention at start (a data client cannot read the engine's config to compare).
 - [Incremental book handling may be unexercised live] → closed-set validation plus the e2e histogram; snapshot behaviour is unchanged.
 - [Maturin bin wheel for `rithmic-gateway` changes how `python/` builds] → consumers install wheels and never build; a source build needs Rust plus protoc, documented as the fallback.
 - [Large single PR] → commits grouped by phase, each passing the full verify set.

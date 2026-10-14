@@ -7,7 +7,11 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from rithmic_nt_connect.errors import CHANNEL_ERRORS, is_reconnectable_poll_error
+from rithmic_nt_connect.errors import (
+    CHANNEL_ERRORS,
+    UnreadableEventError,
+    is_reconnectable_poll_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +160,18 @@ class PlantPoller:
                 continue
             try:
                 self.on_event(event)
+            except UnreadableEventError as exc:
+                # One event lost on a healthy stream: re-read venue state, keep going.
+                self._log.error(
+                    f"{self.name} event unreadable ({exc}); re-reading venue state"
+                )
+                if self.on_gap is not None:
+                    await self._recover_gap()
+                else:
+                    backoff, transient_streak = await self._resync(
+                        backoff, transient_streak
+                    )
+                continue
             except Exception as exc:
                 self._log.exception(
                     f"{self.name} event handler error (suppressed)", exc

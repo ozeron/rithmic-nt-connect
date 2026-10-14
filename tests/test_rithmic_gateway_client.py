@@ -734,9 +734,11 @@ def test_desync_nulls_sock_for_next_rpc() -> None:
         )
         client = GatewayClient(cfg, rpc_timeout_sec=0.3)
         client.connect()
+        # A reply that stalls part-way is a timeout (outcome unknown); the RPC
+        # path closes the socket so the next call cannot misread the stream.
         with pytest.raises(GatewayError) as ei:
             client.subscribe("NQ", "CME")
-        assert ei.value.code == "desync"
+        assert ei.value.code == "timeout"
         with pytest.raises(GatewayError) as ei2:
             client.subscribe("ES", "CME")
         assert ei2.value.code == "not_connected"
@@ -990,3 +992,64 @@ def test_history_denied_live_md_maps_to_capability_denied() -> None:
     finally:
         if sock.exists():
             sock.unlink()
+
+
+def _bare_client() -> tuple[GatewayClient, socket.socket]:
+    """A client wired to one end of a socket pair, past the handshake."""
+    from collections import deque
+
+    ours, theirs = socket.socketpair()
+    client = GatewayClient.__new__(GatewayClient)
+    client._sock = ours
+    client._rpc_timeout_sec = 2.0
+    client._io_lock = threading.RLock()
+    client._pending = deque()
+    client._next_id = 1
+    return client, theirs
+
+
+def _event_frame(symbol: str) -> bytes:
+    frame = pb.Frame(
+        request_id=0,
+        event=pb.Event(last_trade=pb.LastTrade(symbol=symbol, exchange="CME")),
+    )
+    return encode_frame(frame.SerializeToString())
+
+
+def test_a_poll_that_reads_half_a_frame_keeps_it_for_the_next_poll() -> None:
+    client, peer = _bare_client()
+    wire = _event_frame("NQU6")
+    peer.sendall(wire[:5])  # header plus one byte
+    assert client.poll_event(timeout_ms=0) is None
+    peer.sendall(wire[5:])
+    evt = client.poll_event(timeout_ms=500)
+    assert evt is not None and evt["symbol"] == "NQU6", evt
+    peer.sendall(_event_frame("ESZ6"))
+    after = client.poll_event(timeout_ms=500)
+    assert after is not None and after["symbol"] == "ESZ6", "stream still aligned"
+
+
+def test_a_request_that_could_not_be_written_is_not_sent() -> None:
+    client, peer = _bare_client()
+    peer.close()
+    with pytest.raises(GatewayError) as err:
+        client._rpc(pb.Frame(cancel_order=pb.CancelOrderRequest(basket_id="B")))
+    assert err.value.code == "not_sent"
+
+
+def test_unpolled_events_are_bounded_and_the_loss_is_a_gap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import rithmic_gateway.client as client_mod
+
+    monkeypatch.setattr(client_mod, "_MAX_PENDING_EVENTS", 3)
+    client, _peer = _bare_client()
+    for i in range(10):
+        client._queue_event({"type": "last_trade", "symbol": f"T{i}"})
+    pending = list(client._pending)
+    assert len(pending) <= 3, pending
+    gaps = [e for e in pending if e.get("type") == "gap"]
+    kept = [e for e in pending if e.get("type") != "gap"]
+    # Every event is either kept or counted in the gap: none vanish.
+    assert gaps == [{"type": "gap", "stream": "ticker", "skipped": 10 - len(kept)}]
+    assert kept[-1]["symbol"] == "T9", "the newest events are kept"

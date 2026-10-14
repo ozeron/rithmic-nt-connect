@@ -31,32 +31,18 @@ _CONNECT_FIRST = "call connect() first"
 _NOT_CONNECTED = "not_connected"
 
 
-def _recv_exact(sock: socket.socket, n: int) -> bytes:
-    buf = bytearray()
-    try:
-        while len(buf) < n:
-            chunk = sock.recv(n - len(buf))
-            if not chunk:
-                raise GatewayError("eof", "gateway closed connection")
-            buf.extend(chunk)
-    except TimeoutError as exc:
-        if buf:
-            with contextlib.suppress(Exception):
-                sock.close()
-            raise GatewayError(
-                "desync",
-                f"timed out after {len(buf)}/{n} bytes; connection closed",
-            ) from exc
-        raise
-    return bytes(buf)
-
-
 class FramedConnection:
-    """Socket lifecycle + frame I/O; subclasses own handshake, RPC and polling."""
+    """Socket lifecycle + frame I/O; subclasses own handshake, RPC and polling.
+
+    Received bytes go through one buffer: a read that times out (or finds a
+    non-blocking socket empty) part-way through a frame keeps what it got, and
+    the next read completes the frame instead of misreading the stream.
+    """
 
     _sock: socket.socket | None
     _config: GatewayConfig
     _rpc_timeout_sec: float
+    _rx: bytearray | None = None
 
     def _dial(self, path: str) -> None:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -81,24 +67,48 @@ class FramedConnection:
     def _close_sock(self) -> None:
         sock = self._sock
         self._sock = None
+        self._rx = None
         if sock is not None:
             with contextlib.suppress(Exception):
                 sock.close()
 
     def _write_frame(self, frame: pb.Frame) -> None:
+        """Send one frame. A failure here means the request never left: it is
+        reported as ``not_sent`` (the caller may deny it), and the connection
+        is closed."""
         if self._sock is None:
             raise GatewayError(_NOT_CONNECTED, _CONNECT_FIRST)
         payload = frame.SerializeToString()
-        self._sock.sendall(encode_frame(payload))
+        try:
+            self._sock.sendall(encode_frame(payload))
+        except OSError as exc:
+            self._close_sock()
+            raise GatewayError("not_sent", f"request not written: {exc}") from exc
+
+    def _fill(self, n: int) -> bytearray:
+        """Buffer at least ``n`` bytes. Raises ``TimeoutError`` (or
+        ``BlockingIOError``) with whatever arrived kept for the next call."""
+        sock = self._sock
+        if sock is None:
+            raise GatewayError(_NOT_CONNECTED, _CONNECT_FIRST)
+        if self._rx is None:
+            self._rx = bytearray()
+        rx = self._rx
+        while len(rx) < n:
+            chunk = sock.recv(max(n - len(rx), 65536))
+            if not chunk:
+                raise GatewayError("eof", "gateway closed connection")
+            rx.extend(chunk)
+        return rx
 
     def _read_frame(self) -> pb.Frame:
-        if self._sock is None:
-            raise GatewayError(_NOT_CONNECTED, _CONNECT_FIRST)
-        header = _recv_exact(self._sock, 4)
-        (length,) = struct.unpack("!I", header)
+        rx = self._fill(4)
+        (length,) = struct.unpack("!I", bytes(rx[:4]))
         if length > MAX_FRAME_LEN:
             raise GatewayError("frame_too_large", f"{length} bytes")
-        payload = _recv_exact(self._sock, length)
+        rx = self._fill(4 + length)
+        payload = bytes(rx[4 : 4 + length])
+        del rx[: 4 + length]
         frame = pb.Frame()
         frame.ParseFromString(payload)
         return frame

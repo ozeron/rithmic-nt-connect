@@ -2041,6 +2041,7 @@ def test_position_status_reports_skip_unloaded_instruments(
         "MNQU6.RITHMIC": {"instrument_id": "MNQU6.RITHMIC", "quantity": 0},
         "NQU6.RITHMIC": {"instrument_id": "NQU6.RITHMIC", "quantity": 0},
     }
+    _observe_live(client, "MNQU6.RITHMIC", "NQU6.RITHMIC")
     monkeypatch.setattr(client, "_cache", _InstrumentCache({"MNQU6.RITHMIC"}))
     emitted: list[str] = []
     monkeypatch.setattr(
@@ -2063,6 +2064,7 @@ def test_position_status_reports_warn_on_unloaded_nonzero_position(
     client._positions = {
         "NQU6.RITHMIC": {"instrument_id": "NQU6.RITHMIC", "quantity": 2},
     }
+    _observe_live(client, "NQU6.RITHMIC")
     monkeypatch.setattr(client, "_cache", _InstrumentCache(set()))
     warnings: list[str] = []
     monkeypatch.setattr(
@@ -2429,3 +2431,107 @@ def test_matches_instrument_exact_and_legacy_bare() -> None:
     assert not match({"instrument_id": "NQU6-CME.RITHMIC"}, "NQ-CME.RITHMIC", None)
     assert not match({"instrument_id": "NQU6-CME.RITHMIC"}, "NQU6-CBOT.RITHMIC", None)
     assert not match({"instrument_id": "ESH6-CME.RITHMIC"}, "ES-CME.RITHMIC", None)
+
+
+def _observe_live(
+    client: Any, *keys: str, live_since: int = 10, seen: int = 10
+) -> None:
+    """Mark the PnL stream live and ``keys`` as re-observed on it."""
+    client._pnl_live_since_ns = live_since
+    client._position_seen_ns = {key: seen for key in keys}
+    client._unreadable_position_symbols = set()
+
+
+def test_no_position_reports_while_pnl_is_not_live(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty position set is not "flat" until the PnL stream is live."""
+    client = _client()
+    client._positions = {
+        "MNQU6.RITHMIC": {"instrument_id": "MNQU6.RITHMIC", "quantity": 1},
+    }
+    client._pnl_live_since_ns = None
+    client._position_seen_ns = {}
+    client._unreadable_position_symbols = set()
+    monkeypatch.setattr(client, "_cache", _InstrumentCache({"MNQU6.RITHMIC"}))
+    monkeypatch.setattr(
+        client, "_position_report_from_fields", lambda fields, ts_init: "R"
+    )
+    assert asyncio.run(client.generate_position_status_reports(_position_cmd())) == []
+    assert client._positions_known() is False
+
+
+def test_a_row_from_before_the_current_stream_is_not_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _client()
+    client._positions = {
+        "MNQU6.RITHMIC": {"instrument_id": "MNQU6.RITHMIC", "quantity": 1},
+        "NQU6.RITHMIC": {"instrument_id": "NQU6.RITHMIC", "quantity": 2},
+    }
+    _observe_live(client, "MNQU6.RITHMIC", live_since=10, seen=10)
+    client._position_seen_ns["NQU6.RITHMIC"] = 5  # seen on the previous stream
+    monkeypatch.setattr(
+        client, "_cache", _InstrumentCache({"MNQU6.RITHMIC", "NQU6.RITHMIC"})
+    )
+    monkeypatch.setattr(
+        client,
+        "_position_report_from_fields",
+        lambda fields, ts_init: f"R:{fields['instrument_id']}",
+    )
+    reports = asyncio.run(client.generate_position_status_reports(_position_cmd()))
+    assert reports == ["R:MNQU6.RITHMIC"]
+
+
+def test_mass_status_adds_no_flat_reports_while_positions_are_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nautilus_trader.model.identifiers import ClientId, Venue
+
+    captured: dict[str, object] = {}
+
+    def _mass_factory(**kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            ts_init=kwargs.get("ts_init", 2),
+            add_order_reports=lambda reports: None,
+            add_fill_reports=lambda reports: None,
+            add_position_reports=lambda reports: captured.__setitem__(
+                "positions", reports
+            ),
+        )
+
+    monkeypatch.setattr(
+        "rithmic_nt_connect.execution.ExecutionMassStatus", _mass_factory
+    )
+
+    async def _empty(_cmd: object) -> list[object]:
+        return []
+
+    augmented: list[object] = []
+    host: Any = SimpleNamespace(
+        id=ClientId("RITHMIC"),
+        venue=Venue("RITHMIC"),
+        account_id=AccountId("RITHMIC-ACC1"),
+        _log=_Log(),
+        _clock=SimpleNamespace(
+            timestamp_ns=lambda: 2,
+            utc_now=lambda: __import__("pandas").Timestamp(0, tz="UTC"),
+        ),
+        reconciliation_active=False,
+        generate_order_status_reports=_empty,
+        generate_fill_reports=_empty,
+        generate_position_status_reports=_empty,
+        _apply_mass_status_report_window=(
+            RithmicExecutionClient._apply_mass_status_report_window
+        ),
+        _positions_known=lambda: False,
+        _augment_soft_mass_flat_for_cache_opens=lambda positions, ts_init: (
+            augmented.append(True) or ["FABRICATED-FLAT"]
+        ),
+    )
+    mass = asyncio.run(
+        RithmicExecutionClient.generate_mass_status(host, lookback_mins=None)
+    )
+    assert mass is not None
+    assert augmented == [], "no flat reports invented for unknown positions"
+    assert captured["positions"] == []

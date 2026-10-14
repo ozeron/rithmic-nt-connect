@@ -188,6 +188,13 @@ fn kind_from_notify(
     rithmic_exec::kind_from_notify(source, notify_type_name, status, text)
 }
 
+/// The kind of an order-book message by its venue `update_type` (`"snapshot"`,
+/// `"solo"`, ...), or `None` for a value outside the venue's closed set.
+#[pyfunction]
+fn book_update_kind(update_type: i32) -> Option<&'static str> {
+    rithmic_exec::book_update_kind(update_type)
+}
+
 /// Fill identity parts arrive as text: the printed form of a number is part of
 /// the identity, so the caller decides it.
 #[pyfunction]
@@ -434,6 +441,7 @@ pub(super) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCommissionTable>()?;
     m.add_class::<PySeenKeyCache>()?;
     m.add_function(wrap_pyfunction!(kind_from_notify, m)?)?;
+    m.add_function(wrap_pyfunction!(book_update_kind, m)?)?;
     m.add_function(wrap_pyfunction!(fill_trade_id, m)?)?;
     m.add_function(wrap_pyfunction!(fill_dedup_key, m)?)?;
     m.add_function(wrap_pyfunction!(instrument_id_from_symbol, m)?)?;

@@ -250,3 +250,30 @@ def test_failing_unsubscribe_does_not_break_detach() -> None:
         await rig.bridge.detach()
 
     asyncio.run(_run())
+
+
+def test_down_and_failed_from_the_transport_thread_run_on_the_loop() -> None:
+    """Handlers touch client state, so they run on the client's loop; only the
+    thread-safe latch runs at once on the transport thread."""
+
+    async def _run() -> None:
+        loop_thread = threading.get_ident()
+        rig = _Rig(asyncio.get_running_loop())
+        latched: list[int] = []
+        handler_threads: list[int] = []
+        rig.bridge._latch_now = lambda: latched.append(threading.get_ident())
+        rig.bridge._on_down = lambda e: handler_threads.append(threading.get_ident())
+        rig.bridge._on_failed = lambda e: handler_threads.append(threading.get_ident())
+        failed = RecoveryFailed(gen=2, attempts=3, cause=None)
+        for event in (_down(), failed):
+            worker = threading.Thread(target=rig.bridge.on_event, args=(event,))
+            worker.start()
+            await asyncio.to_thread(worker.join)
+        assert len(latched) == 2 and loop_thread not in latched, "latched at once"
+        for _ in range(50):
+            if len(handler_threads) == 2:
+                break
+            await asyncio.sleep(0.01)
+        assert handler_threads == [loop_thread, loop_thread]
+
+    asyncio.run(_run())

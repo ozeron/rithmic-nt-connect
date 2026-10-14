@@ -10,7 +10,7 @@ ORDER_BOOK_SUMMARY = {
     "type": "order_book",
     "symbol": "NQU6",
     "exchange": "CME",
-    "update_type": 1,
+    "update_type": 3,
     "bid_price": [21012.0, 21011.75, 21011.5],
     "bid_size": [2, 4, 6],
     "ask_price": [21012.25, 21012.5],

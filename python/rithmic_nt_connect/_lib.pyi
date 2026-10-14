@@ -46,6 +46,7 @@ def exposure_complete(
     pnl_ts_ns: int | None,
     drain_ts_ns: int | None,
 ) -> bool: ...
+def book_update_kind(update_type: int) -> str | None: ...
 def kind_from_notify(
     source: str,
     notify_type_name: str,

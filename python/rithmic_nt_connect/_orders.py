@@ -351,6 +351,14 @@ def _fill_parts(fields: Mapping[str, Any]) -> tuple[str | None, str, str, str, s
     )
 
 
+def fill_identity_ts(fields: Mapping[str, Any]) -> int:
+    """The time stamp that enters a fill's identity: the venue's own (0 when it
+    sent none), never the adapter clock, so a fill seen live and again in recon
+    or after a restart keys the same."""
+    raw = fields.get("ts_event")
+    return int(raw) if raw else 0
+
+
 def trade_id_from_fill_fields(fields: Mapping[str, Any], ts_event: int) -> str:
     fill_id, basket, exch, size, px = _fill_parts(fields)
     return _lib.fill_trade_id(fill_id, basket, exch, size, px, ts_event)

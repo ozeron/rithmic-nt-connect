@@ -355,3 +355,28 @@ def test_client_delegate_lap42_accepted(
         5,
     )
     assert bool(accepted) is emits
+
+
+def test_a_live_fill_without_id_or_time_has_the_identity_recon_computes() -> None:
+    """Live and recon key an untagged, untimed fill the same way (no adapter
+    clock in the identity), so recon does not emit it a second time."""
+    built: list[int] = []
+    host = _host(
+        _clock=SimpleNamespace(timestamp_ns=lambda: 987_654_321),
+        _fill_report_from_fields=lambda fields, ts_event: (
+            built.append(ts_event) or object()
+        ),
+    )
+    intake = VenueNotificationIntake(host)
+    fields = {
+        "kind": "filled",
+        "basket_id": "B1",
+        "exchange_order_id": "X1",
+        "account_id": "ACC1",
+        "instrument_id": "NQU6-CME.RITHMIC",
+        "fill_size": 1,
+        "fill_price": 21000.25,
+    }
+    intake.publish_untracked_fill(fields, 987_654_321)
+    assert host._seen_fill_keys.has_seen(fill_dedup_key(fields, ts_event=0))
+    assert built == [0], "the report's TradeId uses the venue's (absent) time"

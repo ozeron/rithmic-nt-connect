@@ -57,7 +57,7 @@ ORDER_BOOK_FIXTURE = {
     "type": "order_book",
     "symbol": "NQU6",
     "exchange": "CME",
-    "update_type": 1,
+    "update_type": 3,
     "bid_price": [21012.0, 21011.75],
     "bid_size": [3, 5],
     "ask_price": [21012.25, 21012.5],

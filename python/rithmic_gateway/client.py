@@ -34,6 +34,11 @@ _NON_MD_EVENT_TYPES = _ORDER_EVENT_TYPES | _PNL_EVENT_TYPES | _HISTORY_EVENT_TYP
 
 _CAPABILITY_DENIED_WIRE_CODES = frozenset({"history_denied_live_md"})
 
+# Events read while waiting for something else wait here for their poll. The
+# queue is bounded: past it the oldest are dropped and reported as a gap on
+# their stream, never silently.
+_MAX_PENDING_EVENTS = 100_000
+
 
 def _normalize_error_code(code: str) -> str:
     if code in _CAPABILITY_DENIED_WIRE_CODES:
@@ -62,6 +67,17 @@ def _is_history_event(evt: dict[str, Any]) -> bool:
 
 def _is_pnl_event(evt: dict[str, Any]) -> bool:
     return evt.get("type") in _PNL_EVENT_TYPES or _gap_stream(evt) == "pnl"
+
+
+def _stream_of(evt: dict[str, Any]) -> str:
+    """The stream an event is polled from (the gap stream for a lost event)."""
+    if _is_order_event(evt):
+        return "order"
+    if _is_pnl_event(evt):
+        return "pnl"
+    if _is_history_event(evt):
+        return "history"
+    return "ticker"
 
 
 def _is_order_event(evt: dict[str, Any]) -> bool:
@@ -792,7 +808,7 @@ class GatewayClient(FramedConnection):
                 resp = self._read_frame()
                 which = resp.WhichOneof("body")
                 if which == "event":
-                    self._pending.append(_event_to_dict(resp.event))
+                    self._queue_event(_event_to_dict(resp.event))
                     continue
                 if which == "error":
                     if resp.request_id != rid:
@@ -828,6 +844,23 @@ class GatewayClient(FramedConnection):
                 "timeout", f"RPC {rid} timed out after {effective}s"
             ) from exc
 
+    def _queue_event(self, evt: dict[str, Any]) -> None:
+        """Queue an event for a later poll, dropping the oldest past the bound."""
+        pending = self._pending
+        while len(pending) >= _MAX_PENDING_EVENTS:
+            dropped = pending.popleft()
+            if dropped.get("type") == "gap":
+                pending.append(dropped)  # keep loss reports; drop data instead
+                continue
+            stream = _stream_of(dropped)
+            for queued in pending:
+                if queued.get("type") == "gap" and queued.get("stream") == stream:
+                    queued["skipped"] = int(queued["skipped"]) + 1
+                    break
+            else:
+                pending.append({"type": "gap", "stream": stream, "skipped": 1})
+        pending.append(evt)
+
     def _poll_filtered(
         self,
         timeout_ms: int,
@@ -858,7 +891,7 @@ class GatewayClient(FramedConnection):
                     evt = _event_to_dict(frame.event)
                     if predicate(evt):
                         return evt
-                    self._pending.append(evt)
+                    self._queue_event(evt)
                     if not timeout:
                         return None
                     continue

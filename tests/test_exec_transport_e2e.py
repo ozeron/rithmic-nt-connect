@@ -888,6 +888,9 @@ def test_restore_is_skipped_when_trading_is_disabled(
     asyncio.run(_run())
     assert "subscribe_order_updates" not in session.calls
     assert client._order_plant.state is OrderPlantState.LATCHED
+    # Read-only clients still need their PnL stream back after a re-dial: the
+    # new connection holds no intent until it is re-issued.
+    assert "subscribe_pnl" in session.calls
 
 
 def test_exec_restores_once_per_generation(
@@ -2011,10 +2014,13 @@ def test_position_query_failure_emits_no_fills(
     client = _trading_client()
 
     class _BoomPositions(dict[str, dict[str, object]]):
-        def values(self):  # type: ignore[override]
+        def items(self):  # type: ignore[override]
             raise RuntimeError("position query failed")
 
     client._positions = _BoomPositions()
+    client._pnl_live_since_ns = 1
+    client._position_seen_ns = {}
+    client._unreadable_position_symbols = set()
     filled: list[tuple[Any, ...]] = []
     monkeypatch.setattr(
         client, "generate_order_filled", lambda *a, **k: filled.append(a)
@@ -2324,6 +2330,10 @@ def test_nonzero_position_visible_before_trading_armed(
             "avg_px_open": 21000.0,
         }
     }
+    # Seen on the live PnL stream (the read-only startup case).
+    client._pnl_live_since_ns = 1
+    client._position_seen_ns = {"NQ": 1}
+    client._unreadable_position_symbols = set()
     monkeypatch.setattr(
         client._cache,
         "instrument",
@@ -2432,3 +2442,99 @@ def test_oco_replay(monkeypatch: pytest.MonkeyPatch, winner: str) -> None:
     assert len(gens["canceled"]) == 1
     assert gens["accepted"] == []
     assert not any("could not be built" in m for m in log.messages)
+
+
+def test_account_lookup_never_runs_on_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In gateway mode ``resolved_account`` is a socket round trip: it must run
+    off the asyncio loop, and synchronous helpers read a cached answer."""
+    import threading
+
+    calls: list[int] = []
+
+    class _AccountSession(_ConnectSession):
+        def resolved_account(self) -> dict[str, object] | None:
+            calls.append(threading.get_ident())
+            return {"account_id": "ACC1", "fcm_id": "F", "ib_id": "I"}
+
+    session = _AccountSession(fail_load_orders=False)
+    client = _connect_client(session, monkeypatch)
+    loop_thread: list[int] = []
+
+    async def run() -> str | None:
+        loop_thread.append(threading.get_ident())
+        await client._connect()
+        return client._account_raw()
+
+    raw = asyncio.run(run())
+    assert calls, "the account was resolved"
+    assert loop_thread[0] not in calls, "resolved_account ran on the event loop"
+    assert raw == "ACC1"
+
+
+def test_an_order_gap_rearm_needs_a_fresh_pnl_observation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A PnL observation from before the gap is not proof the stream is alive
+    now: the gap recovery waits for a new one (and stays latched without it)."""
+    client = _trading_client(plant_state=OrderPlantState.LIVE)
+    client._pnl_connected = True
+    client._pnl_snapshot_observed.set()  # observed before the gap
+    client._REARM_PNL_SNAPSHOT_TIMEOUT_S = 0.05
+
+    async def _no_orders(*_a: Any) -> list[Any]:
+        return []
+
+    monkeypatch.setattr(client, "_load_orders_events", _no_orders)
+    monkeypatch.setattr(client, "_apply_drain_rows", lambda rows: None)
+    monkeypatch.setattr(client, "_seed_account_if_needed", lambda *a, **k: None)
+    with pytest.raises(VenueQueryUnavailable):
+        asyncio.run(client._recover_order_gap())
+    assert not client._order_plant.allow_submit()
+
+
+def test_a_pnl_resync_resets_the_snapshot_barrier() -> None:
+    class _Pnl(WireSessionStub):
+        def disconnect_pnl_plant(self) -> None:
+            pass  # Stub: the resync's teardown is not under test.
+
+        def subscribe_pnl(self) -> None:
+            pass  # Stub: the resubscribe always succeeds here.
+
+    client = _trading_client(_Pnl())
+    client._pnl_live_since_ns = 1
+    client._unreadable_position_symbols = set()
+    client._pnl_snapshot_observed.set()
+    asyncio.run(client._resync_pnl_subscription())
+    assert not client._pnl_snapshot_observed.is_set()
+
+
+def test_a_failed_connect_leaves_no_poller_or_listener(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The order subscribe fails after the PnL poller started: nothing from the
+    attempt may keep running (a second connect would otherwise add a second
+    PnL poller next to the first)."""
+
+    class _OrderSubscribeFails(_ConnectSession):
+        def subscribe_order_updates(self) -> None:
+            raise RuntimeError("order plant refused")
+
+    session = _OrderSubscribeFails(fail_load_orders=False)
+    client = _connect_client(session, monkeypatch)
+    detached: list[int] = []
+
+    async def _detach() -> None:
+        detached.append(1)
+
+    monkeypatch.setattr(client._recovery, "detach", _detach)
+
+    async def run() -> None:
+        with pytest.raises(RuntimeError, match="order plant refused"):
+            await client._connect()
+        assert client._poll_task is None or client._poll_task.done()
+        assert getattr(client, "_order_poll_task", None) is None
+
+    asyncio.run(run())
+    assert detached == [1]
