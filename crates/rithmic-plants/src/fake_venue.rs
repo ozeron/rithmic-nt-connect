@@ -57,6 +57,7 @@ pub mod template {
     pub const SHOW_ORDERS: i32 = 320;
     pub const SHOW_ORDER_HISTORY_SUMMARY: i32 = 324;
     pub const BRACKET_ORDER: i32 = 330;
+    pub const SHOW_FILL_HISTORY: i32 = 3512;
     pub const UPDATE_TARGET_BRACKET_LEVEL: i32 = 332;
     pub const UPDATE_STOP_BRACKET_LEVEL: i32 = 334;
     pub const SUBSCRIBE_BRACKET_UPDATES: i32 = 336;
@@ -163,6 +164,39 @@ impl Reply {
         put_string(&mut end, RP_CODE, "0");
         frames.push(end);
         Self::frames(frames)
+    }
+
+    /// A replay whose rows arrive and whose last frame then reports `rp_code`
+    /// (a venue error part-way through a reply).
+    pub fn rows_then<M: rithmic_rs::prost::Message>(
+        response_template: i32,
+        rows: &[M],
+        rp_code: &[&str],
+    ) -> Self {
+        let mut reply = Self::rows(response_template, rows);
+        let mut end = Vec::new();
+        put_int32(&mut end, TEMPLATE_ID, response_template);
+        for code in rp_code {
+            put_string(&mut end, RP_CODE, code);
+        }
+        *reply
+            .frames
+            .last_mut()
+            .expect("rows end with a final frame") = end;
+        reply
+    }
+
+    /// An ok answer to `request_template` followed by replayed messages (how
+    /// `show_orders` / the order-history summary deliver their rows).
+    pub fn ok_then_replay<M: rithmic_rs::prost::Message>(
+        request_template: i32,
+        replay: &[M],
+    ) -> Self {
+        let mut reply = Self::ok(request_template);
+        reply
+            .frames
+            .extend(replay.iter().map(|m| m.encode_to_vec()));
+        reply
     }
 
     /// Raw frames, each completed with the request's `user_msg`.
@@ -649,6 +683,27 @@ pub mod frames {
         m.day_pnl = Some(day_pnl.into());
         m.ssboe = Some(1_790_000_000);
         m.usecs = Some(0);
+        m
+    }
+
+    /// One fill-history row.
+    pub fn fill_row(
+        fill_id: &str,
+        basket_id: &str,
+        price: f64,
+        size: u64,
+    ) -> rti::ResponseShowFillHistory {
+        let mut m = rti::ResponseShowFillHistory::default();
+        m.template_id = super::template::SHOW_FILL_HISTORY + 1;
+        m.fill_id = Some(fill_id.into());
+        m.basket_id = Some(basket_id.into());
+        m.account_id = Some("ACCOUNT".into());
+        m.symbol = Some("ESZ6".into());
+        m.exchange = Some("CME".into());
+        m.fill_price = Some(price);
+        m.fill_size = Some(size);
+        m.fill_date = Some("20261014".into());
+        m.fill_time = Some("10:00:00".into());
         m
     }
 

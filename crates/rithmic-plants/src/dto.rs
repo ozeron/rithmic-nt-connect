@@ -1,7 +1,8 @@
 //! Venue DTOs converted from rithmic-rs plant messages.
 
+use rithmic_exec::{exchange_ts_ns, venue_ts_ns};
 use rithmic_rs::rti::messages::RithmicMessage;
-use rithmic_rs::{rithmic_to_unix_nanos, RithmicResponse};
+use rithmic_rs::RithmicResponse;
 
 /// Events a plant stream dropped because its consumer lagged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -461,8 +462,7 @@ pub struct HistoryBarDto {
 }
 
 fn ts_ns(ssboe: Option<i32>, usecs: Option<i32>) -> Option<u64> {
-    let ssboe = ssboe?;
-    Some(rithmic_to_unix_nanos(ssboe, usecs.unwrap_or(0)))
+    venue_ts_ns(ssboe, usecs)
 }
 
 fn order_kind(
@@ -486,7 +486,9 @@ impl From<&RithmicResponse> for PlantEvent {
                 aggressor: t.aggressor,
                 ssboe: t.ssboe,
                 usecs: t.usecs,
-                ts_event_ns: ts_ns(t.ssboe, t.usecs),
+                // The exchange's own trade time when sent; Rithmic's otherwise.
+                ts_event_ns: exchange_ts_ns(t.source_ssboe, t.source_usecs, t.source_nsecs)
+                    .or_else(|| ts_ns(t.ssboe, t.usecs)),
                 is_snapshot: t.is_snapshot,
             }),
             RithmicMessage::BestBidOffer(b) => Self::Bbo(BboDto {
@@ -794,7 +796,7 @@ impl HistoryBarDto {
             num_trades,
             bid_volume,
             ask_volume,
-            ts_event_ns: Some(rithmic_to_unix_nanos(ssboe, 0)),
+            ts_event_ns: venue_ts_ns(Some(ssboe), Some(0)),
         })
     }
 

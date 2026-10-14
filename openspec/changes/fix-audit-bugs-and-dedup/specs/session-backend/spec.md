@@ -12,7 +12,7 @@ A place, cancel or modify on a live order plant SHALL obtain its order handle wi
 - **THEN** it SHALL return the cached account without waiting for the reconnect
 
 ### Requirement: A failed subscribe tears down only what it opened
-A failed order-updates or bracket-updates subscribe SHALL disconnect the order plant only if that subscribe call opened it, and only after in-flight order operations have finished.
+A failed order-updates or bracket-updates subscribe SHALL disconnect the order plant only if that subscribe call opened it. The handle of a plant opened by the call SHALL NOT be published to order operations before the call succeeds, so no order operation can be in flight on a plant being rolled back.
 
 #### Scenario: Re-subscribe on a live shared plant fails
 - **WHEN** `subscribe_order_updates` fails on an order plant that was already connected

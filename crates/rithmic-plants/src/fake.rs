@@ -75,6 +75,9 @@ struct State {
     /// A `disconnect` is in progress (held for its scripted delay): order
     /// operations started now fail as not sent, as on `DirectSession`.
     disconnecting: bool,
+    /// The order plant was disconnected on request; commands are not sent until
+    /// it is ensured or subscribed again (as on `DirectSession`).
+    order_closed: bool,
 }
 
 /// Scripted in-memory plant session.
@@ -124,10 +127,19 @@ impl FakeSession {
     /// disconnect check, then the order plant comes up (as `command_handle` does).
     fn order_op(&self, method: &str, detail: &str) -> Result<()> {
         self.require_trading(method)?;
-        if self.lock().disconnecting {
-            return Err(Error::NotSent(
-                "session disconnect in progress; order operation rejected".into(),
-            ));
+        {
+            let state = self.lock();
+            if state.disconnecting {
+                return Err(Error::NotSent(
+                    "session disconnect in progress; order operation rejected".into(),
+                ));
+            }
+            if state.order_closed {
+                return Err(Error::NotSent(
+                    "order plant was disconnected; ensure it (or subscribe to order updates) first"
+                        .into(),
+                ));
+            }
         }
         self.enter_plant(method, detail, Stream::Order)
     }
@@ -262,6 +274,7 @@ impl Session for FakeSession {
     async fn connect(&self) -> Result<()> {
         let mut state = self.enter("connect", "")?;
         state.connected = true;
+        state.order_closed = false;
         state.dropped = false;
         self.attach(&mut state, Stream::Ticker);
         self.attach(&mut state, Stream::History);
@@ -298,6 +311,7 @@ impl Session for FakeSession {
         self.require_trading("ensure_order_plant")?;
         let mut state = self.enter("ensure_order_plant", "")?;
         state.order_plant = true;
+        state.order_closed = false;
         self.attach(&mut state, Stream::Order);
         Ok(())
     }
@@ -312,6 +326,7 @@ impl Session for FakeSession {
     async fn disconnect_order_plant(&self) -> Result<()> {
         let mut state = self.enter("disconnect_order_plant", "")?;
         state.order_plant = false;
+        state.order_closed = true;
         self.detach(&mut state, Stream::Order);
         Ok(())
     }
@@ -388,12 +403,14 @@ impl Session for FakeSession {
     async fn subscribe_order_updates(&self) -> Result<()> {
         self.require_trading("subscribe_order_updates")?;
         self.enter_plant("subscribe_order_updates", "", Stream::Order)?;
+        self.lock().order_closed = false;
         Ok(())
     }
 
     async fn subscribe_bracket_updates(&self) -> Result<()> {
         self.require_trading("subscribe_bracket_updates")?;
         self.enter_plant("subscribe_bracket_updates", "", Stream::Order)?;
+        self.lock().order_closed = false;
         Ok(())
     }
 

@@ -21,7 +21,9 @@ pub use drain::{
 };
 pub use exposure::{exposure_complete, matches_root, product_root, signed_net, PositionRow};
 pub use fills::{dedup_key, trade_id, FillParts};
-pub use ident::{event_ts_ns, instrument_id, split_instrument_id, IdentError};
+pub use ident::{
+    event_ts_ns, exchange_ts_ns, instrument_id, split_instrument_id, venue_ts_ns, IdentError,
+};
 pub use inventory::{
     flatten_side, order_is_gone, pnl_live, position_change, side_from_txn, PositionChange,
     StatusClass,

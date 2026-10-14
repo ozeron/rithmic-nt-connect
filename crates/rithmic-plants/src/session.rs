@@ -4,6 +4,7 @@
 //! The order plant stays lazy via [`RithmicSession::ensure_order_plant`].
 
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -26,9 +27,9 @@ use crate::dto::{
 };
 use crate::error::{Error, Result};
 use crate::history::{
-    bar_replay_index, bar_slice_secs, dedup_bars, dedup_ticks, history_ready_probe_enabled,
+    bar_dedup_key, bar_replay_index, bar_slice_secs, history_ready_probe_enabled,
     history_ready_probe_root, load_sliced, looks_like_listed_contract, parse_time_bar_type,
-    DEFAULT_TICK_SLICE_SECS,
+    tick_dedup_key, DEFAULT_TICK_SLICE_SECS,
 };
 use crate::plants::PlantSet;
 use crate::streams::{Stream, StreamGuard, StreamHub};
@@ -125,11 +126,21 @@ fn forward<R: Feed + 'static>(
     let task = tokio::spawn(async move {
         loop {
             match rx.next_item().await {
-                Ok(item) => match to_event(item) {
-                    Ok(Some(event)) => task_tx.event(event).await,
-                    Ok(None) => {}
-                    Err(Error::Rithmic(text)) => task_tx.fail(text),
-                    Err(other) => task_tx.fail(other.to_string()),
+                // A panic in the conversion (a venue value it cannot handle)
+                // must not kill the task silently: the lane would stay up with
+                // no producer and its consumers would wait forever.
+                Ok(item) => match std::panic::catch_unwind(AssertUnwindSafe(|| to_event(item))) {
+                    Ok(Ok(Some(event))) => task_tx.event(event).await,
+                    Ok(Ok(None)) => {}
+                    Ok(Err(Error::Rithmic(text))) => task_tx.fail(text),
+                    Ok(Err(other)) => task_tx.fail(other.to_string()),
+                    Err(_) => {
+                        task_tx.fail(format!(
+                            "{} event conversion panicked; plant stream stopped",
+                            stream.plant()
+                        ));
+                        break;
+                    }
                 },
                 Err(RecvError::Lagged(skipped)) => task_tx.gap(skipped).await,
                 Err(RecvError::Closed) => {
@@ -154,6 +165,45 @@ pub struct RithmicSession {
     resolved_account: Option<RithmicAccount>,
     /// Event lanes shared with consumers; they outlive plant reconnects.
     streams: Arc<StreamHub>,
+    /// Bumped by every `connect` / `disconnect`, so a ticker reconnect run
+    /// without the session lock can tell the session moved on underneath it.
+    epoch: u64,
+}
+
+/// A ticker reconnect prepared under the session lock ([`RithmicSession::begin_ticker_reset`])
+/// and run without it ([`TickerReset::reconnect`]), so order calls and account
+/// lookups never wait behind the venue round trips.
+pub struct TickerReset {
+    old: Option<TickerPlant>,
+    epoch: u64,
+    /// `None` when the session does not want a ticker (nothing to reconnect).
+    connect: Option<(RithmicConfig, Arc<StreamHub>)>,
+}
+
+/// The outcome of [`TickerReset::reconnect`], installed by
+/// [`RithmicSession::finish_ticker_reset`].
+pub struct ReconnectedTicker {
+    plant: Option<TickerPlant>,
+    epoch: u64,
+}
+
+impl TickerReset {
+    /// Log the old ticker out and connect a new one. A failed reconnect leaves
+    /// the ticker down (the data client's resync retries); the sibling plants
+    /// are never touched.
+    pub async fn reconnect(self) -> Result<ReconnectedTicker> {
+        if let Some(old) = self.old {
+            let _ = old.handle.disconnect().await;
+        }
+        let plant = match self.connect {
+            Some((rc, hub)) => Some(connect_ticker(&rc, &hub).await?),
+            None => None,
+        };
+        Ok(ReconnectedTicker {
+            plant,
+            epoch: self.epoch,
+        })
+    }
 }
 
 impl std::fmt::Debug for RithmicSession {
@@ -284,7 +334,7 @@ impl Handles {
                 load_tick_slice(handle, symbol, exchange, slice_start, slice_end).await
             },
             |t| t.ts_event_ns.unwrap_or(0),
-            dedup_ticks,
+            tick_dedup_key,
         )
         .await
     }
@@ -317,7 +367,7 @@ impl Handles {
                 .await
             },
             |b| b.ts_event_ns.unwrap_or(0),
-            dedup_bars,
+            bar_dedup_key,
         )
         .await
     }
@@ -433,6 +483,7 @@ impl RithmicSession {
             order: None,
             resolved_account,
             streams: StreamHub::new(),
+            epoch: 0,
         }
     }
 
@@ -482,9 +533,13 @@ impl RithmicSession {
             }
         }
         if self.plants.history && self.history.is_none() {
-            match connect_history(&rc, &self.streams).await {
-                Ok(plant) => self.history = Some(plant),
-                Err(err) => return Err(err),
+            self.history = Some(connect_history(&rc, &self.streams).await?);
+            // Same bar as `connect`: logged in is not ready to serve loads (RC4).
+            if let Err(err) = self.prove_history_ready().await {
+                if let Some(history) = self.history.take() {
+                    let _ = history.handle.disconnect().await;
+                }
+                return Err(err);
             }
         }
         if self.plants.pnl && self.pnl.is_none() && self.config.account().is_some() {
@@ -510,6 +565,7 @@ impl RithmicSession {
         if self.ticker.is_some() || self.history.is_some() || self.pnl.is_some() {
             return Err(Error::AlreadyConnected);
         }
+        self.epoch += 1;
 
         let rc = self.config.to_rithmic_config()?;
         let hub = Arc::clone(&self.streams);
@@ -716,6 +772,7 @@ impl RithmicSession {
 
     /// Gracefully disconnect connected plants (order first, then PnL, history, ticker).
     pub async fn disconnect(&mut self) -> Result<()> {
+        self.epoch += 1;
         if let Some(order) = self.order.take() {
             let _ = order.handle.disconnect().await;
         }
@@ -733,6 +790,7 @@ impl RithmicSession {
 
     /// Subscribe to order plant notifications (Rithmic + exchange).
     pub async fn subscribe_order_updates(&mut self) -> Result<()> {
+        let opened_here = self.order.is_none();
         self.ensure_order_plant().await?;
         let result = async {
             let handle = self.order_handle()?;
@@ -742,7 +800,7 @@ impl RithmicSession {
             )
         }
         .await;
-        rollback_order_plant_subscribe(self, result, true).await
+        rollback_order_plant_subscribe(self, result, opened_here).await
     }
 
     /// Disconnect only the order plant (leaves ticker/history/PnL connected).
@@ -761,24 +819,36 @@ impl RithmicSession {
         Ok(())
     }
 
-    /// Disconnect + reconnect only the ticker plant (leaves history/PnL/order
-    /// connected).
+    /// Start a ticker-only reconnect (leaves history/PnL/order connected).
     ///
     /// The data client's channel-error resync needs a fresh ticker receiver,
     /// but the exec client shares this session, so the PnL/order plants must
-    /// not be disturbed. A reconnect failure leaves the ticker disconnected
-    /// (the poll loop keeps retrying the resync) and never tears down the
-    /// sibling plants.
-    pub async fn reset_ticker_plant(&mut self) -> Result<()> {
-        if let Some(ticker) = self.ticker.take() {
-            let _ = ticker.handle.disconnect().await;
+    /// not be disturbed. The old ticker is taken out here; the venue round
+    /// trips run in [`TickerReset::reconnect`] without the session lock.
+    pub fn begin_ticker_reset(&mut self) -> Result<TickerReset> {
+        let connect = if self.plants.ticker {
+            Some((self.config.to_rithmic_config()?, Arc::clone(&self.streams)))
+        } else {
+            None
+        };
+        Ok(TickerReset {
+            old: self.ticker.take(),
+            epoch: self.epoch,
+            connect,
+        })
+    }
+
+    /// Install a reconnected ticker. If the session connected or disconnected
+    /// while the reset ran, the new plant belongs to nobody: it is logged out.
+    pub async fn finish_ticker_reset(&mut self, done: ReconnectedTicker) {
+        let Some(plant) = done.plant else {
+            return;
+        };
+        if done.epoch == self.epoch && self.ticker.is_none() {
+            self.ticker = Some(plant);
+        } else {
+            let _ = plant.handle.disconnect().await;
         }
-        if !self.plants.ticker {
-            return Ok(());
-        }
-        let rc = self.config.to_rithmic_config()?;
-        self.ticker = Some(connect_ticker(&rc, &self.streams.clone()).await?);
-        Ok(())
     }
 
     /// Subscribe to bracket update notifications (required for plant brackets).
@@ -807,6 +877,11 @@ impl RithmicSession {
             .as_ref()
             .map(|o| &o.handle)
             .ok_or(Error::NotConnected { plant: "order" })
+    }
+
+    /// The order handle if the order plant is up (no connect attempt).
+    pub fn current_order_handle(&self) -> Option<RithmicOrderPlantHandle> {
+        self.order.as_ref().map(|o| o.handle.clone())
     }
 
     /// Clone a command handle for order I/O outside the session lock.
@@ -1170,8 +1245,11 @@ where
 }
 
 /// On subscribe failure, disconnect the order plant when `disconnect_on_err`.
-/// Order-updates always pass `true`. Brackets pass `opened_here` so a failure
-/// on an already-live plant does not tear down a shared order stream.
+/// Both subscribes pass `opened_here`: a plant this call opened is closed again,
+/// while a failure on an already-live plant leaves the shared order stream, its
+/// other subscription and in-flight orders alone. No order operation can be in
+/// flight on a plant opened by this call: its handle is published only after
+/// the call returns.
 async fn rollback_order_plant_subscribe(
     session: &mut RithmicSession,
     result: Result<()>,
@@ -1247,11 +1325,19 @@ pub async fn load_fill_history_on(
             Some(FILL_HISTORY_MAX_RECORDS as i32),
         )
         .await?;
+    // Recon must not act on a reply the venue abandoned part-way.
     let rows = collect_history_rows(
         responses,
         "load_fill_history",
         FillHistoryDto::from_response,
-    )?;
+    )
+    .map_err(|e| {
+        if is_partial_reply(&e) {
+            Error::ReconciliationUnavailable(e.to_string())
+        } else {
+            e
+        }
+    })?;
     check_fill_history_cap(rows.len())?;
     Ok(rows)
 }
@@ -1441,8 +1527,8 @@ async fn load_tick_slice(
             end_time_sec,
         )
         .await?;
-    // Multi-response replay: keep valid rows; if nothing parsed and the plant
-    // reported an error on any frame, surface that instead of Ok([]).
+    // Multi-response replay: an error frame anywhere fails the slice, so the
+    // sliced loader retries or fails it instead of leaving a silent gap.
     collect_history_rows(responses, "load_ticks", HistoryTickDto::from_response)
 }
 
@@ -1470,6 +1556,10 @@ async fn load_bar_slice(
     collect_history_rows(responses, "load_time_bars", HistoryBarDto::from_response)
 }
 
+/// Rows of a multi-frame reply. Any error frame fails the whole reply: an error
+/// after some rows means the venue stopped part-way, and returning the rows that
+/// did arrive would pass a partial answer off as complete. The partial case says
+/// so in its text (`partial reply`) so callers can tell it apart.
 fn collect_history_rows<T>(
     responses: Vec<rithmic_rs::RithmicResponse>,
     ctx: &str,
@@ -1488,12 +1578,21 @@ fn collect_history_rows<T>(
             rows.push(row);
         }
     }
-    if rows.is_empty() {
-        if let Some(err) = first_err {
-            return Err(Error::Rithmic(format!("{ctx}: {err}")));
-        }
+    match first_err {
+        None => Ok(rows),
+        Some(err) if rows.is_empty() => Err(Error::Rithmic(format!("{ctx}: {err}"))),
+        Some(err) => Err(Error::Rithmic(format!(
+            "{ctx}: {PARTIAL_REPLY} after {} rows: {err}",
+            rows.len()
+        ))),
     }
-    Ok(rows)
+}
+
+/// Marks a reply that failed after some rows (see [`collect_history_rows`]).
+const PARTIAL_REPLY: &str = "partial reply";
+
+fn is_partial_reply(err: &Error) -> bool {
+    matches!(err, Error::Rithmic(text) if text.contains(PARTIAL_REPLY))
 }
 
 fn update_bar_type(bar_type: i32) -> Result<request_time_bar_update::BarType> {
@@ -1899,6 +1998,35 @@ mod forward_tests {
             .unwrap_err();
         assert!(
             matches!(&err, Error::Rithmic(m) if m == "connection reset"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_panicking_conversion_fails_the_lane_instead_of_stalling_it() {
+        fn panicking(seq: i32) -> Result<Option<PlantEvent>> {
+            if seq < 0 {
+                panic!("bad venue timestamp");
+            }
+            to_event(seq)
+        }
+        let hub = StreamHub::new();
+        let (tx, rx) = tokio::sync::broadcast::channel(8);
+        let _guard = forward(&hub, Stream::Order, rx, panicking);
+        tx.send(1).unwrap();
+        tx.send(-1).unwrap();
+        tx.send(2).unwrap();
+        let first = hub
+            .next_events(Stream::Order, 8, Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(first.len(), 1);
+        let err = hub
+            .next_events(Stream::Order, 8, Duration::from_secs(2))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, Error::Rithmic(m) if m.contains("panicked")),
             "{err}"
         );
     }

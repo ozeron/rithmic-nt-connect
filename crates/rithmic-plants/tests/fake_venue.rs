@@ -225,3 +225,227 @@ async fn partial_connect_logs_out_what_already_logged_in() {
     );
     venue.wait_connections(Plant::Ticker, 0).await;
 }
+
+/// A ticker reconnect whose login takes `delay`, started in the background.
+fn slow_ticker_reset(
+    venue: &FakeVenue,
+    session: &std::sync::Arc<DirectSession>,
+    delay: Duration,
+) -> tokio::task::JoinHandle<rithmic_plants::Result<()>> {
+    venue.script(template::LOGIN, Reply::ok(template::LOGIN).after(delay));
+    let s = session.clone();
+    tokio::spawn(async move { s.reset_ticker().await })
+}
+
+#[tokio::test]
+async fn cancel_does_not_wait_behind_a_ticker_reset() {
+    let venue = venue().await;
+    let session = std::sync::Arc::new(connected(&venue, PlantSet::MARKET_DATA).await);
+    session.ensure_order_plant().await.unwrap();
+
+    let reset = slow_ticker_reset(&venue, &session, Duration::from_secs(3));
+    venue.wait_for(template::LOGOUT, 1).await; // the reset is under way
+
+    let started = tokio::time::Instant::now();
+    session.cancel_order("B1").await.expect("cancel");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "cancel waited {:?} behind the ticker reset",
+        started.elapsed()
+    );
+    reset.await.unwrap().expect("reset completes");
+}
+
+#[tokio::test]
+async fn resolved_account_does_not_wait_behind_a_ticker_reset() {
+    let venue = venue().await;
+    let session = std::sync::Arc::new(connected(&venue, PlantSet::MARKET_DATA).await);
+
+    let reset = slow_ticker_reset(&venue, &session, Duration::from_secs(3));
+    venue.wait_for(template::LOGOUT, 1).await;
+
+    let account = tokio::time::timeout(Duration::from_secs(1), session.resolved_account())
+        .await
+        .expect("resolved_account answered during the reset");
+    assert_eq!(account.map(|a| a.account_id), Some("ACCOUNT".into()));
+    reset.await.unwrap().expect("reset completes");
+}
+
+#[tokio::test]
+async fn failed_resubscribe_keeps_a_live_order_plant() {
+    let venue = venue().await;
+    let session = connected(&venue, PlantSet::MARKET_DATA).await;
+    session
+        .subscribe_order_updates()
+        .await
+        .expect("first subscribe");
+    session.subscribe_bracket_updates().await.expect("brackets");
+
+    venue.script(
+        template::SUBSCRIBE_ORDER_UPDATES,
+        Reply::reject(template::SUBSCRIBE_ORDER_UPDATES, "5", "try later"),
+    );
+    session
+        .subscribe_order_updates()
+        .await
+        .expect_err("re-subscribe refused");
+
+    // The plant this call did not open stays up: no order-plant logout, and
+    // orders still go out on it.
+    assert!(venue
+        .received_of(template::LOGOUT)
+        .iter()
+        .all(|r| r.plant != Some(Plant::Order)));
+    assert_eq!(venue.connections(Plant::Order), 1);
+    session
+        .place_order(&order("after"))
+        .await
+        .expect("place on the live plant");
+}
+
+#[tokio::test]
+async fn failed_first_subscribe_closes_the_plant_it_opened() {
+    let venue = venue().await;
+    let session = connected(&venue, PlantSet::MARKET_DATA).await;
+    venue.script(
+        template::SUBSCRIBE_ORDER_UPDATES,
+        Reply::reject(template::SUBSCRIBE_ORDER_UPDATES, "5", "try later"),
+    );
+    session
+        .subscribe_order_updates()
+        .await
+        .expect_err("subscribe refused");
+    venue.wait_connections(Plant::Order, 0).await;
+}
+
+#[tokio::test]
+async fn tick_replay_with_an_error_part_way_is_an_error() {
+    let venue = venue().await;
+    let session = connected(&venue, PlantSet::MARKET_DATA).await;
+    venue.script(
+        template::TICK_BAR_REPLAY,
+        Reply::rows_then(
+            template::TICK_BAR_REPLAY + 1,
+            &[frames::tick_row("ESZ6", 5000.0, 1, 1_790_000_000, 0)],
+            &["3", "replay aborted"],
+        ),
+    );
+    let err = session
+        .load_ticks("ESZ6", "CME", 1_790_000_000, 1_790_000_100)
+        .await
+        .expect_err("a partial replay is not a complete answer");
+    assert!(err.to_string().contains("partial"), "{err}");
+}
+
+#[tokio::test]
+async fn fill_history_with_an_error_part_way_is_unavailable() {
+    let venue = venue().await;
+    let session = connected(&venue, PlantSet::MARKET_DATA).await;
+    venue.script(
+        template::SHOW_FILL_HISTORY,
+        Reply::rows_then(
+            template::SHOW_FILL_HISTORY + 1,
+            &[frames::fill_row("F1", "B1", 5000.0, 1)],
+            &["3", "replay aborted"],
+        ),
+    );
+    let err = session
+        .load_fill_history(20261014, 20261014)
+        .await
+        .expect_err("partial fill history");
+    assert!(
+        matches!(err, Error::ReconciliationUnavailable(_)),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn complete_fill_history_is_returned() {
+    let venue = venue().await;
+    let session = connected(&venue, PlantSet::MARKET_DATA).await;
+    venue.script(
+        template::SHOW_FILL_HISTORY,
+        Reply::rows(
+            template::SHOW_FILL_HISTORY + 1,
+            &[frames::fill_row("F1", "B1", 5000.0, 1)],
+        ),
+    );
+    let fills = session.load_fill_history(20261014, 20261014).await.unwrap();
+    assert_eq!(fills.len(), 1);
+    assert_eq!(fills[0].fill_id.as_deref(), Some("F1"));
+}
+
+#[tokio::test]
+async fn concurrent_order_loads_do_not_collect_each_others_rows() {
+    let venue = venue().await;
+    let session = std::sync::Arc::new(connected(&venue, PlantSet::MARKET_DATA).await);
+    session.subscribe_order_updates().await.unwrap();
+
+    venue.script(
+        template::SHOW_ORDERS,
+        Reply::ok_then_replay(
+            template::SHOW_ORDERS,
+            &[frames::rithmic_order("WORKING-1", "w", 13, "open")],
+        )
+        .after(Duration::from_millis(100)),
+    );
+    venue.script(
+        template::SHOW_ORDER_HISTORY_SUMMARY,
+        Reply::ok_then_replay(
+            template::SHOW_ORDER_HISTORY_SUMMARY,
+            &[frames::rithmic_order("HISTORY-1", "h", 15, "complete")],
+        )
+        .after(Duration::from_millis(100)),
+    );
+    let (working, history) = tokio::join!(
+        session.load_orders(0, 0),
+        session.load_order_history("20261013")
+    );
+    let ids = |rows: Vec<rithmic_plants::OrderNotificationDto>| -> Vec<String> {
+        rows.into_iter().filter_map(|r| r.basket_id).collect()
+    };
+    assert_eq!(ids(working.unwrap()), vec!["WORKING-1".to_string()]);
+    assert_eq!(ids(history.unwrap()), vec!["HISTORY-1".to_string()]);
+}
+
+#[tokio::test]
+async fn trade_time_is_the_exchange_time_when_the_venue_sends_it() {
+    let venue = venue().await;
+    let session = connected(&venue, PlantSet::MARKET_DATA).await;
+    session.subscribe("ESZ6", "CME").await.unwrap();
+
+    let mut trade = frames::last_trade("ESZ6", "CME", 5001.0, 1, 1_790_000_001);
+    trade.source_ssboe = Some(1_790_000_000);
+    trade.source_usecs = Some(999_000);
+    trade.source_nsecs = Some(999_000_123);
+    venue.push(Plant::Ticker, &trade);
+    match next_event(&session, Stream::Ticker).await {
+        PlantEvent::LastTrade(t) => {
+            assert_eq!(t.ts_event_ns, Some(1_790_000_000_999_000_123));
+            // Rithmic's own stamp is still carried for diagnostics.
+            assert_eq!(t.ssboe, Some(1_790_000_001));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn history_added_mid_session_is_probed_before_use() {
+    let venue = venue().await;
+    let ticker_only = PlantSet {
+        ticker: true,
+        history: false,
+        pnl: false,
+    };
+    let session = connected(&venue, ticker_only).await;
+    assert!(venue.received_of(template::TIME_BAR_REPLAY).is_empty());
+
+    session
+        .request_plants(PlantSet::MARKET_DATA)
+        .await
+        .expect("history added");
+    assert!(
+        !venue.received_of(template::TIME_BAR_REPLAY).is_empty(),
+        "the readiness probe ran before history was advertised"
+    );
+}

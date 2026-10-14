@@ -6,8 +6,8 @@
 //! I/O runs on a cloned plant handle outside the session lock so a blocking
 //! poll never waits behind a place / cancel / modify.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -42,39 +42,65 @@ pub struct DirectSession {
     /// concurrently); `disconnect` takes it exclusively, so it waits for them and
     /// none starts underneath it.
     session_ops: RwLock<()>,
-    disconnecting: AtomicBool,
+    /// Disconnects in progress (`disconnect`, `disconnect_order_plant`); a
+    /// count, so overlapping ones keep order operations refused until the last
+    /// finishes.
+    disconnecting: AtomicUsize,
+    /// The order plant was disconnected on request: commands are refused (not
+    /// sent) until `ensure_order_plant` or an order subscribe opens it again,
+    /// instead of silently re-opening a plant with no subscriptions.
+    order_closed: AtomicBool,
     /// Trading gate (place, cancel, modify, brackets, order subscriptions and the
     /// order-plant loads). Off by default: nothing reaches the order plant until
     /// the owner opens it.
     trading_enabled: AtomicBool,
     /// Plant-wide cancel-all gate, independent of trading.
     cancel_all_enabled: AtomicBool,
+    /// The live order plant's handle, mirrored from `inner` whenever a call
+    /// that can change it returns, so place / cancel / modify on a live plant
+    /// never wait for `inner` (a ticker reset or a reconnect may hold it).
+    order_cache: StdMutex<Option<rithmic_rs::RithmicOrderPlantHandle>>,
+    /// The resolved account, mirrored the same way.
+    account_cache: StdMutex<Option<AccountTriple>>,
+    /// Ticker resets run one at a time, and ticker calls wait for one in flight
+    /// instead of finding the ticker missing.
+    ticker_reset: Mutex<()>,
+    /// `load_orders` and `load_order_history` both collect replayed rows off the
+    /// shared order stream with no request correlation; run one at a time so
+    /// neither collects the other's replay.
+    order_drain: Mutex<()>,
 }
 
 /// Marks a disconnect in progress for its lifetime (cleared on every exit path).
-struct DisconnectGate<'a>(&'a AtomicBool);
+struct DisconnectGate<'a>(&'a AtomicUsize);
 
 impl<'a> DisconnectGate<'a> {
-    fn new(flag: &'a AtomicBool) -> Self {
-        flag.store(true, Ordering::SeqCst);
-        Self(flag)
+    fn new(count: &'a AtomicUsize) -> Self {
+        count.fetch_add(1, Ordering::SeqCst);
+        Self(count)
     }
 }
 
 impl Drop for DisconnectGate<'_> {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
 impl DirectSession {
     pub fn new(config: SessionConfig, plants: PlantSet) -> Self {
         let session = RithmicSession::with_plants(config, plants);
+        let account = session.resolved_account().map(account_triple);
         Self {
             streams: session.streams(),
+            order_cache: StdMutex::new(session.current_order_handle()),
+            account_cache: StdMutex::new(account),
+            ticker_reset: Mutex::new(()),
+            order_drain: Mutex::new(()),
             inner: Mutex::new(session),
             session_ops: RwLock::new(()),
-            disconnecting: AtomicBool::new(false),
+            disconnecting: AtomicUsize::new(0),
+            order_closed: AtomicBool::new(false),
             trading_enabled: AtomicBool::new(false),
             cancel_all_enabled: AtomicBool::new(false),
         }
@@ -134,13 +160,13 @@ impl DirectSession {
     async fn begin_order_op(&self) -> Result<RwLockReadGuard<'_, ()>> {
         let refused =
             || Error::NotSent("session disconnect in progress; order operation rejected".into());
-        if self.disconnecting.load(Ordering::SeqCst) {
+        if self.disconnecting.load(Ordering::SeqCst) > 0 {
             return Err(refused());
         }
         let guard = self.session_ops.read().await;
         // A disconnect may have started (and finished) while this waited behind its
         // queued write lock: re-check, or the order would re-open the plant it closed.
-        if self.disconnecting.load(Ordering::SeqCst) {
+        if self.disconnecting.load(Ordering::SeqCst) > 0 {
             return Err(refused());
         }
         Ok(guard)
@@ -157,6 +183,12 @@ impl DirectSession {
     /// fails, so a missing or unreachable plant is [`Error::NotSent`], never an
     /// unknown outcome.
     async fn command_handle(&self) -> Result<rithmic_rs::RithmicOrderPlantHandle> {
+        if self.order_closed.load(Ordering::SeqCst) {
+            return Err(Error::NotSent(
+                "order plant was disconnected; ensure it (or subscribe to order updates) first"
+                    .into(),
+            ));
+        }
         self.order_handle()
             .await
             .map_err(|e| Error::NotSent(e.to_string()))
@@ -168,44 +200,97 @@ impl DirectSession {
         self.inner.lock().await.handles()
     }
 
-    /// Ensure the order plant under a short lock, then clone its handle so
-    /// network I/O runs without blocking `poll_order_event`.
+    /// The handles for a ticker call: waits out a ticker reset in flight, so a
+    /// subscribe during a resync lands on the new plant instead of failing.
+    async fn ticker_handles(&self) -> Handles {
+        let _reset = self.ticker_reset.lock().await;
+        self.handles().await
+    }
+
+    /// Mirror the order handle and account from `inner` after a call that can
+    /// change them (connect, disconnect, ensure, subscribe, rollback).
+    fn sync_caches(&self, inner: &RithmicSession) {
+        *self.order_cache.lock().expect("order cache") = inner.current_order_handle();
+        if let Some(account) = inner.resolved_account() {
+            *self.account_cache.lock().expect("account cache") = Some(account_triple(account));
+        }
+    }
+
+    /// The order handle: the mirrored one when the plant is up, otherwise ensure
+    /// the plant under the session lock. Network I/O runs on the clone, never
+    /// under the lock.
     async fn order_handle(&self) -> Result<rithmic_rs::RithmicOrderPlantHandle> {
+        if let Some(handle) = self.order_cache.lock().expect("order cache").clone() {
+            return Ok(handle);
+        }
         let mut inner = self.inner.lock().await;
-        inner.ensure_order_plant().await?;
+        let ensured = inner.ensure_order_plant().await;
+        self.sync_caches(&inner);
+        ensured?;
         inner.clone_order_handle()
+    }
+}
+
+fn account_triple(a: &rithmic_rs::RithmicAccount) -> AccountTriple {
+    AccountTriple {
+        account_id: a.account_id.clone(),
+        fcm_id: a.fcm_id.clone(),
+        ib_id: a.ib_id.clone(),
     }
 }
 
 #[async_trait]
 impl Session for DirectSession {
     async fn connect(&self) -> Result<()> {
-        self.inner.lock().await.connect().await
+        let mut inner = self.inner.lock().await;
+        let result = inner.connect().await;
+        self.sync_caches(&inner);
+        self.order_closed.store(false, Ordering::SeqCst);
+        result
     }
 
     async fn disconnect(&self) -> Result<()> {
         let _gate = DisconnectGate::new(&self.disconnecting);
         let _ops = self.wait_for_order_ops().await?;
-        self.inner.lock().await.disconnect().await
+        let mut inner = self.inner.lock().await;
+        let result = inner.disconnect().await;
+        self.sync_caches(&inner);
+        result
     }
 
     async fn request_plants(&self, extra: PlantSet) -> Result<()> {
-        self.inner.lock().await.request_plants(extra).await
+        let mut inner = self.inner.lock().await;
+        let result = inner.request_plants(extra).await;
+        self.sync_caches(&inner);
+        result
     }
 
     async fn ensure_order_plant(&self) -> Result<()> {
         self.require_trading("ensure_order_plant")?;
-        self.inner.lock().await.ensure_order_plant().await
+        let mut inner = self.inner.lock().await;
+        let result = inner.ensure_order_plant().await;
+        self.sync_caches(&inner);
+        if result.is_ok() {
+            self.order_closed.store(false, Ordering::SeqCst);
+        }
+        result
     }
 
     async fn ensure_pnl_plant(&self) -> Result<()> {
-        self.inner.lock().await.ensure_pnl_plant().await
+        let mut inner = self.inner.lock().await;
+        let result = inner.ensure_pnl_plant().await;
+        self.sync_caches(&inner);
+        result
     }
 
     async fn disconnect_order_plant(&self) -> Result<()> {
         let _gate = DisconnectGate::new(&self.disconnecting);
         let _ops = self.wait_for_order_ops().await?;
-        self.inner.lock().await.disconnect_order_plant().await
+        let mut inner = self.inner.lock().await;
+        let result = inner.disconnect_order_plant().await;
+        self.sync_caches(&inner);
+        self.order_closed.store(true, Ordering::SeqCst);
+        result
     }
 
     async fn disconnect_pnl_plant(&self) -> Result<()> {
@@ -215,38 +300,45 @@ impl Session for DirectSession {
     async fn reset_ticker(&self) -> Result<()> {
         // Refcount-blind on purpose: the data client's channel-error resync must
         // actually recreate the ticker plant even when the session is shared.
-        self.inner.lock().await.reset_ticker_plant().await
-    }
-
-    async fn resolved_account(&self) -> Option<AccountTriple> {
+        // The venue round trips run without the session lock.
+        let _serial = self.ticker_reset.lock().await;
+        let reset = self.inner.lock().await.begin_ticker_reset()?;
+        let reconnected = reset.reconnect().await?;
         self.inner
             .lock()
             .await
-            .resolved_account()
-            .map(|a| AccountTriple {
-                account_id: a.account_id.clone(),
-                fcm_id: a.fcm_id.clone(),
-                ib_id: a.ib_id.clone(),
-            })
+            .finish_ticker_reset(reconnected)
+            .await;
+        Ok(())
+    }
+
+    async fn resolved_account(&self) -> Option<AccountTriple> {
+        self.account_cache.lock().expect("account cache").clone()
     }
 
     async fn subscribe(&self, symbol: &str, exchange: &str) -> Result<()> {
-        self.handles().await.subscribe(symbol, exchange).await
+        self.ticker_handles()
+            .await
+            .subscribe(symbol, exchange)
+            .await
     }
 
     async fn unsubscribe(&self, symbol: &str, exchange: &str) -> Result<()> {
-        self.handles().await.unsubscribe(symbol, exchange).await
+        self.ticker_handles()
+            .await
+            .unsubscribe(symbol, exchange)
+            .await
     }
 
     async fn subscribe_order_book_summary(&self, symbol: &str, exchange: &str) -> Result<()> {
-        self.handles()
+        self.ticker_handles()
             .await
             .subscribe_order_book_summary(symbol, exchange)
             .await
     }
 
     async fn unsubscribe_order_book_summary(&self, symbol: &str, exchange: &str) -> Result<()> {
-        self.handles()
+        self.ticker_handles()
             .await
             .unsubscribe_order_book_summary(symbol, exchange)
             .await
@@ -279,27 +371,42 @@ impl Session for DirectSession {
     }
 
     async fn subscribe_pnl(&self) -> Result<()> {
-        self.inner.lock().await.ensure_pnl_plant().await?;
+        self.ensure_pnl_plant().await?;
         self.handles().await.subscribe_pnl().await
     }
 
     async fn subscribe_order_updates(&self) -> Result<()> {
         self.require_trading("subscribe_order_updates")?;
         // Must use the session's own handle (the one poll_order_event reads).
-        self.inner.lock().await.subscribe_order_updates().await
+        let mut inner = self.inner.lock().await;
+        let result = inner.subscribe_order_updates().await;
+        self.sync_caches(&inner);
+        if result.is_ok() {
+            self.order_closed.store(false, Ordering::SeqCst);
+        }
+        result
     }
 
     async fn subscribe_bracket_updates(&self) -> Result<()> {
         self.require_trading("subscribe_bracket_updates")?;
-        self.inner.lock().await.subscribe_bracket_updates().await
+        let mut inner = self.inner.lock().await;
+        let result = inner.subscribe_bracket_updates().await;
+        self.sync_caches(&inner);
+        if result.is_ok() {
+            self.order_closed.store(false, Ordering::SeqCst);
+        }
+        result
     }
 
     async fn get_front_month(&self, symbol: &str, exchange: &str) -> Result<FrontMonthDto> {
-        self.handles().await.get_front_month(symbol, exchange).await
+        self.ticker_handles()
+            .await
+            .get_front_month(symbol, exchange)
+            .await
     }
 
     async fn get_reference_data(&self, symbol: &str, exchange: &str) -> Result<ReferenceDataDto> {
-        self.handles()
+        self.ticker_handles()
             .await
             .get_reference_data(symbol, exchange)
             .await
@@ -374,6 +481,7 @@ impl Session for DirectSession {
         // event pump / pollers on the session lock. The window is ignored: only
         // the current working set is requested.
         let handle = self.order_handle().await?;
+        let _drain = self.order_drain.lock().await;
         load_orders_on(&handle).await
     }
 
@@ -398,6 +506,7 @@ impl Session for DirectSession {
     async fn load_order_history(&self, date: &str) -> Result<Vec<OrderNotificationDto>> {
         self.require_trading("load_order_history")?;
         let handle = self.order_handle().await?;
+        let _drain = self.order_drain.lock().await;
         load_order_history_on(&handle, date).await
     }
 
@@ -554,13 +663,27 @@ mod tests {
     #[tokio::test]
     async fn order_op_is_rejected_while_a_disconnect_is_in_progress() {
         let s = offline();
-        s.disconnecting.store(true, Ordering::SeqCst);
+        s.disconnecting.store(1, Ordering::SeqCst);
         let err = s.begin_order_op().await.expect_err("must reject");
         assert!(
             err.to_string()
                 .contains("session disconnect in progress; order operation rejected"),
             "{err}"
         );
+    }
+
+    #[tokio::test]
+    async fn overlapping_disconnects_keep_orders_refused_until_the_last_ends() {
+        let s = offline();
+        let first = DisconnectGate::new(&s.disconnecting);
+        let second = DisconnectGate::new(&s.disconnecting);
+        drop(first);
+        assert!(
+            s.begin_order_op().await.is_err(),
+            "one disconnect still in progress"
+        );
+        drop(second);
+        assert!(s.begin_order_op().await.is_ok());
     }
 
     fn place() -> crate::backend::PlaceOrder {
@@ -659,7 +782,7 @@ mod tests {
     #[tokio::test]
     async fn an_order_op_during_a_disconnect_is_not_sent() {
         let s = Arc::new(offline().with_gates(true, true));
-        s.disconnecting.store(true, Ordering::SeqCst);
+        s.disconnecting.store(1, Ordering::SeqCst);
         let err = s.place_order(&place()).await.unwrap_err();
         assert!(matches!(err, Error::NotSent(_)), "{err}");
     }
@@ -701,13 +824,13 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(60)).await;
         assert!(!task.is_finished(), "disconnect must wait for the order op");
-        assert!(s.disconnecting.load(Ordering::SeqCst), "gate is raised");
+        assert_eq!(s.disconnecting.load(Ordering::SeqCst), 1, "gate is raised");
         // A new order op started during the disconnect is refused outright.
         assert!(s.begin_order_op().await.is_err());
 
         drop(op);
         task.await.expect("join").expect("disconnect ok");
-        assert!(!s.disconnecting.load(Ordering::SeqCst), "gate is cleared");
+        assert_eq!(s.disconnecting.load(Ordering::SeqCst), 0, "gate is cleared");
         assert!(s.begin_order_op().await.is_ok(), "orders allowed again");
     }
 
@@ -719,7 +842,7 @@ mod tests {
         let timed_out = tokio::time::timeout(Duration::from_millis(20), s.disconnect()).await;
         assert!(timed_out.is_err(), "disconnect is still waiting");
         // Dropping the cancelled future dropped its DisconnectGate.
-        assert!(!s.disconnecting.load(Ordering::SeqCst));
+        assert_eq!(s.disconnecting.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

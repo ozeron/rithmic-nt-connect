@@ -8,16 +8,16 @@
 
 ## 2. Plants and exec fixes (each test-first)
 
-- [ ] 2.1 Cache the order handle and resolved account outside `inner`; `reset_ticker` does I/O unlocked; test: cancel completes during a slow ticker reset; `resolved_account` doesn't wait on a reconnect
-- [ ] 2.2 `subscribe_order_updates` rollback uses `opened_here` and waits for in-flight order ops before teardown; test: a failed re-subscribe on a live plant keeps it up
-- [ ] 2.3 `collect_history_rows` fails on any error frame; fill history becomes `ReconciliationUnavailable`; tick/bar partials go through `is_transient`; tests for each caller
-- [ ] 2.4 Dedup only between adjacent slices at the shared boundary second/day; tests: identical in-slice prints kept, boundary repeat removed, daily boundary
-- [ ] 2.5 `StreamHub::take`: drain before `Down`; re-drain after `fail`/`closed` and keep the failure pending; tests for both races
-- [ ] 2.6 Serialise `load_orders` / `load_order_history` with an `order_drain` mutex; concurrent-load test over the fake venue
-- [ ] 2.7 Forwarder `catch_unwind` marks the lane failed; test with a panicking conversion
-- [ ] 2.8 Exchange-time `ts_event` for LastTrade/BBO; move `ts_ns` into `rithmic-exec::ident` and use it from `dto.rs`; tests with and without source fields
-- [ ] 2.9 `DisconnectGate` as a counter; `request_plants` probes history when it adds it; explicit `disconnect_order_plant` keeps order commands `NotSent` until ensure/subscribe; tests
-- [ ] 2.10 Golden tests for `From<&RithmicResponse> for PlantEvent` built from real-shaped messages (LastTrade, BBO, OrderBook, both order notifications, PnL, time bar)
+- [x] 2.1 Cache the order handle and resolved account outside `inner`; `reset_ticker` does I/O unlocked; test: cancel completes during a slow ticker reset; `resolved_account` doesn't wait on a reconnect
+- [x] 2.2 `subscribe_order_updates` rollback uses `opened_here` (a plant opened by the failing call has no published handle, so no order op can be in flight on it); tests: a failed re-subscribe on a live plant keeps it up, a failed first subscribe closes the plant it opened
+- [x] 2.3 `collect_history_rows` fails on any error frame; fill history becomes `ReconciliationUnavailable`; tick/bar partials go through `is_transient`; tests for each caller
+- [x] 2.4 Dedup only between adjacent slices at the shared boundary second/day; tests: identical in-slice prints kept, boundary repeat removed, daily boundary
+- [x] 2.5 `StreamHub::take`: drain before `Down`; re-drain after `fail`/`closed` and keep the failure pending; tests for both races
+- [x] 2.6 Serialise `load_orders` / `load_order_history` with an `order_drain` mutex; concurrent-load test over the fake venue
+- [x] 2.7 Forwarder `catch_unwind` marks the lane failed; test with a panicking conversion
+- [x] 2.8 Exchange-time `ts_event` for LastTrade/BBO; move `ts_ns` into `rithmic-exec::ident` and use it from `dto.rs`; tests with and without source fields
+- [x] 2.9 `DisconnectGate` as a counter; `request_plants` probes history when it adds it; explicit `disconnect_order_plant` keeps order commands `NotSent` until ensure/subscribe; tests
+- [x] 2.10 Golden tests for `From<&RithmicResponse> for PlantEvent` built from real-shaped messages (LastTrade, BBO, OrderBook, both order notifications, PnL, time bar)
 
 ## 3. Typed bracket updates (parity checklist)
 

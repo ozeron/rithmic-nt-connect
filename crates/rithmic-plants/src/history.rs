@@ -5,7 +5,7 @@
 //! shorter windows for 1s bars where a month would be huge on the wire.
 //! Boundary overlaps are removed by dedup.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::time::Duration;
 
 use rithmic_rs::TimeBarType;
@@ -149,23 +149,31 @@ pub fn bar_dedup_key(bar: &HistoryBarDto) -> (u64, u64, u64, u64, u64, u64) {
     )
 }
 
-/// Keep first occurrence; preserve input order.
-fn dedup_by<T, K: Eq + std::hash::Hash>(items: Vec<T>, key_fn: impl Fn(&T) -> K) -> Vec<T> {
-    let mut seen = HashSet::new();
-    items
-        .into_iter()
-        .filter(|item| seen.insert(key_fn(item)))
+/// Drop from `next` the rows that repeat rows of `prev`, the slice before it.
+///
+/// Adjacent slices overlap only at their shared boundary (second, or day for
+/// daily/weekly replays), so a row returned by both is one row. Repeats are
+/// matched by count: N identical prints at the boundary stay N, and identical
+/// prints inside one slice are never touched (two 1-lot trades at the same
+/// microsecond and price are two trades).
+pub fn drop_boundary_repeats<T, K: Eq + std::hash::Hash>(
+    prev: &[T],
+    next: Vec<T>,
+    key: impl Fn(&T) -> K,
+) -> Vec<T> {
+    let mut seen: HashMap<K, usize> = HashMap::new();
+    for row in prev {
+        *seen.entry(key(row)).or_default() += 1;
+    }
+    next.into_iter()
+        .filter(|row| match seen.get_mut(&key(row)) {
+            Some(left) if *left > 0 => {
+                *left -= 1;
+                false
+            }
+            _ => true,
+        })
         .collect()
-}
-
-/// Keep first occurrence; preserve input order.
-pub fn dedup_ticks(ticks: Vec<HistoryTickDto>) -> Vec<HistoryTickDto> {
-    dedup_by(ticks, tick_dedup_key)
-}
-
-/// Keep first occurrence; preserve input order.
-pub fn dedup_bars(bars: Vec<HistoryBarDto>) -> Vec<HistoryBarDto> {
-    dedup_by(bars, bar_dedup_key)
 }
 
 /// Map Rithmic wire `bar_type` int (1..4) to [`TimeBarType`].
@@ -263,15 +271,16 @@ pub fn looks_like_listed_contract(symbol: &str) -> bool {
     year.is_ascii_digit() && MONTH_CODES.contains(&month)
 }
 
-pub(crate) async fn load_sliced<T, F, Fut>(
+pub(crate) async fn load_sliced<T, K, F, Fut>(
     start: i32,
     end: i32,
     step_secs: i32,
     mut load_slice: F,
     sort_key: impl Fn(&T) -> u64,
-    dedup: impl Fn(Vec<T>) -> Vec<T>,
+    identity: impl Fn(&T) -> K,
 ) -> Result<Vec<T>>
 where
+    K: Eq + std::hash::Hash,
     F: FnMut(i32, i32) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<T>>>,
 {
@@ -279,12 +288,17 @@ where
         return Ok(Vec::new());
     }
     let mut out = Vec::new();
+    let mut prev: Vec<T> = Vec::new();
     for (slice_start, slice_end) in window_slices(start, end, step_secs) {
         let chunk = load_slice_with_retry(&mut load_slice, slice_start, slice_end).await?;
-        out.extend(chunk);
+        let chunk = drop_boundary_repeats(&prev, chunk, &identity);
+        out.append(&mut prev);
+        prev = chunk;
     }
+    out.append(&mut prev);
+    // Stable: rows sharing a timestamp keep the venue's order.
     out.sort_by_key(|row| sort_key(row));
-    Ok(dedup(out))
+    Ok(out)
 }
 
 async fn load_slice_with_retry<T, F, Fut>(
@@ -364,28 +378,70 @@ mod tests {
         assert_eq!(window_slices(0, 900, 900), vec![(0, 900)]);
     }
 
-    #[test]
-    fn dedup_ticks_keeps_first() {
-        let a = HistoryTickDto {
+    fn tick(ts: u64, volume: u64) -> HistoryTickDto {
+        HistoryTickDto {
             symbol: Some("NQU6".into()),
             exchange: Some("CME".into()),
             open_price: None,
             high_price: None,
             low_price: None,
             close_price: Some(1.25),
-            volume: None,
+            volume: Some(volume),
             num_trades: Some(1),
             ssboe: None,
             usecs: None,
-            ts_event_ns: Some(10),
-        };
-        let mut b = a.clone();
-        b.volume = Some(99);
-        let out = dedup_ticks(vec![a.clone(), b, a.clone()]);
-        // Same ts/price/trades but different volume → distinct rows.
-        assert_eq!(out.len(), 2);
-        assert_eq!(out[0].volume, None);
-        assert_eq!(out[1].volume, Some(99));
+            ts_event_ns: Some(ts),
+        }
+    }
+
+    #[tokio::test]
+    async fn identical_prints_inside_a_slice_are_kept() {
+        let out = load_sliced(
+            0,
+            10,
+            60,
+            |_s, _e| async { Ok(vec![tick(5, 1), tick(5, 1)]) },
+            |t| t.ts_event_ns.unwrap_or(0),
+            tick_dedup_key,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            out.len(),
+            2,
+            "two 1-lot trades at the same instant are two trades"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_row_repeated_at_the_boundary_is_returned_once() {
+        // Slices (0, 60) and (60, 120) share second 60; both return its print.
+        let out = load_sliced(
+            0,
+            120,
+            60,
+            |s, _e| async move {
+                Ok(if s == 0 {
+                    vec![tick(10, 1), tick(60, 2), tick(60, 2)]
+                } else {
+                    vec![tick(60, 2), tick(60, 2), tick(90, 3)]
+                })
+            },
+            |t| t.ts_event_ns.unwrap_or(0),
+            tick_dedup_key,
+        )
+        .await
+        .unwrap();
+        let vols: Vec<_> = out.iter().map(|t| t.volume.unwrap()).collect();
+        assert_eq!(vols, vec![1, 2, 2, 3], "boundary repeats matched by count");
+    }
+
+    #[test]
+    fn boundary_repeats_keep_unmatched_rows() {
+        let prev = vec![tick(60, 2)];
+        let next = vec![tick(60, 2), tick(60, 2), tick(61, 1)];
+        let out = drop_boundary_repeats(&prev, next, tick_dedup_key);
+        assert_eq!(out.len(), 2, "one repeat dropped, the extra print kept");
     }
 
     #[test]
@@ -431,7 +487,7 @@ mod tests {
                 }
             },
             |x| *x,
-            |v| v,
+            |x| *x,
         )
         .await
         .expect("retry then ok");

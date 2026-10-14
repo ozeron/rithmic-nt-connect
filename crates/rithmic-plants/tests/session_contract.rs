@@ -182,6 +182,23 @@ async fn order_op_during_disconnect_is_not_sent<H: Harness>() {
     closing.await.unwrap().unwrap();
 }
 
+async fn an_explicitly_disconnected_order_plant_stays_down<H: Harness>() {
+    let h = H::open(true).await;
+    let s = h.session();
+    s.ensure_order_plant().await.unwrap();
+    s.disconnect_order_plant().await.unwrap();
+
+    let err = s.place_order(&order("after-stop")).await.unwrap_err();
+    assert!(
+        matches!(err, Error::NotSent(_)),
+        "after an explicit disconnect: {err:?}"
+    );
+    assert_eq!(h.places_sent(), 0);
+
+    s.ensure_order_plant().await.unwrap();
+    s.place_order(&order("reopened")).await.unwrap();
+}
+
 macro_rules! contract {
     ($($scenario:ident),* $(,)?) => {
         mod fake_session {
@@ -200,4 +217,5 @@ contract!(
     outcome_classes_survive_the_session,
     cancel_brings_up_the_order_plant,
     order_op_during_disconnect_is_not_sent,
+    an_explicitly_disconnected_order_plant_stays_down,
 );
