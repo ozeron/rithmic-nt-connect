@@ -87,7 +87,7 @@ After a change that emits Nautilus data or execution events, check the rows that
 - [ ] Live / Demo / Test endpoints cannot mix accidentally
 - [ ] Distinct venue instruments never share an `InstrumentId`
 - [ ] `connect_mode` / `RITHMIC_CONNECT_MODE` is explicit (`ConnectMode.DIRECT` \| `GATEWAY`; no silent default)
-- [ ] Gateway-mode clients hold no Rithmic password and never spawn the parent (attach-only, mux-only; the parent is started explicitly)
+- [ ] Gateway-mode clients hold no Rithmic password and never spawn the parent (attach-only, one shared socket per process; the parent is started explicitly)
 
 ### Data
 

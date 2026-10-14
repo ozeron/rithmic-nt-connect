@@ -462,17 +462,13 @@ class GatewayClient(FramedConnection):
         period: int = 1,
         *,
         rpc_timeout_sec: float | None = None,
-        max_workers: int = 1,
     ) -> list[dict[str, Any]]:
         """Load a wide window via client-side calendar chunks + merge.
 
-        Slice lengths match Rust ``bar_slice_secs``. Default ``max_workers=1``
-        (sequential): the parent holds a session mutex for each history RPC, so
-        extra dials do not overlap plant work. ``max_workers`` > 1 remains for
-        experiments once the plant allows concurrent history.
+        Slice lengths match Rust ``bar_slice_secs``. Slices are fetched
+        sequentially over this connection: the parent holds a session mutex for
+        each history RPC, so extra sockets would not overlap plant work.
         """
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
         from rithmic_gateway.history_window import (
             bar_slice_secs,
             dedupe_bars_by_marker,
@@ -485,39 +481,12 @@ class GatewayClient(FramedConnection):
             if rpc_timeout_sec is None
             else float(rpc_timeout_sec)
         )
-        slices = window_slices(int(start_ssboe), int(end_ssboe), step)
-        if not slices:
-            return []
-        if len(slices) == 1 or max_workers <= 1:
-            merged: list[dict[str, Any]] = []
-            for slice_start, slice_end in slices:
-                merged.extend(
-                    self.load_time_bars(
-                        symbol,
-                        exchange,
-                        slice_start,
-                        slice_end,
-                        bar_type=bar_type,
-                        period=period,
-                        rpc_timeout_sec=timeout,
-                    )
-                )
-            return dedupe_bars_by_marker(merged)
-
-        # Ensure the parent is reachable on this client first (attach or fail).
-        self.connect()
-
-        def _fetch_slice(window: tuple[int, int]) -> list[dict[str, Any]]:
-            slice_start, slice_end = window
-            from rithmic_gateway.runtime import create_gateway_client
-
-            peer = create_gateway_client(
-                self._config,
-                rpc_timeout_sec=self._rpc_timeout_sec,
-            )
-            peer.connect()
-            try:
-                return peer.load_time_bars(
+        merged: list[dict[str, Any]] = []
+        for slice_start, slice_end in window_slices(
+            int(start_ssboe), int(end_ssboe), step
+        ):
+            merged.extend(
+                self.load_time_bars(
                     symbol,
                     exchange,
                     slice_start,
@@ -526,21 +495,8 @@ class GatewayClient(FramedConnection):
                     period=period,
                     rpc_timeout_sec=timeout,
                 )
-            finally:
-                with contextlib.suppress(Exception):
-                    peer.disconnect()
-
-        merged_map: dict[tuple[int, int], list[dict[str, Any]]] = {}
-        workers = min(max_workers, len(slices))
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futs = {pool.submit(_fetch_slice, window): window for window in slices}
-            for fut in as_completed(futs):
-                window = futs[fut]
-                merged_map[window] = fut.result()
-        ordered: list[dict[str, Any]] = []
-        for window in slices:
-            ordered.extend(merged_map[window])
-        return dedupe_bars_by_marker(ordered)
+            )
+        return dedupe_bars_by_marker(merged)
 
     async def load_time_bars_range_async(
         self,
@@ -552,7 +508,6 @@ class GatewayClient(FramedConnection):
         period: int = 1,
         *,
         rpc_timeout_sec: float | None = None,
-        max_workers: int = 1,
     ) -> list[dict[str, Any]]:
         """Async wrapper around :meth:`load_time_bars_range` (thread offload)."""
         import asyncio
@@ -566,7 +521,6 @@ class GatewayClient(FramedConnection):
             bar_type,
             period,
             rpc_timeout_sec=rpc_timeout_sec,
-            max_workers=max_workers,
         )
 
     def probe_time_bars(

@@ -172,9 +172,7 @@ def test_load_time_bars_range_chunks(monkeypatch: pytest.MonkeyPatch) -> None:
     step = 40 * 24 * 3600  # matches bar_slice_secs(1m)
     start = 0
     end = 3 * step
-    bars = client.load_time_bars_range(
-        "NQU6", "CME", start, end, bar_type=2, period=1, max_workers=1
-    )
+    bars = client.load_time_bars_range("NQU6", "CME", start, end, bar_type=2, period=1)
     assert len(calls) == 3
     markers = [b["marker"] for b in bars]
     assert markers == sorted(set(markers))
@@ -206,8 +204,6 @@ def test_load_time_bars_range_async(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(client, "load_time_bars", _fake_load)
     bars = asyncio.run(
-        client.load_time_bars_range_async(
-            "NQU6", "CME", 0, 3600, bar_type=2, period=1, max_workers=1
-        )
+        client.load_time_bars_range_async("NQU6", "CME", 0, 3600, bar_type=2, period=1)
     )
     assert len(bars) == 1

@@ -3,7 +3,7 @@
 Each scenario drives ``rithmic-gateway-fake`` (the production server code path:
 handshake, gates, fan-out, event pump, reconnect + intent restore, credential
 flock) through a ``make_client`` factory. The suite runs once per client
-implementation, so the Python clients are pinned today and the Rust client must
+implementation (the lake's plain Python client and the Rust client), which must
 pass the identical list. No Rithmic credentials are needed.
 """
 
@@ -18,7 +18,6 @@ import pytest
 from gateway_fake import FakeParent, build_fake_gateway, running_fake
 from rithmic_gateway.client import GatewayClient
 from rithmic_gateway.client import GatewayError as LakeGatewayError
-from rithmic_gateway.runtime import GatewayRuntimeRegistry, create_gateway_client
 from rithmic_nt_connect.errors import GatewayError as ExtensionGatewayError
 
 # The Python clients raise the lake error, the Rust client the extension's; both
@@ -33,12 +32,6 @@ MakeClient = Callable[[FakeParent], Any]
 
 def _python_plain(parent: FakeParent) -> Any:
     client = GatewayClient(parent.config(), rpc_timeout_sec=10.0)
-    client.connect()
-    return client
-
-
-def _python_mux(parent: FakeParent) -> Any:
-    client = create_gateway_client(parent.config(), rpc_timeout_sec=10.0)
     client.connect()
     return client
 
@@ -61,7 +54,6 @@ def _rust(parent: FakeParent) -> Any:
 
 CLIENTS: dict[str, MakeClient] = {
     "python-plain": _python_plain,
-    "python-mux": _python_mux,
     "rust": _rust,
 }
 
@@ -94,25 +86,23 @@ class ClientFactory:
 
 @pytest.fixture(params=sorted(CLIENTS))
 def make_client(request: pytest.FixtureRequest) -> Iterator[ClientFactory]:
-    GatewayRuntimeRegistry.reset_for_tests()
     factory = ClientFactory(request.param)
     yield factory
     factory.close()
-    GatewayRuntimeRegistry.reset_for_tests()
 
 
 def reattach(make_client: ClientFactory, client: Any) -> None:
     """Recover a client after the parent drops its connection (adapter-owned replay).
 
     On a plant reconnect the parent bumps its transport epoch and disconnects
-    clients so they re-handshake; the plain client re-dials itself, the mux
-    runtime re-dials through ``ensure_transport_live``.
+    clients so they re-handshake; the plain client re-dials itself, the Rust
+    session re-dials through ``ensure_transport_live``.
     """
     if make_client.kind == "python-plain":
         client.disconnect()
         client.connect()
     else:
-        # The mux runtimes (Python and Rust) re-dial through ensure_transport_live.
+        # The Rust session re-dials through ensure_transport_live.
         client.ensure_transport_live()
 
 
@@ -330,7 +320,9 @@ def test_a_slow_client_is_disconnected_without_hurting_its_peer(
     fake_bin, make_client
 ) -> None:
     if make_client.kind != "python-plain":
-        pytest.skip("mux clients share one socket; overflow isolation is per-socket")
+        pytest.skip(
+            "the Rust client shares one socket; overflow isolation is per-socket"
+        )
     with running_fake(fake_bin) as parent:
         slow, fast = make_client(parent), make_client(parent)
         slow.subscribe(NQ, EXCHANGE)
@@ -358,9 +350,9 @@ def test_a_slow_client_is_disconnected_without_hurting_its_peer(
 # -- parent restart / transport recovery --------------------------------------
 
 
-def test_mux_client_recovers_after_the_parent_restarts(fake_bin, make_client) -> None:
+def test_rust_client_recovers_after_the_parent_restarts(fake_bin, make_client) -> None:
     if make_client.kind == "python-plain":
-        pytest.skip("transport recovery is a mux-runtime behavior")
+        pytest.skip("transport recovery is a Rust-session behavior")
     with running_fake(fake_bin) as parent:
         client = make_client(parent)
         client.subscribe(NQ, EXCHANGE)

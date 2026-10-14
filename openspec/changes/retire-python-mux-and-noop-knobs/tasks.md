@@ -6,11 +6,11 @@
 
 ## 2. Retire the Python mux
 
-- [ ] 2.1 Confirm with the market-data-lake owner that `create_gateway_client` and `max_workers > 1` are unused (extends `simplify-gateway-modes` 6.4)
-- [ ] 2.2 Make `GatewayClient.load_time_bars_range` sequential-only and remove `max_workers`
-- [ ] 2.3 Delete `python/rithmic_gateway/{mux,runtime,transport_recovery}.py` and `tests/test_gateway_mux.py`, `tests/test_gateway_runtime.py`, `tests/test_transport_recovery.py`
-- [ ] 2.4 Drop the `python-mux` client from `tests/test_gateway_scenarios.py`; fix comments in `framed_conn.py`, `recovery_bridge.py`, `client.py`
-- [ ] 2.5 Test that `rithmic_gateway` imports without Nautilus and exposes no mux names
+- [x] 2.1 Confirm with the market-data-lake owner that `create_gateway_client` and `max_workers > 1` are unused (extends `simplify-gateway-modes` 6.4)
+- [x] 2.2 Make `GatewayClient.load_time_bars_range` sequential-only and remove `max_workers`
+- [x] 2.3 Delete `python/rithmic_gateway/{mux,runtime,transport_recovery}.py` and `tests/test_gateway_mux.py`, `tests/test_gateway_runtime.py`, `tests/test_transport_recovery.py`
+- [x] 2.4 Drop the `python-mux` client from `tests/test_gateway_scenarios.py`; fix comments in `framed_conn.py`, `recovery_bridge.py`, `client.py`
+- [x] 2.5 Test that `rithmic_gateway` imports without Nautilus and exposes no mux names
 
 ## 3. Skipped behavior fixes (code-only, one commit each)
 
@@ -22,8 +22,8 @@
 ## 4. Docs and specs
 
 - [x] 4.1 Replace the six `TBD` Purpose lines in `openspec/specs/*/spec.md`
-- [ ] 4.2 Update `AGENTS.md`, `docs/STATUS.md`, `docs/references/ops-runbook.md`, ADR 0001 for removed knobs and mux (knob wording done; mux wording lands with section 2)
-- [ ] 4.3 Run `python scripts/status_progress.py --check` after STATUS edits
+- [x] 4.2 Update `AGENTS.md`, `docs/STATUS.md`, `docs/references/ops-runbook.md`, ADR 0001 for removed knobs and mux
+- [x] 4.3 Run `python scripts/status_progress.py --check` after STATUS edits
 
 ## 5. Verify
 
