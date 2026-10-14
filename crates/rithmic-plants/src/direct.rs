@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use tokio::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::backend::{AccountTriple, ModifyOrder, PlaceBracketOrder, PlaceOrder, Session};
 use crate::config::SessionConfig;
@@ -70,6 +70,13 @@ pub struct DirectSession {
     /// neither collects the other's replay.
     order_drain: Mutex<()>,
 }
+
+/// Refusal texts shared with [`crate::fake::FakeSession`], so the two sides of
+/// the session contract cannot drift.
+pub(crate) const DISCONNECT_IN_PROGRESS: &str =
+    "session disconnect in progress; order operation rejected";
+pub(crate) const ORDER_PLANT_CLOSED: &str =
+    "order plant was disconnected; ensure it (or subscribe to order updates) first";
 
 /// Marks a disconnect in progress for its lifetime (cleared on every exit path).
 struct DisconnectGate<'a>(&'a AtomicUsize);
@@ -158,8 +165,7 @@ impl DirectSession {
 
     /// Begin a place / cancel / modify: rejected while a disconnect is in progress.
     async fn begin_order_op(&self) -> Result<RwLockReadGuard<'_, ()>> {
-        let refused =
-            || Error::NotSent("session disconnect in progress; order operation rejected".into());
+        let refused = || Error::NotSent(DISCONNECT_IN_PROGRESS.into());
         if self.disconnecting.load(Ordering::SeqCst) > 0 {
             return Err(refused());
         }
@@ -179,19 +185,28 @@ impl DirectSession {
             .map_err(|_| Error::Session("timed out waiting for in-flight order operations".into()))
     }
 
-    /// The order handle for a state-changing call. Nothing has been sent when this
-    /// fails, so a missing or unreachable plant is [`Error::NotSent`], never an
-    /// unknown outcome.
+    /// The order handle for a command or an order-plant read. Nothing has been
+    /// sent when this fails, so a missing or unreachable plant is
+    /// [`Error::NotSent`], never an unknown outcome. After an explicit
+    /// `disconnect_order_plant` it refuses instead of silently re-opening a plant
+    /// with no subscriptions.
     async fn command_handle(&self) -> Result<rithmic_rs::RithmicOrderPlantHandle> {
         if self.order_closed.load(Ordering::SeqCst) {
-            return Err(Error::NotSent(
-                "order plant was disconnected; ensure it (or subscribe to order updates) first"
-                    .into(),
-            ));
+            return Err(Error::NotSent(ORDER_PLANT_CLOSED.into()));
         }
         self.order_handle()
             .await
             .map_err(|e| Error::NotSent(e.to_string()))
+    }
+
+    /// The session for a bring-up (connect, ensure, request plants, subscribe on
+    /// the order plant): waits out a ticker reset in flight first, because the
+    /// reset takes the ticker out of the session for its venue round trips and a
+    /// bring-up would otherwise see no ticker. Lock order: `ticker_reset`, then
+    /// `inner` (the same order `reset_ticker` uses).
+    async fn bring_up(&self) -> (MutexGuard<'_, ()>, MutexGuard<'_, RithmicSession>) {
+        let reset = self.ticker_reset.lock().await;
+        (reset, self.inner.lock().await)
     }
 
     /// Clone the plant handles under an instant's lock; the I/O that follows runs
@@ -223,7 +238,7 @@ impl DirectSession {
         if let Some(handle) = self.order_cache.lock().expect("order cache").clone() {
             return Ok(handle);
         }
-        let mut inner = self.inner.lock().await;
+        let (_reset, mut inner) = self.bring_up().await;
         let ensured = inner.ensure_order_plant().await;
         self.sync_caches(&inner);
         ensured?;
@@ -242,10 +257,12 @@ fn account_triple(a: &rithmic_rs::RithmicAccount) -> AccountTriple {
 #[async_trait]
 impl Session for DirectSession {
     async fn connect(&self) -> Result<()> {
-        let mut inner = self.inner.lock().await;
+        let (_reset, mut inner) = self.bring_up().await;
         let result = inner.connect().await;
         self.sync_caches(&inner);
-        self.order_closed.store(false, Ordering::SeqCst);
+        if result.is_ok() {
+            self.order_closed.store(false, Ordering::SeqCst);
+        }
         result
     }
 
@@ -259,7 +276,7 @@ impl Session for DirectSession {
     }
 
     async fn request_plants(&self, extra: PlantSet) -> Result<()> {
-        let mut inner = self.inner.lock().await;
+        let (_reset, mut inner) = self.bring_up().await;
         let result = inner.request_plants(extra).await;
         self.sync_caches(&inner);
         result
@@ -267,7 +284,7 @@ impl Session for DirectSession {
 
     async fn ensure_order_plant(&self) -> Result<()> {
         self.require_trading("ensure_order_plant")?;
-        let mut inner = self.inner.lock().await;
+        let (_reset, mut inner) = self.bring_up().await;
         let result = inner.ensure_order_plant().await;
         self.sync_caches(&inner);
         if result.is_ok() {
@@ -277,7 +294,7 @@ impl Session for DirectSession {
     }
 
     async fn ensure_pnl_plant(&self) -> Result<()> {
-        let mut inner = self.inner.lock().await;
+        let (_reset, mut inner) = self.bring_up().await;
         let result = inner.ensure_pnl_plant().await;
         self.sync_caches(&inner);
         result
@@ -378,7 +395,7 @@ impl Session for DirectSession {
     async fn subscribe_order_updates(&self) -> Result<()> {
         self.require_trading("subscribe_order_updates")?;
         // Must use the session's own handle (the one poll_order_event reads).
-        let mut inner = self.inner.lock().await;
+        let (_reset, mut inner) = self.bring_up().await;
         let result = inner.subscribe_order_updates().await;
         self.sync_caches(&inner);
         if result.is_ok() {
@@ -389,7 +406,7 @@ impl Session for DirectSession {
 
     async fn subscribe_bracket_updates(&self) -> Result<()> {
         self.require_trading("subscribe_bracket_updates")?;
-        let mut inner = self.inner.lock().await;
+        let (_reset, mut inner) = self.bring_up().await;
         let result = inner.subscribe_bracket_updates().await;
         self.sync_caches(&inner);
         if result.is_ok() {
@@ -480,39 +497,39 @@ impl Session for DirectSession {
         // Detached handle: the drain can run for seconds and must not block the
         // event pump / pollers on the session lock. The window is ignored: only
         // the current working set is requested.
-        let handle = self.order_handle().await?;
+        let handle = self.command_handle().await?;
         let _drain = self.order_drain.lock().await;
         load_orders_on(&handle).await
     }
 
     async fn load_product_rms_info(&self) -> Result<Vec<ProductRmsInfoDto>> {
         self.require_trading("load_product_rms_info")?;
-        let handle = self.order_handle().await?;
+        let handle = self.command_handle().await?;
         load_product_rms_info_on(&handle).await
     }
 
     async fn load_account_rms_info(&self) -> Result<Vec<AccountRmsInfoDto>> {
         self.require_trading("load_account_rms_info")?;
-        let handle = self.order_handle().await?;
+        let handle = self.command_handle().await?;
         load_account_rms_info_on(&handle).await
     }
 
     async fn load_fill_history(&self, start: i32, finish: i32) -> Result<Vec<FillHistoryDto>> {
         self.require_trading("load_fill_history")?;
-        let handle = self.order_handle().await?;
+        let handle = self.command_handle().await?;
         load_fill_history_on(&handle, start, finish).await
     }
 
     async fn load_order_history(&self, date: &str) -> Result<Vec<OrderNotificationDto>> {
         self.require_trading("load_order_history")?;
-        let handle = self.order_handle().await?;
+        let handle = self.command_handle().await?;
         let _drain = self.order_drain.lock().await;
         load_order_history_on(&handle, date).await
     }
 
     async fn load_order_history_dates(&self) -> Result<Vec<String>> {
         self.require_trading("load_order_history_dates")?;
-        let handle = self.order_handle().await?;
+        let handle = self.command_handle().await?;
         load_order_history_dates_on(&handle).await
     }
 

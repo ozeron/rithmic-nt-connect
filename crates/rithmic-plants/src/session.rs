@@ -152,10 +152,13 @@ fn forward<R: Feed + 'static>(
                     Ok(Err(Error::Rithmic(text))) => task_tx.fail(text),
                     Ok(Err(other)) => task_tx.fail(other.to_string()),
                     Err(_) => {
+                        // Fail, then close: the failure is reported once and
+                        // every later poll sees a closed lane, never a silent one.
                         task_tx.fail(format!(
                             "{} event conversion panicked; plant stream stopped",
                             stream.plant()
                         ));
+                        task_tx.close();
                         break;
                     }
                 },
@@ -1519,6 +1522,9 @@ fn collect_history_rows<T>(
             rows.push(row);
         }
     }
+    // "Partial" means rows arrived before the error. rithmic-rs 3 puts `rp_code`
+    // only on the terminal frame, so in practice the error frame ends the reply;
+    // the row count, not frame order, is what is classified here.
     match first_err {
         None => Ok(rows),
         Some(err) if rows.is_empty() => Err(Error::Rithmic(format!("{ctx}: {err}"))),
@@ -2044,5 +2050,41 @@ mod order_class_tests {
         let not_sent = order_result_one(Err(E::InvalidArgument("x".into())), "cancel_all_orders");
         assert!(matches!(not_sent, Err(Error::NotSent(_))));
         assert!(order_result_many(Ok(Vec::new()), "place_order").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod forwarder_tests {
+    use super::*;
+
+    struct Items(tokio::sync::mpsc::Receiver<u32>);
+
+    #[async_trait::async_trait]
+    impl Feed for Items {
+        type Item = u32;
+
+        async fn next_item(&mut self) -> std::result::Result<u32, RecvError> {
+            self.0.recv().await.ok_or(RecvError::Closed)
+        }
+    }
+
+    fn panics(_: u32) -> Result<Option<PlantEvent>> {
+        panic!("unconvertible venue value")
+    }
+
+    #[tokio::test]
+    async fn a_conversion_panic_fails_the_lane_once_then_reads_closed_forever() {
+        let hub = StreamHub::new();
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let _guard = forward(&hub, Stream::Ticker, Items(rx), panics);
+        tx.send(1).await.unwrap();
+
+        let wait = Duration::from_secs(2);
+        let first = hub.poll(Stream::Ticker, wait).await.unwrap_err();
+        assert!(first.to_string().contains("panicked"), "{first}");
+        for _ in 0..3 {
+            let later = hub.poll(Stream::Ticker, wait).await.unwrap_err();
+            assert!(matches!(later, Error::ChannelClosed { .. }), "{later}");
+        }
     }
 }

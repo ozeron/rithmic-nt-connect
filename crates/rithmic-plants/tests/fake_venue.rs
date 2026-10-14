@@ -480,3 +480,70 @@ async fn a_deliberate_order_plant_disconnect_never_reads_as_a_closed_channel() {
     let errors = consumer.await.unwrap();
     assert!(errors.is_empty(), "the order lane reported: {errors:?}");
 }
+
+#[tokio::test]
+async fn the_first_order_command_during_a_ticker_reset_waits_for_it() {
+    let venue = venue().await;
+    // No order plant yet: the place has to bring it up, which needs the ticker.
+    let session = std::sync::Arc::new(connected(&venue, PlantSet::MARKET_DATA).await);
+
+    let reset = slow_ticker_reset(&venue, &session, Duration::from_millis(500));
+    venue.wait_for(template::LOGOUT, 1).await;
+
+    session
+        .place_order(&order("during-reset"))
+        .await
+        .expect("waited for the reset, then placed");
+    reset.await.unwrap().expect("reset completes");
+}
+
+#[tokio::test]
+async fn plants_requested_during_a_ticker_reset_are_attached() {
+    let venue = venue().await;
+    let ticker_only = PlantSet {
+        ticker: true,
+        history: false,
+        pnl: false,
+    };
+    let session = std::sync::Arc::new(connected(&venue, ticker_only).await);
+    assert_eq!(venue.connections(Plant::History), 0);
+
+    let reset = slow_ticker_reset(&venue, &session, Duration::from_millis(500));
+    venue.wait_for(template::LOGOUT, 1).await;
+
+    session
+        .request_plants(PlantSet::MARKET_DATA)
+        .await
+        .expect("request plants");
+    venue.wait_connections(Plant::History, 1).await;
+    reset.await.unwrap().expect("reset completes");
+}
+
+#[tokio::test]
+async fn order_plant_reads_after_an_explicit_disconnect_do_not_reopen_it() {
+    let venue = venue().await;
+    let session = connected(&venue, PlantSet::MARKET_DATA).await;
+    session.ensure_order_plant().await.expect("ensure");
+    session
+        .disconnect_order_plant()
+        .await
+        .expect("disconnect order plant");
+    venue.wait_connections(Plant::Order, 0).await;
+
+    let err = session
+        .load_fill_history(1_790_000_000, 1_790_000_100)
+        .await
+        .expect_err("refused while the plant is down on request");
+    assert!(matches!(err, Error::NotSent(_)), "{err}");
+    assert_eq!(
+        venue.connections(Plant::Order),
+        0,
+        "the read re-opened the plant"
+    );
+
+    session.ensure_order_plant().await.expect("ensure again");
+    session
+        .load_fill_history(1_790_000_000, 1_790_000_100)
+        .await
+        .expect("reads work once the plant is ensured");
+}

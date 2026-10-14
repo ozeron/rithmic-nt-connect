@@ -133,15 +133,10 @@ impl FakeSession {
         {
             let state = self.lock();
             if state.disconnecting {
-                return Err(Error::NotSent(
-                    "session disconnect in progress; order operation rejected".into(),
-                ));
+                return Err(Error::NotSent(crate::direct::DISCONNECT_IN_PROGRESS.into()));
             }
             if state.order_closed {
-                return Err(Error::NotSent(
-                    "order plant was disconnected; ensure it (or subscribe to order updates) first"
-                        .into(),
-                ));
+                return Err(Error::NotSent(crate::direct::ORDER_PLANT_CLOSED.into()));
             }
         }
         self.enter_plant(method, detail, Stream::Order)
@@ -593,9 +588,7 @@ impl Session for FakeSession {
             });
         }
         if self.lock().disconnecting {
-            return Err(Error::NotSent(
-                "session disconnect in progress; order operation rejected".into(),
-            ));
+            return Err(Error::NotSent(crate::direct::DISCONNECT_IN_PROGRESS.into()));
         }
         self.enter_plant("cancel_all_orders", "", Stream::Order)
     }
