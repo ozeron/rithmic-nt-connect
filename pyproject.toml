@@ -40,6 +40,7 @@ pythonpath = ["python", "scripts"]
 markers = [
     "live: real-connection e2e (tests/e2e); auto-skip without RITHMIC_TEST_DOTENV",
     "slow: takes >30s (1m EXTERNAL bar poll); deselect with -m 'not slow'",
+    "perf: synthetic throughput measurements (tests/test_perf_ffi_throughput.py); need RITHMIC_PERF=1",
 ]
 
 [tool.ty.environment]

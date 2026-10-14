@@ -55,6 +55,18 @@ There is no benchmark of any kind in the repository today.
 
 **10. Budgets are initial and ratified from the baseline.** The numbers in `gateway-throughput` (50k events/s sustained, 200k burst, p99 5 ms at 20k/s, order p99 at most 2x idle and 50 ms, at most two allocations per event, RSS growth at most 5 percent) are set from engineering judgment with headroom over expected CME NQ/ES rates; they are validated against the real baseline in task 1 and edited in the spec before archive if the harness shows they are mis-sized. Real market peak rates still need a capture from a market-data account.
 
+## Baseline findings (unmodified code, `docs/perf/baseline-before.json`)
+
+Measured with `rithmic-load suite` on a 10-core macOS machine, all parties in one process.
+
+- **H1 reproduced.** A 1,000 events/s feed is delivered at about 138 events/s (13.8 percent after the drain window); 10k, 50k and 200k events/s all deliver 137 to 190 events/s. The pump ceiling is the whole story at every rate. Latency grows without bound (p99 7 s at 1k/s, 54 s in the 45 s soak). The fake plant's queue is unbounded, so RSS climbs to about 390 MB; the real rithmic-rs buffer would instead lag and, today, drop silently.
+- **Idle wake-to-deliver:** p50 5.2 ms, p99 11.6 ms (the 10 ms poll interval), over the 2 ms budget.
+- **H2 reproduced two ways.** On one raw connection a place sent behind a 3 s read RPC is answered after 2.9 s and the replies arrive in order slow, place. Through the library with open-loop order flow, order p99 is 7.6 s under an 8 s slow RPC versus 0.20 ms idle. (A sequential order loop hides this behind one stuck call; the harness is open-loop for that reason.)
+- **Stalled consumer:** the parent drops a connection that stops reading; peers' delivery is bounded by the same pump ceiling, so isolation cannot be judged until H1 is fixed.
+- **Allocations on the publish path:** 4 per event, 107 bytes. The spec budget of 2 is a target for the copy-diet phase.
+- **Per-client fan-out buffer is 1,024 events** (`DEFAULT_QUEUE_CAP`), and an overflow disconnects the client. At 50k events/s that is a 20 ms stall. The baseline cannot reach it (the pump is the bottleneck), so event-driven delivery must size this deliberately.
+- **Python boundary (S7):** about 80 events/s through `Session.poll_event` in gateway mode, the same ceiling seen from Python.
+
 ## Risks / Trade-offs
 
 - [Per-stream tasks reorder across streams] → ordering is only guaranteed within a stream today; the spec keeps it that way; order and PnL are separate streams already.

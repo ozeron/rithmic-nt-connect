@@ -73,6 +73,8 @@ struct State {
     events: HashMap<Stream, VecDeque<PlantEvent>>,
     calls: Vec<String>,
     failures: HashMap<String, VecDeque<FakeFailure>>,
+    /// Per-method artificial latency applied by [`FakeSession::delay`].
+    delays: HashMap<String, Duration>,
     account: Option<AccountTriple>,
 }
 
@@ -134,6 +136,18 @@ impl FakeSession {
     /// next `connect`, exactly what the parent's event pump reacts to.
     pub fn drop_plants(&self) {
         self.lock().dropped = true;
+    }
+
+    /// Make every call to `method` take at least `delay` (a slow venue).
+    pub fn set_delay(&self, method: &str, delay: Duration) {
+        self.lock().delays.insert(method.to_string(), delay);
+    }
+
+    async fn delay(&self, method: &str) {
+        let delay = self.lock().delays.get(method).copied();
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
     }
 
     pub fn set_account(&self, account: AccountTriple) {
@@ -352,6 +366,7 @@ impl Session for FakeSession {
             "load_ticks",
             &format!("{symbol} {exchange} {start_time_sec} {end_time_sec}"),
         )?;
+        self.delay("load_ticks").await;
         Ok(Vec::new())
     }
 
@@ -368,6 +383,7 @@ impl Session for FakeSession {
             "load_time_bars",
             &format!("{symbol} {exchange} {start_time_sec} {end_time_sec} {bar_type} {period}"),
         )?;
+        self.delay("load_time_bars").await;
         Ok(Vec::new())
     }
 
@@ -409,6 +425,7 @@ impl Session for FakeSession {
     async fn load_fill_history(&self, start: i32, finish: i32) -> Result<Vec<FillHistoryDto>> {
         self.enter("load_fill_history", &format!("{start} {finish}"))?
             .order_plant = true;
+        self.delay("load_fill_history").await;
         Ok(Vec::new())
     }
 

@@ -1,12 +1,12 @@
 ## 1. Load harness and baseline (no behavior change)
 
-- [ ] 1.1 Add `crates/rithmic-loadtest` (`rithmic-load`, excluded from the wheel): start the fake gateway parent, attach the real Rust client over a unix socket, JSON report with hdrhistogram p50/p99/p999, sent/received, gaps and skipped, throughput, peak RSS
-- [ ] 1.2 Scenario S1 ticker flood at 1k / 10k / 50k / 100k / 200k events/s with 1, 4 and 8 clients; each event carries its creation timestamp
-- [ ] 1.3 Scenario S2 flood plus order place/cancel round-trip latency; S3 flood plus a slow history RPC on the same socket (fake gains a configurable history delay)
-- [ ] 1.4 Scenario S4 stalled consumer (one client stops reading); S5 plant reconnect during a flood; S6 10 minute soak with RSS sampling
-- [ ] 1.5 Allocation microbench of `publish_plant_event` with a counting global allocator (server path only), 1 and 4 subscribers
-- [ ] 1.6 Scenario S7: direct-mode and gateway-mode FFI throughput through the PyO3 `Session` into the dict converter (pytest `perf` marker, reuses `tests/gateway_fake.py`)
-- [ ] 1.7 Run everything on the unmodified code and commit `docs/perf/baseline-before.json`; record the observed pump ceiling and any unexpected finding in the design
+- [x] 1.1 Add `crates/rithmic-loadtest` (`rithmic-load`, excluded from the wheel): start the fake gateway parent, attach the real Rust client over a unix socket, JSON report with hdrhistogram p50/p99/p999, sent/received, gaps and skipped, throughput, peak RSS
+- [x] 1.2 Scenario S1 ticker flood at 1k / 10k / 50k / 100k / 200k events/s with 1, 4 and 8 clients; each event carries its creation timestamp
+- [x] 1.3 Scenario S2 flood plus order place/cancel round-trip latency; S3 flood plus a slow history RPC on the same socket (fake gains a configurable history delay)
+- [x] 1.4 Scenario S4 stalled consumer (one client stops reading); S5 plant reconnect during a flood; S6 10 minute soak with RSS sampling
+- [x] 1.5 Allocation microbench of `publish_plant_event` with a counting global allocator (server path only), 1 and 4 subscribers
+- [x] 1.6 Scenario S7: direct-mode and gateway-mode FFI throughput through the PyO3 `Session` into the dict converter (pytest `perf` marker, reuses `tests/gateway_fake.py`)
+- [x] 1.7 Run everything on the unmodified code and commit `docs/perf/baseline-before.json`; record the observed pump ceiling and any unexpected finding in the design
 - [ ] 1.8 Ratify or edit the budgets in `specs/gateway-throughput/spec.md` against the baseline
 
 ## 2. Event-driven delivery and gaps (review H1, L9)

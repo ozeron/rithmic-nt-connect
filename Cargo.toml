@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/rithmic-plants", "crates/rithmic-gateway", "crates/rithmic-exec", "crates/rithmic-nt-connect"]
+members = ["crates/rithmic-plants", "crates/rithmic-gateway", "crates/rithmic-exec", "crates/rithmic-nt-connect", "crates/rithmic-loadtest"]
 resolver = "2"
 
 [workspace.package]
