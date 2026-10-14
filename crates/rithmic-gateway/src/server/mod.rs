@@ -770,6 +770,9 @@ async fn handle_client(mut stream: UnixStream, state: Arc<GatewayState>) -> Resu
 
     let mut reader = tokio::spawn(read_requests(read_half, cmd_tx, slow_tx, reply_tx.clone()));
     let slow = tokio::spawn(run_slow_lane(Arc::clone(&state), slow_rx, reply_tx.clone()));
+    // Kept to tell this client when the plants were rebuilt; dropped before the
+    // writer is awaited so the reply channel can close.
+    let resume_tx = reply_tx.clone();
     let mut commands = tokio::spawn(run_commands(
         Arc::clone(&state),
         client,
@@ -800,15 +803,29 @@ async fn handle_client(mut stream: UnixStream, state: Arc<GatewayState>) -> Resu
                 let _ = stop_tx.send(true);
                 break (&mut commands).await.ok();
             }
-            // Plants rebuilt — force re-handshake so Ready carries the new
-            // transport_generation (Macroscope).
+            // The plants were rebuilt and every client's subscriptions restored.
+            // The client stays attached and keeps its intents; it is told so it can
+            // resynchronize (events were missed while the plants were down).
             _ = epoch_rx.changed() => {
-                let _ = stop_tx.send(true);
-                break (&mut commands).await.ok();
+                let generation = *epoch_rx.borrow_and_update();
+                let resumed = Frame {
+                    request_id: 0,
+                    body: Some(Body::Event(pb::Event {
+                        body: Some(pb::event::Body::TransportResumed(pb::TransportResumed {
+                            generation,
+                        })),
+                    })),
+                };
+                if resume_tx.send(resumed).await.is_err() {
+                    // The writer is gone: the connection is done.
+                    let _ = stop_tx.send(true);
+                    break (&mut commands).await.ok();
+                }
             }
         }
     };
 
+    drop(resume_tx);
     reader.abort();
     slow.abort();
     if let Some(mut client) = client {

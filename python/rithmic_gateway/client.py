@@ -724,7 +724,10 @@ class GatewayClient(FramedConnection):
         """Next MD event (last_trade / bbo / order_book / other / gap), or None.
 
         A ``{"type": "gap", "stream": "ticker", "skipped": N}`` event means the
-        parent dropped ``N`` events for a lagging consumer; resynchronize.
+        parent dropped ``N`` events for a lagging consumer; resynchronize. A
+        ``{"type": "transport_resumed", ...}`` event means the parent rebuilt its
+        plants and already restored this connection's subscriptions: keep
+        reading, there is nothing to re-subscribe.
         """
         return self._poll_filtered(timeout_ms, _is_md_event)
 

@@ -473,6 +473,10 @@ assigns the state directly — every transition goes through the policy, and
 - Do not redistribute gated Rithmic `.proto` sources; keep them out of public git.
 
 
+## Plant reconnect in the gateway parent
+
+When a plant connection drops, the parent rebuilds the plants and re-issues every remembered subscription itself (ticker, book, time bars, PnL, order updates, brackets). Attached clients stay connected and receive a `TransportResumed` event (the Rust client turns it into `TransportDown` / `TransportUp`); nothing re-subscribes at the venue a second time. A market-data subscription that cannot be restored after 3 passes (for example an expired contract) is left degraded: the gateway becomes ready and the next `subscribe` for that key retries it. An account-level subscription (PnL, orders, brackets) that keeps failing makes the parent reconnect fully and stay not ready. `RITHMIC_GATEWAY_RESTORE_BACKOFF_MS` (default 2000) sets the pause between passes; tests lower it. Scenario `reconnect_during_flood` in the load harness checks this behavior. Live reconnect on a market-data account is still unverified here.
+
 ## Load harness
 
 `rithmic-load` (crate `crates/rithmic-loadtest`) drives the real gateway server, client and PyO3 layers over a fake plant, in one process, with no credentials. See `docs/perf/README.md` for the commands, how to read a report, and the recorded baselines.

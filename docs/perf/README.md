@@ -25,5 +25,6 @@ runs on the same machine.
 - `after-phase2.json`, `after-phase2-ffi.json`: after event-driven delivery and gaps (phase 2).
 - `after-phase3.json`: after per-connection lanes (a slow read no longer holds up orders or events).
 - `after-phase5.json`, `after-phase5-ffi.json`: after the copy diet (1 allocation per published event, shared client events, batched Python polling).
+- `after-phase7.json`: reconnect during a flood after parent-owned restore (one venue subscribe, no unsubscribe, no client reattach).
 
 Noise: the harness shares the machine with whatever else is running. On a quiet machine latencies are sub-millisecond; with a load average above the core count tails move by 10x between runs. Compare on a quiet host and repeat before trusting a single tail number.

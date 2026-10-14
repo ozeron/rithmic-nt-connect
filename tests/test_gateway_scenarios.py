@@ -255,8 +255,8 @@ def test_every_intent_is_reissued_after_a_plant_drop(fake_bin, make_client) -> N
         ):
             assert expected in calls, (expected, calls)
 
-        # The parent then drops its clients (transport epoch bump) and their
-        # teardown leaves the venue topics; the adapter re-attaches and replays.
+        # The parent restores the intents itself and clients stay attached; the
+        # re-handshake below is idempotent (refcounted intent).
         reattach(make_client, client)
         client.subscribe(NQ, EXCHANGE)
         client.subscribe_order_updates()
@@ -265,6 +265,39 @@ def test_every_intent_is_reissued_after_a_plant_drop(fake_bin, make_client) -> N
         assert len(drain(client.poll_event, 1)) == 1
         orders = drain(client.poll_order_event, 1)
         assert orders and orders[0].get("basket_id") == "basket-9"
+
+
+def test_plant_drop_keeps_clients_attached_and_signals_resumed(
+    fake_bin, make_client
+) -> None:
+    """The parent restores intents; a client sees a typed resume, not a teardown.
+
+    No re-subscribe or re-attach is needed: after the drop the next tick arrives
+    on the same connection and the venue saw exactly one subscribe for the intent.
+    """
+    with running_fake(fake_bin) as parent:
+        client = make_client(parent)
+        client.subscribe(NQ, EXCHANGE)
+        parent.clear_calls()
+
+        parent.drop_plants()
+        assert wait_for(lambda: parent.count(f"subscribe {NQ} {EXCHANGE}") >= 1), (
+            parent.calls()
+        )
+        assert wait_for(lambda: parent.count("connect") >= 1)
+
+        parent.push_last_trades(NQ, 1)
+        events: list[Any] = []
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and not any(
+            e.get("type") == "last_trade" for e in events
+        ):
+            ev = client.poll_event(timeout_ms=100)
+            if ev is not None:
+                events.append(ev)
+        types = [e.get("type") for e in events]
+        assert "last_trade" in types, types
+        assert parent.count(f"subscribe {NQ} {EXCHANGE}") == 1, parent.calls()
 
 
 def test_one_shot_commands_register_no_intent(fake_bin, make_client) -> None:

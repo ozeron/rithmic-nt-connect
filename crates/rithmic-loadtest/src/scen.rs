@@ -126,6 +126,7 @@ async fn raw_consumer(
                     rep.gap_events += 1;
                     rep.gap_skipped += skipped;
                 }
+                Ok(Ok(Some(Item::Resumed))) => rep.resumed += 1,
                 Ok(Ok(None)) | Ok(Err(_)) => {
                     dropped_at = Some(Instant::now());
                     continue 'outer;
@@ -358,10 +359,12 @@ pub async fn run(p: Params) -> Report {
             ));
         }));
     }
+    let calls_at_drop = Arc::new(AtomicUsize::new(usize::MAX));
     if let Some(at) = p.drop_plants_at {
-        let rig2 = rig.clone();
+        let (rig2, calls_at_drop) = (rig.clone(), calls_at_drop.clone());
         aux.push(tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs_f64(at)).await;
+            calls_at_drop.store(rig2.fake.calls().len(), Ordering::SeqCst);
             rig2.fake.drop_plants();
         }));
     }
@@ -378,6 +381,10 @@ pub async fn run(p: Params) -> Report {
             .all(|c| c.received.load(Ordering::Relaxed) >= total)
     })
     .await;
+
+    // Venue calls the reconnect caused, before the clients are stopped (their
+    // teardown would add unsubscribes of its own).
+    let calls_after_drain = rig.fake.calls();
 
     let mut dropped = 0usize;
     for mut c in stalled {
@@ -419,6 +426,20 @@ pub async fn run(p: Params) -> Report {
     }
 
     let mut notes = slow_note.lock().unwrap().clone();
+    let at_drop = calls_at_drop.load(Ordering::SeqCst);
+    if at_drop != usize::MAX {
+        // What the parent did at the venue because of the reconnect.
+        let calls = calls_after_drain;
+        let after = &calls[at_drop.min(calls.len())..];
+        let count = |prefix: &str| after.iter().filter(|c| c.starts_with(prefix)).count();
+        notes.push(format!(
+            "venue calls after the drop: {} connect, {} disconnect, {} subscribe, {} unsubscribe",
+            count("connect"),
+            count("disconnect"),
+            count("subscribe "),
+            count("unsubscribe"),
+        ));
+    }
     if p.stalled > 0 {
         notes.push(format!(
             "{dropped}/{} stalled connections were dropped by the parent",
@@ -441,11 +462,11 @@ pub async fn run(p: Params) -> Report {
         .map(|c| c.received as f64 / p.secs.max(0.001))
         .fold(f64::INFINITY, f64::min);
     // Loss that nothing told the consumer about: a hole in the sequence that no
-    // gap accounts for, on a connection that never had to reattach (a reattach
-    // is itself the signal for events missed while disconnected).
+    // gap accounts for, on a connection that was neither dropped nor told its
+    // plants were rebuilt (either is itself the signal for events missed).
     let unsignalled: u64 = conns
         .iter()
-        .filter(|c| c.reattaches == 0)
+        .filter(|c| c.reattaches == 0 && c.resumed == 0)
         .map(|c| c.missing_in_stream.saturating_sub(c.gap_skipped))
         .sum();
     if unsignalled > 0 {

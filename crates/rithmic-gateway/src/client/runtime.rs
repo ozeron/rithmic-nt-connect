@@ -320,6 +320,15 @@ async fn reader_loop(conn: Arc<Connection>, mut read: OwnedReadHalf, runtime: We
             continue;
         }
         if let Some(Body::Event(event)) = frame.body {
+            // The parent rebuilt its plants and restored this client's
+            // subscriptions: the socket stays up, the adapter is told as it would
+            // be after a re-dial.
+            if let Some(pb::event::Body::TransportResumed(_)) = &event.body {
+                if let Some(rt) = runtime.upgrade() {
+                    rt.on_resumed();
+                }
+                continue;
+            }
             if let (Some(rt), Some(event)) = (runtime.upgrade(), plant_event_from_pb(event)) {
                 rt.deliver(event);
             }
@@ -529,6 +538,20 @@ impl Runtime {
 
     pub(super) fn allow_recovery(&self) {
         self.stopping.store(false, Ordering::SeqCst);
+    }
+
+    /// The parent rebuilt its plants without dropping this connection. Surface it
+    /// as the same Down / Up pair a re-dial produces, with a new generation, so the
+    /// adapter's recovery (re-arm exec, replay market data) runs unchanged.
+    fn on_resumed(&self) {
+        let previous = self.generation.fetch_add(1, Ordering::SeqCst);
+        let _ = self.transport_tx.send(TransportEvent::Down {
+            generation: previous,
+        });
+        let _ = self.transport_tx.send(TransportEvent::Up {
+            generation: previous + 1,
+        });
+        self.wake_all();
     }
 
     fn on_connection_lost(&self, conn_id: u64) {

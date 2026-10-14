@@ -435,16 +435,23 @@ async def resync_ticker_session(
     subscriptions: set[tuple[str, str]],
     book_subscriptions: set[tuple[str, str]],
     bar_subscriptions: set[tuple[str, str, int, int]] | None = None,
+    *,
+    reset: bool = True,
 ) -> None:
-    """Reset the wire, then replay ticker + book + EXTERNAL bar intent.
+    """Reset the ticker plant (direct only), then replay ticker/book/bar intent.
 
     ``session.reset_ticker`` is refcount-blind: a channel-error resync must
     actually recreate the ticker plant even when the session is shared with
     the exec client, where ``disconnect`` alone is a holder-refcounted no-op.
-    Direct mode recreates only the ticker plant (PnL/order untouched); the
-    gateway detaches + re-dials this client only (parent plants untouched).
+    Only a direct session resets: it owns its plants, and the reset touches the
+    ticker plant alone (PnL/order untouched). A gateway client never does, since
+    the parent plant is shared by every attached client and the parent restores
+    its own intents when it reconnects; a client-side reset would re-subscribe
+    for everyone. ``reset=False`` is the gap path: the stream dropped events for
+    this consumer but the plant is healthy, so only the intent is replayed.
     """
-    await asyncio.to_thread(session.reset_ticker)
+    if reset and getattr(session, "is_direct", True):
+        await asyncio.to_thread(session.reset_ticker)
     await replay_subscription_intent(
         session, subscriptions, book_subscriptions, bar_subscriptions
     )
@@ -794,7 +801,7 @@ class RithmicDataClient(LiveMarketDataClient):
                 setattr(self, attr, None)
         await asyncio.to_thread(self._session.disconnect)
 
-    async def _resync_ticker_subscription(self) -> None:
+    async def _resync_ticker_subscription(self, *, reset: bool = True) -> None:
         start_gen = self._resync_generation
         async with self._resync_lock:
             if self._resync_generation != start_gen:
@@ -814,6 +821,7 @@ class RithmicDataClient(LiveMarketDataClient):
                 ticker_keys,
                 set(self._book_subscriptions),
                 bar_resync_subscriptions(self._bar_types),
+                reset=reset,
             )
             self._resync_generation += 1
 
@@ -855,14 +863,16 @@ class RithmicDataClient(LiveMarketDataClient):
                         f"{label} stream dropped {event.get('skipped')} events; "
                         "resyncing"
                     )
-                    backoff = await self._resync_channel(label, backoff)
+                    backoff = await self._resync_channel(label, backoff, reset=False)
                     continue
                 self._dispatch_event(event)
 
-    async def _resync_channel(self, label: str, backoff: float) -> float:
+    async def _resync_channel(
+        self, label: str, backoff: float, *, reset: bool = True
+    ) -> float:
         """Resubscribe after a channel error or a gap; returns the next backoff."""
         try:
-            await self._resync_ticker_subscription()
+            await self._resync_ticker_subscription(reset=reset)
             self._log.warning(f"{label} subscription resynced after channel error")
             backoff = 0.05
         except Exception as resync_exc:

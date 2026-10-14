@@ -344,6 +344,8 @@ pub fn plant_event_from_pb(event: pb::Event) -> Option<PlantEvent> {
         Body::InstrumentPnl(i) => PlantEvent::InstrumentPnl(instrument_pnl_from_pb(i)),
         Body::OrderNotification(n) => PlantEvent::OrderNotification(order_notification_from_pb(n)),
         Body::TimeBar(b) => PlantEvent::TimeBar(history_bar_from_pb(b)),
+        // Connection-level, not a plant event: the runtime handles it before this.
+        Body::TransportResumed(_) => return None,
         Body::Gap(g) => PlantEvent::Gap(rithmic_plants::GapDto {
             stream: rithmic_plants::Stream::from_plant(&g.stream)?,
             skipped: g.skipped,

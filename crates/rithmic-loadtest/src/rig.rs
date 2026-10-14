@@ -130,8 +130,15 @@ pub fn tick(seq: u64) -> PlantEvent {
 
 /// What a raw consumer reads from the stream.
 pub enum Item {
-    Tick { seq: i32, created_ns: u64 },
-    Gap { skipped: u64 },
+    Tick {
+        seq: i32,
+        created_ns: u64,
+    },
+    Gap {
+        skipped: u64,
+    },
+    /// The parent rebuilt its plants without dropping this connection.
+    Resumed,
 }
 
 /// A minimal protocol client: handshake, subscribe, read frames. It lets the
@@ -242,6 +249,9 @@ impl RawClient {
                     }
                     Some(rithmic_gateway::pb::event::Body::Gap(g)) => {
                         return Ok(Some(Item::Gap { skipped: g.skipped }))
+                    }
+                    Some(rithmic_gateway::pb::event::Body::TransportResumed(_)) => {
+                        return Ok(Some(Item::Resumed))
                     }
                     _ => {}
                 }

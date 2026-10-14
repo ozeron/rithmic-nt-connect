@@ -10,7 +10,7 @@ use std::time::Duration;
 use rithmic_plants::{Session, Stream};
 use tokio::task::JoinSet;
 
-use crate::reconnect::ReconnectController;
+use crate::reconnect::{MdIntent, ReconnectController};
 use crate::subscriptions::FanoutHub;
 
 use super::dispatch::TopicIntent;
@@ -103,6 +103,29 @@ pub async fn run_event_pump(
     }
 }
 
+/// Pause before retrying a failed plant connect.
+const CONNECT_RETRY: Duration = Duration::from_secs(5);
+/// Restore passes before a market-data join that keeps failing is left degraded.
+const RESTORE_ATTEMPTS: u32 = 3;
+/// Pause between restore passes (override with `RITHMIC_GATEWAY_RESTORE_BACKOFF_MS`,
+/// which the integration tests use to keep the bounded give-up quick).
+const RESTORE_BACKOFF: Duration = Duration::from_secs(2);
+
+fn restore_backoff() -> Duration {
+    std::env::var("RITHMIC_GATEWAY_RESTORE_BACKOFF_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(RESTORE_BACKOFF)
+}
+
+/// Rebuild the plants and restore every client's subscriptions, then tell the
+/// attached clients (the epoch bump). A market-data join that cannot be restored
+/// after a few passes (an expired contract, say) is left *degraded* instead of
+/// holding every client out: the gateway becomes ready, the join stays noted for
+/// the clients that hold it, and their next subscribe retries it. An account-level
+/// restore (PnL, orders) that keeps failing still keeps the gateway not ready,
+/// because trading on a half-restored order plant is the unsafe choice.
 async fn reconnect_loop(
     session: &SessionHandle,
     reconnect: &ReconnectController,
@@ -116,60 +139,108 @@ async fn reconnect_loop(
             let _ = guard.disconnect().await;
             if let Err(e) = guard.connect().await {
                 drop(guard);
-                eprintln!("rithmic-gateway: reconnect failed: {e}; retrying in 5s");
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                eprintln!(
+                    "rithmic-gateway: reconnect failed: {e}; retrying in {}s",
+                    CONNECT_RETRY.as_secs()
+                );
+                tokio::time::sleep(CONNECT_RETRY).await;
                 continue;
             }
         }
-        // Connect succeeded: retry restore a bounded number of times without
-        // tearing TLS down. If still incomplete, full-reconnect (outer loop)
-        // while staying Ready=false — never claim Ready with half-restored intent.
-        for attempt in 1..=6u32 {
+        // Connect succeeded: restore without tearing TLS down. Later passes retry
+        // only what failed, so a join that already succeeded is not issued twice.
+        let mut pending: Option<Vec<MdIntent>> = None; // None = every market-data join
+        let mut account = true;
+        let mut failed_md: Vec<MdIntent> = Vec::new();
+        for attempt in 1..=RESTORE_ATTEMPTS {
             let guard = session.lock_exclusive().await;
-            let (restored, attempted) = restore_intents(&*guard, reconnect).await;
+            let pass = restore_pass(&*guard, reconnect, pending.as_deref(), account).await;
             drop(guard);
             eprintln!(
-                "rithmic-gateway: restore attempt {attempt}: {restored}/{attempted} subscriptions"
+                "rithmic-gateway: restore attempt {attempt}: {}/{} subscriptions",
+                pass.restored, pass.attempted
             );
-            if restored == attempted {
-                let next = state.transport_generation.fetch_add(1, Ordering::SeqCst) + 1;
-                let _ = state.transport_epoch.send(next);
-                state.ready.store(true, Ordering::SeqCst);
-                return;
+            account = pass.account_failed;
+            failed_md = pass.failed_md;
+            pending = Some(failed_md.clone());
+            if !account && failed_md.is_empty() {
+                break;
             }
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            if attempt < RESTORE_ATTEMPTS {
+                tokio::time::sleep(restore_backoff()).await;
+            }
         }
-        eprintln!("rithmic-gateway: restore still incomplete after 6 attempts; full reconnect");
+        if account {
+            eprintln!(
+                "rithmic-gateway: account restore still incomplete after {RESTORE_ATTEMPTS} \
+                 attempts; full reconnect"
+            );
+            continue;
+        }
+        for intent in failed_md {
+            eprintln!(
+                "rithmic-gateway: could not restore {intent:?}; left degraded until a client \
+                 subscribes again"
+            );
+            reconnect.mark_degraded(intent).await;
+        }
+        let next = state.transport_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let _ = state.transport_epoch.send(next);
+        state.ready.store(true, Ordering::SeqCst);
+        return;
     }
 }
 
-/// Re-issue every remembered intent on a freshly reconnected session; returns
-/// `(restored, attempted)`. Public so the RPC-table tests can prove each
-/// subscription intent is re-issued.
-pub async fn restore_intents(
+/// What one restore pass achieved.
+#[derive(Debug, Default)]
+pub struct RestorePass {
+    pub restored: usize,
+    pub attempted: usize,
+    /// Market-data joins that failed and should be retried (or left degraded).
+    pub failed_md: Vec<MdIntent>,
+    /// An account-level join (PnL, order updates, brackets) failed.
+    pub account_failed: bool,
+}
+
+/// One restore pass over the remembered intents. `only_md` limits the
+/// market-data joins to those listed (a retry pass); `account` says whether to
+/// restore the account-level joins (PnL, orders, brackets) in this pass.
+pub async fn restore_pass(
     guard: &dyn Session,
     reconnect: &ReconnectController,
-) -> (usize, usize) {
+    only_md: Option<&[MdIntent]>,
+    account: bool,
+) -> RestorePass {
     let plan = reconnect.restore_plan().await;
-    let mut restored = 0usize;
-    let mut attempted = 0usize;
+    let mut pass = RestorePass::default();
 
     // MD intents (ticker / book / time bars, in that order) share the
     // dispatch-side venue-join mapping via TopicIntent. The failure policy
     // here is deliberately log-and-continue — dispatch rolls back instead.
-    let mut md_intents: Vec<TopicIntent> = Vec::new();
-    md_intents.extend(plan.ticker.iter().cloned().map(TopicIntent::Ticker));
-    md_intents.extend(plan.book.iter().cloned().map(TopicIntent::Book));
-    md_intents.extend(plan.time_bars.iter().cloned().map(TopicIntent::TimeBars));
-    for intent in &md_intents {
-        attempted += 1;
-        match intent.venue_join(guard).await {
-            Ok(()) => restored += 1,
-            Err(e) => eprintln!("{}", intent.resubscribe_fail_log(e)),
+    let mut md: Vec<MdIntent> = Vec::new();
+    md.extend(plan.ticker.iter().cloned().map(MdIntent::Ticker));
+    md.extend(plan.book.iter().cloned().map(MdIntent::Book));
+    md.extend(plan.time_bars.iter().cloned().map(MdIntent::TimeBars));
+    for intent in md {
+        if only_md.is_some_and(|only| !only.contains(&intent)) {
+            continue;
+        }
+        let topic = TopicIntent::from_md(&intent);
+        pass.attempted += 1;
+        match topic.venue_join(guard).await {
+            Ok(()) => pass.restored += 1,
+            Err(e) => {
+                eprintln!("{}", topic.resubscribe_fail_log(e));
+                pass.failed_md.push(intent);
+            }
         }
     }
+    if !account {
+        return pass;
+    }
+    let mut account_ok = true;
     if plan.pnl {
-        attempted += 1;
+        pass.attempted += 1;
         let pnl_ok = match guard.ensure_pnl_plant().await {
             Ok(()) => match guard.subscribe_pnl().await {
                 Ok(()) => true,
@@ -184,34 +255,55 @@ pub async fn restore_intents(
             }
         };
         if pnl_ok {
-            restored += 1;
+            pass.restored += 1;
+        } else {
+            account_ok = false;
         }
     }
     let mut order_ok = !plan.order;
     if plan.order {
-        attempted += 1;
+        pass.attempted += 1;
         match guard.subscribe_order_updates().await {
             Ok(()) => {
-                restored += 1;
+                pass.restored += 1;
                 order_ok = true;
             }
-            Err(e) => eprintln!("rithmic-gateway: resubscribe order updates failed: {e}"),
+            Err(e) => {
+                eprintln!("rithmic-gateway: resubscribe order updates failed: {e}");
+                account_ok = false;
+            }
         }
     }
     if plan.brackets {
-        attempted += 1;
+        pass.attempted += 1;
         // Order updates failure disconnects the plant — do not ensure+subscribe
         // brackets alone (would look like a partial restore success).
         if plan.order && !order_ok {
             eprintln!("rithmic-gateway: skip bracket restore; order updates not restored");
+            account_ok = false;
         } else {
             match guard.subscribe_bracket_updates().await {
-                Ok(()) => restored += 1,
-                Err(e) => eprintln!("rithmic-gateway: resubscribe bracket updates failed: {e}"),
+                Ok(()) => pass.restored += 1,
+                Err(e) => {
+                    eprintln!("rithmic-gateway: resubscribe bracket updates failed: {e}");
+                    account_ok = false;
+                }
             }
         }
     }
-    (restored, attempted)
+    pass.account_failed = !account_ok;
+    pass
+}
+
+/// Re-issue every remembered intent on a freshly reconnected session; returns
+/// `(restored, attempted)`. Public so the RPC-table tests can prove each
+/// subscription intent is re-issued.
+pub async fn restore_intents(
+    guard: &dyn Session,
+    reconnect: &ReconnectController,
+) -> (usize, usize) {
+    let pass = restore_pass(guard, reconnect, None, true).await;
+    (pass.restored, pass.attempted)
 }
 
 #[cfg(test)]

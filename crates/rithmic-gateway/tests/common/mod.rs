@@ -91,6 +91,7 @@ impl FakeParent {
                 format!("unix://{}", self.listen.display()),
             )
             .env("RITHMIC_FAKE_CONTROL", &self.control)
+            .env("RITHMIC_GATEWAY_RESTORE_BACKOFF_MS", "50")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());

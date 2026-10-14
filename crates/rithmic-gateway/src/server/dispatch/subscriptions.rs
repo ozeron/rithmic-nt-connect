@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use crate::convert::{order_key, pnl_key};
 use crate::pb::Frame;
-use crate::reconnect::{ReconnectController, TimeBarIntent};
+use crate::reconnect::{MdIntent, ReconnectController, TimeBarIntent};
 use crate::subscriptions::SubKey;
 
 use super::{
@@ -36,6 +36,23 @@ pub(in crate::server) enum TopicIntent {
 }
 
 impl TopicIntent {
+    /// This intent as the hashable key the controller tracks degradation by.
+    pub(in crate::server) fn md_intent(&self) -> MdIntent {
+        match self {
+            Self::Ticker(key) => MdIntent::Ticker(key.clone()),
+            Self::Book(key) => MdIntent::Book(key.clone()),
+            Self::TimeBars(intent) => MdIntent::TimeBars(intent.clone()),
+        }
+    }
+
+    pub(in crate::server) fn from_md(intent: &MdIntent) -> Self {
+        match intent {
+            MdIntent::Ticker(key) => Self::Ticker(key.clone()),
+            MdIntent::Book(key) => Self::Book(key.clone()),
+            MdIntent::TimeBars(intent) => Self::TimeBars(intent.clone()),
+        }
+    }
+
     pub(in crate::server) fn key(&self) -> SubKey {
         match self {
             Self::Ticker(key) | Self::Book(key) => key.clone(),
@@ -234,7 +251,13 @@ pub(super) async fn subscribe_topic(
 ) -> Frame {
     let key = intent.key();
     if intent.client_has(client) {
-        return ack_frame(request_id);
+        // A repeat subscribe is normally a no-op. If a plant rebuild left this join
+        // degraded (the venue lost it and the restore could not bring it back), it
+        // is the client's cue to retry: do the venue join now.
+        if !state.reconnect.is_degraded(&intent.md_intent()).await {
+            return ack_frame(request_id);
+        }
+        return rejoin_degraded(state, request_id, intent).await;
     }
     // Hold md_history_gate across note + venue join so history cannot pass
     // its live-MD check then acquire session while we are creating intent
@@ -264,6 +287,31 @@ pub(super) async fn subscribe_topic(
         }
     }
     ack_frame(request_id)
+}
+
+/// Retry the venue join of an intent a rebuild left degraded, on behalf of a client
+/// that already holds it. Clears the degradation on success; on failure the client
+/// gets the venue's own error and the intent stays degraded for the next try.
+async fn rejoin_degraded(state: &GatewayState, request_id: u64, intent: TopicIntent) -> Frame {
+    let key = intent.key();
+    let _md_gate = state.md_history_gate.lock().await;
+    let lock = topic_lock(state, &key).await;
+    let _guard = lock.lock().await;
+    // Another client's retry may have healed it while this one waited.
+    if !state.reconnect.is_degraded(&intent.md_intent()).await {
+        return ack_frame(request_id);
+    }
+    let Some(session) = &state.session else {
+        return no_session_frame(request_id);
+    };
+    let session_guard = session.lock().await;
+    match intent.venue_join(&*session_guard).await {
+        Ok(()) => {
+            state.reconnect.clear_degraded(&intent.md_intent()).await;
+            ack_frame(request_id)
+        }
+        Err(e) => err_to_frame(request_id, intent.subscribe_failed_code(), e),
+    }
 }
 
 pub(super) async fn unsubscribe_topic(

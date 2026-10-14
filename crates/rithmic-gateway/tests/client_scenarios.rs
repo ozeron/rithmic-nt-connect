@@ -259,7 +259,7 @@ async fn cancel_all_has_its_own_gate_independent_of_trading() {
 // --- restore after plant drop -----------------------------------------------------
 
 #[tokio::test]
-async fn every_intent_is_reissued_after_a_plant_drop_then_the_client_reattaches() {
+async fn every_intent_is_restored_by_the_parent_and_clients_stay_attached() {
     let parent = FakeParent::start(Opts {
         trading: true,
         ..Opts::default()
@@ -293,11 +293,11 @@ async fn every_intent_is_reissued_after_a_plant_drop_then_the_client_reattaches(
         assert!(calls.contains(&expected), "{expected}: {calls:?}");
     }
 
-    // The parent then drops its clients (epoch bump); re-attach and replay.
-    let generation = s.ensure_transport_live().await.expect("recovered");
-    assert_eq!(generation, 2);
-    s.subscribe(NQ, CME).await.unwrap();
-    s.subscribe_order_updates().await.unwrap();
+    // The parent restored the subscriptions itself and told this client; the
+    // client stayed attached and keeps its intents, so there is nothing to replay.
+    assert!(wait_until(Duration::from_secs(10), || s.transport_generation() == 2).await);
+    assert!(s.transport_connected());
+    assert_eq!(s.ensure_transport_live().await.expect("live"), 2);
     parent.push_last_trades(NQ, 1).await;
     parent
         .command("push order accepted basket-9 tag-9 NQH6")
@@ -308,6 +308,26 @@ async fn every_intent_is_reissued_after_a_plant_drop_then_the_client_reattaches(
         &orders[0],
         PlantEvent::OrderNotification(n) if n.basket_id.as_deref() == Some("basket-9")
     ));
+    // The rebuild cost the venue exactly one join per intent: nothing was torn
+    // down and re-issued by a client replay.
+    let after = parent.calls().await;
+    for join in [
+        format!("subscribe {NQ} {CME}"),
+        format!("subscribe_book {NQ} {CME}"),
+        format!("subscribe_time_bars {NQ} {CME} 2 1"),
+        "subscribe_pnl".to_string(),
+        "subscribe_order_updates".to_string(),
+    ] {
+        assert_eq!(
+            after.iter().filter(|c| **c == join).count(),
+            1,
+            "{join} issued once: {after:?}"
+        );
+    }
+    assert!(
+        !after.iter().any(|c| c.starts_with("unsubscribe")),
+        "no venue unsubscribe from client teardown: {after:?}"
+    );
 }
 
 #[tokio::test]
@@ -754,4 +774,90 @@ async fn a_gateway_denial_is_a_denial_not_a_venue_class() {
     let s = session_for(&parent).await;
     let err = s.place_order(&place("t")).await.unwrap_err();
     assert_eq!(class_of(&err), "denied", "{err}");
+}
+
+#[tokio::test]
+async fn the_adapter_is_told_with_the_same_down_and_up_events_a_redial_produces() {
+    let parent = FakeParent::start(Opts::default()).await;
+    let s = session_for(&parent).await;
+    s.subscribe(NQ, CME).await.unwrap();
+    let mut events = s.subscribe_transport();
+    parent.clear_calls().await;
+    parent.command("drop_plants").await;
+    let down = tokio::time::timeout(Duration::from_secs(10), events.recv())
+        .await
+        .expect("down in time")
+        .unwrap();
+    let up = tokio::time::timeout(Duration::from_secs(10), events.recv())
+        .await
+        .expect("up in time")
+        .unwrap();
+    assert!(
+        matches!(
+            down,
+            rithmic_gateway::client::TransportEvent::Down { generation: 1 }
+        ),
+        "{down:?}"
+    );
+    assert!(
+        matches!(
+            up,
+            rithmic_gateway::client::TransportEvent::Up { generation: 2 }
+        ),
+        "{up:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_market_data_join_that_cannot_be_restored_degrades_instead_of_wedging_the_gateway() {
+    let parent = FakeParent::start(Opts::default()).await;
+    let s = session_for(&parent).await;
+    s.subscribe(NQ, CME).await.unwrap();
+    parent.clear_calls().await;
+    // Every restore pass fails (three passes), so the join cannot be brought back.
+    for _ in 0..3 {
+        parent
+            .command("fail_next subscribe rithmic contract expired")
+            .await;
+    }
+    parent.command("drop_plants").await;
+
+    // The gateway still becomes ready and tells the client, rather than staying
+    // not-ready forever behind the stuck join.
+    assert!(wait_until(Duration::from_secs(15), || s.transport_generation() == 2).await);
+    assert_eq!(s.ensure_transport_live().await.unwrap(), 2);
+    let attempts = parent.count("subscribe NQH6").await;
+    assert_eq!(attempts, 3, "exactly the bounded passes, no more");
+
+    // The client's own subscribe (what its recovery replay does) retries the
+    // degraded join once and heals it.
+    s.subscribe(NQ, CME)
+        .await
+        .expect("the retry reaches the venue");
+    assert_eq!(parent.count("subscribe NQH6").await, attempts + 1);
+    parent.push_last_trades(NQ, 1).await;
+    assert_eq!(drain(&s, 1, market).await.len(), 1);
+    // Healed: a further subscribe is a plain no-op again.
+    s.subscribe(NQ, CME).await.unwrap();
+    assert_eq!(parent.count("subscribe NQH6").await, attempts + 1);
+}
+
+#[tokio::test]
+async fn a_failed_retry_of_a_degraded_join_reports_the_venue_error_and_stays_degraded() {
+    let parent = FakeParent::start(Opts::default()).await;
+    let s = session_for(&parent).await;
+    s.subscribe(NQ, CME).await.unwrap();
+    for _ in 0..3 {
+        parent.command("fail_next subscribe rithmic expired").await;
+    }
+    parent.command("drop_plants").await;
+    assert!(wait_until(Duration::from_secs(15), || s.transport_generation() == 2).await);
+
+    parent
+        .command("fail_next subscribe rithmic still expired")
+        .await;
+    let err = s.subscribe(NQ, CME).await.unwrap_err();
+    assert!(err.to_string().contains("still expired"), "{err}");
+    // Still degraded: the next subscribe tries again, and now succeeds.
+    s.subscribe(NQ, CME).await.expect("healed on the next try");
 }

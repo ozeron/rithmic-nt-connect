@@ -1,0 +1,80 @@
+[
+  {
+    "scenario": "reconnect_during_flood",
+    "params": {
+      "drain_secs": 8.0,
+      "drop_plants_at": 3.0,
+      "name": "reconnect_during_flood",
+      "orders": false,
+      "rate": 10000,
+      "raw": 2,
+      "sample_rss": false,
+      "secs": 8.0,
+      "sessions": 0,
+      "slow_rpc_secs": 0.0,
+      "stalled": 0,
+      "warmup_secs": 0.0
+    },
+    "duration_s": 8.102361292,
+    "sent": 80000,
+    "conns": [
+      {
+        "kind": "raw",
+        "received": 80000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 1,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 80000,
+          "p50_us": 121,
+          "p99_us": 192,
+          "p999_us": 344,
+          "max_us": 545
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 80000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 1,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 80000,
+          "p50_us": 119,
+          "p99_us": 190,
+          "p999_us": 324,
+          "max_us": 536
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 10000.0,
+    "latency": {
+      "count": 160000,
+      "p50_us": 120,
+      "p99_us": 191,
+      "p999_us": 329,
+      "max_us": 545
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 13744,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": null,
+    "alloc_bytes_per_event": null,
+    "notes": [
+      "venue calls after the drop: 1 connect, 1 disconnect, 1 subscribe, 0 unsubscribe"
+    ]
+  }
+]

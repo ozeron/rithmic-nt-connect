@@ -76,6 +76,13 @@ fn print_summary(r: &Report) {
     for n in &r.notes {
         eprintln!("{:<28} note: {n}", "");
     }
+    let resumed: u32 = r.conns.iter().map(|c| c.resumed).sum();
+    if resumed > 0 {
+        eprintln!(
+            "{:<28} told of a plant rebuild (TransportResumed): {resumed}",
+            ""
+        );
+    }
     let drops: u32 = r.conns.iter().map(|c| c.reattaches).sum();
     if drops > 0 {
         let outage = r.conns.iter().map(|c| c.max_outage_ms).max().unwrap_or(0);

@@ -68,6 +68,8 @@ pub struct ConnReport {
     /// Gap events delivered, and the events they reported as skipped.
     pub gap_events: u64,
     pub gap_skipped: u64,
+    /// Times the parent told this connection its plants were rebuilt.
+    pub resumed: u32,
     pub reattaches: u32,
     /// Longest time spent re-attaching after a drop, in milliseconds.
     pub max_outage_ms: u64,

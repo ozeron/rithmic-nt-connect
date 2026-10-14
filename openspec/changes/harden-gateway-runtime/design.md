@@ -137,6 +137,23 @@ What changed, and where it differs from the plan:
 - **`DirectSession` enforces the gates itself.** Trading RPCs (place, cancel, modify, bracket place/adjust, order and bracket subscribe, `ensure_order_plant`, working-order, RMS and history loads) fail with `trading_disabled`, and cancel-all with `cancel_all_denied`, the same codes the parent answers, before anything is sent. Both gates are closed at construction. The session is a process singleton shared by the data and exec clients, so a gate can only be opened (`allow`, OR semantics), by the exec client from its `enable_trading` and from `RITHMIC_GATEWAY_CANCEL_ALL`; one client cannot close it under another. The gateway parent builds its `DirectSession` with the parent's own gates, so it is enforced there as well as at dispatch. `trading_enabled` / `cancel_all_enabled` on the extension return the real gate in both modes (direct used to return `None`, which the exec client read as "allowed").
 - **Not done here:** `NoTradeRoute` and other non-constructible rithmic-rs variants cannot be built in unit tests (the types are `non_exhaustive`); the reject arm is covered end to end through the fake.
 
+## Phase 7 results and decisions (recovery: option B)
+
+`docs/perf/after-phase7.json`. Oracle: scenario S5 (plant dropped during a 10,000 events/s flood), counting venue calls after the drop.
+
+| Per plant reconnect | Before (current code at the start of phase 7) | After |
+|---|---|---|
+| Venue subscribes for one ticker intent | 2 (parent restore, then the client's replay) | 1 |
+| Venue unsubscribes | 1 to 2 (client teardown on epoch bump) | 0 |
+| Client reattaches | 2 (every client handler exited) | 0 |
+| Client told | connection closed, client re-dials | `TransportResumed`, connection kept |
+
+**Decision: B, parent-owned restore.** The parent was already re-issuing every intent after a reconnect and then throwing the work away by closing every client. Now it keeps the clients attached and sends each one a `TransportResumed` event (additive proto, `Event` body 10). The Rust client runtime turns it into the same `TransportDown` / `TransportUp` pair the adapter already handles, so the adapter's replay boundary is unchanged.
+
+- **Bounded restore.** A restore pass re-issues every intent; an intent that fails is retried on the next pass with a backoff (default 2 s, `RITHMIC_GATEWAY_RESTORE_BACKOFF_MS`). A market-data intent (ticker, book, time bars) that still fails after 3 passes is marked degraded: the parent stops looping reconnect for it, the other intents stay live, and the client's next `subscribe` for that key heals it (`rejoin_degraded`). Account-level intents (PnL, order updates, brackets) are never degraded: if they still fail after the bounded passes the parent does a full reconnect and stays not ready, because trading on a half-restored order plant is the unsafe choice.
+- **`reset_ticker` is no longer a gateway-client action.** `resync_ticker_session` resets only a direct session, which owns its plants. A gateway client never resets the shared parent plant (that re-subscribed for every peer); it replays its intent, which the parent refcounts. A `gap` is a resync without any reset (`reset=False`) in both modes: the plant is healthy, this consumer just lost events.
+- **Not done:** the `ResetTickerPlant` RPC stays for explicit operator use and the lake client.
+
 ## Risks / Trade-offs
 
 - [Per-stream tasks reorder across streams] → ordering is only guaranteed within a stream today; the spec keeps it that way; order and PnL are separate streams already.
@@ -155,6 +172,6 @@ Phases are separate commits, each green on `cargo test`, `uv run pytest` and the
 ## Open Questions
 
 - What are real peak per-symbol and aggregate tick rates on the target account? Needs a capture.
-- Option A or B for recovery (decision 9).
+- ~~Option A or B for recovery (decision 9).~~ Decided: B (phase 7).
 - Does the order stream need its own OS thread, or is a separate task enough (decided by S2)?
 - Should `RITHMIC_SUBSCRIPTION_CAPACITY` be exposed, and at what default, once the baseline shows buffer headroom?

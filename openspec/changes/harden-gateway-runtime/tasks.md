@@ -54,11 +54,11 @@
 
 ## 7. Recovery semantics (spike; after S5 passes on current code)
 
-- [ ] 7.1 Make S5 (reconnect during flood) pass and record its current behavior (loss, duplicates, gap markers, teardown churn)
-- [ ] 7.2 Decide option A (client-driven replay, remove dead restore work) or B (parent-owned restore, epoch bump as `TransportUp` plus gap); record the decision in the design
-- [ ] 7.3 Implement the decision; one failing intent must not loop reconnect forever (bounded give-up with a typed state)
-- [ ] 7.4 `reset_ticker` becomes a per-client resync once gap events exist (review M4); update the misleading docstring in `data.py`
-- [ ] 7.5 Extend `RestorePlan` / `restore_intents` and the gate/reconnect tests if a new intent bit is introduced
+- [x] 7.1 Make S5 (reconnect during flood) pass and record its current behavior (loss, duplicates, gap markers, teardown churn)
+- [x] 7.2 Decide option A (client-driven replay, remove dead restore work) or B (parent-owned restore, epoch bump as `TransportUp` plus gap); record the decision in the design
+- [x] 7.3 Implement the decision; one failing intent must not loop reconnect forever (bounded give-up with a typed state)
+- [x] 7.4 `reset_ticker` becomes a per-client resync once gap events exist (review M4); update the misleading docstring in `data.py`
+- [x] 7.5 Extend `RestorePlan` / `restore_intents` and the gate/reconnect tests if a new intent bit is introduced
 
 ## 8. CI, docs and verification
 
