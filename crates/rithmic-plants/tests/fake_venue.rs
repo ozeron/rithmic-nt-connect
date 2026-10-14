@@ -449,3 +449,34 @@ async fn history_added_mid_session_is_probed_before_use() {
         "the readiness probe ran before history was advertised"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_deliberate_order_plant_disconnect_never_reads_as_a_closed_channel() {
+    let venue = venue().await;
+    let session = std::sync::Arc::new(connected(&venue, PlantSet::MARKET_DATA).await);
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // The gateway pump reads the order lane the whole time; a closed channel
+    // there means "plant connection lost" and rebuilds every plant.
+    let consumer = {
+        let (session, stop) = (session.clone(), stop.clone());
+        tokio::spawn(async move {
+            let mut errors = Vec::new();
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                if let Err(e) = session
+                    .next_events(Stream::Order, 64, Duration::from_millis(20))
+                    .await
+                {
+                    errors.push(e.to_string());
+                }
+            }
+            errors
+        })
+    };
+    for _ in 0..15 {
+        session.subscribe_order_updates().await.unwrap();
+        session.disconnect_order_plant().await.unwrap();
+    }
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let errors = consumer.await.unwrap();
+    assert!(errors.is_empty(), "the order lane reported: {errors:?}");
+}

@@ -27,19 +27,19 @@
 
 ## 4. Gateway fixes (each test-first)
 
-- [ ] 4.1 History holds `md_history_gate` only for the live-intent check; add `history_load_lock`; test: subscribe and place on one socket complete during a slow fake history load; refusal test unchanged
-- [ ] 4.2 Forwarder overflow also sends `Gap(History)` when the client's kinds include bars; test
-- [ ] 4.3 Per-facade intent refcount in `client/runtime.rs` (ticker, book, time bars, PnL, order, brackets); facade disconnect/drop releases its holdings; `account_id` in the runtime key; tests for shared symbol, exec stop, different accounts
-- [ ] 4.4 `idle_exit::wait_until_should_exit` enables `Notified` before reading state; paused-time race test
-- [ ] 4.5 Decode failure recovers `request_id` and replies `bad_request`; client maps it to `NotSent`; test with a corrupt frame
-- [ ] 4.6 Per-request `catch_unwind` on the command lane with an `internal` reply; teardown always runs; test with a panicking fake call
-- [ ] 4.7 `plant_err_frame` defaults one-shot commands to `venue_unknown`; table-driven test over every `Error` variant
-- [ ] 4.8 Remove the extra client-side transport retries in `load_bar_slice`; test counts the attempts
-- [ ] 4.9 Move `GetReferenceData` / `GetFrontMonth` / `ResolvedAccount` to the slow lane; slow-lane tasks finish detached on disconnect; `tests/lanes.rs` updated
-- [ ] 4.10 Order-plant re-seat sends `Gap(Order)` to order peers; a deliberate re-seat does not trigger a full rebuild in `pump.rs`; test
-- [ ] 4.11 Pre-handshake read timeout and small max frame; test with a silent and an oversized client
-- [ ] 4.12 Singleton lock file opened with `truncate(false)`; losing-contender test
-- [ ] 4.13 PyO3 transport callbacks delivered from a dedicated std thread; Python test where a listener calls a session method synchronously
+- [x] 4.1 History holds `md_history_gate` only for the live-intent check; add `history_load_lock`; test: subscribe and place on one socket complete during a slow fake history load; refusal test unchanged
+- [x] 4.2 Forwarder overflow also sends `Gap(History)` when the client's kinds include bars; test
+- [x] 4.3 Per-facade intent refcount in `client/runtime.rs` (ticker, book, time bars, PnL, order, brackets); facade disconnect/drop releases its holdings; `account_id` in the runtime key; tests for shared symbol, exec stop, different accounts
+- [x] 4.4 `idle_exit::wait_until_should_exit` enables `Notified` before reading state; paused-time race test
+- [x] 4.5 Decode failure recovers `request_id` and replies `bad_request`; client maps it to `NotSent`; test with a corrupt frame
+- [x] 4.6 Per-request `catch_unwind` on the command lane with an `internal` reply; teardown always runs; test with a panicking fake call
+- [x] 4.7 `plant_err_frame` defaults one-shot commands to `venue_unknown`; table-driven test over every `Error` variant
+- [x] 4.8 Remove the extra client-side transport retries in `load_bar_slice`; test counts the attempts
+- [x] 4.9 Move `GetReferenceData` / `GetFrontMonth` / `ResolvedAccount` to the slow lane; slow-lane tasks finish detached on disconnect; `tests/lanes.rs` updated
+- [x] 4.10 Order-plant re-seat sends `Gap(Order)` to order peers; a deliberate re-seat does not trigger a full rebuild in `pump.rs`; test
+- [x] 4.11 Pre-handshake read timeout and small max frame; test with a silent and an oversized client
+- [x] 4.12 Singleton lock file opened with `truncate(false)`; losing-contender test
+- [x] 4.13 PyO3 transport callbacks delivered from a dedicated std thread; Python test where a listener calls a session method synchronously
 
 ## 5. Python fixes (each test-first)
 
@@ -62,7 +62,7 @@
 
 - [ ] 6.1 `mirror_conv!` macro generates the 14 DTO↔proto mappings both ways; `python/mod.rs` order notification reuses the field list; `client_convert.rs` round-trip test over every pair
 - [ ] 6.2 `one_shot` helper for the gated command handlers and the three gated loads in `dispatch/orders.rs`
-- [ ] 6.3 Lane derived from the RPC table rows; delete the hand lists in `dispatch/mod.rs`
+- [x] 6.3 Lane derived from the RPC table rows; delete the hand lists in `dispatch/mod.rs`
 - [ ] 6.4 One `leave_order_plant` / `leave_pnl_plant` used by teardown and by explicit disconnect (rollback flag)
 - [ ] 6.5 `reset_ticker_plant` reuses the market-data restore pass and clears degraded flags
 - [ ] 6.6 `reconnect.rs`: generic `bump<K>` / `drop_count`; trim the pass-through methods

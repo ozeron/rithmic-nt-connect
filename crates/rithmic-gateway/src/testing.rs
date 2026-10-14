@@ -204,6 +204,7 @@ fn run_command(fake: &FakeSession, line: &str) -> String {
                 "rejected" => FakeFailure::Rejected(message),
                 "not_sent" => FakeFailure::NotSent(message),
                 "unknown" => FakeFailure::Unknown(message),
+                "panic" => FakeFailure::Panic(message),
                 other => return format!("err unknown failure kind {other}\n"),
             };
             fake.fail_next(method, failure);

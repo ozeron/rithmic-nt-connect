@@ -259,9 +259,10 @@ pub(super) async fn subscribe_topic(
         }
         return rejoin_degraded(state, request_id, intent).await;
     }
-    // Hold md_history_gate across note + venue join so history cannot pass
-    // its live-MD check then acquire session while we are creating intent
-    // (RC2.3 race). Lock order: md_history_gate → topic_lock → session.
+    // Hold md_history_gate across note + venue join so a history load cannot
+    // pass its live-MD check while this intent is being created (RC2.3). A load
+    // holds the gate only for that check, so this never waits for a load.
+    // Lock order: md_history_gate → topic_lock → session.
     let _md_gate = state.md_history_gate.lock().await;
     let lock = topic_lock(state, &key).await;
     let _guard = lock.lock().await;
@@ -485,16 +486,31 @@ async fn fail_order_plant_stream(
 }
 
 /// No venue unsubscribe for brackets. When the last brackets peer leaves and
-/// order peers remain, disconnect + `subscribe_order_updates` to drop brackets.
+/// order peers remain, disconnect + `subscribe_order_updates` to drop brackets,
+/// then tell the order peers with an order gap so they reconcile the window.
 pub(in crate::server) async fn reseat_order_plant_without_brackets(
     state: &GatewayState,
 ) -> Result<(), rithmic_plants::Error> {
     let Some(session) = &state.session else {
         return Ok(());
     };
-    let guard = session.lock().await;
-    let _ = guard.disconnect_order_plant().await;
-    guard.subscribe_order_updates().await
+    let reseated = {
+        let guard = session.lock().await;
+        let _ = guard.disconnect_order_plant().await;
+        guard.subscribe_order_updates().await
+    };
+    // Order events in the window between the disconnect and the new subscription
+    // were not delivered: every order peer reconciles on this gap (the count of
+    // missed events is unknown, hence 0).
+    crate::server::publish_plant_event(
+        &state.hub,
+        rithmic_plants::dto::PlantEvent::Gap(rithmic_plants::GapDto {
+            stream: rithmic_plants::Stream::Order,
+            skipped: 0,
+        }),
+    )
+    .await;
+    reseated
 }
 
 /// Drop this client's brackets flag/intent. Returns whether this was the last

@@ -38,6 +38,8 @@ pub enum FakeFailure {
     NotSent(String),
     /// The request may have reached the venue (`Error::OutcomeUnknown`).
     Unknown(String),
+    /// The call panics (a bug in a handler), for testing that a caller survives it.
+    Panic(String),
 }
 
 impl FakeFailure {
@@ -49,6 +51,7 @@ impl FakeFailure {
             Self::Rejected(msg) => Error::Rejected(msg.clone()),
             Self::NotSent(msg) => Error::NotSent(msg.clone()),
             Self::Unknown(msg) => Error::OutcomeUnknown(msg.clone()),
+            Self::Panic(msg) => panic!("injected panic: {msg}"),
         }
     }
 }
@@ -158,6 +161,7 @@ impl FakeSession {
         };
         state.calls.push(line);
         if let Some(failure) = state.failures.get_mut(method).and_then(VecDeque::pop_front) {
+            drop(state);
             return Err(failure.to_error());
         }
         Ok(state)
@@ -416,6 +420,7 @@ impl Session for FakeSession {
 
     async fn get_front_month(&self, symbol: &str, exchange: &str) -> Result<FrontMonthDto> {
         self.note("get_front_month", &format!("{symbol} {exchange}"))?;
+        self.delay("get_front_month").await;
         Ok(FrontMonthDto {
             symbol: Some(symbol.to_string()),
             exchange: Some(exchange.to_string()),
@@ -428,6 +433,7 @@ impl Session for FakeSession {
 
     async fn get_reference_data(&self, symbol: &str, exchange: &str) -> Result<ReferenceDataDto> {
         self.note("get_reference_data", &format!("{symbol} {exchange}"))?;
+        self.delay("get_reference_data").await;
         Ok(ReferenceDataDto {
             symbol: Some(symbol.to_string()),
             exchange: Some(exchange.to_string()),

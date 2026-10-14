@@ -66,6 +66,23 @@ struct OrderPlant {
     _stream: StreamGuard,
 }
 
+macro_rules! plant_close {
+    ($($plant:ident),*) => {$(
+        impl $plant {
+            /// Detach the event lane, then log the plant out. A deliberate close
+            /// must never read as a lost connection: once the lane is detached
+            /// nothing the closing plant emits reaches a consumer.
+            async fn close(self) {
+                let Self { _plant, handle, _stream } = self;
+                drop(_stream);
+                let _ = handle.disconnect().await;
+            }
+        }
+    )*};
+}
+
+plant_close!(TickerPlant, HistoryPlant, PnlPlant, OrderPlant);
+
 /// Anything that yields plant messages one at a time (the broadcast receiver
 /// of the ticker / history plants and the account filter of the PnL / order plants).
 #[async_trait::async_trait]
@@ -193,7 +210,7 @@ impl TickerReset {
     /// are never touched.
     pub async fn reconnect(self) -> Result<ReconnectedTicker> {
         if let Some(old) = self.old {
-            let _ = old.handle.disconnect().await;
+            old.close().await;
         }
         let plant = match self.connect {
             Some((rc, hub)) => Some(connect_ticker(&rc, &hub).await?),
@@ -537,7 +554,7 @@ impl RithmicSession {
             // Same bar as `connect`: logged in is not ready to serve loads (RC4).
             if let Err(err) = self.prove_history_ready().await {
                 if let Some(history) = self.history.take() {
-                    let _ = history.handle.disconnect().await;
+                    history.close().await;
                 }
                 return Err(err);
             }
@@ -774,16 +791,16 @@ impl RithmicSession {
     pub async fn disconnect(&mut self) -> Result<()> {
         self.epoch += 1;
         if let Some(order) = self.order.take() {
-            let _ = order.handle.disconnect().await;
+            order.close().await;
         }
         if let Some(pnl) = self.pnl.take() {
-            let _ = pnl.handle.disconnect().await;
+            pnl.close().await;
         }
         if let Some(history) = self.history.take() {
-            let _ = history.handle.disconnect().await;
+            history.close().await;
         }
         if let Some(ticker) = self.ticker.take() {
-            let _ = ticker.handle.disconnect().await;
+            ticker.close().await;
         }
         Ok(())
     }
@@ -806,7 +823,7 @@ impl RithmicSession {
     /// Disconnect only the order plant (leaves ticker/history/PnL connected).
     pub async fn disconnect_order_plant(&mut self) -> Result<()> {
         if let Some(order) = self.order.take() {
-            let _ = order.handle.disconnect().await;
+            order.close().await;
         }
         Ok(())
     }
@@ -814,7 +831,7 @@ impl RithmicSession {
     /// Disconnect only the PnL plant (leaves ticker/history/order connected).
     pub async fn disconnect_pnl_plant(&mut self) -> Result<()> {
         if let Some(pnl) = self.pnl.take() {
-            let _ = pnl.handle.disconnect().await;
+            pnl.close().await;
         }
         Ok(())
     }
@@ -847,7 +864,7 @@ impl RithmicSession {
         if done.epoch == self.epoch && self.ticker.is_none() {
             self.ticker = Some(plant);
         } else {
-            let _ = plant.handle.disconnect().await;
+            plant.close().await;
         }
     }
 

@@ -10,10 +10,14 @@
 //! before Ready, and plant-side slice retries treat `request timed out` as
 //! transient. Do not weaken RC2.3 for hydrate retries.
 //!
-//! Admission is synchronized with live MD subscribe via
-//! [`GatewayState::md_history_gate`]: the refuse check, session-lock
-//! acquisition, and the load itself all run under that gate so a concurrent
-//! subscribe cannot sneak live intent in between check and lock.
+//! Admission: a load first waits its turn on [`GatewayState::history_load_lock`]
+//! (loads run one at a time against the venue), then makes the live-MD check
+//! under [`GatewayState::md_history_gate`] and releases that gate before the
+//! load runs. The refusal therefore holds at the moment a load starts, while a
+//! subscribe that arrives during a long load proceeds instead of queueing the
+//! connection's command lane (and every place / cancel behind it) for minutes.
+//! History no longer holds the session gate, so a live stream cannot be starved
+//! by a load that is already running.
 
 use rithmic_plants::history::parse_time_bar_type;
 
@@ -36,14 +40,25 @@ fn live_md_denied_frame(request_id: u64) -> Frame {
     )
 }
 
+/// The live-MD admission check, under the subscribe gate only for its own
+/// duration.
+async fn refuse_under_live_md(state: &GatewayState, request_id: u64) -> Option<Frame> {
+    let _md_gate = state.md_history_gate.lock().await;
+    state
+        .reconnect
+        .has_live_md_intents()
+        .await
+        .then(|| live_md_denied_frame(request_id))
+}
+
 pub(super) async fn load_ticks(
     state: &GatewayState,
     request_id: u64,
     req: pb::LoadTicksRequest,
 ) -> Frame {
-    let _md_gate = state.md_history_gate.lock().await;
-    if state.reconnect.has_live_md_intents().await {
-        return live_md_denied_frame(request_id);
+    let _turn = state.history_load_lock.lock().await;
+    if let Some(denied) = refuse_under_live_md(state, request_id).await {
+        return denied;
     }
     let Some(session) = &state.session else {
         return no_session_frame(request_id);
@@ -109,9 +124,9 @@ pub(super) async fn probe_time_bars(
 }
 
 async fn run_time_bar_op(state: &GatewayState, request_id: u64, op: TimeBarOp) -> Frame {
-    let _md_gate = state.md_history_gate.lock().await;
-    if state.reconnect.has_live_md_intents().await {
-        return live_md_denied_frame(request_id);
+    let _turn = state.history_load_lock.lock().await;
+    if let Some(denied) = refuse_under_live_md(state, request_id).await {
+        return denied;
     }
     let Some(session) = &state.session else {
         return no_session_frame(request_id);

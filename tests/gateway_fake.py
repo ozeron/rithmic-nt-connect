@@ -137,7 +137,8 @@ class FakeParent:
                 raise RuntimeError(f"fake gateway exited early: {self.stderr_text()}")
             listening = socket_listening(self.listen)
             held = session_flock_held(cfg.user, cfg.system_name, cfg.url, cfg.env)
-            if listening and held and self.control_path.exists():
+            # The control socket file exists from bind, before it listens.
+            if listening and held and socket_listening(self.control_path):
                 return self
             time.sleep(0.02)
         self.stop()

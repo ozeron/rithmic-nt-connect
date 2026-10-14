@@ -111,7 +111,9 @@ impl FakeParent {
         let up = wait_until(Duration::from_secs(20), || {
             std::os::unix::net::UnixStream::connect(&self.listen).is_ok()
                 && flock_held(&self.user, SYSTEM, URL, "Live")
-                && self.control.exists()
+                // The socket file exists from `bind`, before it listens: wait for
+                // a connect to succeed, not for the file.
+                && std::os::unix::net::UnixStream::connect(&self.control).is_ok()
         })
         .await;
         assert!(up, "fake gateway did not come up");

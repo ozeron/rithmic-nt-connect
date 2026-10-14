@@ -757,13 +757,27 @@ impl PySession {
         let gateway = self.gateway.as_ref()?;
         let mut transport = gateway.subscribe_transport();
         let mut failed = gateway.subscribe_recovery_failed();
-        let notify = move |kind: &'static str, generation: u64, attempts: u32, cause: String| {
-            Python::attach(|py| {
-                let cause = if cause.is_empty() { None } else { Some(cause) };
-                if let Err(err) = callback.call1(py, (kind, generation, attempts, cause)) {
-                    err.print(py);
+        // Python is called from a dedicated thread, never from a tokio worker: a
+        // listener may call a blocking session method, which `block_on`s the
+        // shared runtime and would panic on one of its own workers.
+        let (tx, rx) = std::sync::mpsc::channel::<(&'static str, u64, u32, String)>();
+        let delivery = std::thread::Builder::new()
+            .name("rithmic-transport-events".into())
+            .spawn(move || {
+                while let Ok((kind, generation, attempts, cause)) = rx.recv() {
+                    Python::attach(|py| {
+                        let cause = if cause.is_empty() { None } else { Some(cause) };
+                        if let Err(err) = callback.call1(py, (kind, generation, attempts, cause)) {
+                            err.print(py);
+                        }
+                    });
                 }
             });
+        if delivery.is_err() {
+            return None;
+        }
+        let notify = move |kind: &'static str, generation: u64, attempts: u32, cause: String| {
+            let _ = tx.send((kind, generation, attempts, cause));
         };
         let task = runtime().spawn(async move {
             loop {

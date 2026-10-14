@@ -62,7 +62,9 @@ impl SessionLock {
             .create(true)
             .read(true)
             .write(true)
-            .truncate(true)
+            // Never truncate here: a contender that loses the lock below must not
+            // wipe the holder's pid. The winner truncates once it holds it.
+            .truncate(false)
             .open(&path)
             .map_err(|source| SingletonError::Io {
                 path: path.clone(),
@@ -249,6 +251,22 @@ mod tests {
         );
         drop(lock);
         assert!(!flock_held(&user, system, url, env), "free after release");
+    }
+
+    #[test]
+    fn a_losing_contender_leaves_the_holders_pid() {
+        let user = format!("contender-user-{}", std::process::id());
+        let (system, url, env) = ("LucidTrading", "wss://contender.example", "Live");
+        let lock = SessionLock::try_acquire(&user, system, url, env).expect("acquire");
+        let err = SessionLock::try_acquire(&user, system, url, env).unwrap_err();
+        assert!(matches!(err, SingletonError::AlreadyHeld { .. }));
+        let pid = std::fs::read_to_string(lock.path()).expect("pid file");
+        assert_eq!(
+            pid,
+            std::process::id().to_string(),
+            "contender wiped the pid"
+        );
+        drop(lock);
     }
 
     #[test]

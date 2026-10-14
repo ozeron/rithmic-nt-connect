@@ -18,6 +18,10 @@
 //! [`Kind::IntentRelease`] is the matching unsubscribe/disconnect: it releases
 //! the refcount and leaves the venue only on the last peer.
 
+use std::collections::HashMap;
+use std::mem::{discriminant, Discriminant};
+use std::sync::OnceLock;
+
 use crate::pb::frame::Body;
 
 /// How an RPC treats subscription intent.
@@ -44,29 +48,31 @@ pub enum Gate {
 /// A connection reads requests on its own task and serves them on two lanes so a
 /// slow read can never hold up a command: the **command** lane runs state-changing
 /// and subscription requests one at a time, in arrival order; the **slow** lane
-/// runs read RPCs that can take seconds (history and order/fill history loads)
-/// concurrently, a few at a time, and replies when each finishes.
+/// runs read RPCs that can take seconds (history and order/fill history loads,
+/// and the reads that wait on the plant session: reference data, front month,
+/// resolved account) concurrently, a few at a time, and replies when each
+/// finishes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lane {
     Command,
     Slow,
 }
 
-/// The lane for a request body. The table's `lane` column must agree (checked in
-/// `tests/rpc_table.rs`), so a new slow RPC is declared in both places.
+/// The lane for a request body, read from the table's `lane` column: the table
+/// is the one place a slow RPC is declared. Bodies without a row (responses,
+/// events) take the command lane, which answers them `unsupported`.
 pub fn lane_of(body: &Body) -> Lane {
-    match body {
-        Body::LoadTicks(_)
-        | Body::LoadTimeBars(_)
-        | Body::ProbeTimeBars(_)
-        | Body::LoadOrders(_)
-        | Body::LoadProductRmsInfo(_)
-        | Body::LoadAccountRmsInfo(_)
-        | Body::LoadFillHistory(_)
-        | Body::LoadOrderHistoryDates(_)
-        | Body::LoadOrderHistory(_) => Lane::Slow,
-        _ => Lane::Command,
-    }
+    static LANES: OnceLock<HashMap<Discriminant<Body>, Lane>> = OnceLock::new();
+    let lanes = LANES.get_or_init(|| {
+        RPC_TABLE
+            .iter()
+            .filter_map(|row| row.make_body.map(|make| (discriminant(&make()), row.lane)))
+            .collect()
+    });
+    lanes
+        .get(&discriminant(body))
+        .copied()
+        .unwrap_or(Lane::Command)
 }
 
 /// How a subscription intent is restored after a plant reconnect.
@@ -296,27 +302,27 @@ pub const RPC_TABLE: &[Rpc] = &[
         NoGate,
     ),
     // --- reads -----------------------------------------------------------
-    rpc(
+    slow(rpc(
         Some("get_front_month"),
         "get_front_month",
         || Body::GetFrontMonth(Default::default()),
         OneShot,
         NoGate,
-    ),
-    rpc(
+    )),
+    slow(rpc(
         Some("get_reference_data"),
         "get_reference_data",
         || Body::GetReferenceData(Default::default()),
         OneShot,
         NoGate,
-    ),
-    rpc(
+    )),
+    slow(rpc(
         Some("resolved_account"),
         "resolved_account",
         || Body::ResolvedAccount(Default::default()),
         OneShot,
         NoGate,
-    ),
+    )),
     slow(rpc(
         Some("load_ticks"),
         "load_ticks",

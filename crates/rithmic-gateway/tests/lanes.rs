@@ -209,6 +209,10 @@ fn every_table_row_lane_agrees_with_the_classifier() {
     assert_eq!(
         slow,
         [
+            // Reads that wait on the plant session.
+            "get_front_month",
+            "get_reference_data",
+            "resolved_account",
             "load_ticks",
             "load_time_bars",
             "probe_time_bars",
@@ -292,4 +296,152 @@ async fn the_session_gate_is_shared_for_rpcs_and_exclusive_for_a_rebuild() {
     let _again = tokio::time::timeout(Duration::from_millis(100), handle.lock())
         .await
         .expect("shared access resumes");
+}
+
+#[tokio::test]
+async fn a_subscribe_and_a_place_are_not_held_by_a_history_load() {
+    let parent = FakeParent::start(Opts {
+        trading: true,
+        ..Opts::default()
+    })
+    .await;
+    parent.command("delay load_ticks 3000").await;
+    let mut c = connect(&parent).await;
+    let started = Instant::now();
+    write_body(
+        &mut c,
+        10,
+        Body::LoadTicks(pb::LoadTicksRequest {
+            symbol: NQ.into(),
+            exchange: CME.into(),
+            start_time_sec: 0,
+            end_time_sec: 60,
+        }),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    // The load started with no live market data, so it runs; a subscribe that
+    // arrives mid-load goes ahead, and the place queued behind it is not held.
+    write_body(
+        &mut c,
+        11,
+        Body::Subscribe(pb::SubscribeRequest {
+            symbol: NQ.into(),
+            exchange: CME.into(),
+        }),
+    )
+    .await;
+    write_body(&mut c, 12, place("behind-subscribe")).await;
+
+    let got = replies(&mut c, &[10, 11, 12], started).await;
+    let order: Vec<u64> = got.iter().map(|(id, _)| *id).collect();
+    assert_eq!(order, vec![11, 12, 10], "{got:?}");
+    assert!(got[1].1 < Duration::from_millis(2000), "{got:?}");
+}
+
+#[tokio::test]
+async fn an_undecodable_request_gets_a_typed_reply_and_the_connection_lives() {
+    let parent = FakeParent::start(Opts {
+        trading: true,
+        ..Opts::default()
+    })
+    .await;
+    let mut c = connect(&parent).await;
+    // request_id = 7, then a field with an invalid wire type: the frame cannot
+    // be decoded, but its id can.
+    let payload: &[u8] = &[0x08, 0x07, 0x17, 0x01];
+    c.write_all(&(payload.len() as u32).to_be_bytes())
+        .await
+        .unwrap();
+    c.write_all(payload).await.unwrap();
+    let (reply, _) = read_frame(&mut c)
+        .await
+        .expect("a reply, not a closed socket");
+    assert_eq!(reply.request_id, 7);
+    match reply.body {
+        Some(Body::Error(e)) => assert_eq!(e.code, "bad_request"),
+        other => panic!("{other:?}"),
+    }
+    // The connection keeps serving.
+    write_body(&mut c, 8, place("after-bad-frame")).await;
+    let got = replies(&mut c, &[8], Instant::now()).await;
+    assert_eq!(got[0].0, 8);
+}
+
+#[tokio::test]
+async fn a_request_with_no_body_is_answered_not_dropped() {
+    let parent = FakeParent::start(Opts::default()).await;
+    let mut c = connect(&parent).await;
+    use prost::Message;
+    let frame = pb::Frame {
+        request_id: 9,
+        body: None,
+    };
+    let payload = frame.encode_to_vec();
+    c.write_all(&(payload.len() as u32).to_be_bytes())
+        .await
+        .unwrap();
+    c.write_all(&payload).await.unwrap();
+    let (reply, _) = tokio::time::timeout(Duration::from_secs(5), read_frame(&mut c))
+        .await
+        .expect("answered in time")
+        .unwrap();
+    assert_eq!(reply.request_id, 9);
+    assert!(matches!(reply.body, Some(Body::Error(e)) if e.code == "bad_request"));
+}
+
+#[tokio::test]
+async fn a_place_is_not_held_by_a_slow_reference_data_lookup() {
+    let parent = FakeParent::start(Opts {
+        trading: true,
+        ..Opts::default()
+    })
+    .await;
+    parent.command("delay get_reference_data 3000").await;
+    let mut c = connect(&parent).await;
+    let started = Instant::now();
+    write_body(
+        &mut c,
+        20,
+        Body::GetReferenceData(pb::GetReferenceDataRequest {
+            symbol: NQ.into(),
+            exchange: CME.into(),
+        }),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    write_body(&mut c, 21, place("during-lookup")).await;
+    let got = replies(&mut c, &[20, 21], started).await;
+    assert_eq!(got[0].0, 21, "the place replies first: {got:?}");
+    assert!(got[0].1 < Duration::from_millis(2000), "{got:?}");
+}
+
+#[tokio::test]
+async fn a_peer_that_never_handshakes_is_closed() {
+    let parent = FakeParent::start(Opts::default()).await;
+    let mut silent = UnixStream::connect(&parent.listen).await.unwrap();
+    let mut buf = [0u8; 1];
+    let read = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::io::AsyncReadExt::read(&mut silent, &mut buf),
+    )
+    .await
+    .expect("the parent closes a silent peer");
+    assert_eq!(read.unwrap_or(0), 0, "closed, not answered");
+}
+
+#[tokio::test]
+async fn an_oversized_frame_before_the_handshake_is_refused() {
+    let parent = FakeParent::start(Opts::default()).await;
+    let mut peer = UnixStream::connect(&parent.listen).await.unwrap();
+    // Claim a 1 MiB handshake: refused without allocating or waiting for it.
+    peer.write_all(&(1u32 << 20).to_be_bytes()).await.unwrap();
+    let mut buf = [0u8; 1];
+    let read = tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::io::AsyncReadExt::read(&mut peer, &mut buf),
+    )
+    .await
+    .expect("refused promptly");
+    assert_eq!(read.unwrap_or(0), 0);
 }

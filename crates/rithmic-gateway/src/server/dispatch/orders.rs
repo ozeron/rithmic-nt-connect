@@ -282,7 +282,7 @@ pub(super) async fn place_order(
     let guard = session.lock().await;
     match guard.place_order(&order).await {
         Ok(()) => ack_frame(request_id),
-        Err(e) => plant_err_frame(request_id, "place_failed", e),
+        Err(e) => plant_err_frame(request_id, e),
     }
 }
 
@@ -317,7 +317,7 @@ pub(super) async fn place_bracket_order(
     let guard = session.lock().await;
     match guard.place_bracket_order(&order).await {
         Ok(()) => ack_frame(request_id),
-        Err(e) => plant_err_frame(request_id, "place_bracket_failed", e),
+        Err(e) => plant_err_frame(request_id, e),
     }
 }
 
@@ -342,7 +342,7 @@ pub(super) async fn adjust_bracket_stop(
         .await
     {
         Ok(()) => ack_frame(request_id),
-        Err(e) => plant_err_frame(request_id, "adjust_bracket_stop_failed", e),
+        Err(e) => plant_err_frame(request_id, e),
     }
 }
 
@@ -367,7 +367,7 @@ pub(super) async fn adjust_bracket_target(
         .await
     {
         Ok(()) => ack_frame(request_id),
-        Err(e) => plant_err_frame(request_id, "adjust_bracket_target_failed", e),
+        Err(e) => plant_err_frame(request_id, e),
     }
 }
 
@@ -389,7 +389,7 @@ pub(super) async fn cancel_order(
     let guard = session.lock().await;
     match guard.cancel_order(&req.basket_id).await {
         Ok(()) => ack_frame(request_id),
-        Err(e) => plant_err_frame(request_id, "cancel_failed", e),
+        Err(e) => plant_err_frame(request_id, e),
     }
 }
 
@@ -421,7 +421,7 @@ pub(super) async fn modify_order(
     let guard = session.lock().await;
     match guard.modify_order(&order).await {
         Ok(()) => ack_frame(request_id),
-        Err(e) => plant_err_frame(request_id, "modify_failed", e),
+        Err(e) => plant_err_frame(request_id, e),
     }
 }
 
@@ -439,6 +439,6 @@ pub(super) async fn cancel_all_orders(state: &GatewayState, request_id: u64) -> 
     let guard = session.lock().await;
     match guard.cancel_all_orders().await {
         Ok(()) => ack_frame(request_id),
-        Err(e) => plant_err_frame(request_id, "cancel_all_failed", e),
+        Err(e) => plant_err_frame(request_id, e),
     }
 }

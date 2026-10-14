@@ -31,7 +31,7 @@ use tokio::sync::broadcast;
 use tokio::time::Instant;
 
 use self::convert::Channel;
-use self::runtime::{CallError, Queues, Runtime, Take};
+use self::runtime::{CallError, IntentKey, Intents, Queues, Release, Runtime, Take};
 pub use self::runtime::{ReadyInfo, RecoveryFailed, TransportEvent, EVENT_QUEUE_CAP};
 use crate::listen::{default_unix_path, ListenEndpoint};
 use crate::pb::{self, frame::Body, Frame};
@@ -40,8 +40,7 @@ const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(30);
 /// One plant history slice can exceed the normal dial timeout.
 const DEFAULT_HISTORY_RPC_TIMEOUT: Duration = Duration::from_secs(300);
 const DEFAULT_ATTACH_TIMEOUT: Duration = Duration::from_secs(90);
-/// Bounded retries of one history slice that timed out in transport.
-const SLICE_RETRIES: u32 = 2;
+
 /// Automatic recovery after a transport loss (the Python `TransportRecovery` budget).
 const DEFAULT_RECOVERY_ATTEMPTS: u32 = 8;
 const DEFAULT_RECOVERY_INITIAL_BACKOFF: Duration = Duration::from_millis(500);
@@ -278,6 +277,113 @@ impl GatewaySession {
         }
     }
 
+    fn facade(&self) -> u64 {
+        self.facade_id.load(Ordering::SeqCst)
+    }
+
+    /// Send a subscription intent and record this facade's hold once the parent
+    /// acknowledged it. Always sent, even when another facade holds the intent:
+    /// a repeat subscribe is how a client retries a join a rebuild left degraded.
+    async fn hold_intent(&self, key: IntentKey, body: Body) -> Result<()> {
+        let mut intents = self.runtime.intents.lock().await;
+        self.ack(body, Mode::Intent).await?;
+        intents.hold(self.facade(), key);
+        Ok(())
+    }
+
+    /// Drop this facade's hold on an intent; the parent is told only when no
+    /// other facade on the shared socket still holds it.
+    async fn release_intent(&self, key: IntentKey, body: Body) -> Result<()> {
+        let mut intents = self.runtime.intents.lock().await;
+        self.release_locked(&mut intents, key, body).await
+    }
+
+    async fn release_locked(
+        &self,
+        intents: &mut Intents,
+        key: IntentKey,
+        body: Body,
+    ) -> Result<()> {
+        let facade = self.facade();
+        let held_here = intents.holds(facade, &key);
+        if intents.release(facade, &key) == Release::Keep {
+            return Ok(());
+        }
+        let sent = self.ack(body, Mode::Intent).await;
+        if sent.is_err() && held_here {
+            intents.hold(facade, key);
+        }
+        sent
+    }
+
+    /// Release this facade's order and bracket intents. The parent drops both
+    /// together (`DisconnectOrder`), so it is told only when no other facade
+    /// holds either; otherwise the order plant, and any bracket subscription on
+    /// it, stay for the others.
+    async fn release_order_locked(&self, intents: &mut Intents) -> Result<()> {
+        let facade = self.facade();
+        let had = [IntentKey::Order, IntentKey::Brackets]
+            .into_iter()
+            .filter(|k| intents.holds(facade, k))
+            .collect::<Vec<_>>();
+        intents.release(facade, &IntentKey::Order);
+        intents.release(facade, &IntentKey::Brackets);
+        if intents.is_held(&IntentKey::Order) || intents.is_held(&IntentKey::Brackets) {
+            return Ok(());
+        }
+        let sent = self
+            .ack(
+                Body::DisconnectOrder(pb::DisconnectOrderRequest {}),
+                Mode::Intent,
+            )
+            .await;
+        if sent.is_err() {
+            for key in had {
+                intents.hold(facade, key);
+            }
+        }
+        sent
+    }
+
+    /// Release everything this facade holds (it is leaving while other facades
+    /// keep the socket). Best effort: the parent drops every intent on the
+    /// socket anyway when the last facade closes it.
+    async fn release_all_intents(&self) {
+        let mut intents = self.runtime.intents.lock().await;
+        let mut order = false;
+        for key in intents.held_by(self.facade()) {
+            let body = match &key {
+                IntentKey::Ticker(symbol, exchange) => Body::Unsubscribe(pb::UnsubscribeRequest {
+                    symbol: symbol.clone(),
+                    exchange: exchange.clone(),
+                }),
+                IntentKey::Book(symbol, exchange) => {
+                    Body::UnsubscribeBook(pb::UnsubscribeBookRequest {
+                        symbol: symbol.clone(),
+                        exchange: exchange.clone(),
+                    })
+                }
+                IntentKey::TimeBars(symbol, exchange, bar_type, period) => {
+                    Body::UnsubscribeTimeBars(pb::UnsubscribeTimeBarsRequest {
+                        symbol: symbol.clone(),
+                        exchange: exchange.clone(),
+                        bar_type: *bar_type,
+                        period: *period,
+                    })
+                }
+                IntentKey::Pnl => Body::DisconnectPnl(pb::DisconnectPnlRequest {}),
+                IntentKey::Order | IntentKey::Brackets => {
+                    order = true;
+                    continue;
+                }
+            };
+            let _ = self.release_locked(&mut intents, key, body).await;
+        }
+        if order {
+            let _ = self.release_order_locked(&mut intents).await;
+        }
+    }
+
     /// Compatibility poll: a gap reads as [`Error::ChannelLagged`].
     async fn poll(&self, channel: Channel, timeout: Duration) -> Result<Option<PlantEvent>> {
         match self.poll_raw(channel, timeout).await? {
@@ -342,26 +448,17 @@ impl GatewaySession {
             start_time_sec: start,
             end_time_sec: end,
         });
-        let mut last: Option<Error> = None;
-        for _ in 0..=SLICE_RETRIES {
-            match self.call(body.clone(), Mode::Read, true).await {
-                Ok(frame) => {
-                    return match frame.body {
-                        Some(Body::LoadTimeBarsResponse(r)) => Ok(r
-                            .bars
-                            .into_iter()
-                            .map(convert::history_bar_from_pb)
-                            .collect()),
-                        other => Err(unexpected("load_time_bars_response", other)),
-                    }
-                }
-                // A transport timeout is transient: retry the slice a bounded
-                // number of times. A typed gateway error is not.
-                Err(err @ Error::Transport(_)) => last = Some(err),
-                Err(other) => return Err(other),
-            }
+        // One call: the read retry in `call` and the parent's own slice retries
+        // are the budget. Retrying here as well multiplied every timeout, and
+        // each abandoned attempt kept a slow-lane slot busy on the parent.
+        match self.call(body, Mode::Read, true).await?.body {
+            Some(Body::LoadTimeBarsResponse(r)) => Ok(r
+                .bars
+                .into_iter()
+                .map(convert::history_bar_from_pb)
+                .collect()),
+            other => Err(unexpected("load_time_bars_response", other)),
         }
-        Err(last.unwrap_or_else(|| Error::Transport("history slice failed".into())))
     }
 }
 
@@ -388,10 +485,18 @@ fn map_reply(frame: Frame) -> Result<Frame> {
         // gateway client reports exactly what a direct session would.
         Some(Body::Error(e)) if e.code == "venue_rejected" => Err(Error::Rejected(e.message)),
         Some(Body::Error(e)) if e.code == "not_sent" => Err(Error::NotSent(e.message)),
+        // The parent could not read the request, so it dispatched nothing.
+        Some(Body::Error(e)) if e.code == crate::server::BAD_REQUEST => {
+            Err(Error::NotSent(e.message))
+        }
         // Older parents refuse requests with `not_ready` while rebuilding; nothing
         // reached the venue. (The handshake matches `not_ready` itself in runtime.rs.)
         Some(Body::Error(e)) if e.code == "not_ready" => Err(Error::NotSent(e.message)),
         Some(Body::Error(e)) if e.code == "venue_unknown" => Err(Error::OutcomeUnknown(e.message)),
+        // The parent's handler failed part-way: whatever it did is unknown.
+        Some(Body::Error(e)) if e.code == crate::server::INTERNAL => {
+            Err(Error::OutcomeUnknown(e.message))
+        }
         Some(Body::Error(e)) => Err(Error::Gateway {
             code: e.code,
             message: e.message,
@@ -424,6 +529,10 @@ impl Session for GatewaySession {
     }
 
     async fn disconnect(&self) -> Result<()> {
+        if self.connected.load(Ordering::SeqCst) && self.runtime.facade_count() > 1 {
+            // Other facades keep the socket: release what only this one held.
+            self.release_all_intents().await;
+        }
         self.connected.store(false, Ordering::SeqCst);
         let id = self.facade_id.swap(0, Ordering::SeqCst);
         if id != 0 && self.runtime.unregister(id) {
@@ -454,17 +563,14 @@ impl Session for GatewaySession {
     }
 
     async fn disconnect_order_plant(&self) -> Result<()> {
-        self.ack(
-            Body::DisconnectOrder(pb::DisconnectOrderRequest {}),
-            Mode::Intent,
-        )
-        .await
+        let mut intents = self.runtime.intents.lock().await;
+        self.release_order_locked(&mut intents).await
     }
 
     async fn disconnect_pnl_plant(&self) -> Result<()> {
-        self.ack(
+        self.release_intent(
+            IntentKey::Pnl,
             Body::DisconnectPnl(pb::DisconnectPnlRequest {}),
-            Mode::Intent,
         )
         .await
     }
@@ -494,46 +600,46 @@ impl Session for GatewaySession {
 
     async fn subscribe(&self, symbol: &str, exchange: &str) -> Result<()> {
         self.queues.get(Channel::Market).arm();
-        self.ack(
+        self.hold_intent(
+            IntentKey::Ticker(symbol.into(), exchange.into()),
             Body::Subscribe(pb::SubscribeRequest {
                 symbol: symbol.into(),
                 exchange: exchange.into(),
             }),
-            Mode::Intent,
         )
         .await
     }
 
     async fn unsubscribe(&self, symbol: &str, exchange: &str) -> Result<()> {
-        self.ack(
+        self.release_intent(
+            IntentKey::Ticker(symbol.into(), exchange.into()),
             Body::Unsubscribe(pb::UnsubscribeRequest {
                 symbol: symbol.into(),
                 exchange: exchange.into(),
             }),
-            Mode::Intent,
         )
         .await
     }
 
     async fn subscribe_order_book_summary(&self, symbol: &str, exchange: &str) -> Result<()> {
         self.queues.get(Channel::Market).arm();
-        self.ack(
+        self.hold_intent(
+            IntentKey::Book(symbol.into(), exchange.into()),
             Body::SubscribeBook(pb::SubscribeBookRequest {
                 symbol: symbol.into(),
                 exchange: exchange.into(),
             }),
-            Mode::Intent,
         )
         .await
     }
 
     async fn unsubscribe_order_book_summary(&self, symbol: &str, exchange: &str) -> Result<()> {
-        self.ack(
+        self.release_intent(
+            IntentKey::Book(symbol.into(), exchange.into()),
             Body::UnsubscribeBook(pb::UnsubscribeBookRequest {
                 symbol: symbol.into(),
                 exchange: exchange.into(),
             }),
-            Mode::Intent,
         )
         .await
     }
@@ -546,14 +652,14 @@ impl Session for GatewaySession {
         period: i32,
     ) -> Result<()> {
         self.queues.get(Channel::History).arm();
-        self.ack(
+        self.hold_intent(
+            IntentKey::TimeBars(symbol.into(), exchange.into(), bar_type, period),
             Body::SubscribeTimeBars(pb::SubscribeTimeBarsRequest {
                 symbol: symbol.into(),
                 exchange: exchange.into(),
                 bar_type,
                 period,
             }),
-            Mode::Intent,
         )
         .await
     }
@@ -565,38 +671,41 @@ impl Session for GatewaySession {
         bar_type: i32,
         period: i32,
     ) -> Result<()> {
-        self.ack(
+        self.release_intent(
+            IntentKey::TimeBars(symbol.into(), exchange.into(), bar_type, period),
             Body::UnsubscribeTimeBars(pb::UnsubscribeTimeBarsRequest {
                 symbol: symbol.into(),
                 exchange: exchange.into(),
                 bar_type,
                 period,
             }),
-            Mode::Intent,
         )
         .await
     }
 
     async fn subscribe_pnl(&self) -> Result<()> {
         self.queues.get(Channel::Pnl).arm();
-        self.ack(Body::SubscribePnl(pb::SubscribePnlRequest {}), Mode::Intent)
-            .await
+        self.hold_intent(
+            IntentKey::Pnl,
+            Body::SubscribePnl(pb::SubscribePnlRequest {}),
+        )
+        .await
     }
 
     async fn subscribe_order_updates(&self) -> Result<()> {
         self.queues.get(Channel::Order).arm();
-        self.ack(
+        self.hold_intent(
+            IntentKey::Order,
             Body::SubscribeOrderUpdates(pb::SubscribeOrderUpdatesRequest {}),
-            Mode::Intent,
         )
         .await
     }
 
     async fn subscribe_bracket_updates(&self) -> Result<()> {
         self.queues.get(Channel::Order).arm();
-        self.ack(
+        self.hold_intent(
+            IntentKey::Brackets,
             Body::SubscribeBracketUpdates(pb::SubscribeBracketUpdatesRequest {}),
-            Mode::Intent,
         )
         .await
     }
@@ -924,5 +1033,44 @@ impl Session for GatewaySession {
             }
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod reply_class_tests {
+    use super::*;
+
+    fn error(code: &str) -> Frame {
+        Frame {
+            request_id: 1,
+            body: Some(Body::Error(pb::ErrorResponse {
+                code: code.into(),
+                message: "m".into(),
+            })),
+        }
+    }
+
+    #[test]
+    fn an_unreadable_request_was_not_sent() {
+        assert!(matches!(
+            map_reply(error(crate::server::BAD_REQUEST)),
+            Err(Error::NotSent(_))
+        ));
+    }
+
+    #[test]
+    fn source_classes_survive_the_wire() {
+        assert!(matches!(
+            map_reply(error("venue_rejected")),
+            Err(Error::Rejected(_))
+        ));
+        assert!(matches!(
+            map_reply(error("venue_unknown")),
+            Err(Error::OutcomeUnknown(_))
+        ));
+        assert!(matches!(
+            map_reply(error("not_sent")),
+            Err(Error::NotSent(_))
+        ));
     }
 }

@@ -5,11 +5,13 @@
 //! peer leaves (see [`crate::idle_exit`]).
 
 use std::collections::{HashMap, HashSet};
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
+use futures_util::FutureExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc, watch, Mutex as TokioMutex, RwLock};
@@ -154,10 +156,12 @@ pub struct GatewayState {
     /// blocking the event pump.
     pub recon_lock: Arc<TokioMutex<()>>,
     /// Serializes history admission vs live MD intent creation (ticker /
-    /// book / time bars). Held from history refuse-check through session-lock
-    /// acquisition (and for the whole Load*), and across MD subscribe note +
-    /// venue join, so history cannot race a concurrent subscribe (RC2.3).
+    /// book / time bars): held for a load's live-MD check (only the check, never
+    /// the load) and across MD subscribe note + venue join, so a load cannot
+    /// start between a subscribe's check and its intent (RC2.3).
     pub md_history_gate: Arc<TokioMutex<()>>,
+    /// History / probe loads run one at a time against the venue.
+    pub history_load_lock: Arc<TokioMutex<()>>,
     /// Ready peer count + optional idle-exit after last client.
     pub idle: IdleExit,
     /// Stable for the parent process lifetime (advertised in Ready).
@@ -317,6 +321,7 @@ pub async fn run_gateway(params: GatewayParams) -> Result<(), String> {
         topic_locks: TokioMutex::new(HashMap::new()),
         recon_lock: Arc::new(TokioMutex::new(())),
         md_history_gate: Arc::new(TokioMutex::new(())),
+        history_load_lock: Arc::new(TokioMutex::new(())),
         idle: IdleExit::new(idle_policy),
         gateway_instance_id,
         transport_generation,
@@ -374,8 +379,20 @@ pub async fn serve(listener: UnixListener, state: Arc<GatewayState>) -> std::io:
     }
 }
 
+/// How long a new connection may take to send its handshake.
+const HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_secs(5);
+/// Largest handshake frame accepted from a peer that has not authenticated yet.
+const HANDSHAKE_MAX_LEN: usize = 64 * 1024;
+
 async fn read_frame_bytes<R: tokio::io::AsyncRead + Unpin>(
     stream: &mut R,
+) -> std::io::Result<Option<Vec<u8>>> {
+    read_frame_bytes_max(stream, crate::framing::MAX_FRAME_LEN as usize).await
+}
+
+async fn read_frame_bytes_max<R: tokio::io::AsyncRead + Unpin>(
+    stream: &mut R,
+    max_len: usize,
 ) -> std::io::Result<Option<Vec<u8>>> {
     // Idle wait for the next frame length has no short timeout (clients may
     // pause between RPCs). Once a length is known, bound the payload read so a
@@ -388,7 +405,7 @@ async fn read_frame_bytes<R: tokio::io::AsyncRead + Unpin>(
         Err(e) => return Err(e),
     }
     let len = u32::from_be_bytes(len_bytes) as usize;
-    if len > crate::framing::MAX_FRAME_LEN as usize {
+    if len > max_len {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "frame too large",
@@ -635,6 +652,18 @@ fn stream_of_topic(key: &SubKey) -> rithmic_plants::Stream {
     }
 }
 
+/// The streams a forwarder overflow is reported on. A symbol topic carries
+/// ticks, book and live bars, but bars are consumed from the history channel: a
+/// client that asked for bars is told on that channel too, so its bar consumer
+/// resyncs instead of continuing with a hole.
+fn overflow_gap_streams(stream: rithmic_plants::Stream, kinds: u8) -> Vec<rithmic_plants::Stream> {
+    let mut streams = vec![stream];
+    if stream == rithmic_plants::Stream::Ticker && kinds & Kind::Bars.bit() != 0 {
+        streams.push(rithmic_plants::Stream::History);
+    }
+    streams
+}
+
 /// Forward one topic to one client. A receiver that falls behind the topic's
 /// ring is not disconnected: it is told exactly how many frames it missed (a
 /// `Gap` in order with the rest) and keeps going. A client that stops reading
@@ -660,20 +689,22 @@ fn spawn_forwarder(
                     }
                 }
                 Err(crate::subscriptions::ClientQueueError::Overflow { skipped }) => {
-                    let gap = Frame {
-                        request_id: 0,
-                        body: Some(Body::Event(pb::Event {
-                            body: Some(pb::event::Body::Gap(pb::Gap {
-                                stream: stream.plant().into(),
-                                skipped,
+                    for gap_stream in overflow_gap_streams(stream, kinds.load(Ordering::Relaxed)) {
+                        let gap = Frame {
+                            request_id: 0,
+                            body: Some(Body::Event(pb::Event {
+                                body: Some(pb::event::Body::Gap(pb::Gap {
+                                    stream: gap_stream.plant().into(),
+                                    skipped,
+                                })),
                             })),
-                        })),
-                    };
-                    let Ok(wire) = codec::encode(&gap) else {
-                        return;
-                    };
-                    if out_tx.send(OutMsg::Frame(Bytes::from(wire))).await.is_err() {
-                        return;
+                        };
+                        let Ok(wire) = codec::encode(&gap) else {
+                            return;
+                        };
+                        if out_tx.send(OutMsg::Frame(Bytes::from(wire))).await.is_err() {
+                            return;
+                        }
                     }
                 }
                 Err(crate::subscriptions::ClientQueueError::Closed) => return,
@@ -710,10 +741,16 @@ pub async fn publish_event(hub: &FanoutHub, key: &SubKey, event: pb::Event) -> u
 async fn handle_client(mut stream: UnixStream, state: Arc<GatewayState>) -> Result<(), String> {
     let same_uid = same_uid_peer(&stream);
 
-    let payload = read_frame_bytes(&mut stream)
-        .await
-        .map_err(|e| format!("read handshake: {e}"))?
-        .ok_or_else(|| "client closed before handshake".to_string())?;
+    // Before it authenticates a peer gets a short deadline and a small frame
+    // budget: an idle or hostile connection cannot hold a task or 16 MiB.
+    let payload = tokio::time::timeout(
+        HANDSHAKE_READ_TIMEOUT,
+        read_frame_bytes_max(&mut stream, HANDSHAKE_MAX_LEN),
+    )
+    .await
+    .map_err(|_| "no handshake in time".to_string())?
+    .map_err(|e| format!("read handshake: {e}"))?
+    .ok_or_else(|| "client closed before handshake".to_string())?;
     // Use codec path (framed buffer) so production shares decode with tests.
     let mut framed = (payload.len() as u32).to_be_bytes().to_vec();
     framed.extend_from_slice(&payload);
@@ -779,7 +816,10 @@ async fn handle_client(mut stream: UnixStream, state: Arc<GatewayState>) -> Resu
     let (read_half, write_half) = stream.into_split();
 
     let mut reader = tokio::spawn(read_requests(read_half, cmd_tx, slow_tx, reply_tx.clone()));
-    let slow = tokio::spawn(run_slow_lane(Arc::clone(&state), slow_rx, reply_tx.clone()));
+    // Detached: when the connection ends the slow lane drains on its own (each
+    // read is bounded by its own timeout). Aborting it mid-drain could leave an
+    // order replay half-read on the plant, to be collected by the next drain.
+    tokio::spawn(run_slow_lane(Arc::clone(&state), slow_rx, reply_tx.clone()));
     // Kept to tell this client when the plants were rebuilt; dropped before the
     // writer is awaited so the reply channel can close.
     let resume_tx = reply_tx.clone();
@@ -837,7 +877,6 @@ async fn handle_client(mut stream: UnixStream, state: Arc<GatewayState>) -> Resu
 
     drop(resume_tx);
     reader.abort();
-    slow.abort();
     if let Some(mut client) = client {
         client.teardown(&state).await;
     }
@@ -867,6 +906,24 @@ struct Request {
 /// Read and decode frames on their own task: nothing selects over this read, so
 /// a partly received frame is never abandoned, and a frame is decoded straight
 /// from its payload with no intermediate copy.
+/// Error code for a request whose handler failed part-way; its effect is unknown.
+pub const INTERNAL: &str = "internal";
+
+/// Error code for a request the parent could not read; nothing was dispatched.
+pub const BAD_REQUEST: &str = "bad_request";
+
+/// The `request_id` (field 1) of a frame that failed to decode, read from its
+/// first field when the encoder put it there (prost writes fields in order).
+fn request_id_of(payload: &[u8]) -> Option<u64> {
+    use prost::encoding::{decode_key, decode_varint, WireType};
+    let mut buf = payload;
+    let (tag, wire) = decode_key(&mut buf).ok()?;
+    if tag != 1 || wire != WireType::Varint {
+        return None;
+    }
+    decode_varint(&mut buf).ok().filter(|id| *id != 0)
+}
+
 async fn read_requests(
     mut read: tokio::net::unix::OwnedReadHalf,
     commands: mpsc::Sender<Request>,
@@ -877,8 +934,40 @@ async fn read_requests(
     loop {
         match read_frame_bytes(&mut read).await {
             Ok(Some(payload)) => {
-                let frame = Frame::decode(payload.as_slice()).map_err(|e| format!("proto: {e}"))?;
-                let Some(body) = frame.body else { continue };
+                let frame = match Frame::decode(payload.as_slice()) {
+                    Ok(frame) => frame,
+                    // An undecodable request whose id can still be read is
+                    // answered (nothing was dispatched, so the client reports it
+                    // as not sent) and the connection keeps serving. Without an
+                    // id the reply cannot be matched: the connection ends.
+                    Err(e) => match request_id_of(&payload) {
+                        Some(id) => {
+                            let reply = dispatch::error_frame(
+                                id,
+                                BAD_REQUEST,
+                                &format!("undecodable request: {e}"),
+                            );
+                            if replies.send(reply).await.is_err() {
+                                return Ok(());
+                            }
+                            continue;
+                        }
+                        None => return Err(format!("proto: {e}")),
+                    },
+                };
+                let Some(body) = frame.body else {
+                    if frame.request_id != 0 {
+                        let reply = dispatch::error_frame(
+                            frame.request_id,
+                            BAD_REQUEST,
+                            "request carries no body",
+                        );
+                        if replies.send(reply).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                    continue;
+                };
                 let req = Request {
                     id: frame.request_id,
                     body,
@@ -937,7 +1026,24 @@ async fn run_commands(
         let resp = if !close_after && !state.ready.load(Ordering::SeqCst) {
             not_ready_frame(req.id)
         } else {
-            dispatch::dispatch(&state, &mut client, req.id, req.body).await
+            // A panic in one handler answers that request and keeps the lane:
+            // ending it would skip the teardown that releases this connection's
+            // intents, leaking venue subscriptions for the life of the parent.
+            let id = req.id;
+            match AssertUnwindSafe(dispatch::dispatch(&state, &mut client, id, req.body))
+                .catch_unwind()
+                .await
+            {
+                Ok(frame) => frame,
+                Err(_) => {
+                    eprintln!("rithmic-gateway: request {id} panicked; answered as internal");
+                    dispatch::error_frame(
+                        id,
+                        INTERNAL,
+                        "the parent failed while serving this request",
+                    )
+                }
+            }
         };
         if replies.send(resp).await.is_err() || close_after {
             break;
@@ -1068,6 +1174,38 @@ pub async fn publish_plant_event(hub: &FanoutHub, event: rithmic_plants::dto::Pl
             let (key, wire_event) = crate::convert::plant_event_to_routed(event);
             publish_event(hub, &key, wire_event).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod overflow_gap_tests {
+    use super::*;
+    use rithmic_plants::Stream;
+
+    #[test]
+    fn a_bar_subscriber_hears_about_the_overflow_on_its_bar_channel() {
+        let kinds = Kind::Ticker.bit() | Kind::Bars.bit();
+        assert_eq!(
+            overflow_gap_streams(Stream::Ticker, kinds),
+            vec![Stream::Ticker, Stream::History]
+        );
+    }
+
+    #[test]
+    fn a_ticker_only_subscriber_gets_one_gap() {
+        assert_eq!(
+            overflow_gap_streams(Stream::Ticker, Kind::Ticker.bit()),
+            vec![Stream::Ticker]
+        );
+    }
+
+    #[test]
+    fn account_topics_report_on_their_own_stream() {
+        assert_eq!(
+            overflow_gap_streams(Stream::Order, 0xff),
+            vec![Stream::Order]
+        );
+        assert_eq!(overflow_gap_streams(Stream::Pnl, 0xff), vec![Stream::Pnl]);
     }
 }
 

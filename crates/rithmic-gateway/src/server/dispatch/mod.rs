@@ -59,25 +59,34 @@ fn err_to_frame(request_id: u64, code: &str, err: impl std::fmt::Display) -> Fra
     error_frame(request_id, code, &err.to_string())
 }
 
-/// Post-send plant transport / connection failures must stay "unknown"
-/// (not definitive `*_failed` rejects) so the adapter does not OrderReject.
-pub(super) fn plant_err_frame(
-    request_id: u64,
-    failed_code: &str,
-    e: rithmic_plants::Error,
-) -> Frame {
+/// The wire class of a failed one-shot command (place, cancel, modify, bracket,
+/// cancel-all). Only a failure known to precede the send is definitive: a venue
+/// reject, a not-sent, a configuration error, or a gate's own denial (which keeps
+/// its code). Anything else may have reached the venue, so it is
+/// `venue_unknown`: the adapter must treat the order as in flight, never as
+/// rejected.
+pub(super) fn plant_err_frame(request_id: u64, e: rithmic_plants::Error) -> Frame {
+    let code = command_error_code(&e);
+    err_to_frame(request_id, &code, e)
+}
+
+pub(super) fn command_error_code(e: &rithmic_plants::Error) -> String {
     use rithmic_plants::Error as E;
-    // The class assigned where the error arose survives the wire: a venue reject,
-    // a request that was never sent, or an outcome that may be live.
-    let code = match &e {
-        E::Rejected(_) => "venue_rejected",
-        E::NotSent(_) => "not_sent",
-        E::OutcomeUnknown(_) | E::Rithmic(_) | E::ChannelClosed { .. } | E::NotConnected { .. } => {
-            "venue_unknown"
-        }
-        _ => failed_code,
-    };
-    err_to_frame(request_id, code, e)
+    match e {
+        E::Rejected(_) => "venue_rejected".into(),
+        E::NotSent(_) | E::Config(_) => "not_sent".into(),
+        E::Gateway { code, .. } => code.clone(),
+        E::ReconciliationUnavailable(_) => "reconciliation_unavailable".into(),
+        E::OutcomeUnknown(_)
+        | E::Rithmic(_)
+        | E::ChannelClosed { .. }
+        | E::ChannelLagged { .. }
+        | E::NotConnected { .. }
+        | E::Session(_)
+        | E::Protocol(_)
+        | E::Transport(_)
+        | E::AlreadyConnected => "venue_unknown".into(),
+    }
 }
 
 /// Dispatch one request frame body to a response frame, applying parent
@@ -90,6 +99,11 @@ pub(super) async fn dispatch(
     request_id: u64,
     body: Body,
 ) -> Frame {
+    // Slow reads normally run on the connection's slow lane through
+    // `dispatch_read`; reaching here (tests, the gate helper) serves them inline.
+    if crate::rpc_table::lane_of(&body) == crate::rpc_table::Lane::Slow {
+        return dispatch_read(state, request_id, body).await;
+    }
     match body {
         Body::Subscribe(req) => {
             subscriptions::subscribe_topic(
@@ -198,9 +212,6 @@ pub(super) async fn dispatch(
         }
         Body::ResetTickerPlant(_) => subscriptions::reset_ticker_plant(state, request_id).await,
         Body::RequestPlants(req) => info::request_plants(state, request_id, req).await,
-        Body::GetFrontMonth(req) => info::get_front_month(state, request_id, req).await,
-        Body::GetReferenceData(req) => info::get_reference_data(state, request_id, req).await,
-        Body::ResolvedAccount(_) => info::resolved_account(state, request_id).await,
         Body::GetLiveMdState(_) => info::get_live_md_state(state, request_id).await,
         Body::EnsurePnl(_) => orders::ensure_pnl(state, request_id).await,
         Body::EnsureOrder(_) => orders::ensure_order(state, request_id).await,
@@ -214,17 +225,6 @@ pub(super) async fn dispatch(
         Body::ModifyOrder(req) => orders::modify_order(state, request_id, req).await,
         Body::CancelAllOrders(_) => orders::cancel_all_orders(state, request_id).await,
         Body::Disconnect(_) => ack_frame(request_id),
-        // Slow reads normally run on the connection's slow lane through
-        // `dispatch_read`; reaching here (tests, the gate helper) serves them inline.
-        body @ (Body::LoadTicks(_)
-        | Body::LoadTimeBars(_)
-        | Body::ProbeTimeBars(_)
-        | Body::LoadOrders(_)
-        | Body::LoadProductRmsInfo(_)
-        | Body::LoadAccountRmsInfo(_)
-        | Body::LoadFillHistory(_)
-        | Body::LoadOrderHistoryDates(_)
-        | Body::LoadOrderHistory(_)) => dispatch_read(state, request_id, body).await,
         // Responses / events are gateway→client only; a client sending one
         // back is a protocol misuse, not a crash.
         _ => error_frame(request_id, "unsupported", "unsupported request body"),
@@ -244,6 +244,9 @@ pub(super) async fn dispatch_read(state: &GatewayState, request_id: u64, body: B
         Body::LoadTicks(req) => history::load_ticks(state, request_id, req).await,
         Body::LoadTimeBars(req) => history::load_time_bars(state, request_id, req).await,
         Body::ProbeTimeBars(req) => history::probe_time_bars(state, request_id, req).await,
+        Body::GetFrontMonth(req) => info::get_front_month(state, request_id, req).await,
+        Body::GetReferenceData(req) => info::get_reference_data(state, request_id, req).await,
+        Body::ResolvedAccount(_) => info::resolved_account(state, request_id).await,
         _ => error_frame(request_id, "unsupported", "not a slow read request"),
     }
 }
@@ -282,6 +285,7 @@ pub(super) fn test_state(gates: ParentGates, hub: SharedFanout) -> GatewayState 
         topic_locks: TokioMutex::new(HashMap::new()),
         recon_lock: Arc::new(TokioMutex::new(())),
         md_history_gate: Arc::new(TokioMutex::new(())),
+        history_load_lock: Arc::new(TokioMutex::new(())),
         idle: IdleExit::new(IdleExitPolicy::Never),
         gateway_instance_id,
         transport_generation,
@@ -338,4 +342,37 @@ pub fn history_rpc_with_live_ticker_intent_for_test(body: Body) -> Body {
             .body
             .expect("body")
     })
+}
+
+#[cfg(test)]
+mod command_error_tests {
+    use super::command_error_code;
+    use rithmic_plants::Error as E;
+
+    #[test]
+    fn only_pre_send_failures_are_definitive() {
+        let cases = [
+            (E::Rejected("r".into()), "venue_rejected"),
+            (E::NotSent("n".into()), "not_sent"),
+            (E::Config("c".into()), "not_sent"),
+            (
+                E::Gateway {
+                    code: "trading_disabled".into(),
+                    message: "m".into(),
+                },
+                "trading_disabled",
+            ),
+            (E::OutcomeUnknown("u".into()), "venue_unknown"),
+            (E::Rithmic("x".into()), "venue_unknown"),
+            (E::Session("timed out waiting".into()), "venue_unknown"),
+            (E::Protocol("bad".into()), "venue_unknown"),
+            (E::Transport("io".into()), "venue_unknown"),
+            (E::ChannelClosed { plant: "order" }, "venue_unknown"),
+            (E::NotConnected { plant: "order" }, "venue_unknown"),
+            (E::AlreadyConnected, "venue_unknown"),
+        ];
+        for (err, want) in cases {
+            assert_eq!(command_error_code(&err), want, "{err}");
+        }
+    }
 }
