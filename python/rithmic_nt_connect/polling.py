@@ -144,6 +144,10 @@ class PlantPoller:
             await asyncio.sleep(0.05)
             return backoff, transient_streak
 
+        # A gap or an unreadable event means venue state must be re-read. However
+        # many there are in one batch, it is re-read once, after the batch: one
+        # bad row must not cost one full recovery (and its denial window) each.
+        lost = 0
         for index, event in enumerate(events):
             if event.get("type") == "gap":
                 # The stream dropped events for a slow consumer: same recovery as
@@ -151,12 +155,7 @@ class PlantPoller:
                 self._log.error(
                     f"{self.name} stream dropped {event.get('skipped')} events"
                 )
-                if self.on_gap is not None:
-                    await self._recover_gap()
-                else:
-                    backoff, transient_streak = await self._resync(
-                        backoff, transient_streak
-                    )
+                lost += 1
                 continue
             try:
                 self.on_event(event)
@@ -165,12 +164,7 @@ class PlantPoller:
                 self._log.error(
                     f"{self.name} event unreadable ({exc}); re-reading venue state"
                 )
-                if self.on_gap is not None:
-                    await self._recover_gap()
-                else:
-                    backoff, transient_streak = await self._resync(
-                        backoff, transient_streak
-                    )
+                lost += 1
                 continue
             except Exception as exc:
                 self._log.exception(
@@ -189,6 +183,13 @@ class PlantPoller:
                             "events unhandled; the re-arm drain re-reads venue state"
                         )
                     return None
+        if lost:
+            if self.on_gap is not None:
+                await self._recover_gap()
+            else:
+                backoff, transient_streak = await self._resync(
+                    backoff, transient_streak
+                )
         return backoff, transient_streak
 
     async def run(self) -> None:

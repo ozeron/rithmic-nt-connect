@@ -102,3 +102,12 @@ def test_a_snapshot_discards_a_half_received_update() -> None:
 def test_an_unknown_update_type_is_rejected() -> None:
     with pytest.raises(ConvertError, match="update_type"):
         order_book_to_fields(_venue_book(9, bids=[(21000.0, 1)]))
+
+
+def test_a_stream_reset_discards_a_half_received_update() -> None:
+    asm = BookAssembler()
+    assert _feed(asm, _venue_book(4, bids=[(21000.0, 1)])) is None
+    asm.reset()  # the ticker stream was reset mid-update
+    out = _feed(asm, _venue_book(6, asks=[(21000.25, 2)]))
+    assert [d.order.price.as_double() for d in out.deltas] == [21000.25]
+    assert out.deltas[-1].flags & F_LAST

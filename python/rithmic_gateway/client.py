@@ -828,9 +828,9 @@ class GatewayClient(FramedConnection):
                     f"while waiting for {rid}",
                 )
         except GatewayError as exc:
-            # Fatal wire errors close the fd inside _recv_exact; null self._sock
-            # so the next call is not_connected (unknown) instead of OSError.
-            if exc.code in {"desync", "eof", "frame_too_large"}:
+            # A fatal wire error leaves the stream unusable: close and null
+            # self._sock so the next call is not_connected instead of OSError.
+            if exc.code in {"eof", "frame_too_large"}:
                 self._close_sock()
             raise
         except (TimeoutError, BlockingIOError) as exc:
@@ -848,17 +848,22 @@ class GatewayClient(FramedConnection):
         """Queue an event for a later poll, dropping the oldest past the bound."""
         pending = self._pending
         while len(pending) >= _MAX_PENDING_EVENTS:
-            dropped = pending.popleft()
-            if dropped.get("type") == "gap":
-                pending.append(dropped)  # keep loss reports; drop data instead
-                continue
+            # Drop the oldest data event. Loss reports are kept, ahead of every
+            # surviving event, so a consumer sees the gap where the loss was.
+            first = next(
+                (i for i, q in enumerate(pending) if q.get("type") != "gap"), None
+            )
+            if first is None:
+                break  # only loss reports are queued
+            dropped = pending[first]
+            del pending[first]
             stream = _stream_of(dropped)
-            for queued in pending:
-                if queued.get("type") == "gap" and queued.get("stream") == stream:
-                    queued["skipped"] = int(queued["skipped"]) + 1
+            for i in range(first):  # the loss reports at the head
+                if pending[i].get("stream") == stream:
+                    pending[i]["skipped"] = int(pending[i]["skipped"]) + 1
                     break
             else:
-                pending.append({"type": "gap", "stream": stream, "skipped": 1})
+                pending.appendleft({"type": "gap", "stream": stream, "skipped": 1})
         pending.append(evt)
 
     def _poll_filtered(
@@ -902,7 +907,7 @@ class GatewayClient(FramedConnection):
                 if not timeout:
                     return None
         except GatewayError as exc:
-            if exc.code in {"desync", "eof", "frame_too_large"}:
+            if exc.code in {"eof", "frame_too_large"}:
                 self._close_sock()
             raise
         except (TimeoutError, BlockingIOError):

@@ -25,10 +25,15 @@ def _client(session: Any) -> tuple[Any, list[tuple[str, list[Any]]]]:
     client._skip_last_flush = float("inf")  # keep counts unflushed for asserts
     client._price_precision = lambda _iid: 2
     handled: list[tuple[str, list[Any]]] = []
-    client._handle_trade_ticks = lambda iid, ticks, *a: handled.append(
-        ("ticks", list(ticks))
+    client.request_ids = []
+    client._handle_trade_ticks = lambda iid, ticks, rid, *a: (
+        handled.append(("ticks", list(ticks))),
+        client.request_ids.append(rid),
     )
-    client._handle_bars = lambda bt, bars, *a: handled.append(("bars", list(bars)))
+    client._handle_bars = lambda bt, bars, rid, *a: (
+        handled.append(("bars", list(bars))),
+        client.request_ids.append(rid),
+    )
     return client, handled
 
 
@@ -49,6 +54,7 @@ def test_a_tick_request_for_an_unloaded_instrument_completes_empty() -> None:
     )
     asyncio.run(client._request_trade_ticks(request))
     assert handled == [("ticks", [])]
+    assert client.request_ids == ["req-1"], "completed under the request's own id"
     assert any("route" in m for m in client._log.messages)
 
 
@@ -58,6 +64,8 @@ def test_a_bar_request_for_an_unloaded_instrument_completes_empty() -> None:
     request: Any = SimpleNamespace(bar_type=bar_type, **_window())
     asyncio.run(client._request_bars(request))
     assert handled == [("bars", [])]
+    assert client.request_ids == ["req-1"], "completed under the request's own id"
+    assert any("route" in m for m in client._log.messages)
 
 
 def test_one_bad_tick_row_is_skipped_not_the_whole_request() -> None:

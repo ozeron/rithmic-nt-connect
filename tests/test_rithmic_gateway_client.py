@@ -47,8 +47,28 @@ def test_resolve_bin_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.delenv("RITHMIC_GATEWAY_BIN", raising=False)
     monkeypatch.delenv("CARGO_TARGET_DIR", raising=False)
     monkeypatch.setenv("PATH", str(tmp_path))
-    monkeypatch.setattr("rithmic_gateway.binary._bin_search_starts", lambda: [tmp_path])
+    monkeypatch.setattr("rithmic_gateway.binary._checkout_root", lambda _start: None)
     with pytest.raises(GatewayBinaryError, match="RITHMIC_GATEWAY_BIN"):
+        resolve_gateway_bin(None)
+
+
+def test_the_dev_fallback_never_searches_the_working_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``target/release/rithmic-gateway`` under an untrusted cwd is never run."""
+    planted = tmp_path / "target" / "release" / "rithmic-gateway"
+    planted.parent.mkdir(parents=True)
+    planted.write_text("#!/bin/sh\nexit 0\n")
+    planted.chmod(0o755)
+    (tmp_path / "Cargo.toml").write_text("[workspace]\n")
+    (tmp_path / "crates" / "rithmic-gateway").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("RITHMIC_GATEWAY_BIN", raising=False)
+    monkeypatch.delenv("CARGO_TARGET_DIR", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path / "nobin"))
+    monkeypatch.setattr("rithmic_gateway.binary._wheel_bin", lambda: None)
+    monkeypatch.setattr("rithmic_gateway.binary._checkout_root", lambda _start: None)
+    with pytest.raises(GatewayBinaryError):
         resolve_gateway_bin(None)
 
 
@@ -71,7 +91,7 @@ def test_resolve_bin_prefers_the_wheel_binary_over_path(
     # PATH points at an empty dir with no binary; target fallback also empty.
     monkeypatch.setenv("PATH", str(tmp_path / "nobin"))
     (tmp_path / "nobin").mkdir(exist_ok=True)
-    monkeypatch.setattr("rithmic_gateway.binary._bin_search_starts", lambda: [tmp_path])
+    monkeypatch.setattr("rithmic_gateway.binary._checkout_root", lambda _start: None)
     assert resolve_gateway_bin(None) == str(bundled.resolve())
 
 
@@ -669,7 +689,7 @@ def test_order_book_event_always_has_side_keys() -> None:
     assert list(out["ask_size"]) == [2]
 
 
-def test_desync_nulls_sock_for_next_rpc() -> None:
+def test_a_mid_payload_timeout_nulls_sock_for_next_rpc() -> None:
     """Partial-frame timeout must yield not_connected on the next call, not OSError."""
     sock = Path(f"/tmp/rgw-test-{os.getpid()}-desync.sock")
     if sock.exists():
@@ -701,7 +721,7 @@ def test_desync_nulls_sock_for_next_rpc() -> None:
                 )
             )
             # Accept Subscribe request, then send a partial length-prefixed frame
-            # so the client times out mid-payload and raises desync.
+            # so the client times out mid-payload (a timeout, not a desync).
             header = conn.recv(4)
             (n,) = struct.unpack("!I", header)
             conn.recv(n)
@@ -1041,3 +1061,4 @@ def test_unpolled_events_are_bounded_and_the_loss_is_a_gap(
     # Every event is either kept or counted in the gap: none vanish.
     assert gaps == [{"type": "gap", "stream": "ticker", "skipped": 10 - len(kept)}]
     assert kept[-1]["symbol"] == "T9", "the newest events are kept"
+    assert pending[0]["type"] == "gap", "the loss is reported before what followed it"

@@ -10,6 +10,7 @@ from __future__ import annotations
 import random
 import re
 import string
+from typing import Any
 
 import pytest
 from rithmic_nt_connect.exposure import matches_root, product_root
@@ -492,7 +493,7 @@ def test_event_time_is_a_field_read_when_the_extension_already_computed_it() -> 
         ), d
 
 
-def _reference_notification_reason(kind: str, fields: dict[str, str | None]) -> object:
+def _reference_notification_reason(kind: str, fields: dict[str, Any]) -> object:
     """The original Python classification (kind and refusal reason), kept as the
     oracle for ``rithmic_exec::notification_action``."""
     reason = fields.get("text") or fields.get("report_text") or fields.get("status")
@@ -537,3 +538,21 @@ def test_notification_action_matches_the_reference() -> None:
                     got = _lib.notification_action(kind, text, report, status)
                     want = _reference_notification_reason(kind, fields)
                     assert (got if got is None else tuple(got)) == want, (kind, fields)
+
+
+def test_notification_reason_skips_falsy_non_text_values_like_the_original() -> None:
+    """The venue dict can carry non-string values; the original ``or`` chain
+    skipped every falsy one (``0``, ``False``), so the adapter boundary must too."""
+    from types import SimpleNamespace
+
+    from rithmic_nt_connect._orders import notification_action
+
+    order = SimpleNamespace(quantity=1)
+    values: list[Any] = [None, "", 0, False, 42, "margin"]
+    for kind in ("rejected", "modify_rejected", "cancel_rejected"):
+        for text in values:
+            for report in values:
+                fields = {"kind": kind, "text": text, "report_text": report}
+                want = _reference_notification_reason(kind, fields)
+                got = notification_action(fields, order)
+                assert got is not None and (kind, got.reason) == want, fields

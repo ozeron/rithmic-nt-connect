@@ -12,6 +12,7 @@ from rithmic_nt_connect._convert import (
     order_book_to_fields,
 )
 from rithmic_nt_connect.data import (
+    BookAssembler,
     fields_to_order_book_deltas,
     fields_to_quote_tick,
     fields_to_trade_tick,
@@ -368,6 +369,7 @@ def test_gap_resync_does_not_stand_in_for_a_queued_plant_reset() -> None:
     async def scenario() -> None:
         client: Any = Client.__new__(Client)
         client._bbo_state = {}
+        client._books = BookAssembler()
         client._subscriptions = set()
         client._book_subscriptions = set()
         client._bar_types = {}
@@ -479,6 +481,7 @@ def test_bbo_state_cleared_on_quote_unsubscribe_and_resync() -> None:
 
     client = RithmicDataClient.__new__(RithmicDataClient)
     client._bbo_state = {"NQU6:CME": {"bid_price": 100.0, "bid_size": 1}}
+    client._books = BookAssembler()
     client._subscriptions = set()
     client._book_subscriptions = set()
     client._bar_types = {}
@@ -519,6 +522,7 @@ def test_bbo_state_cleared_on_quote_unsubscribe_and_resync() -> None:
 
     # A resync also clears all accumulators before re-issuing intents.
     client._bbo_state = {"NQU6:CME": {"bid_price": 100.0, "bid_size": 1}}
+    client._books = BookAssembler()
     asyncio.run(client._resync_ticker_subscription())
     assert client._bbo_state == {}
 
@@ -586,6 +590,7 @@ def test_connect_reissues_intent_and_resets_derived_state() -> None:
             ("NQU6", "CME", 2, 60): {m1},
         }
         client._bbo_state = {"NQU6:CME": {"bid_price": 100.0, "bid_size": 1}}
+        client._books = BookAssembler()
         client._resync_generation = 0
         client._resync_lock = asyncio.Lock()
         client._instrument_routes = {}

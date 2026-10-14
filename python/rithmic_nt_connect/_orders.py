@@ -423,7 +423,9 @@ def slim_order_fields(fields: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _text_or_none(value: Any) -> str | None:
-    return None if value is None else str(value)
+    """A reason candidate as text; any falsy value (``0``, ``False``, ``""``) is
+    no reason, as the original ``text or report_text or status`` chain had it."""
+    return str(value) if value else None
 
 
 def notification_action(fields: Mapping[str, Any], order: Any) -> OrderAction | None:
@@ -461,7 +463,7 @@ def notification_action(fields: Mapping[str, Any], order: Any) -> OrderAction | 
         fill_sz = fields.get("fill_size")
         if fill_sz is None:
             return None
-        ts_event = int(fields.get("ts_event") or 0)
+        ts_event = fill_identity_ts(fields)
         return OrderAction(
             kind="filled",
             fill_qty=int(fill_sz),

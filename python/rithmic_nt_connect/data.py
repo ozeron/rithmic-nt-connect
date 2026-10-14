@@ -473,6 +473,11 @@ class BookAssembler:
     def __init__(self) -> None:
         self._pending: dict[str, list[OrderBookDelta]] = {}
 
+    def reset(self) -> None:
+        """Forget half-received updates (the stream was reset or resynced: its
+        remaining parts will not arrive)."""
+        self._pending.clear()
+
     def feed(
         self,
         fields: dict[str, Any],
@@ -880,6 +885,7 @@ class RithmicDataClient(LiveMarketDataClient):
             bar_resync_subscriptions(self._bar_types),
         )
         self._bbo_state.clear()
+        self._books.reset()
         if self._bar_types:
             self._ensure_history_poll_task()
         # Own the task: LiveMarketDataClient.create_task WARNs on our cancel.
@@ -966,8 +972,10 @@ class RithmicDataClient(LiveMarketDataClient):
                 return
             # Drop one-sided BBO accumulators: after a plant reset the venue
             # re-sends fresh bid/ask sides, and merging them with pre-reset
-            # state would publish a QuoteTick mixing stale + fresh sides.
+            # state would publish a QuoteTick mixing stale + fresh sides. A
+            # half-received book update will not be completed either.
             self._bbo_state.clear()
+            self._books.reset()
             ensure = getattr(self._session, "ensure_transport_live", None)
             if callable(ensure):
                 await asyncio.to_thread(ensure)

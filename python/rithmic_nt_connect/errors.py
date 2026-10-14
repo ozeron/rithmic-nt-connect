@@ -68,7 +68,6 @@ _RECONNECTABLE_GATEWAY_CODES = frozenset(
         "not_connected",
         "eof",
         "shutting_down",
-        "desync",
         "transport_reset",
         "frame_too_large",
     }

@@ -67,7 +67,10 @@ def test_resolve_gateway_bin_finds_cargo_target(
     monkeypatch.delenv("RITHMIC_GATEWAY_BIN", raising=False)
     monkeypatch.delenv("CARGO_TARGET_DIR", raising=False)
     monkeypatch.setattr("rithmic_gateway.binary.shutil.which", lambda _n: None)
-    monkeypatch.setattr("rithmic_gateway.binary._bin_search_starts", lambda: [tmp_path])
+    monkeypatch.setattr("rithmic_gateway.binary._wheel_bin", lambda: None)
+    monkeypatch.setattr(
+        "rithmic_gateway.binary._checkout_root", lambda _start: tmp_path
+    )
     found = resolve_gateway_bin()
     assert Path(found).resolve() == release.resolve()
 
@@ -85,7 +88,10 @@ def test_resolve_gateway_bin_skips_non_executable_target(
     monkeypatch.delenv("RITHMIC_GATEWAY_BIN", raising=False)
     monkeypatch.delenv("CARGO_TARGET_DIR", raising=False)
     monkeypatch.setattr("rithmic_gateway.binary.shutil.which", lambda _n: None)
-    monkeypatch.setattr("rithmic_gateway.binary._bin_search_starts", lambda: [tmp_path])
+    monkeypatch.setattr("rithmic_gateway.binary._wheel_bin", lambda: None)
+    monkeypatch.setattr(
+        "rithmic_gateway.binary._checkout_root", lambda _start: tmp_path
+    )
     with pytest.raises(GatewayBinaryError, match="RITHMIC_GATEWAY_BIN"):
         resolve_gateway_bin()
 
@@ -96,7 +102,8 @@ def test_resolve_gateway_bin_missing_mentions_env(
     monkeypatch.delenv("RITHMIC_GATEWAY_BIN", raising=False)
     monkeypatch.delenv("CARGO_TARGET_DIR", raising=False)
     monkeypatch.setattr("rithmic_gateway.binary.shutil.which", lambda _n: None)
-    monkeypatch.setattr("rithmic_gateway.binary._bin_search_starts", lambda: [tmp_path])
+    monkeypatch.setattr("rithmic_gateway.binary._wheel_bin", lambda: None)
+    monkeypatch.setattr("rithmic_gateway.binary._checkout_root", lambda _start: None)
     with pytest.raises(GatewayBinaryError, match="RITHMIC_GATEWAY_BIN"):
         resolve_gateway_bin()
 

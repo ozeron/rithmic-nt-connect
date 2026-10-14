@@ -357,8 +357,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         self._pnl_connected = False
         try:
             await asyncio.to_thread(self._session.subscribe_pnl)
-            await self._refresh_resolved_account()
-            self._seed_account_if_needed()
+            await self._resolve_and_seed_account()
             self._poll_task = self._make_poll_task("pnl")
             self._pnl_connected = True
         except Exception as exc:
@@ -366,8 +365,6 @@ class RithmicExecutionClient(LiveExecutionClient):
                 self._log.warning(f"PnL/account path soft-failed: {exc}")
             else:
                 raise
-        await self._refresh_resolved_account()
-        self._seed_account_if_needed()
 
         if self.enable_trading:
             self._order_plant.begin_connect()
@@ -383,8 +380,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                         f"order plant teardown after subscribe fail: {teardown_exc}"
                     )
                 raise
-            await self._refresh_resolved_account()
-            self._seed_account_if_needed()
+            await self._resolve_and_seed_account()
             await self._load_commission_rates()
             # The poll loop starts before the re-arm barrier (never-drop):
             # notifications must keep flowing even while the plant is
@@ -426,8 +422,7 @@ class RithmicExecutionClient(LiveExecutionClient):
     ) -> None:
         deadline = time.monotonic() + timeout_secs
         while self.account_id is None and time.monotonic() < deadline:
-            await self._refresh_resolved_account()
-            self._seed_account_if_needed()
+            await self._resolve_and_seed_account()
             if self.account_id is not None:
                 break
             await asyncio.sleep(0.05)
@@ -447,6 +442,14 @@ class RithmicExecutionClient(LiveExecutionClient):
         )
         if log_registered:
             self._log.info(f"account observable in cache {self.account_id}")
+
+    async def _resolve_and_seed_account(self) -> None:
+        """Pick up the account once the session has resolved it. Called after
+        each bring-up step (PnL subscribe, order subscribe, the registration
+        wait) because the account can resolve at any of them; a no-op once it
+        is known."""
+        await self._refresh_resolved_account()
+        self._seed_account_if_needed()
 
     async def _refresh_resolved_account(self) -> None:
         """Fetch the session's resolved account off the event loop and cache it."""
@@ -646,8 +649,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         # this connect: with ``soft_fail_pnl`` there is no stream to observe.
         if self._pnl_connected:
             await self._await_pnl_snapshot()
-        await self._refresh_resolved_account()
-        self._seed_account_if_needed()
+        await self._resolve_and_seed_account()
 
     def _drain_row_from_fields(
         self, fields: dict[str, Any], ts_event: int

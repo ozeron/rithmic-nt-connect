@@ -20,11 +20,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         binary = resolve_gateway_bin()
     except GatewayBinaryError as exc:
-        print(
-            f"rithmic_gateway: {exc} (set RITHMIC_GATEWAY_BIN to the "
-            f"rithmic-gateway binary)",
-            file=sys.stderr,
-        )
+        print(f"rithmic_gateway: {exc}", file=sys.stderr)
         return 2
     sys.stdout.flush()
     sys.stderr.flush()
