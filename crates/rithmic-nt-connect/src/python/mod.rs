@@ -884,7 +884,22 @@ impl PySession {
             self.session
                 .next_events(parsed, max_events.max(1), Duration::from_millis(timeout_ms)),
         )?;
-        events.into_iter().map(|e| event_to_dict(py, e)).collect()
+        // The batch is already dequeued, so one event that fails to convert must not
+        // discard its neighbours. It becomes a gap of one, which the consumer
+        // resynchronizes on exactly like a lag: nothing is dropped silently.
+        events
+            .into_iter()
+            .map(|e| match event_to_dict(py, e) {
+                Ok(dict) => Ok(dict),
+                Err(_) => {
+                    let gap = PyDict::new(py);
+                    gap.set_item("type", "gap")?;
+                    gap.set_item("stream", stream)?;
+                    gap.set_item("skipped", 1u64)?;
+                    Ok(gap.unbind())
+                }
+            })
+            .collect()
     }
 
     /// Next PnL-plant event as a dict, or `None` after `timeout_ms`.

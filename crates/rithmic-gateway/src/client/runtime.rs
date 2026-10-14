@@ -203,6 +203,15 @@ impl Connection {
         self.pending.lock().expect("pending").clear();
     }
 
+    /// A write failed or timed out part-way, so the stream may hold a truncated
+    /// frame: no later frame may follow it. Fail every call, refuse new ones, and
+    /// close the write half so the parent drops the connection and the reader's
+    /// end-of-stream reports the loss (the normal re-dial path).
+    async fn break_connection(&self, writer: &mut OwnedWriteHalf) {
+        self.fail_all();
+        let _ = tokio::time::timeout(DISCONNECT_GRACE, writer.shutdown()).await;
+    }
+
     /// Send one request and await its reply.
     pub(super) async fn call(
         &self,
@@ -231,11 +240,12 @@ impl Connection {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => {
                     self.pending.lock().expect("pending").remove(&id);
-                    self.fail_all();
+                    self.break_connection(&mut writer).await;
                     return Err(CallError::Sent(transport(format!("write failed: {e}"))));
                 }
                 Err(_) => {
                     self.pending.lock().expect("pending").remove(&id);
+                    self.break_connection(&mut writer).await;
                     return Err(CallError::Sent(transport("write timed out")));
                 }
             }

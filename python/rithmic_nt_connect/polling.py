@@ -31,16 +31,23 @@ class PlantPoller:
         on_resync_failed: Callable[[], None] | None = None,
         log: Any | None = None,
         batch_fn: Callable[[], list[dict[str, Any]]] | None = None,
+        on_gap: Callable[[], Any] | None = None,
     ) -> None:
         """``batch_fn`` (the extension's ``next_events``) is preferred when given:
         it blocks in Rust until events arrive and returns a batch, so there is no
         idle sleep and one thread hop serves many events. ``poll_fn`` is the
-        single-event form kept for callers and tests that supply their own."""
+        single-event form kept for callers and tests that supply their own.
+
+        ``on_gap`` handles a ``gap`` event (the stream dropped events but its plant
+        is healthy). It is retried until it succeeds, because a gap is reported once
+        and nothing else would run it again. Without it a gap is handled like a
+        channel error (``on_resync``)."""
         self.name = name
         self.batch_fn = batch_fn
         self.poll_fn = poll_fn
         self.on_event = on_event
         self.on_resync = on_resync
+        self.on_gap = on_gap
         self.max_transient = max_transient
         self.on_latch = on_latch
         self.on_resync_start = on_resync_start
@@ -89,6 +96,24 @@ class PlantPoller:
         await asyncio.sleep(backoff)
         return backoff, transient_streak
 
+    async def _recover_gap(self) -> None:
+        """Run ``on_gap`` until it succeeds."""
+        on_gap = self.on_gap
+        if on_gap is None:
+            return
+        delay = 0.05
+        while True:
+            try:
+                await on_gap()
+                self._log.warning(f"{self.name} stream recovered after a gap")
+                return
+            except Exception as exc:
+                self._log.error(f"{self.name} gap recovery failed: {exc}")
+                if self.name == "order" and self.on_resync_failed is not None:
+                    self.on_resync_failed()
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 2.0)
+
     async def poll_iteration(
         self, backoff: float, transient_streak: int
     ) -> tuple[float, int] | None:
@@ -115,16 +140,19 @@ class PlantPoller:
             await asyncio.sleep(0.05)
             return backoff, transient_streak
 
-        for event in events:
+        for index, event in enumerate(events):
             if event.get("type") == "gap":
                 # The stream dropped events for a slow consumer: same recovery as
                 # a channel error.
                 self._log.error(
                     f"{self.name} stream dropped {event.get('skipped')} events"
                 )
-                backoff, transient_streak = await self._resync(
-                    backoff, transient_streak
-                )
+                if self.on_gap is not None:
+                    await self._recover_gap()
+                else:
+                    backoff, transient_streak = await self._resync(
+                        backoff, transient_streak
+                    )
                 continue
             try:
                 self.on_event(event)
@@ -137,6 +165,12 @@ class PlantPoller:
                         self.on_latch(
                             "order handler failure",
                             f"order stream stopped; cache/venue state divergent: {exc}",
+                        )
+                    dropped = len(events) - index - 1
+                    if dropped:
+                        self._log.error(
+                            f"{self.name} poller stopped with {dropped} dequeued "
+                            "events unhandled; the re-arm drain re-reads venue state"
                         )
                     return None
         return backoff, transient_streak

@@ -354,6 +354,48 @@ def test_poll_loop_gap_resyncs_without_reset_and_error_with_reset(
     assert resyncs == [False, True]
 
 
+def test_gap_resync_does_not_stand_in_for_a_queued_plant_reset() -> None:
+    """A channel-error resync that waited behind a gap resync still resets."""
+    import asyncio
+
+    from rithmic_nt_connect.data import RithmicDataClient
+
+    resets: list[bool] = []
+
+    class Client(RithmicDataClient):
+        pass
+
+    async def scenario() -> None:
+        client: Any = Client.__new__(Client)
+        client._bbo_state = {}
+        client._subscriptions = set()
+        client._book_subscriptions = set()
+        client._bar_types = {}
+        client._resync_generation = 0
+        client._reset_generation = 0
+        client._resync_lock = asyncio.Lock()
+
+        class Sess(WireSessionStub):
+            is_direct = True
+
+            def reset_ticker(self) -> None:
+                resets.append(True)
+
+            def ensure_transport_live(self) -> int:
+                return 0
+
+        client._session = Sess()
+        await client._resync_lock.acquire()  # a resync is in flight
+        gap = asyncio.create_task(client._resync_ticker_subscription(reset=False))
+        error = asyncio.create_task(client._resync_ticker_subscription(reset=True))
+        await asyncio.sleep(0)
+        client._resync_lock.release()
+        await asyncio.gather(gap, error)
+
+    asyncio.run(scenario())
+    assert resets == [True]
+
+
 def test_resync_tolerates_venue_duplicate_subscribe() -> None:
     """History-plant bars often survive reset_ticker; ``[8]`` must not abort."""
     import asyncio

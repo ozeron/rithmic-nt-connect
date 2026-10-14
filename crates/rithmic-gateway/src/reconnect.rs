@@ -173,8 +173,18 @@ impl IntentStore {
         }
     }
 
+    /// Mark a join degraded. A no-op when no client holds the intent any more (the
+    /// last holder left while the restore was retrying): a stale flag would make a
+    /// later, unrelated subscribe do a spurious second venue join.
     pub fn mark_degraded(&mut self, intent: MdIntent) {
-        self.degraded.insert(intent);
+        let held = match &intent {
+            MdIntent::Ticker(k) => self.ticker.contains_key(k),
+            MdIntent::Book(k) => self.book.contains_key(k),
+            MdIntent::TimeBars(t) => self.time_bars.contains_key(t),
+        };
+        if held {
+            self.degraded.insert(intent);
+        }
     }
 
     pub fn clear_degraded(&mut self, intent: &MdIntent) -> bool {
@@ -347,6 +357,25 @@ mod tests {
         assert!(!hub.add_interest(key.clone()).await);
         assert!(!hub.remove_interest(&key).await);
         assert!(hub.remove_interest(&key).await);
+    }
+
+    #[tokio::test]
+    async fn degraded_marks_only_apply_to_held_intents() {
+        let ctl = ReconnectController::new(Arc::new(FanoutHub::new(16)));
+        let key = SubKey {
+            symbol: "NQ".into(),
+            exchange: "CME".into(),
+        };
+        let intent = MdIntent::Ticker(key.clone());
+        // Everyone left while the restore was retrying: the late mark is dropped.
+        ctl.mark_degraded(intent.clone()).await;
+        assert!(!ctl.is_degraded(&intent).await);
+
+        ctl.note_ticker(key.clone()).await;
+        ctl.mark_degraded(intent.clone()).await;
+        assert!(ctl.is_degraded(&intent).await);
+        ctl.forget_ticker(&key).await;
+        assert!(!ctl.is_degraded(&intent).await);
     }
 
     #[tokio::test]

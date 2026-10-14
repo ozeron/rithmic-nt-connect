@@ -132,12 +132,18 @@ impl DirectSession {
 
     /// Begin a place / cancel / modify: rejected while a disconnect is in progress.
     async fn begin_order_op(&self) -> Result<RwLockReadGuard<'_, ()>> {
+        let refused =
+            || Error::NotSent("session disconnect in progress; order operation rejected".into());
         if self.disconnecting.load(Ordering::SeqCst) {
-            return Err(Error::NotSent(
-                "session disconnect in progress; order operation rejected".into(),
-            ));
+            return Err(refused());
         }
-        Ok(self.session_ops.read().await)
+        let guard = self.session_ops.read().await;
+        // A disconnect may have started (and finished) while this waited behind its
+        // queued write lock: re-check, or the order would re-open the plant it closed.
+        if self.disconnecting.load(Ordering::SeqCst) {
+            return Err(refused());
+        }
+        Ok(guard)
     }
 
     /// Wait for in-flight order operations, bounded by [`DISCONNECT_WAIT`].

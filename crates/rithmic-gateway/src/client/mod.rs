@@ -238,12 +238,21 @@ impl GatewaySession {
         // never left (the connection closed before it was written).
         let mut retried = false;
         loop {
-            let conn = self.runtime.ensure_live().await?;
+            // A state-changing request that never left is a definitive local
+            // failure (`NotSent`), the same class `DirectSession` reports.
+            let conn = match self.runtime.ensure_live().await {
+                Ok(conn) => conn,
+                Err(err) if mode == Mode::Command => return Err(Error::NotSent(err.to_string())),
+                Err(err) => return Err(err),
+            };
             match conn.call(body.clone(), timeout).await {
                 Ok(frame) => return map_reply(frame),
                 Err(CallError::NotSent(err)) => {
                     if retried {
-                        return Err(err);
+                        return Err(match mode {
+                            Mode::Command => Error::NotSent(err.to_string()),
+                            _ => err,
+                        });
                     }
                     retried = true;
                 }

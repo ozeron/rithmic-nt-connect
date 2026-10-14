@@ -71,3 +71,37 @@ def test_plant_poller_transient_error_latches_after_max() -> None:
     assert res3 is None
     assert len(latched) == 1
     assert latched[0][0] == "order poll stream failure"
+
+
+def test_plant_poller_gap_runs_on_gap_until_it_succeeds_and_keeps_the_batch() -> None:
+    """A gap is reported once, so its recovery is retried; events after it in the
+    same batch are still handled."""
+    attempts = []
+
+    async def on_gap() -> None:
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise RuntimeError("venue busy")
+
+    handled = []
+    resync = Mock()
+    failed = Mock()
+    poller = PlantPoller(
+        name="order",
+        poll_fn=lambda: None,
+        batch_fn=lambda: [
+            {"type": "gap", "stream": "order", "skipped": 4},
+            {"type": "order_notification", "status": "open"},
+        ],
+        on_event=handled.append,
+        on_resync=resync,
+        on_gap=on_gap,
+        on_resync_failed=failed,
+    )
+
+    res = asyncio.run(poller.poll_iteration(0.05, 0))
+    assert res == (0.05, 0)
+    assert len(attempts) == 3
+    assert failed.call_count == 2
+    resync.assert_not_called()
+    assert handled == [{"type": "order_notification", "status": "open"}]

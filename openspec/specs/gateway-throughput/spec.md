@@ -4,7 +4,7 @@
 TBD - created by archiving change harden-gateway-runtime. Update Purpose after archive.
 ## Requirements
 ### Requirement: Event delivery is event-driven
-The gateway parent, the direct session and the Python pollers SHALL wake on event arrival and SHALL NOT discover events by sleeping for a fixed interval and re-polling. An idle system SHALL perform no periodic polling wakeups.
+The gateway parent, the direct session and the Python pollers SHALL wake on event arrival and SHALL NOT discover events by sleeping for a fixed interval and re-polling. The delivery path SHALL perform no periodic polling: a Python consumer blocks inside the extension on the event wait, which has a bounded timeout (50 ms) only so the consumer can notice cancellation and a closed session. A consumer with nothing to poll (for example the history stream with no bar subscription) MAY sleep between checks.
 
 #### Scenario: Idle wake-to-deliver latency
 - **WHEN** a single event is published after the system has been idle

@@ -568,6 +568,8 @@ impl ClientCtx {
             return;
         }
         self.pnl = false;
+        let lock = dispatch::topic_lock(state, &crate::convert::pnl_key()).await;
+        let _guard = lock.lock().await;
         if state.reconnect.forget_pnl().await {
             if let Some(session) = &state.session {
                 let guard = session.lock().await;
@@ -727,6 +729,12 @@ async fn handle_client(mut stream: UnixStream, state: Arc<GatewayState>) -> Resu
         return Err(format!("{code}: {msg}"));
     }
 
+    // Subscribe before the generation goes into Ready, so a rebuild that finishes
+    // in between is still reported (Ready carries the older generation) instead of
+    // being missed. Only later bumps are reacted to.
+    let mut epoch_rx = state.transport_epoch.subscribe();
+    epoch_rx.borrow_and_update();
+
     write_frame(
         &mut stream,
         &Frame {
@@ -753,10 +761,6 @@ async fn handle_client(mut stream: UnixStream, state: Arc<GatewayState>) -> Resu
 
     let (out_tx, out_rx) = mpsc::channel::<OutMsg>(crate::subscriptions::DEFAULT_QUEUE_CAP);
     let client = ClientCtx::new(out_tx);
-    let mut epoch_rx = state.transport_epoch.subscribe();
-    // Ignore the current value; only react to subsequent generation bumps.
-    epoch_rx.borrow_and_update();
-
     // One connection is four tasks so no request can hold up another:
     //   reader   owns the read half, decodes frames and hands each to a lane;
     //   commands runs state-changing / subscription requests in arrival order;
@@ -990,7 +994,16 @@ async fn write_replies(
             frame = replies.recv(), if replies_open => match frame {
                 Some(frame) => match codec::encode(&frame) {
                     Ok(wire) => Some(Bytes::from(wire)),
-                    Err(_) => None,
+                    // A reply that cannot be framed (a history window over the frame
+                    // limit) must still answer its request, or the caller waits for
+                    // its own timeout.
+                    Err(e) => codec::encode(&dispatch::error_frame(
+                        frame.request_id,
+                        "response_too_large",
+                        &e.to_string(),
+                    ))
+                    .ok()
+                    .map(Bytes::from),
                 },
                 None => {
                     replies_open = false;

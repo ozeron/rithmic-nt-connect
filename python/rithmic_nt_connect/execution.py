@@ -371,6 +371,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                     stream="order",
                     on_event=self._dispatch_order_event,
                     on_resync=self._resync_order_subscription,
+                    on_gap=self._recover_order_gap,
                 ),
                 log_msg="rithmic_order_poll",
             )
@@ -507,7 +508,7 @@ class RithmicExecutionClient(LiveExecutionClient):
     ) -> None:
         """Transport is already LIVE; resubscribe plants + drain/PnL + rearm.
 
-        ``TransportRecovery`` owns dial; ``TransportRecoveryBridge`` owns retry
+        The Rust client runtime owns dial; ``TransportRecoveryBridge`` owns retry
         (each failed attempt re-latches). Mid-session plant resync never clears
         a latch — only ``begin_connect`` + ``rearm`` after fresh observation.
         """
@@ -526,10 +527,9 @@ class RithmicExecutionClient(LiveExecutionClient):
                     f"L3 PnL disconnect before resubscribe: {teardown_exc}"
                 )
             await asyncio.to_thread(self._session.subscribe_pnl)
-        try:
-            await asyncio.to_thread(self._session.disconnect_order_plant)
-        except Exception as teardown_exc:
-            self._log.warning(f"L3 order disconnect before resubscribe: {teardown_exc}")
+        # No order-plant disconnect first: the parent restored (or this client's
+        # re-dial dropped) the order intent already, and the subscribes below are
+        # idempotent. Tearing the shared venue plant down would be a second churn.
         await asyncio.to_thread(self._session.subscribe_order_updates)
         await asyncio.to_thread(self._session.subscribe_bracket_updates)
         if self._order_poll_task is None or self._order_poll_task.done():
@@ -540,6 +540,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                     stream="order",
                     on_event=self._dispatch_order_event,
                     on_resync=self._resync_order_subscription,
+                    on_gap=self._recover_order_gap,
                 ),
                 log_msg="rithmic_order_poll",
             )
@@ -578,6 +579,22 @@ class RithmicExecutionClient(LiveExecutionClient):
         # The transient streak is loop-local (``_plant_poll_loop``): it resets
         # structurally when this successful resubscribe returns to the loop.
         self._order_plant.resync_complete()
+
+    async def _recover_order_gap(self) -> None:
+        """The order stream dropped events but its plant is healthy.
+
+        The lost notifications may hide a fill or a terminal state, so submits stay
+        blocked until venue state is re-read (the same barrier as a reconnect:
+        bounded working-order drain and the PnL gate). The plant is not torn down:
+        that would open a second window of lost events and, in gateway mode, would
+        drop the shared venue plant when this is the last holder.
+        """
+        self._order_plant.begin_connect()
+        await self._rearm_after_reconnect()
+        if not self._order_plant.rearm(poll_alive=True):
+            raise RuntimeError(
+                f"re-arm refused after a gap (state={self._order_plant.state.value})"
+            )
 
     async def _resync_pnl_subscription(self) -> None:
         # The stream failed: rows from before it are not proof of current exposure.
@@ -671,6 +688,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         on_event: Callable[[dict[str, Any]], None],
         on_resync: Callable[[], Any],
         stream: str | None = None,
+        on_gap: Callable[[], Any] | None = None,
     ) -> None:
         batch_fn = None
         if stream is not None:
@@ -685,6 +703,7 @@ class RithmicExecutionClient(LiveExecutionClient):
             batch_fn=batch_fn,
             on_event=on_event,
             on_resync=on_resync,
+            on_gap=on_gap,
             max_transient=self._ORDER_POLL_MAX_TRANSIENT,
             on_latch=self._latch_order_plant,
             on_resync_start=(

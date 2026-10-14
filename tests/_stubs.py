@@ -10,6 +10,7 @@ silently.
 
 from __future__ import annotations
 
+import inspect
 import time
 from collections.abc import Callable
 from types import SimpleNamespace
@@ -93,7 +94,12 @@ class WireSessionStub:
             "pnl": self.poll_pnl_event,
             "order": self.poll_order_event,
         }[stream]
-        event = poll(0)
+        # Fixtures override these with or without a timeout parameter.
+        takes_timeout = any(
+            p.kind in (p.VAR_POSITIONAL, p.POSITIONAL_OR_KEYWORD, p.POSITIONAL_ONLY)
+            for p in inspect.signature(poll).parameters.values()
+        )
+        event = poll(0) if takes_timeout else poll()
         if event is None:
             # The real extension blocks in Rust until an event or the timeout.
             time.sleep(min(timeout_ms, 10) / 1000)

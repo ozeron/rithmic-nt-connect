@@ -150,7 +150,7 @@ The gateway server SHALL read requests on a dedicated per-connection reader, pro
 - **THEN** the request SHALL be decoded intact with no stream desync
 
 ### Requirement: A plant reconnect keeps clients attached
-When the parent rebuilds its plants it SHALL restore every remembered subscription intent itself and SHALL keep attached clients connected, sending each a `TransportResumed` event instead of closing the connection. A client SHALL NOT re-subscribe or reset the shared ticker plant in response. A market-data intent that cannot be restored after a bounded number of passes SHALL be left degraded without holding the gateway not ready, and a client's next subscribe for that key SHALL retry it. An account-level intent (PnL, orders, brackets) that cannot be restored SHALL cause a full reconnect and keep the gateway not ready.
+When the parent rebuilds its plants it SHALL restore every remembered subscription intent itself and SHALL keep attached clients connected, sending each a `TransportResumed` event instead of closing the connection. A client SHALL NOT reset the shared ticker plant or re-issue market-data subscriptions in response; it MAY re-read its account state (working-order drain, a fresh PnL subscription) before trading resumes. A market-data intent that cannot be restored after a bounded number of passes SHALL be left degraded without holding the gateway not ready, and a client's next subscribe for that key SHALL retry it. An account-level intent (PnL, orders, brackets) that cannot be restored SHALL cause a full reconnect and keep the gateway not ready.
 
 #### Scenario: Reconnect during a flood
 - **WHEN** the plants drop during a 10,000 events/s flood

@@ -173,8 +173,10 @@ async fn reconnect_loop(
         if account {
             eprintln!(
                 "rithmic-gateway: account restore still incomplete after {RESTORE_ATTEMPTS} \
-                 attempts; full reconnect"
+                 attempts; full reconnect in {}s",
+                CONNECT_RETRY.as_secs()
             );
+            tokio::time::sleep(CONNECT_RETRY).await;
             continue;
         }
         for intent in failed_md {
@@ -184,9 +186,14 @@ async fn reconnect_loop(
             );
             reconnect.mark_degraded(intent).await;
         }
+        // A rebuild was requested while this one ran (a failed reseat, say): this
+        // one just rebuilt everything, so it must not trigger a second.
+        state.force_reconnect.store(false, Ordering::SeqCst);
+        // Ready first: a client that resynchronizes on the epoch bump must not meet
+        // `not_ready`.
+        state.ready.store(true, Ordering::SeqCst);
         let next = state.transport_generation.fetch_add(1, Ordering::SeqCst) + 1;
         let _ = state.transport_epoch.send(next);
-        state.ready.store(true, Ordering::SeqCst);
         return;
     }
 }
@@ -228,7 +235,11 @@ pub async fn restore_pass(
         let topic = TopicIntent::from_md(&intent);
         pass.attempted += 1;
         match topic.venue_join(guard).await {
-            Ok(()) => pass.restored += 1,
+            Ok(()) => {
+                pass.restored += 1;
+                // Restored by a later rebuild: no longer degraded.
+                reconnect.clear_degraded(&intent).await;
+            }
             Err(e) => {
                 eprintln!("{}", topic.resubscribe_fail_log(e));
                 pass.failed_md.push(intent);

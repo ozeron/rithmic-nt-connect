@@ -62,14 +62,14 @@ from rithmic_nt_connect.providers import RithmicInstrumentProvider
 from rithmic_nt_connect.recovery_bridge import TransportRecoveryBridge
 from rithmic_nt_connect.session import WireSession
 
-# RequestBars failure reason per request id (``hydrate_blocked_live_md`` = RC2.3
-# capability_denied after the bounded wait, ``history_error`` otherwise). Keyed so
-# concurrent lookbacks (several strategies hydrating at once) never read each
-# other's failure; NT's request callback only carries the request id.
 # Plant events taken per wake, and how long one wait blocks inside the extension.
 _POLL_BATCH = 256
 _POLL_WAIT_MS = 50
 
+# RequestBars failure reason per request id (``hydrate_blocked_live_md`` = RC2.3
+# capability_denied after the bounded wait, ``history_error`` otherwise). Keyed so
+# concurrent lookbacks (several strategies hydrating at once) never read each
+# other's failure; NT's request callback only carries the request id.
 _REQUEST_BARS_ERRORS: OrderedDict[str, str] = OrderedDict()
 _MAX_REQUEST_BARS_ERRORS = 256
 
@@ -686,6 +686,7 @@ class RithmicDataClient(LiveMarketDataClient):
         self._history_poll_task: asyncio.Task | None = None
         self._resync_lock = asyncio.Lock()
         self._resync_generation = 0
+        self._reset_generation = 0
         self._recovery = self._build_recovery()
         # One-sided BestBidOffer merge state, keyed by symbol[:exchange].
         self._bbo_state: dict[str, dict[str, Any]] = {}
@@ -803,8 +804,14 @@ class RithmicDataClient(LiveMarketDataClient):
 
     async def _resync_ticker_subscription(self, *, reset: bool = True) -> None:
         start_gen = self._resync_generation
+        start_resets = getattr(self, "_reset_generation", 0)
         async with self._resync_lock:
-            if self._resync_generation != start_gen:
+            # Another resync finished while this waited: skip, unless this one needs a
+            # plant reset and that one did not (a gap resync must not stand in for a
+            # channel-error reset).
+            if self._resync_generation != start_gen and (
+                not reset or getattr(self, "_reset_generation", 0) != start_resets
+            ):
                 return
             # Drop one-sided BBO accumulators: after a plant reset the venue
             # re-sends fresh bid/ask sides, and merging them with pre-reset
@@ -824,6 +831,8 @@ class RithmicDataClient(LiveMarketDataClient):
                 reset=reset,
             )
             self._resync_generation += 1
+            if reset:
+                self._reset_generation = getattr(self, "_reset_generation", 0) + 1
 
     async def _poll_channel_loop(
         self,

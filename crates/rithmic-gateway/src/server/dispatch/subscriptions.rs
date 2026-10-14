@@ -268,7 +268,10 @@ pub(super) async fn subscribe_topic(
     let had_forwarder = attach_shared_topic(state, client, &key).await;
     let is_first = intent.note(&state.reconnect).await;
     intent.client_insert(client);
-    if is_first {
+    // A later client joining an intent a rebuild left degraded retries the venue
+    // join too: the other holders' join is dark, so this one would get nothing.
+    let degraded = !is_first && state.reconnect.is_degraded(&intent.md_intent()).await;
+    if is_first || degraded {
         let Some(session) = &state.session else {
             intent.client_remove(client);
             intent.forget(&state.reconnect).await;
@@ -284,6 +287,9 @@ pub(super) async fn subscribe_topic(
             intent.forget(&state.reconnect).await;
             rollback_shared_topic(state, client, &key, had_forwarder).await;
             return err_to_frame(request_id, intent.subscribe_failed_code(), e);
+        }
+        if degraded {
+            state.reconnect.clear_degraded(&intent.md_intent()).await;
         }
     }
     ack_frame(request_id)
@@ -395,6 +401,10 @@ pub(super) async fn disconnect_pnl(
     request_id: u64,
 ) -> Frame {
     let key = pnl_key();
+    // Same lock as `subscribe_pnl`: a first-peer join must not have its venue
+    // subscribe undone by a leaving peer that saw the count reach zero before it.
+    let lock = topic_lock(state, &key).await;
+    let _guard = lock.lock().await;
     if client.pnl {
         client.pnl = false;
         let last = state.reconnect.forget_pnl().await;
