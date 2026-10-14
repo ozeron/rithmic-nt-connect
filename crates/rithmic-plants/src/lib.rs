@@ -30,8 +30,8 @@ pub use config::{
 };
 pub use direct::DirectSession;
 pub use dto::{
-    AccountPnlDto, BboDto, FillHistoryDto, FrontMonthDto, GapDto, HistoryBarDto, HistoryTickDto,
-    InstrumentPnlDto, LastTradeDto, OrderBookDto, OrderNotificationDto, PlantEvent,
+    AccountPnlDto, BboDto, BracketUpdateDto, FillHistoryDto, FrontMonthDto, GapDto, HistoryBarDto,
+    HistoryTickDto, InstrumentPnlDto, LastTradeDto, OrderBookDto, OrderNotificationDto, PlantEvent,
     ReferenceDataDto, TimeBarProbeRow,
 };
 pub use error::{Error, Result};

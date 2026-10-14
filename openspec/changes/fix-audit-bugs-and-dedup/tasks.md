@@ -21,9 +21,9 @@
 
 ## 3. Typed bracket updates (parity checklist)
 
-- [ ] 3.1 `PlantEvent::BracketUpdate(BracketUpdateDto)` decoded in `dto.rs`, emitted by `FakeSession`
-- [ ] 3.2 Additive `session.proto` event body, server encode, client decode, regenerate `session_pb2.py`
-- [ ] 3.3 PyO3 dict conversion, `_lib.pyi`, Python data/exec dispatch logs it; same-scenario test through direct and gateway (`client_scenarios.rs`, `test_gateway_scenarios.py`)
+- [x] 3.1 `PlantEvent::BracketUpdate(BracketUpdateDto)` decoded in `dto.rs`, emitted by `FakeSession`
+- [x] 3.2 Additive `session.proto` event body, server encode, client decode, regenerate `session_pb2.py`
+- [x] 3.3 PyO3 dict conversion, `_lib.pyi`, Python data/exec dispatch logs it; same-scenario test through direct and gateway (`client_scenarios.rs`, `test_gateway_scenarios.py`)
 
 ## 4. Gateway fixes (each test-first)
 

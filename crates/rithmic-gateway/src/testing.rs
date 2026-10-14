@@ -89,6 +89,21 @@ pub fn account_pnl(account_id: &str, day_pnl: &str) -> PlantEvent {
     })
 }
 
+pub fn bracket_update(basket_id: &str, stop_ticks: i32, target_ticks: i32) -> PlantEvent {
+    PlantEvent::BracketUpdate(rithmic_plants::BracketUpdateDto {
+        account_id: Some("ACCT".into()),
+        fcm_id: Some("FCM".into()),
+        ib_id: Some("IB".into()),
+        basket_id: Some(basket_id.into()),
+        stop_ticks: Some(stop_ticks),
+        stop_quantity: Some(1),
+        stop_quantity_released: Some(0),
+        target_ticks: Some(target_ticks),
+        target_quantity: Some(1),
+        target_quantity_released: Some(0),
+    })
+}
+
 pub fn order_notification(kind: &str, basket_id: &str, user_tag: &str, symbol: &str) -> PlantEvent {
     PlantEvent::OrderNotification(OrderNotificationDto {
         source: "rithmic".into(),
@@ -224,6 +239,11 @@ fn run_command(fake: &FakeSession, line: &str) -> String {
             fake,
             Stream::Order,
             Some(order_notification(kind, basket, tag, sym)),
+        ),
+        ["push", "bracket", basket, stop, target] => push(
+            fake,
+            Stream::Order,
+            parse2(stop, target).map(|(s, t)| bracket_update(basket, s as i32, t as i32)),
         ),
         ["delay", method, ms] => match ms.parse::<u64>() {
             Ok(ms) => {

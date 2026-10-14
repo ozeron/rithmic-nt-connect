@@ -267,6 +267,22 @@ def test_every_intent_is_reissued_after_a_plant_drop(fake_bin, make_client) -> N
         assert orders and orders[0].get("basket_id") == "basket-9"
 
 
+def test_a_bracket_update_rides_the_order_stream(fake_bin, make_client) -> None:
+    """Typed bracket state reaches every client on its order channel."""
+    with running_fake(fake_bin, trading=True) as parent:
+        client = make_client(parent)
+        client.subscribe_order_updates()
+        client.subscribe_bracket_updates()
+        parent.push("bracket", "basket-9", "8", "16")
+        events = drain(client.poll_order_event, 1)
+        assert events, "no bracket update arrived"
+        update = events[0]
+        assert update["type"] == "bracket_update"
+        assert update.get("basket_id") == "basket-9"
+        assert int(update["stop_ticks"]) == 8
+        assert int(update["target_ticks"]) == 16
+
+
 def test_plant_drop_keeps_clients_attached_and_signals_resumed(
     fake_bin, make_client
 ) -> None:

@@ -27,7 +27,7 @@ from rithmic_gateway.v1 import session_pb2 as pb
 # Per-chunk history RPC timeout — one plant slice can exceed the dial default.
 DEFAULT_HISTORY_RPC_TIMEOUT_SEC = 300.0
 
-_ORDER_EVENT_TYPES = frozenset({"order_notification"})
+_ORDER_EVENT_TYPES = frozenset({"order_notification", "bracket_update"})
 _PNL_EVENT_TYPES = frozenset({"account_pnl", "instrument_pnl"})
 _HISTORY_EVENT_TYPES = frozenset({"time_bar"})
 _NON_MD_EVENT_TYPES = _ORDER_EVENT_TYPES | _PNL_EVENT_TYPES | _HISTORY_EVENT_TYPES

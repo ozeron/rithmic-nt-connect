@@ -13,9 +13,9 @@ mod exec;
 use rithmic_gateway::client::{GatewayConfig, GatewaySession, TransportEvent};
 use rithmic_plants::config::{SessionConfig, DEFAULT_LUCID_URL};
 use rithmic_plants::dto::{
-    AccountPnlDto, AccountRmsInfoDto, BboDto, FillHistoryDto, FrontMonthDto, HistoryBarDto,
-    HistoryTickDto, InstrumentPnlDto, LastTradeDto, OrderBookDto, OrderNotificationDto, PlantEvent,
-    ProductRmsInfoDto, ReferenceDataDto, TimeBarProbeRow,
+    AccountPnlDto, AccountRmsInfoDto, BboDto, BracketUpdateDto, FillHistoryDto, FrontMonthDto,
+    HistoryBarDto, HistoryTickDto, InstrumentPnlDto, LastTradeDto, OrderBookDto,
+    OrderNotificationDto, PlantEvent, ProductRmsInfoDto, ReferenceDataDto, TimeBarProbeRow,
 };
 use rithmic_plants::error::Error;
 use rithmic_plants::plants::PlantSet;
@@ -370,6 +370,22 @@ fn reference_data_dict(py: Python<'_>, r: ReferenceDataDto) -> PyResult<Py<PyDic
     Ok(d.unbind())
 }
 
+fn bracket_update_dict(py: Python<'_>, b: BracketUpdateDto) -> PyResult<Py<PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("type", "bracket_update")?;
+    set_opt_str(&d, "account_id", b.account_id)?;
+    set_opt_str(&d, "fcm_id", b.fcm_id)?;
+    set_opt_str(&d, "ib_id", b.ib_id)?;
+    set_opt_str(&d, "basket_id", b.basket_id)?;
+    set_opt_i32(&d, "stop_ticks", b.stop_ticks)?;
+    set_opt_i32(&d, "stop_quantity", b.stop_quantity)?;
+    set_opt_i32(&d, "stop_quantity_released", b.stop_quantity_released)?;
+    set_opt_i32(&d, "target_ticks", b.target_ticks)?;
+    set_opt_i32(&d, "target_quantity", b.target_quantity)?;
+    set_opt_i32(&d, "target_quantity_released", b.target_quantity_released)?;
+    Ok(d.unbind())
+}
+
 fn event_to_dict(py: Python<'_>, event: PlantEvent) -> PyResult<Py<PyDict>> {
     match event {
         PlantEvent::LastTrade(t) => last_trade_dict(py, t),
@@ -378,6 +394,7 @@ fn event_to_dict(py: Python<'_>, event: PlantEvent) -> PyResult<Py<PyDict>> {
         PlantEvent::AccountPnl(a) => account_pnl_dict(py, a),
         PlantEvent::InstrumentPnl(i) => instrument_pnl_dict(py, i),
         PlantEvent::OrderNotification(n) => order_notification_dict(py, n),
+        PlantEvent::BracketUpdate(b) => bracket_update_dict(py, b),
         PlantEvent::TimeBar(b) => time_bar_event_dict(py, b),
         PlantEvent::Gap(g) => {
             // Polls report a gap as `ChannelLaggedError`; this form is for

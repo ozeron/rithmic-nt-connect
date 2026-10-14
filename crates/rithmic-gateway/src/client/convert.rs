@@ -324,7 +324,7 @@ impl Channel {
             PlantEvent::TimeBar(_) => Self::History,
             PlantEvent::Gap(g) => Self::of_stream(g.stream),
             PlantEvent::AccountPnl(_) | PlantEvent::InstrumentPnl(_) => Self::Pnl,
-            PlantEvent::OrderNotification(_) => Self::Order,
+            PlantEvent::OrderNotification(_) | PlantEvent::BracketUpdate(_) => Self::Order,
             PlantEvent::LastTrade(_)
             | PlantEvent::Bbo(_)
             | PlantEvent::OrderBook(_)
@@ -334,6 +334,21 @@ impl Channel {
 }
 
 /// Decode a pushed wire event. `None` for an event with no body.
+pub fn bracket_update_from_pb(b: pb::BracketUpdate) -> rithmic_plants::BracketUpdateDto {
+    rithmic_plants::BracketUpdateDto {
+        account_id: b.account_id,
+        fcm_id: b.fcm_id,
+        ib_id: b.ib_id,
+        basket_id: b.basket_id,
+        stop_ticks: b.stop_ticks,
+        stop_quantity: b.stop_quantity,
+        stop_quantity_released: b.stop_quantity_released,
+        target_ticks: b.target_ticks,
+        target_quantity: b.target_quantity,
+        target_quantity_released: b.target_quantity_released,
+    }
+}
+
 pub fn plant_event_from_pb(event: pb::Event) -> Option<PlantEvent> {
     use pb::event::Body;
     Some(match event.body? {
@@ -343,6 +358,7 @@ pub fn plant_event_from_pb(event: pb::Event) -> Option<PlantEvent> {
         Body::AccountPnl(a) => PlantEvent::AccountPnl(account_pnl_from_pb(a)),
         Body::InstrumentPnl(i) => PlantEvent::InstrumentPnl(instrument_pnl_from_pb(i)),
         Body::OrderNotification(n) => PlantEvent::OrderNotification(order_notification_from_pb(n)),
+        Body::BracketUpdate(b) => PlantEvent::BracketUpdate(bracket_update_from_pb(b)),
         Body::TimeBar(b) => PlantEvent::TimeBar(history_bar_from_pb(b)),
         // Connection-level, not a plant event: the runtime handles it before this.
         Body::TransportResumed(_) => return None,

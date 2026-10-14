@@ -329,6 +329,21 @@ fn text(field: &Option<String>) -> &str {
     field.as_deref().unwrap_or("")
 }
 
+pub fn bracket_update_to_pb(b: rithmic_plants::BracketUpdateDto) -> pb::BracketUpdate {
+    pb::BracketUpdate {
+        account_id: b.account_id,
+        fcm_id: b.fcm_id,
+        ib_id: b.ib_id,
+        basket_id: b.basket_id,
+        stop_ticks: b.stop_ticks,
+        stop_quantity: b.stop_quantity,
+        stop_quantity_released: b.stop_quantity_released,
+        target_ticks: b.target_ticks,
+        target_quantity: b.target_quantity,
+        target_quantity_released: b.target_quantity_released,
+    }
+}
+
 /// The route of `event`, without consuming or copying it.
 pub fn route_of(event: &PlantEvent) -> Route<'_> {
     match event {
@@ -353,7 +368,8 @@ pub fn route_of(event: &PlantEvent) -> Route<'_> {
             kind: Kind::Bars,
         },
         PlantEvent::AccountPnl(_) | PlantEvent::InstrumentPnl(_) => Route::Pnl,
-        PlantEvent::OrderNotification(_) => Route::Order,
+        // Bracket updates ride the order-plant stream, so they share its topic.
+        PlantEvent::OrderNotification(_) | PlantEvent::BracketUpdate(_) => Route::Order,
         PlantEvent::Gap(g) => Route::Gap(g.stream),
         PlantEvent::Other { .. } => Route::Other,
     }
@@ -371,6 +387,7 @@ pub fn plant_event_to_pb(event: PlantEvent) -> pb::Event {
         PlantEvent::AccountPnl(a) => Body::AccountPnl(account_pnl_to_pb(a)),
         PlantEvent::InstrumentPnl(i) => Body::InstrumentPnl(instrument_pnl_to_pb(i)),
         PlantEvent::OrderNotification(n) => Body::OrderNotification(order_notification_to_pb(n)),
+        PlantEvent::BracketUpdate(b) => Body::BracketUpdate(bracket_update_to_pb(b)),
         PlantEvent::Gap(g) => Body::Gap(pb::Gap {
             stream: g.stream.plant().into(),
             skipped: g.skipped,

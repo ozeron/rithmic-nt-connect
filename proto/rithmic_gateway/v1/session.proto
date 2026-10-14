@@ -556,6 +556,22 @@ message TransportResumed {
   uint64 generation = 1;
 }
 
+// A plant bracket's stop / target state for one basket (order plant, rides the
+// order stream to clients holding a brackets intent). Additive: older clients
+// that do not know this body ignore it.
+message BracketUpdate {
+  optional string account_id = 1;
+  optional string fcm_id = 2;
+  optional string ib_id = 3;
+  optional string basket_id = 4;
+  optional int32 stop_ticks = 5;
+  optional int32 stop_quantity = 6;
+  optional int32 stop_quantity_released = 7;
+  optional int32 target_ticks = 8;
+  optional int32 target_quantity = 9;
+  optional int32 target_quantity_released = 10;
+}
+
 // Discriminated event envelope pushed from gateway to client.
 message Event {
   oneof body {
@@ -569,6 +585,7 @@ message Event {
     OtherEvent other = 8;
     Gap gap = 9;
     TransportResumed transport_resumed = 10;
+    BracketUpdate bracket_update = 11;
   }
 }
 

@@ -497,6 +497,7 @@ async fn events_arrive_equal_to_what_the_plant_emitted() {
     s.subscribe_time_bars(NQ, CME, 2, 1).await.unwrap();
     s.subscribe_pnl().await.unwrap();
     s.subscribe_order_updates().await.unwrap();
+    s.subscribe_bracket_updates().await.unwrap();
 
     parent.command("push last_trade NQH6 CME 100.25 1").await;
     parent.command("push bbo NQH6 CME 100.0 5 100.25 7").await;
@@ -523,6 +524,12 @@ async fn events_arrive_equal_to_what_the_plant_emitted() {
     assert_eq!(
         drain(&s, 1, order).await[0],
         scripted::order_notification("accepted", "basket-9", "tag-9", NQ)
+    );
+    // A bracket update rides the order stream with the same record shape.
+    parent.command("push bracket basket-9 8 16").await;
+    assert_eq!(
+        drain(&s, 1, order).await[0],
+        scripted::bracket_update("basket-9", 8, 16)
     );
 }
 

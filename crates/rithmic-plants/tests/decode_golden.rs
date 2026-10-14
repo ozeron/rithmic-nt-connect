@@ -203,3 +203,28 @@ async fn live_time_bar_on_the_history_plant() {
         other => panic!("{other:?}"),
     }
 }
+
+#[tokio::test]
+async fn bracket_update_is_typed() {
+    let (venue, s) = session().await;
+    s.subscribe_bracket_updates().await.unwrap();
+    let mut m = rti::BracketUpdates::default();
+    m.template_id = 353;
+    m.account_id = Some("ACCOUNT".into());
+    m.basket_id = Some("B9".into());
+    m.stop_ticks = Some(8);
+    m.stop_quantity = Some(1);
+    m.target_ticks = Some(16);
+    m.target_quantity = Some(1);
+    m.target_quantity_released = Some(0);
+    venue.push(Plant::Order, &m);
+    match one(&s, Stream::Order).await {
+        PlantEvent::BracketUpdate(b) => {
+            assert_eq!(b.basket_id.as_deref(), Some("B9"));
+            assert_eq!((b.stop_ticks, b.target_ticks), (Some(8), Some(16)));
+            assert_eq!((b.stop_quantity, b.target_quantity), (Some(1), Some(1)));
+            assert_eq!(b.target_quantity_released, Some(0));
+        }
+        other => panic!("{other:?}"),
+    }
+}

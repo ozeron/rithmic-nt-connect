@@ -728,6 +728,15 @@ class RithmicExecutionClient(LiveExecutionClient):
             self._cache_position(event)
 
     def _dispatch_order_event(self, event: dict[str, Any]) -> None:
+        if event.get("type") == "bracket_update":
+            # Plant bracket stop/target state; leg fills arrive as ordinary order
+            # notifications, so no Nautilus event is derived from it.
+            self._log.debug(
+                f"bracket update basket={event.get('basket_id')} "
+                f"stop_ticks={event.get('stop_ticks')} "
+                f"target_ticks={event.get('target_ticks')}"
+            )
+            return
         if event.get("type") != "order_notification":
             return
         try:

@@ -32,6 +32,8 @@ pub enum PlantEvent {
     InstrumentPnl(InstrumentPnlDto),
     /// Order plant notification (Rithmic or exchange).
     OrderNotification(OrderNotificationDto),
+    /// A plant bracket's stop / target levels changed (order plant, template 353).
+    BracketUpdate(BracketUpdateDto),
     /// Live or replay time bar (history plant).
     TimeBar(HistoryBarDto),
     /// A stream dropped events (a lagging consumer); carries the count so the
@@ -44,6 +46,22 @@ pub enum PlantEvent {
         /// Plant source name.
         source: String,
     },
+}
+
+/// Plant bracket state for one basket: stop and target distance in ticks and
+/// the quantities resting / released on each leg.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BracketUpdateDto {
+    pub account_id: Option<String>,
+    pub fcm_id: Option<String>,
+    pub ib_id: Option<String>,
+    pub basket_id: Option<String>,
+    pub stop_ticks: Option<i32>,
+    pub stop_quantity: Option<i32>,
+    pub stop_quantity_released: Option<i32>,
+    pub target_ticks: Option<i32>,
+    pub target_quantity: Option<i32>,
+    pub target_quantity_released: Option<i32>,
 }
 
 /// Product-level RMS (Risk Management System) info — commission fill rate per
@@ -640,6 +658,18 @@ impl From<&RithmicResponse> for PlantEvent {
                     is_snapshot: n.is_snapshot,
                 })
             }
+            RithmicMessage::BracketUpdates(b) => Self::BracketUpdate(BracketUpdateDto {
+                account_id: b.account_id.clone(),
+                fcm_id: b.fcm_id.clone(),
+                ib_id: b.ib_id.clone(),
+                basket_id: b.basket_id.clone(),
+                stop_ticks: b.stop_ticks,
+                stop_quantity: b.stop_quantity,
+                stop_quantity_released: b.stop_quantity_released,
+                target_ticks: b.target_ticks,
+                target_quantity: b.target_quantity,
+                target_quantity_released: b.target_quantity_released,
+            }),
             RithmicMessage::TimeBar(_) => match HistoryBarDto::from_response(resp) {
                 Some(bar) => Self::TimeBar(bar),
                 None => Self::Other {
