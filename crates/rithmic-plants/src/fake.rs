@@ -74,16 +74,6 @@ struct State {
     calls: Vec<String>,
     failures: HashMap<String, VecDeque<FakeFailure>>,
     account: Option<AccountTriple>,
-    front_months: HashMap<(String, String), FrontMonthDto>,
-    ticks: Vec<HistoryTickDto>,
-    bars: Vec<HistoryBarDto>,
-    probe_rows: Vec<TimeBarProbeRow>,
-    orders: Vec<OrderNotificationDto>,
-    product_rms: Vec<ProductRmsInfoDto>,
-    account_rms: Vec<AccountRmsInfoDto>,
-    fills: Vec<FillHistoryDto>,
-    history_dates: Vec<String>,
-    order_history: Vec<OrderNotificationDto>,
 }
 
 /// Scripted in-memory plant session.
@@ -148,44 +138,6 @@ impl FakeSession {
 
     pub fn set_account(&self, account: AccountTriple) {
         self.lock().account = Some(account);
-    }
-
-    pub fn set_front_month(&self, symbol: &str, exchange: &str, dto: FrontMonthDto) {
-        self.lock()
-            .front_months
-            .insert((symbol.to_string(), exchange.to_string()), dto);
-    }
-
-    pub fn set_ticks(&self, ticks: Vec<HistoryTickDto>) {
-        self.lock().ticks = ticks;
-    }
-
-    pub fn set_bars(&self, bars: Vec<HistoryBarDto>) {
-        self.lock().bars = bars;
-    }
-
-    pub fn set_orders(&self, orders: Vec<OrderNotificationDto>) {
-        self.lock().orders = orders;
-    }
-
-    pub fn set_product_rms(&self, rows: Vec<ProductRmsInfoDto>) {
-        self.lock().product_rms = rows;
-    }
-
-    pub fn set_account_rms(&self, rows: Vec<AccountRmsInfoDto>) {
-        self.lock().account_rms = rows;
-    }
-
-    pub fn set_fill_history(&self, rows: Vec<FillHistoryDto>) {
-        self.lock().fills = rows;
-    }
-
-    pub fn set_order_history_dates(&self, dates: Vec<String>) {
-        self.lock().history_dates = dates;
-    }
-
-    pub fn set_order_history(&self, events: Vec<OrderNotificationDto>) {
-        self.lock().order_history = events;
     }
 
     // --- observation -----------------------------------------------------
@@ -362,19 +314,15 @@ impl Session for FakeSession {
     }
 
     async fn get_front_month(&self, symbol: &str, exchange: &str) -> Result<FrontMonthDto> {
-        let state = self.enter("get_front_month", &format!("{symbol} {exchange}"))?;
-        Ok(state
-            .front_months
-            .get(&(symbol.to_string(), exchange.to_string()))
-            .cloned()
-            .unwrap_or_else(|| FrontMonthDto {
-                symbol: Some(symbol.to_string()),
-                exchange: Some(exchange.to_string()),
-                trading_symbol: Some(format!("{symbol}H6")),
-                trading_exchange: Some(exchange.to_string()),
-                symbol_name: None,
-                is_front_month_symbol: Some(true),
-            }))
+        self.note("get_front_month", &format!("{symbol} {exchange}"))?;
+        Ok(FrontMonthDto {
+            symbol: Some(symbol.to_string()),
+            exchange: Some(exchange.to_string()),
+            trading_symbol: Some(format!("{symbol}H6")),
+            trading_exchange: Some(exchange.to_string()),
+            symbol_name: None,
+            is_front_month_symbol: Some(true),
+        })
     }
 
     async fn get_reference_data(&self, symbol: &str, exchange: &str) -> Result<ReferenceDataDto> {
@@ -404,11 +352,11 @@ impl Session for FakeSession {
         start_time_sec: i32,
         end_time_sec: i32,
     ) -> Result<Vec<HistoryTickDto>> {
-        let state = self.enter(
+        self.note(
             "load_ticks",
             &format!("{symbol} {exchange} {start_time_sec} {end_time_sec}"),
         )?;
-        Ok(state.ticks.clone())
+        Ok(Vec::new())
     }
 
     async fn load_time_bars(
@@ -420,11 +368,11 @@ impl Session for FakeSession {
         bar_type: i32,
         period: i32,
     ) -> Result<Vec<HistoryBarDto>> {
-        let state = self.enter(
+        self.note(
             "load_time_bars",
             &format!("{symbol} {exchange} {start_time_sec} {end_time_sec} {bar_type} {period}"),
         )?;
-        Ok(state.bars.clone())
+        Ok(Vec::new())
     }
 
     async fn probe_time_bars(
@@ -436,11 +384,11 @@ impl Session for FakeSession {
         bar_type: i32,
         period: i32,
     ) -> Result<Vec<TimeBarProbeRow>> {
-        let state = self.enter(
+        self.note(
             "probe_time_bars",
             &format!("{symbol} {exchange} {start_time_sec} {end_time_sec} {bar_type} {period}"),
         )?;
-        Ok(state.probe_rows.clone())
+        Ok(Vec::new())
     }
 
     async fn load_orders(
@@ -448,39 +396,34 @@ impl Session for FakeSession {
         _start_sec: i32,
         _end_sec: i32,
     ) -> Result<Vec<OrderNotificationDto>> {
-        let mut state = self.enter("load_orders", "")?;
-        state.order_plant = true;
-        Ok(state.orders.clone())
+        self.enter("load_orders", "")?.order_plant = true;
+        Ok(Vec::new())
     }
 
     async fn load_product_rms_info(&self) -> Result<Vec<ProductRmsInfoDto>> {
-        let mut state = self.enter("load_product_rms_info", "")?;
-        state.order_plant = true;
-        Ok(state.product_rms.clone())
+        self.enter("load_product_rms_info", "")?.order_plant = true;
+        Ok(Vec::new())
     }
 
     async fn load_account_rms_info(&self) -> Result<Vec<AccountRmsInfoDto>> {
-        let mut state = self.enter("load_account_rms_info", "")?;
-        state.order_plant = true;
-        Ok(state.account_rms.clone())
+        self.enter("load_account_rms_info", "")?.order_plant = true;
+        Ok(Vec::new())
     }
 
     async fn load_fill_history(&self, start: i32, finish: i32) -> Result<Vec<FillHistoryDto>> {
-        let mut state = self.enter("load_fill_history", &format!("{start} {finish}"))?;
-        state.order_plant = true;
-        Ok(state.fills.clone())
+        self.enter("load_fill_history", &format!("{start} {finish}"))?
+            .order_plant = true;
+        Ok(Vec::new())
     }
 
     async fn load_order_history(&self, date: &str) -> Result<Vec<OrderNotificationDto>> {
-        let mut state = self.enter("load_order_history", date)?;
-        state.order_plant = true;
-        Ok(state.order_history.clone())
+        self.enter("load_order_history", date)?.order_plant = true;
+        Ok(Vec::new())
     }
 
     async fn load_order_history_dates(&self) -> Result<Vec<String>> {
-        let mut state = self.enter("load_order_history_dates", "")?;
-        state.order_plant = true;
-        Ok(state.history_dates.clone())
+        self.enter("load_order_history_dates", "")?.order_plant = true;
+        Ok(Vec::new())
     }
 
     async fn place_order(&self, o: &PlaceOrder) -> Result<()> {

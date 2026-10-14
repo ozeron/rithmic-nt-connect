@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use prost::Message;
 use rithmic_plants::dto::PlantEvent;
 use rithmic_plants::{Error, Result};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
 use tokio::sync::{broadcast, oneshot, Mutex as TokioMutex, Notify};
@@ -59,7 +59,6 @@ pub struct ReadyInfo {
     pub trading_enabled: bool,
     pub cancel_all_enabled: bool,
     pub gateway_instance_id: u64,
-    pub parent_transport_generation: u64,
 }
 
 /// Why an RPC failed, split by whether the request may have reached the parent.
@@ -266,7 +265,7 @@ impl Connection {
     }
 }
 
-async fn read_frame(read: &mut OwnedReadHalf) -> std::io::Result<Frame> {
+async fn read_frame<R: AsyncRead + Unpin>(read: &mut R) -> std::io::Result<Frame> {
     let mut len = [0u8; 4];
     read.read_exact(&mut len).await?;
     let n = u32::from_be_bytes(len);
@@ -353,21 +352,7 @@ async fn handshake(
         .map_err(|e| HandshakeError::Retry(transport(format!("handshake write failed: {e}"))))?;
 
     let (mut read, _write) = stream.split();
-    let mut len = [0u8; 4];
-    let reply = async {
-        read.read_exact(&mut len).await?;
-        let n = u32::from_be_bytes(len);
-        if n > MAX_FRAME_LEN {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "oversized frame",
-            ));
-        }
-        let mut buf = vec![0u8; n as usize];
-        read.read_exact(&mut buf).await?;
-        Frame::decode(buf.as_slice())
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
-    };
+    let reply = read_frame(&mut read);
     let frame = match tokio::time::timeout(cfg.rpc_timeout, reply).await {
         Err(_) => return Err(HandshakeError::Retry(transport("handshake timed out"))),
         Ok(Err(e)) => {
@@ -383,7 +368,6 @@ async fn handshake(
             trading_enabled: ready.trading_enabled,
             cancel_all_enabled: ready.cancel_all_enabled,
             gateway_instance_id: ready.gateway_instance_id,
-            parent_transport_generation: ready.transport_generation,
         }),
         Some(Body::Error(e)) if e.code == "not_ready" => {
             Err(HandshakeError::Retry(Error::Gateway {

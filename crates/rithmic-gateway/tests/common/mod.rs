@@ -38,16 +38,7 @@ pub fn short_dir() -> tempfile::TempDir {
         .expect("tempdir")
 }
 
-pub async fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if cond() {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    cond()
-}
+pub use rithmic_gateway::testing::wait_until;
 
 // --- the real server over a fake plant ---------------------------------------
 

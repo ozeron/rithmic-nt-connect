@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from decimal import Decimal
+from functools import lru_cache
 from typing import Any
 
 from rithmic_nt_connect import _lib
@@ -38,6 +39,16 @@ def _ts_ns(d: Mapping[str, Any]) -> int | None:
     )
 
 
+@lru_cache(maxsize=4096)
+def _instrument_id(symbol: str, exchange: str | None) -> str:
+    # Cached: every tick and quote builds its id, and the instrument set is small.
+    # Errors are raised, so they are never cached.
+    try:
+        return _lib.instrument_id_from_symbol(symbol, exchange, VENUE)
+    except ValueError as exc:
+        raise ConvertError(str(exc)) from None
+
+
 def instrument_id_from_symbol(symbol: str, exchange: str | None = None) -> str:
     """Build a Nautilus-style instrument id string.
 
@@ -49,12 +60,7 @@ def instrument_id_from_symbol(symbol: str, exchange: str | None = None) -> str:
     The hyphen is the exchange encoding separator; ``symbol`` and ``exchange``
     must not contain ``-`` or ``.``.
     """
-    try:
-        return _lib.instrument_id_from_symbol(
-            str(symbol), None if exchange is None else str(exchange), VENUE
-        )
-    except ValueError as exc:
-        raise ConvertError(str(exc)) from None
+    return _instrument_id(str(symbol), None if exchange is None else str(exchange))
 
 
 def symbol_and_exchange_from_instrument_id(
