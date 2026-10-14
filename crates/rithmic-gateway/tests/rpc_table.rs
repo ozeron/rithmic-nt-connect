@@ -46,15 +46,12 @@ fn proto_request_fields() -> BTreeSet<String> {
     out
 }
 
-/// Method names declared in `pub trait Session` (not `HistoryReplay`).
+/// Method names declared in `pub trait Session`.
 fn trait_methods() -> BTreeSet<String> {
     let session = BACKEND
         .split("pub trait Session")
         .nth(1)
-        .expect("Session trait")
-        .split("pub trait HistoryReplay")
-        .next()
-        .expect("end of Session");
+        .expect("Session trait");
     session
         .lines()
         .filter_map(|l| l.trim().strip_prefix("async fn "))

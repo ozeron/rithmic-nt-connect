@@ -12,9 +12,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use tokio::sync::{Mutex, MutexGuard};
 
-use crate::backend::{
-    AccountTriple, HistoryReplay, ModifyOrder, PlaceBracketOrder, PlaceOrder, Session,
-};
+use crate::backend::{AccountTriple, ModifyOrder, PlaceBracketOrder, PlaceOrder, Session};
 use crate::config::SessionConfig;
 use crate::dto::{
     AccountRmsInfoDto, FillHistoryDto, FrontMonthDto, HistoryBarDto, HistoryTickDto,
@@ -25,7 +23,8 @@ use crate::history::parse_time_bar_type;
 use crate::plants::PlantSet;
 use crate::session::{
     adjust_bracket_stop_on, adjust_bracket_target_on, cancel_all_orders_on, cancel_order_on,
-    load_account_rms_info_on, load_orders_on, load_product_rms_info_on, modify_order_on,
+    load_account_rms_info_on, load_fill_history_on, load_order_history_dates_on,
+    load_order_history_on, load_orders_on, load_product_rms_info_on, modify_order_on,
     place_bracket_order_on, place_order_on, RithmicSession,
 };
 
@@ -331,6 +330,21 @@ impl Session for DirectSession {
         load_account_rms_info_on(&handle).await
     }
 
+    async fn load_fill_history(&self, start: i32, finish: i32) -> Result<Vec<FillHistoryDto>> {
+        let handle = self.order_handle().await?;
+        load_fill_history_on(&handle, start, finish).await
+    }
+
+    async fn load_order_history(&self, date: &str) -> Result<Vec<OrderNotificationDto>> {
+        let handle = self.order_handle().await?;
+        load_order_history_on(&handle, date).await
+    }
+
+    async fn load_order_history_dates(&self) -> Result<Vec<String>> {
+        let handle = self.order_handle().await?;
+        load_order_history_dates_on(&handle).await
+    }
+
     async fn place_order(&self, o: &PlaceOrder) -> Result<()> {
         let _op = self.begin_order_op().await?;
         let handle = self.order_handle().await?;
@@ -439,25 +453,6 @@ impl Session for DirectSession {
     async fn poll_order_event(&self, timeout: Duration) -> Result<Option<PlantEvent>> {
         self.poll_with(timeout, RithmicSession::poll_order_event)
             .await
-    }
-}
-
-#[async_trait]
-impl HistoryReplay for DirectSession {
-    async fn load_fill_history(&self, start: i32, finish: i32) -> Result<Vec<FillHistoryDto>> {
-        self.inner
-            .lock()
-            .await
-            .load_fill_history(start, finish)
-            .await
-    }
-
-    async fn load_order_history(&self, date: &str) -> Result<Vec<OrderNotificationDto>> {
-        self.inner.lock().await.load_order_history(date).await
-    }
-
-    async fn load_order_history_dates(&self) -> Result<Vec<String>> {
-        self.inner.lock().await.load_order_history_dates().await
     }
 }
 

@@ -20,8 +20,8 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use rithmic_plants::dto::{
-    AccountRmsInfoDto, FrontMonthDto, HistoryBarDto, HistoryTickDto, OrderNotificationDto,
-    PlantEvent, ProductRmsInfoDto, ReferenceDataDto, TimeBarProbeRow,
+    AccountRmsInfoDto, FillHistoryDto, FrontMonthDto, HistoryBarDto, HistoryTickDto,
+    OrderNotificationDto, PlantEvent, ProductRmsInfoDto, ReferenceDataDto, TimeBarProbeRow,
 };
 use rithmic_plants::history::{bar_slice_secs, parse_time_bar_type, window_slices};
 use rithmic_plants::{
@@ -693,6 +693,43 @@ impl Session for GatewaySession {
                 .map(convert::account_rms_info_from_pb)
                 .collect()),
             other => Err(unexpected("load_account_rms_info_response", other)),
+        }
+    }
+
+    async fn load_fill_history(&self, start: i32, finish: i32) -> Result<Vec<FillHistoryDto>> {
+        let body = Body::LoadFillHistory(pb::LoadFillHistoryRequest {
+            start_date: start,
+            finish_date: finish,
+        });
+        match self.call(body, Mode::Read, false).await?.body {
+            Some(Body::LoadFillHistoryResponse(r)) => Ok(r
+                .rows
+                .into_iter()
+                .map(convert::fill_history_from_pb)
+                .collect()),
+            other => Err(unexpected("load_fill_history_response", other)),
+        }
+    }
+
+    async fn load_order_history(&self, date: &str) -> Result<Vec<OrderNotificationDto>> {
+        let body = Body::LoadOrderHistory(pb::LoadOrderHistoryRequest {
+            date: date.to_string(),
+        });
+        match self.call(body, Mode::Read, false).await?.body {
+            Some(Body::LoadOrderHistoryResponse(r)) => Ok(r
+                .events
+                .into_iter()
+                .map(convert::order_notification_from_pb)
+                .collect()),
+            other => Err(unexpected("load_order_history_response", other)),
+        }
+    }
+
+    async fn load_order_history_dates(&self) -> Result<Vec<String>> {
+        let body = Body::LoadOrderHistoryDates(pb::LoadOrderHistoryDatesRequest {});
+        match self.call(body, Mode::Read, false).await?.body {
+            Some(Body::LoadOrderHistoryDatesResponse(r)) => Ok(r.dates),
+            other => Err(unexpected("load_order_history_dates_response", other)),
         }
     }
 

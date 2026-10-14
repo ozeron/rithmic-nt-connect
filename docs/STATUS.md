@@ -31,12 +31,12 @@ Legend: **Done** `[x]` · **Partial** `[~]` · **Not started** `[ ]` · `N/A` ou
 | --- | ---: | ---: | ---: | ---: | ---: |
 | **Capability matrix** | 22 | 4 | 12 | 0 | 6 |
 | **Phase marks (0–9)** | 29 | 15 | 8 | 2 | 4 |
-| **Convention marks** | 18 | 15 | 3 | 0 | 0 |
+| **Convention marks** | 18 | 14 | 4 | 0 | 0 |
 | **Close-outs (advertised path)** | 9 | 5 | 2 | 0 | 2 |
 | **Paper path (intraday)** | 8 | 8 | 0 | 0 | 0 |
-| **TOTAL** | 86 | 47 | 25 | 2 | 12 |
+| **TOTAL** | 86 | 46 | 26 | 2 | 12 |
 
-**Implemented:** 80% (`47` done + `25` partial of `74` in-scope marked items (`12` N/A excluded); partial counts as half).
+**Implemented:** 80% (`46` done + `26` partial of `74` in-scope marked items (`12` N/A excluded); partial counts as half).
 
 Not started (real leftover work): Phase 2 definition updates, Phase 7 recovery suite.
 
@@ -62,7 +62,7 @@ Not started (real leftover work): Phase 2 definition updates, Phase 7 recovery s
 | Submit / cancel / modify + fills | Gated order plant | [~] see notes |
 | Order status reports | Venue recon when trading; cache-backed when read-only | [~] (best-effort) — `load_orders` = `show_orders` + bounded silence. Not provably complete (no end-of-list; 10k replay cap). Advisory, not authoritative. Read-only → cache-backed. **TC-E88 drain-by-identity live-proven on Test 2026-08-24.** |
 | Fill reports | Venue recon when trading; read-only declines | [~] (best-effort) — `generate_fill_reports` filters the same drain for filled rows. Working-order replays carry no historical fills; fills are live-stream only. Read-only declines. |
-| Fill / order history (read-only) | Offline account recon | [~] **direct `Session` only; gateway deferred.** `load_fill_history` (`RequestShowFillHistory`, 10k cap), `load_order_history_dates`, `load_order_history(date)` (summary replay, best-effort drain like `load_orders`). Not a live capability: absent from `WireSession`, `GatewayClient` and the exec client, so no book/runner/factory can call it in gateway mode (`tests/test_history_direct_only.py` fails if one path gains it without the other). Recon scripts use a one-shot direct login — not while a gateway parent or live node holds the credential. |
+| Fill / order history (read-only) | Offline account recon | [~] **both paths wired (direct + gateway).** `load_fill_history` (`RequestShowFillHistory`; fills capped at 10,000 rows and a full page fails closed as `reconciliation_unavailable`, so the caller splits the date range), `load_order_history_dates`, `load_order_history(date)` (summary replay, best-effort drain like `load_orders`). One-shot reads, not subscriptions: trading-gated like `load_orders` (`trading_disabled` when trading is off), no fanout / intent / restore. Present on the Rust `Session` trait (so on `DirectSession` and the Rust `GatewaySession`, with RPC-table rows and a scenario test), on the pure-Python `GatewayClient` (lake) and on `WireSession`; `tests/test_wire_session_parity.py` and `tests/test_wire_trait_parity.py` enforce the parity. **Not yet consumed** by `generate_fill_reports` or mass status (fill-omission contract unchanged). Recon scripts use a one-shot direct login — not while a gateway parent or live node holds the credential. |
 | Reconnect + MD resubscribe | Planned | [~] see notes |
 | Session gateway (shared login) | `connect_mode` required (`direct` / `gateway`) | [~] see notes |
 | Python v2 / LiveNode | Not this support line | **N/A** |
@@ -147,6 +147,7 @@ Not started (real leftover work): Phase 2 definition updates, Phase 7 recovery s
 
 - [~] Unit + MD smoke + live↔history; order dry-run exercised LucidTrading 2026-08-14 (local under gitignored `artifacts/`)
 - [~] Recovery suite [ ] + skipped-spec register [x] (`docs/references/ops-runbook.md:54`)
+  - Gateway transport recovery is unit-tested (`tests/test_recovery_bridge.py`, data/exec client tests); no end-to-end recovery suite yet. Direct mode has no L3 transport recovery at all (no unix transport): it relies on the poll loops / `PlantPoller` resync only
 - [~] **Exit:** not claimed until advertised close-outs have evidence
 
 ### Phase 8: Perf / robustness
@@ -171,7 +172,7 @@ Cross-cutting items from [`references/nautilus-adapter-conventions.md`](referenc
 | Creds at construction | [x] | |
 | Env / endpoint not mixed | [x] | Live / Demo / Test on `SessionConfig` |
 | Distinct `InstrumentId`s | [x] | |
-| One convert boundary; reject closed-set unknowns | [x] | `_convert.py` / `_orders.py` |
+| One convert boundary; reject closed-set unknowns | [~] | Wire normalization is strict (`_convert.py` / `_orders.py` `enum_int`; bindable gate `order_rows.row_is_trustworthy`), but advisory status/recon builders in `order_rows.py` still fall back to MARKET / GTC / ACCEPTED / BUY for unknown closed-set values instead of rejecting |
 | `ts_event` venue / `ts_init` clock | [x] | |
 | Book `F_LAST` / `F_SNAPSHOT` | [x] | Snapshot envelope; last delta includes `F_LAST` |
 | Subscribe intent vs confirm | [~] | Ticks/quotes tracked; book unsubscribe wired (plants/gateway/direct) |

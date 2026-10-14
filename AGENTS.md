@@ -18,9 +18,8 @@ Direct and gateway are two implementations of one Rust trait, `Session`
 the order-op gate) and `GatewaySession` (`crates/rithmic-gateway/src/client`,
 attach-only, one socket per fingerprint). The PyO3 `Session` and the gateway
 **server** (`crates/rithmic-gateway/src/server`) are both generic over that trait,
-so the adapter has one call surface in either mode. Direct-only history replay is a
-separate `HistoryReplay` trait that gateway mode refuses with
-`UnsupportedInGatewayModeError`.
+so the adapter has one call surface in either mode, including the read-only
+fill-history and order-history queries (one-shot, trading-gated reads).
 
 When you add or change a plant RPC (place / cancel / modify / brackets / ensure / subscribe / …):
 
@@ -29,6 +28,13 @@ When you add or change a plant RPC (place / cancel / modify / brackets / ensure 
 3. Keep request field names and semantics aligned (e.g. bracket `localid` / `stop_ticks` / `target_ticks`).
 4. Tests that fail on drift: `tests/rpc_table.rs` (proto ↔ trait ↔ table ↔ `RestorePlan`), `tests/client_scenarios.rs` + `tests/test_gateway_scenarios.py` (same scenarios through every client), `tests/test_wire_trait_parity.py` (PyO3 ↔ `WireSession`).
 5. Do not ship “direct-only” for a new live capability unless STATUS marks gateway as deferred **and** book/runners refuse that mode.
+
+Structure now enforces the first half of this: declare the RPC on `WireSession` in `session.py` and
+`tests/test_wire_session_parity.py` fails until every adapter (direct facade, gateway facade over
+`GatewayClient`, `WireSessionStub`, and the compiled extension via `_lib.pyi`, which is itself checked
+against the built extension) exposes it with a compatible signature. `tests/test_gateway_proto_parity.py`
+fails when `session_pb2.py` was not regenerated after editing `session.proto`. Proto framing and gateway
+dispatch/gate tests (`crates/rithmic-gateway/tests`) are still yours to extend.
 
 #### Learning: gateway RPC kinds (do not confuse)
 
@@ -66,6 +72,7 @@ Related:
 | [`docs/references/nautilus-adapter-tiers.md`](docs/references/nautilus-adapter-tiers.md) | 1.231.x `TradingNode` seam; naming |
 | [`docs/references/ops-runbook.md`](docs/references/ops-runbook.md) | How to run smokes |
 | [`docs/references/gateway-remote.md`](docs/references/gateway-remote.md) | Gateway unix / tunnel / TLS roadmap |
+| [`docs/adr/`](docs/adr/) | Decisions an architecture review should not re-litigate |
 
 Do not invent a second status table. Do not copy upstream DataTester / ExecTester case lists into the repo.
 
@@ -147,7 +154,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test -p rithmic-plants -p rithmic-gateway -p rithmic-exec -p rithmic-nt-connect
 uv run ruff check .
 uv run ruff format --check .
-uv run ty check python/rithmic_nt_connect tests
+uv run ty check python/rithmic_nt_connect python/rithmic_gateway tests
 uv run pytest -q
 # Qlty (added 2026-08-20): orchestrator over ruff/clippy + bandit/trufflehog/
 # shellcheck/actionlint/zizmor/osv-scanner/radarlint/smells. CI runs the

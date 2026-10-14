@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 from gateway_fake import FakeParent, build_fake_gateway, running_fake
 from rithmic_nt_connect.config import ConnectMode, SessionConfig
-from rithmic_nt_connect.errors import UnsupportedInGatewayModeError
+from rithmic_nt_connect.errors import NotConnectedError
 from rithmic_nt_connect.session import (
     _RustGatewaySession,
     create_rust_gateway_session,
@@ -75,14 +75,15 @@ def test_gateway_mode_rejects_remote_listen_urls() -> None:
         )
 
 
-def test_history_replay_is_unreachable_in_gateway_mode() -> None:
+def test_history_reads_are_served_in_gateway_mode() -> None:
+    # Not refused by mode: an unconnected client fails like any other read.
     session = _lib.Session(user="u", connect_mode="gateway")
     for call in (
         lambda: session.load_fill_history(20260101, 20260102),
         lambda: session.load_order_history("20260101"),
         lambda: session.load_order_history_dates(),
     ):
-        with pytest.raises(UnsupportedInGatewayModeError):
+        with pytest.raises(NotConnectedError):
             call()
 
 
@@ -151,23 +152,51 @@ def test_transport_events_are_built_for_the_adapter() -> None:
     assert event_from_rust("nonsense", 1, 0, None) is None
 
 
+class _TransportInner:
+    """Stands in for the extension: one callback registration, fired by hand."""
+
+    def __init__(self) -> None:
+        self.registrations = 0
+        self.callback: Any = None
+
+    def subscribe_transport_events(self, callback: Any) -> None:
+        self.registrations += 1
+        self.callback = callback
+
+
 def test_the_wrapper_bridges_rust_callbacks_to_adapter_events() -> None:
     seen: list[Any] = []
-
-    class _Inner:
-        def subscribe_transport_events(self, callback: Any) -> None:
-            callback("down", 1, 0, None)
-            callback("up", 2, 0, None)
-            callback("recovery_failed", 2, 8, "gone")
-
-    wrapper = _RustGatewaySession(_Inner())
+    inner = _TransportInner()
+    wrapper = _RustGatewaySession(inner)
     unsubscribe = wrapper.subscribe_transport_events(seen.append)
+    assert callable(unsubscribe)
+
+    inner.callback("down", 1, 0, None)
+    inner.callback("up", 2, 0, None)
+    inner.callback("recovery_failed", 2, 8, "gone")
+    inner.callback("nonsense", 2, 0, None)
     assert [type(e).__name__ for e in seen] == [
         "TransportDown",
         "TransportUp",
         "RecoveryFailed",
     ]
-    assert callable(unsubscribe)
+
+
+def test_listeners_share_one_registration_and_can_detach() -> None:
+    first: list[Any] = []
+    second: list[Any] = []
+    inner = _TransportInner()
+    wrapper = _RustGatewaySession(inner)
+    drop_first = wrapper.subscribe_transport_events(first.append)
+    wrapper.subscribe_transport_events(second.append)
+    assert inner.registrations == 1
+
+    inner.callback("up", 1, 0, None)
+    drop_first()
+    drop_first()  # detaching twice is harmless
+    inner.callback("up", 2, 0, None)
+    assert len(first) == 1
+    assert len(second) == 2
 
 
 def test_create_rust_gateway_session_never_passes_a_password(

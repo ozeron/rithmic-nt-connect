@@ -155,6 +155,13 @@ pub trait Session: Send + Sync {
     async fn load_orders(&self, start_sec: i32, end_sec: i32) -> Result<Vec<OrderNotificationDto>>;
     async fn load_product_rms_info(&self) -> Result<Vec<ProductRmsInfoDto>>;
     async fn load_account_rms_info(&self) -> Result<Vec<AccountRmsInfoDto>>;
+    /// Fills for trade dates `start..=finish` (CCYYMMDD). Fails closed with
+    /// `ReconciliationUnavailable` at the venue row cap. Read-only.
+    async fn load_fill_history(&self, start: i32, finish: i32) -> Result<Vec<FillHistoryDto>>;
+    /// Replay one trade date (CCYYMMDD) as order notifications. Read-only.
+    async fn load_order_history(&self, date: &str) -> Result<Vec<OrderNotificationDto>>;
+    /// Trade dates (CCYYMMDD) the venue keeps order history for. Read-only.
+    async fn load_order_history_dates(&self) -> Result<Vec<String>>;
 
     // --- one-shot commands (never retried; post-send failure is unknown) ---
     async fn place_order(&self, order: &PlaceOrder) -> Result<()>;
@@ -181,18 +188,4 @@ pub trait Session: Send + Sync {
     async fn poll_history_event(&self, timeout: Duration) -> Result<Option<PlantEvent>>;
     async fn poll_pnl_event(&self, timeout: Duration) -> Result<Option<PlantEvent>>;
     async fn poll_order_event(&self, timeout: Duration) -> Result<Option<PlantEvent>>;
-}
-
-/// Fill-history and order-history replay. Direct-only: implemented by
-/// `DirectSession` and deliberately **not** by `GatewaySession` (deferred for
-/// gateway per `docs/STATUS.md`), so these calls are structurally unreachable
-/// in gateway mode.
-#[async_trait]
-pub trait HistoryReplay: Send + Sync {
-    /// Trade dates `start..=finish` (CCYYMMDD). Read-only.
-    async fn load_fill_history(&self, start: i32, finish: i32) -> Result<Vec<FillHistoryDto>>;
-    /// Replay one trade date (CCYYMMDD) as order notifications. Read-only.
-    async fn load_order_history(&self, date: &str) -> Result<Vec<OrderNotificationDto>>;
-    /// Trade dates (CCYYMMDD) the venue keeps order history for. Read-only.
-    async fn load_order_history_dates(&self) -> Result<Vec<String>>;
 }

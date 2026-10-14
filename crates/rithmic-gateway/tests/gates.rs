@@ -2,7 +2,8 @@
 
 use rithmic_gateway::pb::frame::Body;
 use rithmic_gateway::pb::{
-    CancelAllOrdersRequest, LoadAccountRmsInfoRequest, LoadOrdersRequest,
+    CancelAllOrdersRequest, LoadAccountRmsInfoRequest, LoadFillHistoryRequest,
+    LoadOrderHistoryDatesRequest, LoadOrderHistoryRequest, LoadOrdersRequest,
     LoadProductRmsInfoRequest, PlaceBracketOrderRequest, PlaceOrderRequest,
     ResetTickerPlantRequest, ResolvedAccountRequest, SubscribeBracketUpdatesRequest,
     SubscribeOrderUpdatesRequest,
@@ -239,6 +240,50 @@ fn fetch_rms_errors_when_no_session() {
         assert_error_code(body, "no_session");
     }
     assert!(!plan.order, "failed rms fetch must not leave order intent");
+}
+
+fn history_reads() -> Vec<Body> {
+    vec![
+        Body::LoadFillHistory(LoadFillHistoryRequest {
+            start_date: 20260901,
+            finish_date: 20260930,
+        }),
+        Body::LoadOrderHistoryDates(LoadOrderHistoryDatesRequest {}),
+        Body::LoadOrderHistory(LoadOrderHistoryRequest {
+            date: "20260930".into(),
+        }),
+    ]
+}
+
+#[test]
+fn history_reads_denied_when_trading_disabled() {
+    // Order-plant reads are a trading capability: gated like LoadOrders so
+    // `RITHMIC_ENABLE_TRADING=0` cannot bypass them through history RPCs.
+    for body in history_reads() {
+        assert_error_code(
+            gate_rpc_for_test(
+                &ParentGates {
+                    trading_enabled: false,
+                    cancel_all_enabled: false,
+                },
+                body,
+            ),
+            "trading_disabled",
+        );
+    }
+}
+
+#[test]
+fn history_reads_errors_when_no_session() {
+    let (bodies, plan) = rpc_sequence_with_gates(trading_on(), history_reads());
+    assert_eq!(bodies.len(), 3);
+    for body in bodies {
+        assert_error_code(body, "no_session");
+    }
+    assert!(
+        !plan.order,
+        "one-shot history reads must not leave order intent"
+    );
 }
 
 #[test]

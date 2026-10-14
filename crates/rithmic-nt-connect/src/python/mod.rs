@@ -19,9 +19,7 @@ use rithmic_plants::dto::{
 };
 use rithmic_plants::error::Error;
 use rithmic_plants::plants::PlantSet;
-use rithmic_plants::{
-    DirectSession, HistoryReplay, ModifyOrder, PlaceBracketOrder, PlaceOrder, Session,
-};
+use rithmic_plants::{DirectSession, ModifyOrder, PlaceBracketOrder, PlaceOrder, Session};
 
 pyo3::create_exception!(rithmic_nt_connect, ChannelLaggedError, PyRuntimeError);
 pyo3::create_exception!(rithmic_nt_connect, ChannelClosedError, PyRuntimeError);
@@ -29,11 +27,6 @@ pyo3::create_exception!(rithmic_nt_connect, NotConnectedError, PyRuntimeError);
 // Raised by gateway-mode sessions; carries `.code` / `.message` like the
 // pure-Python gateway client's error, so the adapter classifies it the same way.
 pyo3::create_exception!(rithmic_nt_connect, GatewayError, PyRuntimeError);
-pyo3::create_exception!(
-    rithmic_nt_connect,
-    UnsupportedInGatewayModeError,
-    PyRuntimeError
-);
 pyo3::create_exception!(rithmic_nt_connect, AlreadyConnectedError, PyRuntimeError);
 pyo3::create_exception!(
     rithmic_nt_connect,
@@ -509,8 +502,6 @@ fn time_bar_event_dict(py: Python<'_>, b: HistoryBarDto) -> PyResult<Py<PyDict>>
 #[pyclass(name = "Session")]
 pub struct PySession {
     session: Arc<dyn Session>,
-    /// Fill / order history replay: direct-only, absent for gateway backends.
-    history: Option<Arc<dyn HistoryReplay>>,
     /// The gateway client, when `connect_mode` is `gateway` (transport hooks).
     gateway: Option<Arc<GatewaySession>>,
 }
@@ -523,14 +514,6 @@ impl PySession {
         F: std::future::Future<Output = Result<T, Error>> + Send,
     {
         py.detach(|| runtime().block_on(fut)).map_err(to_py_err)
-    }
-
-    fn history(&self) -> PyResult<&Arc<dyn HistoryReplay>> {
-        self.history.as_ref().ok_or_else(|| {
-            UnsupportedInGatewayModeError::new_err(
-                "unsupported in gateway mode: fill/order history is direct-only",
-            )
-        })
     }
 }
 
@@ -603,7 +586,6 @@ impl PySession {
                 let gateway = Arc::new(GatewaySession::new(cfg));
                 Ok(Self {
                     session: gateway.clone(),
-                    history: None,
                     gateway: Some(gateway),
                 })
             }
@@ -635,7 +617,6 @@ impl PySession {
                 let direct = Arc::new(DirectSession::new(config, plants));
                 Ok(Self {
                     session: direct.clone(),
-                    history: Some(direct),
                     gateway: None,
                 })
             }
@@ -1025,8 +1006,7 @@ impl PySession {
 
     /// Replay one trade date's order history (CCYYMMDD) as order notifications. Read-only.
     fn load_order_history(&self, py: Python<'_>, date: &str) -> PyResult<Vec<Py<PyDict>>> {
-        let history = self.history()?;
-        let events = self.run(py, history.load_order_history(date))?;
+        let events = self.run(py, self.session.load_order_history(date))?;
         events
             .into_iter()
             .map(|n| order_notification_dict(py, n))
@@ -1040,15 +1020,13 @@ impl PySession {
         start_date: i32,
         finish_date: i32,
     ) -> PyResult<Vec<Py<PyDict>>> {
-        let history = self.history()?;
-        let rows = self.run(py, history.load_fill_history(start_date, finish_date))?;
+        let rows = self.run(py, self.session.load_fill_history(start_date, finish_date))?;
         rows.into_iter().map(|r| fill_history_dict(py, r)).collect()
     }
 
     /// Trade dates (CCYYMMDD) for which the venue keeps order history. Read-only.
     fn load_order_history_dates(&self, py: Python<'_>) -> PyResult<Vec<String>> {
-        let history = self.history()?;
-        self.run(py, history.load_order_history_dates())
+        self.run(py, self.session.load_order_history_dates())
     }
 
     #[pyo3(signature = (
@@ -1242,10 +1220,6 @@ fn _lib(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     m.add("NotConnectedError", m.py().get_type::<NotConnectedError>())?;
     m.add("GatewayError", m.py().get_type::<GatewayError>())?;
-    m.add(
-        "UnsupportedInGatewayModeError",
-        m.py().get_type::<UnsupportedInGatewayModeError>(),
-    )?;
     m.add(
         "AlreadyConnectedError",
         m.py().get_type::<AlreadyConnectedError>(),

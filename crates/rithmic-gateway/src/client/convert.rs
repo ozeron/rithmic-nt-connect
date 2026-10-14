@@ -5,8 +5,8 @@
 //! modes. A round-trip test (`tests/client_convert.rs`) pins `from(to(x)) == x`.
 
 use rithmic_plants::dto::{
-    AccountPnlDto, AccountRmsInfoDto, BboDto, FrontMonthDto, HistoryBarDto, HistoryTickDto,
-    InstrumentPnlDto, LastTradeDto, OrderBookDto, OrderNotificationDto, PlantEvent,
+    AccountPnlDto, AccountRmsInfoDto, BboDto, FillHistoryDto, FrontMonthDto, HistoryBarDto,
+    HistoryTickDto, InstrumentPnlDto, LastTradeDto, OrderBookDto, OrderNotificationDto, PlantEvent,
     ProductRmsInfoDto, ReferenceDataDto, TimeBarProbeRow,
 };
 use rithmic_plants::AccountTriple;
@@ -224,6 +224,28 @@ pub fn account_rms_info_from_pb(r: pb::AccountRmsInfo) -> AccountRmsInfoDto {
         account_id: r.account_id,
         default_commission: r.default_commission,
         presence_bits: r.presence_bits,
+    }
+}
+
+pub fn fill_history_from_pb(f: pb::FillHistory) -> FillHistoryDto {
+    FillHistoryDto {
+        account_id: f.account_id,
+        basket_id: f.basket_id,
+        symbol: f.symbol,
+        exchange: f.exchange,
+        transaction_type: f.transaction_type,
+        price_type: f.price_type,
+        duration: f.duration,
+        manual_or_auto: f.manual_or_auto,
+        fill_id: f.fill_id,
+        fill_date: f.fill_date,
+        fill_time: f.fill_time,
+        fill_price: f.fill_price,
+        fill_size: f.fill_size,
+        price: f.price,
+        trigger_price: f.trigger_price,
+        ssboe: f.ssboe,
+        usecs: f.usecs,
     }
 }
 

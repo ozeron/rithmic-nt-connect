@@ -93,13 +93,17 @@ The system SHALL share one in-process login among all `DirectSession` users with
 - **WHEN** the final direct session holder disconnects
 - **THEN** another process SHALL be able to acquire the credential flock
 
-### Requirement: Direct-only surfaces are structurally unreachable in gateway mode
-The system SHALL expose fill-history and order-history replay through a separate `HistoryReplay` trait implemented only by `DirectSession`, and SHALL reject those calls in gateway mode with a typed unsupported-in-gateway-mode error.
+### Requirement: History reads are ordinary Session methods in both modes
+The system SHALL expose fill-history and order-history queries (`load_fill_history`, `load_order_history_dates`, `load_order_history`) as methods of the `Session` trait, implemented by `DirectSession` and by the Rust `GatewaySession`, served by the gateway server as one-shot, trading-gated read RPCs. A fill-history reply that reaches the venue row cap SHALL fail closed as `reconciliation_unavailable`.
 
 #### Scenario: Fill history requested in gateway mode
-- **WHEN** `load_fill_history` is called on a gateway-mode session
-- **THEN** the call SHALL fail with the unsupported-in-gateway-mode error and SHALL NOT reach the parent
+- **WHEN** `load_fill_history` is called on a gateway-mode session with trading enabled on the parent
+- **THEN** the call SHALL reach the parent and return the venue rows
 
-#### Scenario: Gateway gains a history RPC
-- **WHEN** a history-replay RPC is added to the gateway proto without being added to the Direct-only list
-- **THEN** `tests/test_history_direct_only.py` SHALL fail
+#### Scenario: Trading disabled on the parent
+- **WHEN** a history read is issued while the parent has trading disabled
+- **THEN** the parent SHALL deny it with `trading_disabled` and SHALL NOT reach the plant
+
+#### Scenario: A history RPC is added without a table row
+- **WHEN** a history RPC is added to the gateway proto or the `Session` trait without a row in the RPC table
+- **THEN** `tests/rpc_table.rs` SHALL fail

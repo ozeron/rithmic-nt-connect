@@ -3,8 +3,8 @@
 The Rust ``Session`` trait is the single definition of the plant surface. The
 extension stub (``_lib.pyi``) and the Python ``WireSession`` protocol must expose
 exactly its methods, so adding a plant RPC in Rust without surfacing it here (or
-vice versa) fails this test. Fill/order-history replay is direct-only: the
-extension exposes it, the ``WireSession`` protocol must not.
+vice versa) fails this test. Fill/order-history reads are ordinary trait
+methods: both modes serve them.
 """
 
 from __future__ import annotations
@@ -32,11 +32,7 @@ def _trait_methods(source: str, trait: str, until: str | None) -> set[str]:
 
 
 def _session_trait() -> set[str]:
-    return _trait_methods(BACKEND.read_text(), "Session", until="HistoryReplay")
-
-
-def _history_trait() -> set[str]:
-    return _trait_methods(BACKEND.read_text(), "HistoryReplay", until=None)
+    return _trait_methods(BACKEND.read_text(), "Session", until=None)
 
 
 def _extension_methods() -> set[str]:
@@ -72,15 +68,15 @@ def _wire_methods() -> set[str]:
 
 def test_the_traits_were_parsed() -> None:
     assert len(_session_trait()) > 30
-    assert _history_trait() == {
+    assert {
         "load_fill_history",
         "load_order_history",
         "load_order_history_dates",
-    }
+    } <= _session_trait()
 
 
 def test_extension_stub_exposes_exactly_the_trait_surface() -> None:
-    expected = _session_trait() | _history_trait() | GATEWAY_HOOKS
+    expected = _session_trait() | GATEWAY_HOOKS
     actual = _extension_methods()
     assert actual - expected == set(), "extension methods with no trait method"
     assert expected - actual == set(), "trait methods the extension does not expose"
@@ -91,8 +87,3 @@ def test_wire_session_protocol_is_exactly_the_session_trait() -> None:
     trait = _session_trait()
     assert wire - trait == set(), "WireSession methods with no Session trait method"
     assert trait - wire == set(), "Session trait methods missing from WireSession"
-
-
-def test_history_replay_is_not_reachable_through_the_wire_protocol() -> None:
-    wire = _wire_methods()
-    assert wire & _history_trait() == set()

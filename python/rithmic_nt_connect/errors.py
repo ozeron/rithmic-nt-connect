@@ -18,7 +18,6 @@ try:
         GatewayError,
         NotConnectedError,
         ReconciliationUnavailableError,
-        UnsupportedInGatewayModeError,
     )
 except ImportError:  # pragma: no cover
 
@@ -27,9 +26,6 @@ except ImportError:  # pragma: no cover
 
         code: str
         message: str
-
-    class UnsupportedInGatewayModeError(RuntimeError):
-        """Direct-only call made in gateway mode."""
 
     class AlreadyConnectedError(RuntimeError):
         """Session already connected (idempotent connect is safe to suppress)."""

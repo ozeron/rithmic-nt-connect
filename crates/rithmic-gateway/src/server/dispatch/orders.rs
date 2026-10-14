@@ -8,7 +8,9 @@ use std::sync::Arc;
 
 use rithmic_plants::{ModifyOrder, PlaceBracketOrder, PlaceOrder, Session};
 
-use crate::convert::{account_rms_info_to_pb, order_notification_to_pb, product_rms_info_to_pb};
+use crate::convert::{
+    account_rms_info_to_pb, fill_history_to_pb, order_notification_to_pb, product_rms_info_to_pb,
+};
 use crate::pb::{self, frame::Body, Frame};
 
 use super::{
@@ -118,6 +120,108 @@ async fn load_rms_info(state: &GatewayState, request_id: u64, kind: RmsKind) -> 
         Err(e) => err_to_frame(request_id, "fetch_rms_failed", e),
     }
 }
+
+// History reads are one-shot commands (trading gate → plant call → map error).
+// No fanout, no `note_*` refcount, no restore: they are not subscriptions.
+// Trading-gated like LoadOrders because they reach the order plant.
+
+/// Map a history-read failure: an unanswerable reconciliation (fill-history
+/// cap, or an order-history drain that cannot prove completeness) keeps its
+/// own code so callers fail closed instead of treating it as "venue empty".
+fn history_err_to_frame(request_id: u64, code: &str, e: rithmic_plants::Error) -> Frame {
+    match e {
+        rithmic_plants::Error::ReconciliationUnavailable(msg) => {
+            error_frame(request_id, "reconciliation_unavailable", &msg)
+        }
+        other => err_to_frame(request_id, code, other),
+    }
+}
+
+pub(super) async fn load_fill_history(
+    state: &GatewayState,
+    request_id: u64,
+    req: pb::LoadFillHistoryRequest,
+) -> Frame {
+    if !state.gates.trading_enabled {
+        return error_frame(
+            request_id,
+            "trading_disabled",
+            "load_fill_history denied: parent trading disabled",
+        );
+    }
+    let session = match checkout_session(state, request_id).await {
+        Ok(session) => session,
+        Err(frame) => return *frame,
+    };
+    match session
+        .load_fill_history(req.start_date, req.finish_date)
+        .await
+    {
+        Ok(rows) => Frame {
+            request_id,
+            body: Some(Body::LoadFillHistoryResponse(pb::LoadFillHistoryResponse {
+                rows: rows.into_iter().map(fill_history_to_pb).collect(),
+            })),
+        },
+        Err(e) => history_err_to_frame(request_id, "load_fill_history_failed", e),
+    }
+}
+
+pub(super) async fn load_order_history_dates(state: &GatewayState, request_id: u64) -> Frame {
+    if !state.gates.trading_enabled {
+        return error_frame(
+            request_id,
+            "trading_disabled",
+            "load_order_history_dates denied: parent trading disabled",
+        );
+    }
+    let session = match checkout_session(state, request_id).await {
+        Ok(session) => session,
+        Err(frame) => return *frame,
+    };
+    match session.load_order_history_dates().await {
+        Ok(dates) => Frame {
+            request_id,
+            body: Some(Body::LoadOrderHistoryDatesResponse(
+                pb::LoadOrderHistoryDatesResponse { dates },
+            )),
+        },
+        Err(e) => history_err_to_frame(request_id, "load_order_history_dates_failed", e),
+    }
+}
+
+pub(super) async fn load_order_history(
+    state: &GatewayState,
+    request_id: u64,
+    req: pb::LoadOrderHistoryRequest,
+) -> Frame {
+    if !state.gates.trading_enabled {
+        return error_frame(
+            request_id,
+            "trading_disabled",
+            "load_order_history denied: parent trading disabled",
+        );
+    }
+    // Same serialization as load_orders: the replay drains the shared
+    // order-updates channel, so concurrent drains would mix their rows.
+    let _recon_guard = state.recon_lock.lock().await;
+    let session = match checkout_session(state, request_id).await {
+        Ok(session) => session,
+        Err(frame) => return *frame,
+    };
+    match session.load_order_history(&req.date).await {
+        Ok(events) => Frame {
+            request_id,
+            body: Some(Body::LoadOrderHistoryResponse(
+                pb::LoadOrderHistoryResponse {
+                    events: events.into_iter().map(order_notification_to_pb).collect(),
+                },
+            )),
+        },
+        Err(e) => history_err_to_frame(request_id, "load_order_history_failed", e),
+    }
+}
+
 pub(super) async fn ensure_pnl(state: &GatewayState, request_id: u64) -> Frame {
     let Some(session) = &state.session else {
         return no_session_frame(request_id);

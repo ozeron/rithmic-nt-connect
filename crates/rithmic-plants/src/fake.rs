@@ -14,8 +14,8 @@ use async_trait::async_trait;
 
 use crate::backend::{AccountTriple, ModifyOrder, PlaceBracketOrder, PlaceOrder, Session};
 use crate::dto::{
-    AccountRmsInfoDto, FrontMonthDto, HistoryBarDto, HistoryTickDto, OrderNotificationDto,
-    PlantEvent, ProductRmsInfoDto, ReferenceDataDto, TimeBarProbeRow,
+    AccountRmsInfoDto, FillHistoryDto, FrontMonthDto, HistoryBarDto, HistoryTickDto,
+    OrderNotificationDto, PlantEvent, ProductRmsInfoDto, ReferenceDataDto, TimeBarProbeRow,
 };
 use crate::error::{Error, Result};
 use crate::plants::PlantSet;
@@ -81,6 +81,9 @@ struct State {
     orders: Vec<OrderNotificationDto>,
     product_rms: Vec<ProductRmsInfoDto>,
     account_rms: Vec<AccountRmsInfoDto>,
+    fills: Vec<FillHistoryDto>,
+    history_dates: Vec<String>,
+    order_history: Vec<OrderNotificationDto>,
 }
 
 /// Scripted in-memory plant session.
@@ -171,6 +174,18 @@ impl FakeSession {
 
     pub fn set_account_rms(&self, rows: Vec<AccountRmsInfoDto>) {
         self.lock().account_rms = rows;
+    }
+
+    pub fn set_fill_history(&self, rows: Vec<FillHistoryDto>) {
+        self.lock().fills = rows;
+    }
+
+    pub fn set_order_history_dates(&self, dates: Vec<String>) {
+        self.lock().history_dates = dates;
+    }
+
+    pub fn set_order_history(&self, events: Vec<OrderNotificationDto>) {
+        self.lock().order_history = events;
     }
 
     // --- observation -----------------------------------------------------
@@ -448,6 +463,24 @@ impl Session for FakeSession {
         let mut state = self.enter("load_account_rms_info", "")?;
         state.order_plant = true;
         Ok(state.account_rms.clone())
+    }
+
+    async fn load_fill_history(&self, start: i32, finish: i32) -> Result<Vec<FillHistoryDto>> {
+        let mut state = self.enter("load_fill_history", &format!("{start} {finish}"))?;
+        state.order_plant = true;
+        Ok(state.fills.clone())
+    }
+
+    async fn load_order_history(&self, date: &str) -> Result<Vec<OrderNotificationDto>> {
+        let mut state = self.enter("load_order_history", date)?;
+        state.order_plant = true;
+        Ok(state.order_history.clone())
+    }
+
+    async fn load_order_history_dates(&self) -> Result<Vec<String>> {
+        let mut state = self.enter("load_order_history_dates", "")?;
+        state.order_plant = true;
+        Ok(state.history_dates.clone())
     }
 
     async fn place_order(&self, o: &PlaceOrder) -> Result<()> {

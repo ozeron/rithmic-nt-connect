@@ -9,9 +9,9 @@ from typing import Any, ClassVar
 
 from rithmic_gateway.client import GatewayClient, GatewayError
 from rithmic_gateway.config import GatewayConfig
-from rithmic_gateway.mux import DEFAULT_RPC_TIMEOUT_SEC, GatewayMux
+from rithmic_gateway.framed_conn import DEFAULT_RPC_TIMEOUT_SEC
+from rithmic_gateway.mux import GatewayMux
 from rithmic_gateway.transport_recovery import (
-    TransportEvent,
     TransportListener,
     TransportRecovery,
     fault_from_gateway_code,
@@ -81,19 +81,6 @@ class MuxGatewayClient(GatewayClient):
         self._mux = runtime.mux
         self._attached = False
         self._sub_id: int | None = None
-
-    def register_transport_generation_listener(
-        self, callback: Callable[[int], None]
-    ) -> None:
-        """Compat: DOWN→callback(gen), UP→callback(new_gen). Prefer events API."""
-
-        def _bridge(event: TransportEvent) -> None:
-            from rithmic_gateway.transport_recovery import TransportDown, TransportUp
-
-            if isinstance(event, (TransportDown, TransportUp)):
-                callback(int(event.gen))
-
-        self._runtime.transport.subscribe(_bridge)
 
     def subscribe_transport_events(
         self, listener: TransportListener

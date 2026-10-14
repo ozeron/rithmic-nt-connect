@@ -316,6 +316,27 @@ pub const RPC_TABLE: &[Rpc] = &[
         OneShot,
         Trading,
     ),
+    rpc(
+        Some("load_fill_history"),
+        "load_fill_history",
+        || Body::LoadFillHistory(Default::default()),
+        OneShot,
+        Trading,
+    ),
+    rpc(
+        Some("load_order_history_dates"),
+        "load_order_history_dates",
+        || Body::LoadOrderHistoryDates(Default::default()),
+        OneShot,
+        Trading,
+    ),
+    rpc(
+        Some("load_order_history"),
+        "load_order_history",
+        || Body::LoadOrderHistory(Default::default()),
+        OneShot,
+        Trading,
+    ),
     // --- one-shot trading commands (never retried; no intent, no restore) ---
     rpc(
         Some("place_order"),

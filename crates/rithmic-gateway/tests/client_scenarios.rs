@@ -154,6 +154,31 @@ async fn disconnect_leaves_the_venue_when_the_last_peer_goes_and_the_parent_stay
 // --- trading gate parity --------------------------------------------------------
 
 #[tokio::test]
+async fn history_reads_reach_the_plant_when_trading_is_on() {
+    let parent = FakeParent::start(Opts {
+        trading: true,
+        ..Opts::default()
+    })
+    .await;
+    let s = session_for(&parent).await;
+    assert!(s
+        .load_fill_history(20260901, 20260930)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(s.load_order_history_dates().await.unwrap().is_empty());
+    assert!(s.load_order_history("20260930").await.unwrap().is_empty());
+    let calls = parent.calls().await;
+    for want in [
+        "load_fill_history 20260901 20260930",
+        "load_order_history_dates",
+        "load_order_history 20260930",
+    ] {
+        assert!(calls.contains(&want.to_string()), "{want}: {calls:?}");
+    }
+}
+
+#[tokio::test]
 async fn trading_off_denies_every_gated_rpc_without_reaching_the_plant() {
     let parent = FakeParent::start(Opts::default()).await;
     let s = session_for(&parent).await;
@@ -167,6 +192,9 @@ async fn trading_off_denies_every_gated_rpc_without_reaching_the_plant() {
         s.load_orders(0, 1).await.unwrap_err(),
         s.load_product_rms_info().await.unwrap_err(),
         s.load_account_rms_info().await.unwrap_err(),
+        s.load_fill_history(20260901, 20260930).await.unwrap_err(),
+        s.load_order_history_dates().await.unwrap_err(),
+        s.load_order_history("20260930").await.unwrap_err(),
     ];
     for err in &denied {
         assert_eq!(code(err), "trading_disabled");

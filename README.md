@@ -140,7 +140,7 @@ Local gates (run via `mise use -q && hk run check` — mirrors CI):
 | --- | --- | --- |
 | Python lint | `ruff check` | block |
 | Python format | `ruff format --check` | block |
-| Python types | `ty check python/rithmic_nt_connect tests` | block |
+| Python types | `ty check python/rithmic_nt_connect python/rithmic_gateway tests` | block |
 | Python tests | `pytest -q` | block |
 | Rust lint | `cargo clippy --workspace --all-targets -- -D warnings` | block |
 | Rust format | `cargo fmt --all --check` | block |

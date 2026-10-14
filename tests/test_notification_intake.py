@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 
 import pytest
 from _stubs import _CacheStub, _Log, _TestClient
@@ -20,8 +20,7 @@ from rithmic_nt_connect._orders import (
     UntrackedStatusBook,
     fill_dedup_key,
 )
-from rithmic_nt_connect.execution import RithmicExecutionClient
-from rithmic_nt_connect.notification_intake import VenueNotificationIntake
+from rithmic_nt_connect.notification_intake import VenueNotificationIntake, intake_for
 
 
 def _drain_row_result(status: object) -> SimpleNamespace:
@@ -103,19 +102,21 @@ def test_emit_accepted_only_while_submitted() -> None:
 def _wire_untracked_publish_spies(
     host: SimpleNamespace, intake: VenueNotificationIntake
 ) -> list[str]:
-    """Install host thin delegates that record calls then forward to intake."""
+    """Record the untracked phases on ``intake`` itself, then run the real ones."""
     calls: list[str] = []
+    real_status = intake.publish_untracked_status
+    real_fill = intake.publish_untracked_fill
 
     def _publish_status(fields: dict[str, Any], ts_event: int) -> bool:
         calls.append("status")
-        return intake.publish_untracked_status(fields, ts_event)
+        return real_status(fields, ts_event)
 
     def _publish_fill(fields: dict[str, Any], ts_event: int) -> None:
         calls.append("fill")
-        intake.publish_untracked_fill(fields, ts_event)
+        real_fill(fields, ts_event)
 
-    host._publish_untracked_status = _publish_status
-    host._publish_untracked_fill = _publish_fill
+    vars(intake)["publish_untracked_status"] = _publish_status
+    vars(intake)["publish_untracked_fill"] = _publish_fill
     return calls
 
 
@@ -341,8 +342,7 @@ def test_client_thin_delegates_forward_to_intake(
         client, "generate_order_accepted", lambda *args: accepted.append(args)
     )
 
-    RithmicExecutionClient._emit_accepted(
-        cast(RithmicExecutionClient, client),
+    intake_for(client).emit_accepted(
         _accepted_order(OrderStatus.SUBMITTED),
         ClientOrderId("O-1"),
         VenueOrderId("B1"),
@@ -371,8 +371,7 @@ def test_client_delegate_lap42_accepted(
     monkeypatch.setattr(
         client, "generate_order_accepted", lambda *args: accepted.append(args)
     )
-    RithmicExecutionClient._emit_accepted(
-        cast(RithmicExecutionClient, client),
+    intake_for(client).emit_accepted(
         _accepted_order(status),
         ClientOrderId("O-1"),
         VenueOrderId("B1"),

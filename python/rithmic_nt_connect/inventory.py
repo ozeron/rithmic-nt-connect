@@ -20,8 +20,8 @@ from nautilus_trader.model.enums import OrderStatus
 
 from rithmic_nt_connect import _lib
 from rithmic_nt_connect._orders import order_notification_to_fields
-from rithmic_nt_connect.execution import order_status_from_fields
 from rithmic_nt_connect.exposure import PNL_SETTLE_NS
+from rithmic_nt_connect.order_rows import order_status_from_fields
 from rithmic_nt_connect.recon import TERMINAL_ORDER_STATUSES
 
 PNL_SETTLE_S = PNL_SETTLE_NS / 1e9

@@ -227,6 +227,24 @@ message LoadProductRmsInfoRequest {}
 // Mirrors `rithmic_plants::load_account_rms_info`; read-only venue config.
 message LoadAccountRmsInfoRequest {}
 
+// Read-only fills for trade dates `start_date..=finish_date` (CCYYMMDD).
+// Mirrors `rithmic_plants::load_fill_history`; fails closed with
+// `reconciliation_unavailable` when the venue's 10,000-row cap is reached.
+message LoadFillHistoryRequest {
+  int32 start_date = 1;
+  int32 finish_date = 2;
+}
+
+// Trade dates (CCYYMMDD) that have order history. Mirrors
+// `rithmic_plants::load_order_history_dates`; read-only.
+message LoadOrderHistoryDatesRequest {}
+
+// Replay one trade date's order history (CCYYMMDD) as order notifications.
+// Mirrors `rithmic_plants::load_order_history`; read-only.
+message LoadOrderHistoryRequest {
+  string date = 1;
+}
+
 // Read-only: whether live MD intents block history Load* (RC2.3 barrier).
 message GetLiveMdStateRequest {}
 
@@ -337,6 +355,40 @@ message LoadProductRmsInfoResponse {
 
 message LoadAccountRmsInfoResponse {
   repeated AccountRmsInfo rows = 1;
+}
+
+// One fill from the venue's fill history. Fields mirror
+// `rithmic_plants::dto::FillHistoryDto`.
+message FillHistory {
+  optional string account_id = 1;
+  optional string basket_id = 2;
+  optional string symbol = 3;
+  optional string exchange = 4;
+  optional string transaction_type = 5;
+  optional string price_type = 6;
+  optional string duration = 7;
+  optional string manual_or_auto = 8;
+  optional string fill_id = 9;
+  optional string fill_date = 10;
+  optional string fill_time = 11;
+  optional double fill_price = 12;
+  optional uint64 fill_size = 13;
+  optional double price = 14;
+  optional double trigger_price = 15;
+  optional int32 ssboe = 16;
+  optional int32 usecs = 17;
+}
+
+message LoadFillHistoryResponse {
+  repeated FillHistory rows = 1;
+}
+
+message LoadOrderHistoryDatesResponse {
+  repeated string dates = 1;
+}
+
+message LoadOrderHistoryResponse {
+  repeated OrderNotification events = 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -547,6 +599,9 @@ message Frame {
     LoadAccountRmsInfoRequest load_account_rms_info = 40;
     ResetTickerPlantRequest reset_ticker_plant = 41;
     GetLiveMdStateRequest get_live_md_state = 42;
+    LoadFillHistoryRequest load_fill_history = 43;
+    LoadOrderHistoryDatesRequest load_order_history_dates = 44;
+    LoadOrderHistoryRequest load_order_history = 45;
 
     Ack ack = 50;
     ErrorResponse error = 51;
@@ -560,6 +615,9 @@ message Frame {
     LoadProductRmsInfoResponse load_product_rms_info_response = 59;
     LoadAccountRmsInfoResponse load_account_rms_info_response = 60;
     GetLiveMdStateResponse get_live_md_state_response = 61;
+    LoadFillHistoryResponse load_fill_history_response = 62;
+    LoadOrderHistoryDatesResponse load_order_history_dates_response = 63;
+    LoadOrderHistoryResponse load_order_history_response = 64;
 
     Event event = 90;
   }

@@ -186,9 +186,6 @@ class GatewayError(RuntimeError):
     code: str
     message: str
 
-class UnsupportedInGatewayModeError(RuntimeError):
-    """Direct-only call (fill / order history replay) made in gateway mode."""
-
 def list_systems(url: str | None = None) -> list[str]:
     """List Rithmic systems via the gateway (template 16); does not log in."""
 
@@ -247,14 +244,14 @@ class Session:
     def get_reference_data(self, symbol: str, exchange: str) -> Any: ...
     def poll_event(self, timeout_ms: int = 0) -> dict[str, Any] | None: ...
     def load_ticks(
-        self, symbol: str, exchange: str, start_ssboe: int, end_ssboe: int
+        self, symbol: str, exchange: str, start_time_sec: int, end_time_sec: int
     ) -> list[dict[str, Any]]: ...
     def load_time_bars(
         self,
         symbol: str,
         exchange: str,
-        start_ssboe: int,
-        end_ssboe: int,
+        start_time_sec: int,
+        end_time_sec: int,
         bar_type: int = 2,
         period: int = 1,
     ) -> list[dict[str, Any]]: ...
@@ -262,8 +259,8 @@ class Session:
         self,
         symbol: str,
         exchange: str,
-        start_ssboe: int,
-        end_ssboe: int,
+        start_time_sec: int,
+        end_time_sec: int,
         bar_type: int = 2,
         period: int = 1,
     ) -> list[dict[str, Any]]: ...
@@ -333,7 +330,7 @@ class Session:
         trail_by_ticks: int | None = None,
     ) -> None: ...
     def cancel_all_orders(self) -> None: ...
-    def load_orders(self, start_ssboe: int, end_ssboe: int) -> list[dict[str, Any]]: ...
+    def load_orders(self, start_sec: int, end_sec: int) -> list[dict[str, Any]]: ...
     def load_product_rms_info(self) -> list[ProductRmsInfo]: ...
     def load_account_rms_info(self) -> list[AccountRmsInfo]: ...
     def load_fill_history(

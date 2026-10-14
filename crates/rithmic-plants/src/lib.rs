@@ -20,9 +20,7 @@ pub mod session;
 pub mod systems;
 
 pub use account::{pick_account, rows_from_account_list, AccountRow};
-pub use backend::{
-    AccountTriple, HistoryReplay, ModifyOrder, PlaceBracketOrder, PlaceOrder, Session,
-};
+pub use backend::{AccountTriple, ModifyOrder, PlaceBracketOrder, PlaceOrder, Session};
 pub use config::{
     SessionConfig, SessionConfigBuilder, DEFAULT_APP_NAME, DEFAULT_APP_VERSION, DEFAULT_LUCID_URL,
     DEFAULT_SYSTEM_NAME,

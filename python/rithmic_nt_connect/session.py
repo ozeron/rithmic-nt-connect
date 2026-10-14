@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import threading
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from rithmic_nt_connect.config import ConfigError, ConnectMode, SessionConfig
@@ -32,7 +33,7 @@ class TickerSession(Protocol):
     def get_reference_data(self, symbol: str, exchange: str) -> Any: ...
     def poll_event(self, timeout_ms: int = 0) -> dict[str, Any] | None: ...
     def load_ticks(
-        self, symbol: str, exchange: str, start_ssboe: int, end_ssboe: int
+        self, symbol: str, exchange: str, start_ssboe: int, end_ssboe: int, /
     ) -> list[dict[str, Any]]: ...
     def load_time_bars(
         self,
@@ -40,6 +41,7 @@ class TickerSession(Protocol):
         exchange: str,
         start_ssboe: int,
         end_ssboe: int,
+        /,
         bar_type: int = 2,
         period: int = 1,
     ) -> list[dict[str, Any]]: ...
@@ -49,6 +51,7 @@ class TickerSession(Protocol):
         exchange: str,
         start_ssboe: int,
         end_ssboe: int,
+        /,
         bar_type: int = 2,
         period: int = 1,
     ) -> list[dict[str, Any]]: ...
@@ -121,9 +124,16 @@ class OrderSession(Protocol):
         trail_by_ticks: int | None = None,
     ) -> None: ...
     def cancel_all_orders(self) -> None: ...
-    def load_orders(self, start_ssboe: int, end_ssboe: int) -> list[dict[str, Any]]: ...
+    def load_orders(
+        self, start_ssboe: int, end_ssboe: int, /
+    ) -> list[dict[str, Any]]: ...
     def load_product_rms_info(self) -> list[ProductRmsInfo]: ...
     def load_account_rms_info(self) -> list[AccountRmsInfo]: ...
+    def load_fill_history(
+        self, start_date: int, finish_date: int
+    ) -> list[dict[str, Any]]: ...
+    def load_order_history_dates(self) -> list[str]: ...
+    def load_order_history(self, date: str) -> list[dict[str, Any]]: ...
     def poll_order_event(self) -> dict[str, Any] | None: ...
 
 
@@ -131,6 +141,20 @@ class WireSession(TickerSession, PnlSession, OrderSession, Protocol):
     """Full multi-plant session facade (composition of ticker / PnL / order)."""
 
     def resolved_account(self) -> dict[str, Any] | None: ...
+
+
+class TransportAware(Protocol):
+    """Optional gateway transport surface (direct sessions have none).
+
+    ``subscribe_transport_events`` returns the unsubscribe callable. Clients
+    reach this through ``TransportRecoveryBridge``; direct sessions simply do
+    not implement it, so recovery wiring is a no-op there.
+    """
+
+    def subscribe_transport_events(
+        self, listener: Callable[[object], None]
+    ) -> Callable[[], None]: ...
+    def ensure_transport_live(self) -> int: ...
 
 
 PLANTS_MARKET_DATA = "market_data"
@@ -330,13 +354,7 @@ class _FlockedDirectSession:
         return self._inner.resolved_account()
 
     def poll_event(self, timeout_ms: int = 0) -> dict[str, Any] | None:
-        # The direct PyO3 ``Session.poll_event`` is a non-blocking ``try_recv``
-        # poll and takes no timeout argument (the gateway client's blocking
-        # ``_poll_filtered`` accepts ``timeout_ms``); a ``0`` forward would
-        # raise ``TypeError`` on the direct path. The facade keeps the shared
-        # signature but ignores the arg on the direct path.
-        del timeout_ms
-        return self._inner.poll_event()
+        return self._inner.poll_event(timeout_ms)
 
     def load_ticks(
         self, symbol: str, exchange: str, start_ssboe: int, end_ssboe: int
@@ -514,6 +532,17 @@ class _FlockedDirectSession:
     def load_account_rms_info(self) -> list[AccountRmsInfo]:
         return self._inner.load_account_rms_info()
 
+    def load_fill_history(
+        self, start_date: int, finish_date: int
+    ) -> list[dict[str, Any]]:
+        return self._inner.load_fill_history(start_date, finish_date)
+
+    def load_order_history_dates(self) -> list[str]:
+        return self._inner.load_order_history_dates()
+
+    def load_order_history(self, date: str) -> list[dict[str, Any]]:
+        return self._inner.load_order_history(date)
+
     def poll_order_event(self) -> dict[str, Any] | None:
         return self._inner.poll_order_event()
 
@@ -553,28 +582,43 @@ class _RustGatewaySession:
     """The Rust gateway client (one shared socket per process) as a ``WireSession``.
 
     A thin shell over the extension's ``Session``: every call is the extension's.
-    It only adapts the extension's transport callback to the adapter's event types.
+    It only adapts the extension's transport callback to the adapter's event
+    types, and fans one extension registration out to the clients' listeners so
+    a client can detach (the extension has no unsubscribe).
     """
 
     def __init__(self, inner: Any) -> None:
         self._inner = inner
+        self._listeners: list[Callable[[object], None]] = []
+        self._registered = False
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
 
-    def subscribe_transport_events(self, listener: Any) -> Any:
+    def _fan_out(
+        self, kind: str, generation: int, attempts: int, cause: str | None
+    ) -> None:
         from rithmic_nt_connect.transport import event_from_rust
 
-        def _bridge(
-            kind: str, generation: int, attempts: int, cause: str | None
-        ) -> None:
-            event = event_from_rust(kind, generation, attempts, cause)
-            if event is not None:
-                listener(event)
+        event = event_from_rust(kind, generation, attempts, cause)
+        if event is None:
+            return
+        for listener in tuple(self._listeners):
+            listener(event)
 
-        self._inner.subscribe_transport_events(_bridge)
-        # The listener lives as long as the session.
-        return lambda: None
+    def subscribe_transport_events(
+        self, listener: Callable[[object], None]
+    ) -> Callable[[], None]:
+        if not self._registered:
+            self._inner.subscribe_transport_events(self._fan_out)
+            self._registered = True
+        self._listeners.append(listener)
+
+        def unsubscribe() -> None:
+            with contextlib.suppress(ValueError):
+                self._listeners.remove(listener)
+
+        return unsubscribe
 
 
 def create_rust_gateway_session(session: SessionConfig) -> WireSession:
