@@ -7,7 +7,7 @@
 - [x] 1.5 Allocation microbench of `publish_plant_event` with a counting global allocator (server path only), 1 and 4 subscribers
 - [x] 1.6 Scenario S7: direct-mode and gateway-mode FFI throughput through the PyO3 `Session` into the dict converter (pytest `perf` marker, reuses `tests/gateway_fake.py`)
 - [x] 1.7 Run everything on the unmodified code and commit `docs/perf/baseline-before.json`; record the observed pump ceiling and any unexpected finding in the design
-- [ ] 1.8 Ratify or edit the budgets in `specs/gateway-throughput/spec.md` against the baseline
+- [x] 1.8 Ratify or edit the budgets in `specs/gateway-throughput/spec.md` against the baseline
 
 ## 2. Event-driven delivery and gaps (review H1, L9)
 
@@ -62,9 +62,9 @@
 
 ## 8. CI, docs and verification
 
-- [ ] 8.1 CI smoke subset (S1 at 10k events/s for 5 s, S2 isolation, S4) with loose floors; fails on loss without a gap
-- [ ] 8.2 Commit `docs/perf/baseline-after.json`; document how to run and read the report in `docs/references/ops-runbook.md`
-- [ ] 8.3 Update `docs/STATUS.md` (do not claim live verification) and run `python scripts/status_progress.py --check`
-- [ ] 8.4 `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test` for all four crates plus the loadtest crate
-- [ ] 8.5 `uv run ruff check .`, `uv run ruff format --check .`, `uv run ty check python/rithmic_nt_connect tests`, `uv run pytest -q`
-- [ ] 8.6 Live tick delivery and reconnect smoke on a market-data account remain open (task 5.3 of `rust-unified-session`); do not claim them
+- [x] 8.1 CI smoke subset (S1 at 10k events/s for 5 s, S2 isolation, S4) with loose floors; fails on loss without a gap
+- [x] 8.2 Commit `docs/perf/baseline-after.json`; document how to run and read the report in `docs/references/ops-runbook.md`
+- [x] 8.3 Update `docs/STATUS.md` (do not claim live verification) and run `python scripts/status_progress.py --check`
+- [x] 8.4 `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test` for all four crates plus the loadtest crate
+- [x] 8.5 `uv run ruff check .`, `uv run ruff format --check .`, `uv run ty check python/rithmic_nt_connect tests`, `uv run pytest -q`
+- [x] 8.6 Live tick delivery and reconnect smoke on a market-data account remain open (task 5.3 of `rust-unified-session`); not claimed in STATUS or the design

@@ -8,6 +8,7 @@ cargo build -p rithmic-loadtest --release
 ./target/release/rithmic-load list
 ./target/release/rithmic-load suite --out docs/perf/report.json          # ~8 min quick suite
 ./target/release/rithmic-load suite --full --out docs/perf/report.json   # spec durations (30 s flood, 10 min soak)
+./target/release/rithmic-load smoke                                      # CI subset, ~25 s, exits non-zero on failure
 ./target/release/rithmic-load run flood_10k_4conn_1session --rate 20000 --secs 10
 RITHMIC_PERF=1 uv run pytest tests/test_perf_ffi_throughput.py -s         # S7: Python boundary
 ```
@@ -26,5 +27,6 @@ runs on the same machine.
 - `after-phase3.json`: after per-connection lanes (a slow read no longer holds up orders or events).
 - `after-phase5.json`, `after-phase5-ffi.json`: after the copy diet (1 allocation per published event, shared client events, batched Python polling).
 - `after-phase7.json`: reconnect during a flood after parent-owned restore (one venue subscribe, no unsubscribe, no client reattach).
+- `baseline-after.json`: the quick suite on the final code (quiet host); `after-soak-full.json`: the 10 minute soak (RSS growth 3.3 percent after the first minute).
 
 Noise: the harness shares the machine with whatever else is running. On a quiet machine latencies are sub-millisecond; with a load average above the core count tails move by 10x between runs. Compare on a quiet host and repeat before trusting a single tail number.

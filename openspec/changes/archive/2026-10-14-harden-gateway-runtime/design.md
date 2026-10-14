@@ -154,6 +154,25 @@ What changed, and where it differs from the plan:
 - **`reset_ticker` is no longer a gateway-client action.** `resync_ticker_session` resets only a direct session, which owns its plants. A gateway client never resets the shared parent plant (that re-subscribed for every peer); it replays its intent, which the parent refcounts. A `gap` is a resync without any reset (`reset=False`) in both modes: the plant is healthy, this consumer just lost events.
 - **Not done:** the `ResetTickerPlant` RPC stays for explicit operator use and the lake client.
 
+## Phase 8 results and budget ratification
+
+`docs/perf/baseline-after.json` (quick suite, quiet host), `docs/perf/after-soak-full.json` (10 minute soak).
+
+| Budget (spec) | Measured | Result |
+|---|---|---|
+| Sustained 50k events/s, 4 clients, no loss | 400,000 sent, 100 percent delivered, p99 1.31 ms | met |
+| 200k events/s burst | 200,000 sent, 100 percent delivered, no unsignalled loss (queueing latency about 0.7 s) | met |
+| Latency at 20k events/s: p99 at most 5 ms, p99.9 at most 20 ms | p99 0.45 ms, p99.9 5.25 ms | met |
+| Order p99 at most 10 ms, max at most 50 ms under 50k flood plus 8 s slow read | p99 0.69 ms, max 1.41 ms (baseline: 7,577 ms) | met |
+| Stalled consumer does not slow peers | peers 100 percent delivered; stalled connection dropped | met |
+| At most 2 allocations per event | 1.00 (52 bytes) | met |
+| Soak RSS growth after the first minute at most 5 percent | 3.3 percent over 10 minutes, 6 M events, no loss | met |
+| Idle wake-to-deliver p99 at most 2 ms | 0.15 ms | met |
+
+Task 1.8: the budgets in `specs/gateway-throughput` are ratified unchanged; the one edit made during the work (absolute order-latency budget) is recorded in phase 3. CI runs the `smoke` subset (`rithmic-load smoke`): it fails on loss without a gap, reordering, an order held up by a slow read, or throughput under a 5,000 events/s floor, and never on a latency tail. Latency budgets are checked by the manual full run on a quiet machine.
+
+Not claimed: live tick delivery and live reconnect on a market-data account (task 5.3 of `rust-unified-session`) were not exercised; everything here is against the fake plant.
+
 ## Risks / Trade-offs
 
 - [Per-stream tasks reorder across streams] → ordering is only guaranteed within a stream today; the spec keeps it that way; order and PnL are separate streams already.

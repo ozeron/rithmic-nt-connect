@@ -484,7 +484,10 @@ When a plant connection drops, the parent rebuilds the plants and re-issues ever
 ```bash
 cargo build -p rithmic-loadtest --release
 ./target/release/rithmic-load suite --out docs/perf/report.json     # ~8 min
+./target/release/rithmic-load smoke                                  # CI subset, ~25 s
 RITHMIC_PERF=1 uv run pytest tests/test_perf_ffi_throughput.py -s    # Python boundary
 ```
+
+`smoke` is what CI runs (ticker flood at 10k events/s, order isolation behind a slow read, a stalled consumer). Its floors are deliberately loose: it fails on events lost without a gap, reordering, a place held up by a slow read, or a throughput collapse, never on a latency tail. The absolute budgets in `openspec/specs/gateway-throughput` are checked by the manual `suite --full` run and recorded in `docs/perf`.
 
 Run it on a quiet machine and repeat before trusting a tail number: with a load average above the core count, tail latencies move by 10x between runs.

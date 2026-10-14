@@ -34,7 +34,7 @@ The client SHALL authenticate with an auth token only, SHALL NOT transmit the Ri
 - **THEN** no client configuration SHALL cause the client to report or obtain trading enabled
 
 ### Requirement: One socket per process with typed event routing
-For a given credential fingerprint, a process SHALL use one gateway socket and one reader that routes inbound frames to pending RPC replies and to separate bounded queues for market-data, history, PnL, and order events. A busy or slow channel SHALL NOT block another channel's delivery.
+For a given credential fingerprint, a process SHALL use one gateway socket and one reader that routes inbound frames to pending RPC replies and to separate bounded queues for market-data, history, PnL, and order events. A queue SHALL receive events only after its channel is armed by the first subscribe or poll of that channel, and events SHALL be shared between queues by reference rather than deep-copied. A busy or slow channel SHALL NOT block another channel's delivery. A gap event SHALL be delivered to the affected channel's queue and surfaced to the adapter.
 
 #### Scenario: Data and exec share the socket
 - **WHEN** the data factory and exec factory both create gateway sessions in one process
@@ -44,9 +44,25 @@ For a given credential fingerprint, a process SHALL use one gateway socket and o
 - **WHEN** market-data events are arriving faster than they are consumed
 - **THEN** order events SHALL still be delivered to the order queue
 
-#### Scenario: Consumer lags past capacity
-- **WHEN** the parent drops this client because its outbound queue overflowed (the parent closes the connection; it sends no overflow frame)
-- **THEN** the client SHALL surface the closed connection as a transport error on the next call or poll, SHALL NOT silently continue, and SHALL re-attach through the normal recovery path
+#### Scenario: Unarmed channel receives nothing
+- **WHEN** the exec facade has never polled or subscribed the market channel
+- **THEN** no market event SHALL be queued or copied for it
+
+#### Scenario: Subscribe then immediate event
+- **WHEN** a channel is armed by subscribe and an event arrives before the first poll
+- **THEN** the event SHALL be queued, not dropped
+
+#### Scenario: Fan-out queue overflows
+- **WHEN** a client's fan-out queue falls further behind than its capacity
+- **THEN** the parent SHALL send that client a gap event carrying the exact number of skipped frames and SHALL keep the connection open
+
+#### Scenario: Client socket stops draining
+- **WHEN** a client's socket accepts no data for longer than the parent's write timeout
+- **THEN** the parent SHALL close the connection, and the client SHALL surface a transport error on the next call or poll, SHALL NOT silently continue, and SHALL re-attach through the normal recovery path
+
+#### Scenario: Gap event surfaced
+- **WHEN** the parent sends a gap event for the ticker stream
+- **THEN** the client SHALL deliver it to the market queue and the adapter SHALL run its ticker resync
 
 ### Requirement: Single-flight transport recovery with generation
 On socket loss the client SHALL perform one shared re-dial for all waiters, SHALL increment a transport generation, and SHALL expose the generation so the adapter can re-arm order-plant state and replay market-data intent. Subscription restore after plant reconnect SHALL remain the parent's responsibility.
@@ -117,4 +133,30 @@ The Rust client and the pure-Python single-connection `rithmic_gateway.GatewayCl
 #### Scenario: Wide history window is sequential
 - **WHEN** `load_time_bars_range` splits a window into slices
 - **THEN** the slices SHALL be fetched sequentially over the one connection and the merged result SHALL be ordered and deduplicated
+
+### Requirement: Slow RPCs do not block other RPCs on the socket
+The gateway server SHALL read requests on a dedicated per-connection reader, process state-changing and subscription commands in arrival order on a command lane, and run slow read RPCs (history loads) on a separate bounded lane. A slow RPC SHALL NOT delay a command, an event write or the reading of the next frame. A frame read SHALL be cancel-safe.
+
+#### Scenario: Cancel behind a history load
+- **WHEN** a client issues `load_time_bars` and then `cancel_order` on the same socket
+- **THEN** the cancel reply SHALL arrive without waiting for the history reply
+
+#### Scenario: Command order preserved
+- **WHEN** a client issues place then cancel for the same order on one socket
+- **THEN** the server SHALL process them in that order
+
+#### Scenario: Partial frame during event write
+- **WHEN** an outbound event is written while a request frame is partly received
+- **THEN** the request SHALL be decoded intact with no stream desync
+
+### Requirement: A plant reconnect keeps clients attached
+When the parent rebuilds its plants it SHALL restore every remembered subscription intent itself and SHALL keep attached clients connected, sending each a `TransportResumed` event instead of closing the connection. A client SHALL NOT re-subscribe or reset the shared ticker plant in response. A market-data intent that cannot be restored after a bounded number of passes SHALL be left degraded without holding the gateway not ready, and a client's next subscribe for that key SHALL retry it. An account-level intent (PnL, orders, brackets) that cannot be restored SHALL cause a full reconnect and keep the gateway not ready.
+
+#### Scenario: Reconnect during a flood
+- **WHEN** the plants drop during a 10,000 events/s flood
+- **THEN** each attached client SHALL receive `TransportResumed` on its existing connection, the venue SHALL see one subscribe per intent and no unsubscribe, and no event SHALL be lost without a gap
+
+#### Scenario: One intent keeps failing
+- **WHEN** a market-data intent fails on every restore pass
+- **THEN** the gateway SHALL become ready with the other intents live, and a later subscribe for that key SHALL succeed once the venue accepts it
 

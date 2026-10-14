@@ -7,6 +7,7 @@
 //! ```text
 //! rithmic-load suite [--full] [--out report.json]
 //! rithmic-load run <scenario> [--out report.json]
+//! rithmic-load smoke [--out report.json]
 //! rithmic-load list
 //! ```
 
@@ -98,6 +99,53 @@ fn write_out(args: &[String], reports: &[Report]) {
     }
 }
 
+/// Loose floors for CI. They guard the invariants (no loss without a gap, no
+/// reordering, orders not held up by a slow read, healthy peers unaffected by a
+/// stalled one) and a throughput floor far below what the code does, so a
+/// loaded shared runner cannot fail it on latency noise alone.
+fn smoke_failures(r: &Report) -> Vec<String> {
+    let mut bad = Vec::new();
+    let mut check = |ok: bool, what: String| {
+        if !ok {
+            bad.push(format!("{}: {what}", r.scenario));
+        }
+    };
+    if r.scenario == "rpc_isolation_same_connection" {
+        let slow_ms = r.params["slow_secs"].as_f64().unwrap_or(0.0) * 1000.0;
+        let place_ms = r.order_latency.as_ref().map_or(f64::MAX, |l| ms(l.max_us));
+        check(
+            place_ms < slow_ms / 2.0,
+            format!("place waited {place_ms:.0} ms behind a {slow_ms:.0} ms read"),
+        );
+        return bad;
+    }
+    check(
+        r.unsignalled_loss == 0,
+        format!("{} events lost without a gap", r.unsignalled_loss),
+    );
+    check(
+        r.conns.iter().all(|c| c.reordered == 0),
+        "events delivered out of order".into(),
+    );
+    check(
+        r.min_delivered_ratio >= 0.9,
+        format!(
+            "slowest reader got {:.1}% of the events",
+            r.min_delivered_ratio * 100.0
+        ),
+    );
+    if r.scenario.starts_with("flood_") {
+        check(
+            r.min_throughput_eps >= 5_000.0,
+            format!(
+                "throughput {:.0} ev/s below the 5000 floor",
+                r.min_throughput_eps
+            ),
+        );
+    }
+    bad
+}
+
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -129,6 +177,38 @@ async fn main() {
             }
             write_out(&args, &reports);
         }
+        "smoke" => {
+            // S1 at 10k events/s for 5 s, S2 isolation, S4 stalled consumer.
+            let mut reports = Vec::new();
+            let mut failures = Vec::new();
+            for mut p in scen::suite(false).into_iter().filter(|p| {
+                matches!(
+                    p.name.as_str(),
+                    "flood_10k_4conn_1session" | "stalled_consumer"
+                )
+            }) {
+                if p.name == "stalled_consumer" {
+                    p.secs = 4.0;
+                    p.drain_secs = 5.0;
+                }
+                let r = scen::run(p).await;
+                print_summary(&r);
+                failures.extend(smoke_failures(&r));
+                reports.push(r);
+            }
+            let r = scen::run_rpc_isolation(2.0).await;
+            print_summary(&r);
+            failures.extend(smoke_failures(&r));
+            reports.push(r);
+            write_out(&args, &reports);
+            if !failures.is_empty() {
+                for f in &failures {
+                    eprintln!("SMOKE FAILED: {f}");
+                }
+                std::process::exit(1);
+            }
+            eprintln!("smoke ok");
+        }
         "run" => {
             let name = args.get(1).expect("scenario name (see `list`)");
             let full = args.iter().any(|a| a == "--full");
@@ -157,7 +237,7 @@ async fn main() {
             write_out(&args, &[report]);
         }
         _ => {
-            eprintln!("usage: rithmic-load suite [--full] [--out f] | run <scenario> [--rate N] [--secs S] [--conns N] [--out f] | list");
+            eprintln!("usage: rithmic-load suite [--full] [--out f] | smoke [--out f] | run <scenario> [--rate N] [--secs S] [--conns N] [--out f] | list");
         }
     }
 }
