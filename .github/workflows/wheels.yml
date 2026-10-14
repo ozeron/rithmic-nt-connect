@@ -16,7 +16,11 @@ on:
     paths:
       - ".github/workflows/wheels.yml"
       - "pyproject.toml"
-      - "python/pyproject.toml"
+      - "python/**"
+      - "crates/**"
+      - "proto/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - "scripts/publish_index.py"
   workflow_dispatch:
 
@@ -91,7 +95,9 @@ jobs:
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
         with:
           enable-cache: false
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        with:
+          toolchain: stable
       - uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
         with:
           version: "29.3"
@@ -99,7 +105,10 @@ jobs:
       - name: Stamp version
         run: |
           sed -i.bak "s/^version = \".*\"$/version = \"$VERSION\"/" pyproject.toml python/pyproject.toml
+          # The adapter's [gateway] extra pins the gateway wheel built with it.
+          sed -i.bak "s/^  \"rithmic-gateway\",$/  \"rithmic-gateway==$VERSION\",/" pyproject.toml
           rm -f pyproject.toml.bak python/pyproject.toml.bak
+          grep -q "rithmic-gateway==$VERSION" pyproject.toml
           grep -H '^version' pyproject.toml python/pyproject.toml
       - name: Build rithmic-gateway (bin wheel)
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
@@ -117,8 +126,11 @@ jobs:
         run: |
           ls -l dist
           uv venv --python 3.13 /tmp/smoke
-          VIRTUAL_ENV=/tmp/smoke uv pip install --no-build --find-links dist \
-            rithmic-gateway "rithmic-nt-connect[gateway]" pytest
+          # The two packages come from these files only (never an index, where a
+          # same-named upload could stand in for a broken build); their
+          # dependencies (protobuf, nautilus_trader, pytest) come from PyPI.
+          VIRTUAL_ENV=/tmp/smoke uv pip install --no-build \
+            dist/rithmic_gateway-*.whl dist/rithmic_nt_connect-*-cp313-*.whl pytest
           test -x /tmp/smoke/bin/rithmic-gateway
           /tmp/smoke/bin/rithmic-gateway --version
           /tmp/smoke/bin/python -m rithmic_gateway --help
@@ -176,6 +188,8 @@ jobs:
             gh release view "$tag" >/dev/null 2>&1 || \
               gh release create "$tag" --prerelease --target "$SHA" \
                 --title "main (rolling dev builds)" --notes "Dev wheels from main."
+            # Move the rolling tag to this build's commit.
+            gh api -X PATCH "repos/$GH_REPO/git/refs/tags/$tag" -f sha="$SHA" -F force=true >/dev/null
             gh release edit "$tag" --notes "Dev wheels from main. Latest: $VERSION ($SHA)."
           fi
           gh release upload "$tag" dist/*.whl --clobber
@@ -184,6 +198,10 @@ jobs:
     if: github.event_name == 'push'
     needs: publish
     runs-on: ubuntu-latest
+    # One Pages deployment at a time (a tag and a main push can overlap).
+    concurrency:
+      group: pages
+      cancel-in-progress: false
     permissions:
       contents: write
       pages: write

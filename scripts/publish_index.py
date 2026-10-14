@@ -23,16 +23,16 @@ import json
 import os
 import re
 import sys
+import tomllib
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
 API = "https://api.github.com"
 DEV_RELEASE = "main-dev"
-REQUIRES_PYTHON = {
-    "rithmic-gateway": ">=3.12",
-    "rithmic-nt-connect": ">=3.12,<3.15",
-}
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PYPROJECTS = (REPO_ROOT / "pyproject.toml", REPO_ROOT / "python" / "pyproject.toml")
 _WHEEL = re.compile(r"^(?P<name>[A-Za-z0-9_.]+?)-(?P<version>[^-]+)-.+\.whl$")
 
 
@@ -45,6 +45,16 @@ class Wheel:
     sha256: str | None
     asset_id: int
     release: str
+
+
+def requires_python() -> dict[str, str]:
+    """Each project's ``requires-python``, read from its pyproject."""
+    out = {}
+    for path in PYPROJECTS:
+        project = tomllib.loads(path.read_text())["project"]
+        if "requires-python" in project:
+            out[normalize(project["name"])] = project["requires-python"]
+    return out
 
 
 def normalize(name: str) -> str:
@@ -104,8 +114,11 @@ def split_pruned(wheels: list[Wheel], keep: int) -> tuple[list[Wheel], list[Whee
     return kept, pruned
 
 
-def render(wheels: list[Wheel]) -> dict[str, str]:
+def render(
+    wheels: list[Wheel], requires: dict[str, str] | None = None
+) -> dict[str, str]:
     """Relative path -> HTML for the root and per-project simple pages."""
+    requires = requires_python() if requires is None else requires
     by_project: dict[str, list[Wheel]] = {}
     for w in wheels:
         by_project.setdefault(w.project, []).append(w)
@@ -128,7 +141,7 @@ def render(wheels: list[Wheel]) -> dict[str, str]:
         items = sorted(
             items, key=lambda w: (version_key(w.version), w.filename), reverse=True
         )
-        rp = REQUIRES_PYTHON.get(project)
+        rp = requires.get(project)
         rp_attr = f' data-requires-python="{html.escape(rp)}"' if rp else ""
         links = []
         for w in items:
@@ -177,11 +190,27 @@ def delete_asset(repo: str, token: str, asset_id: int) -> None:
         pass
 
 
-def hash_download(url: str, token: str) -> str:
+class _NoAuthAcrossHosts(urllib.request.HTTPRedirectHandler):
+    """Follow redirects, but never carry the GitHub token to another host (the
+    asset download redirects to a presigned storage URL that rejects it)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and urllib.parse.urlsplit(newurl).netloc != (
+            urllib.parse.urlsplit(req.full_url).netloc
+        ):
+            new.headers.pop("Authorization", None)
+            new.unredirected_hdrs.pop("Authorization", None)
+        return new
+
+
+def hash_download(repo: str, token: str, asset_id: int) -> str:
+    """sha256 of a release asset, for an asset GitHub reported no digest for."""
     digest = hashlib.sha256()
-    req = _request("GET", url, token)
+    req = _request("GET", f"{API}/repos/{repo}/releases/assets/{asset_id}", token)
     req.add_header("Accept", "application/octet-stream")
-    with urllib.request.urlopen(req) as r:  # nosec B310
+    opener = urllib.request.build_opener(_NoAuthAcrossHosts)
+    with opener.open(req) as r:  # nosec B310 - https API URL, see _request
         for chunk in iter(lambda: r.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()
@@ -213,7 +242,9 @@ def main(argv: list[str] | None = None) -> int:
     resolved = [
         w
         if w.sha256
-        else Wheel(**{**w.__dict__, "sha256": hash_download(w.url, token)})
+        else Wheel(
+            **{**w.__dict__, "sha256": hash_download(args.repo, token, w.asset_id)}
+        )
         for w in kept
     ]
     for rel, text in render(resolved).items():
