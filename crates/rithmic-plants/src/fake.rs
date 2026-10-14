@@ -69,6 +69,12 @@ struct State {
     /// Per-method artificial latency applied by [`FakeSession::delay`].
     delays: HashMap<String, Duration>,
     account: Option<AccountTriple>,
+    /// Gates, as on `DirectSession`; closed gates deny before anything else.
+    trading_closed: bool,
+    cancel_all_closed: bool,
+    /// A `disconnect` is in progress (held for its scripted delay): order
+    /// operations started now fail as not sent, as on `DirectSession`.
+    disconnecting: bool,
 }
 
 /// Scripted in-memory plant session.
@@ -89,6 +95,41 @@ impl Default for FakeSession {
 impl FakeSession {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Set the trading and cancel-all gates, with the same denials as
+    /// `DirectSession::with_gates`. A new fake has both open: gateway tests
+    /// exercise the parent's own gate in front of it.
+    pub fn with_gates(self, trading_enabled: bool, cancel_all_enabled: bool) -> Self {
+        {
+            let mut state = self.lock();
+            state.trading_closed = !trading_enabled;
+            state.cancel_all_closed = !cancel_all_enabled;
+        }
+        self
+    }
+
+    /// The trading gate check `DirectSession` makes before `what`.
+    fn require_trading(&self, what: &str) -> Result<()> {
+        if self.lock().trading_closed {
+            return Err(Error::Gateway {
+                code: "trading_disabled".into(),
+                message: format!("{what} denied: trading disabled"),
+            });
+        }
+        Ok(())
+    }
+
+    /// A state-changing order call: trading gate, then the in-progress
+    /// disconnect check, then the order plant comes up (as `command_handle` does).
+    fn order_op(&self, method: &str, detail: &str) -> Result<()> {
+        self.require_trading(method)?;
+        if self.lock().disconnecting {
+            return Err(Error::NotSent(
+                "session disconnect in progress; order operation rejected".into(),
+            ));
+        }
+        self.enter_plant(method, detail, Stream::Order)
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -228,7 +269,17 @@ impl Session for FakeSession {
     }
 
     async fn disconnect(&self) -> Result<()> {
-        let mut state = self.enter("disconnect", "")?;
+        self.lock().disconnecting = true;
+        self.delay("disconnect").await;
+        let entered = self.enter("disconnect", "");
+        let mut state = match entered {
+            Ok(state) => state,
+            Err(err) => {
+                self.lock().disconnecting = false;
+                return Err(err);
+            }
+        };
+        state.disconnecting = false;
         state.connected = false;
         state.pnl_plant = false;
         state.order_plant = false;
@@ -244,6 +295,7 @@ impl Session for FakeSession {
     }
 
     async fn ensure_order_plant(&self) -> Result<()> {
+        self.require_trading("ensure_order_plant")?;
         let mut state = self.enter("ensure_order_plant", "")?;
         state.order_plant = true;
         self.attach(&mut state, Stream::Order);
@@ -334,11 +386,13 @@ impl Session for FakeSession {
     }
 
     async fn subscribe_order_updates(&self) -> Result<()> {
+        self.require_trading("subscribe_order_updates")?;
         self.enter_plant("subscribe_order_updates", "", Stream::Order)?;
         Ok(())
     }
 
     async fn subscribe_bracket_updates(&self) -> Result<()> {
+        self.require_trading("subscribe_bracket_updates")?;
         self.enter_plant("subscribe_bracket_updates", "", Stream::Order)?;
         Ok(())
     }
@@ -428,21 +482,25 @@ impl Session for FakeSession {
         _start_sec: i32,
         _end_sec: i32,
     ) -> Result<Vec<OrderNotificationDto>> {
+        self.require_trading("load_orders")?;
         self.enter_plant("load_orders", "", Stream::Order)?;
         Ok(Vec::new())
     }
 
     async fn load_product_rms_info(&self) -> Result<Vec<ProductRmsInfoDto>> {
+        self.require_trading("load_product_rms_info")?;
         self.enter_plant("load_product_rms_info", "", Stream::Order)?;
         Ok(Vec::new())
     }
 
     async fn load_account_rms_info(&self) -> Result<Vec<AccountRmsInfoDto>> {
+        self.require_trading("load_account_rms_info")?;
         self.enter_plant("load_account_rms_info", "", Stream::Order)?;
         Ok(Vec::new())
     }
 
     async fn load_fill_history(&self, start: i32, finish: i32) -> Result<Vec<FillHistoryDto>> {
+        self.require_trading("load_fill_history")?;
         self.enter_plant(
             "load_fill_history",
             &format!("{start} {finish}"),
@@ -453,21 +511,23 @@ impl Session for FakeSession {
     }
 
     async fn load_order_history(&self, date: &str) -> Result<Vec<OrderNotificationDto>> {
+        self.require_trading("load_order_history")?;
         self.enter_plant("load_order_history", date, Stream::Order)?;
         Ok(Vec::new())
     }
 
     async fn load_order_history_dates(&self) -> Result<Vec<String>> {
+        self.require_trading("load_order_history_dates")?;
         self.enter_plant("load_order_history_dates", "", Stream::Order)?;
         Ok(Vec::new())
     }
 
     async fn place_order(&self, o: &PlaceOrder) -> Result<()> {
-        self.enter_plant("place_order", &o.user_tag, Stream::Order)
+        self.order_op("place_order", &o.user_tag)
     }
 
     async fn place_bracket_order(&self, o: &PlaceBracketOrder) -> Result<()> {
-        self.enter_plant("place_bracket_order", &o.localid, Stream::Order)
+        self.order_op("place_bracket_order", &o.localid)
     }
 
     async fn adjust_bracket_stop(
@@ -476,11 +536,10 @@ impl Session for FakeSession {
         ticks: i32,
         level: Option<i32>,
     ) -> Result<()> {
-        self.note(
+        self.order_op(
             "adjust_bracket_stop",
             &format!("{basket_id} {ticks} {level:?}"),
-        )?;
-        Ok(())
+        )
     }
 
     async fn adjust_bracket_target(
@@ -489,26 +548,33 @@ impl Session for FakeSession {
         ticks: i32,
         level: Option<i32>,
     ) -> Result<()> {
-        self.note(
+        self.order_op(
             "adjust_bracket_target",
             &format!("{basket_id} {ticks} {level:?}"),
-        )?;
-        Ok(())
+        )
     }
 
     async fn cancel_order(&self, basket_id: &str) -> Result<()> {
-        self.note("cancel_order", basket_id)?;
-        Ok(())
+        self.order_op("cancel_order", basket_id)
     }
 
     async fn modify_order(&self, o: &ModifyOrder) -> Result<()> {
-        self.note("modify_order", &o.basket_id)?;
-        Ok(())
+        self.order_op("modify_order", &o.basket_id)
     }
 
     async fn cancel_all_orders(&self) -> Result<()> {
-        self.note("cancel_all_orders", "")?;
-        Ok(())
+        if self.lock().cancel_all_closed {
+            return Err(Error::Gateway {
+                code: "cancel_all_denied".into(),
+                message: "cancel_all_orders denied: cancel_all disabled".into(),
+            });
+        }
+        if self.lock().disconnecting {
+            return Err(Error::NotSent(
+                "session disconnect in progress; order operation rejected".into(),
+            ));
+        }
+        self.enter_plant("cancel_all_orders", "", Stream::Order)
     }
 
     async fn poll_event(&self, timeout: Duration) -> Result<Option<PlantEvent>> {

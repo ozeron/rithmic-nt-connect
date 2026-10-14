@@ -14,6 +14,8 @@ pub mod dto;
 pub mod error;
 #[cfg(feature = "testing")]
 pub mod fake;
+#[cfg(feature = "testing")]
+pub mod fake_venue;
 pub mod history;
 pub mod plants;
 pub mod session;

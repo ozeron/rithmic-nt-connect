@@ -16,7 +16,7 @@ mod runtime;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use rithmic_plants::dto::{
@@ -28,6 +28,7 @@ use rithmic_plants::{
     AccountTriple, Error, ModifyOrder, PlaceBracketOrder, PlaceOrder, PlantSet, Result, Session,
 };
 use tokio::sync::broadcast;
+use tokio::time::Instant;
 
 use self::convert::Channel;
 use self::runtime::{CallError, Queues, Runtime, Take};

@@ -286,6 +286,7 @@ pub(super) fn test_state(gates: ParentGates, hub: SharedFanout) -> GatewayState 
         gateway_instance_id,
         transport_generation,
         transport_epoch,
+        timing: crate::server::pump::PumpTiming::default(),
     }
 }
 

@@ -12,7 +12,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use prost::Message;
 use rithmic_plants::dto::PlantEvent;
@@ -22,6 +22,7 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
 use tokio::sync::{broadcast, oneshot, Mutex as TokioMutex, Notify};
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 
 use super::attach::{attach, parent_flock_held};
 use super::convert::{plant_event_from_pb, Channel};

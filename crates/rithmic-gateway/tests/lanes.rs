@@ -75,7 +75,9 @@ async fn a_place_overtakes_a_slow_read_on_the_same_connection() {
         ..Opts::default()
     })
     .await;
-    parent.command("delay load_fill_history 1500").await;
+    // The read is slow by a wide margin, so a loaded CI box cannot blur which
+    // reply came first: ordering is the property, the bounds are generous.
+    parent.command("delay load_fill_history 3000").await;
     let mut c = connect(&parent).await;
     let started = Instant::now();
     write_body(&mut c, 10, fill_history()).await;
@@ -85,10 +87,10 @@ async fn a_place_overtakes_a_slow_read_on_the_same_connection() {
     let got = replies(&mut c, &[10, 11], started).await;
     assert_eq!(got[0].0, 11, "the place replies first: {got:?}");
     assert!(
-        got[0].1 < Duration::from_millis(600),
+        got[0].1 < Duration::from_millis(2000),
         "place waited for the slow read: {got:?}"
     );
-    assert!(got[1].1 >= Duration::from_millis(1400), "{got:?}");
+    assert!(got[1].1 >= Duration::from_millis(2900), "{got:?}");
 }
 
 #[tokio::test]
@@ -122,7 +124,7 @@ async fn slow_reads_run_concurrently_but_only_a_few_at_a_time() {
         ..Opts::default()
     })
     .await;
-    parent.command("delay load_fill_history 600").await;
+    parent.command("delay load_fill_history 1000").await;
     let mut c = connect(&parent).await;
     let started = Instant::now();
     // Eight slow reads at concurrency four finish in two waves, not eight.
@@ -133,11 +135,12 @@ async fn slow_reads_run_concurrently_but_only_a_few_at_a_time() {
     let got = replies(&mut c, &ids, started).await;
     let last = got.last().unwrap().1;
     assert!(
-        last >= Duration::from_millis(1100),
+        last >= Duration::from_millis(1900),
         "concurrency is bounded: {got:?}"
     );
+    // One after another would take 8s; two waves take 2s.
     assert!(
-        last < Duration::from_millis(3000),
+        last < Duration::from_millis(6000),
         "reads ran concurrently, not one after another: {got:?}"
     );
 }
@@ -237,7 +240,7 @@ async fn a_place_is_not_held_by_a_time_bar_load_that_holds_the_session_gate() {
         ..Opts::default()
     })
     .await;
-    parent.command("delay load_time_bars 1500").await;
+    parent.command("delay load_time_bars 3000").await;
     let mut c = connect(&parent).await;
     let started = Instant::now();
     write_body(
@@ -257,7 +260,7 @@ async fn a_place_is_not_held_by_a_time_bar_load_that_holds_the_session_gate() {
     write_body(&mut c, 11, place("during-history")).await;
     let got = replies(&mut c, &[10, 11], started).await;
     assert_eq!(got[0].0, 11, "the place replies first: {got:?}");
-    assert!(got[0].1 < Duration::from_millis(600), "{got:?}");
+    assert!(got[0].1 < Duration::from_millis(2000), "{got:?}");
 }
 
 #[tokio::test]

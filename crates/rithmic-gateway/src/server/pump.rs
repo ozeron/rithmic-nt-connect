@@ -25,6 +25,30 @@ const IDLE_WAIT: Duration = Duration::from_secs(1);
 /// Pause after a non-connection error so a persistent fault cannot spin.
 const ERROR_BACKOFF: Duration = Duration::from_millis(250);
 
+/// The pump's pauses. Production uses [`PumpTiming::default`]; tests pass short
+/// ones (or run under paused tokio time) instead of sleeping for real.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PumpTiming {
+    /// After a non-connection stream error.
+    pub error_backoff: Duration,
+    /// Before retrying a failed plant connect.
+    pub connect_retry: Duration,
+    /// Between restore passes.
+    pub restore_backoff: Duration,
+}
+
+impl Default for PumpTiming {
+    /// The production pauses; `RITHMIC_GATEWAY_RESTORE_BACKOFF_MS` still overrides
+    /// the restore pause for the subprocess integration tests.
+    fn default() -> Self {
+        Self {
+            error_backoff: ERROR_BACKOFF,
+            connect_retry: CONNECT_RETRY,
+            restore_backoff: restore_backoff(),
+        }
+    }
+}
+
 /// True for the subset of `rithmic_plants::Error` that the session
 /// constructor maps `is_connection_issue()` errors onto (see
 /// `rithmic_plants::session::forward` / the stream lanes).
@@ -41,7 +65,12 @@ fn is_connection_issue(e: &rithmic_plants::Error) -> bool {
 /// Serve one plant stream until it reports a connection issue. Waits on the
 /// stream (no session lock held, no polling) and publishes every event, and
 /// every gap, as it arrives.
-async fn serve_stream(session: Arc<dyn Session>, hub: Arc<FanoutHub>, stream: Stream) {
+async fn serve_stream(
+    session: Arc<dyn Session>,
+    hub: Arc<FanoutHub>,
+    stream: Stream,
+    error_backoff: Duration,
+) {
     loop {
         match session.next_events(stream, BATCH, IDLE_WAIT).await {
             Ok(events) => {
@@ -54,7 +83,7 @@ async fn serve_stream(session: Arc<dyn Session>, hub: Arc<FanoutHub>, stream: St
                 if is_connection_issue(&e) {
                     return;
                 }
-                tokio::time::sleep(ERROR_BACKOFF).await;
+                tokio::time::sleep(error_backoff).await;
             }
         }
     }
@@ -70,7 +99,12 @@ async fn serve_until_issue(session: &SessionHandle, hub: &Arc<FanoutHub>, state:
     let plants: Arc<dyn Session> = session.checkout().await;
     let mut streams = JoinSet::new();
     for stream in Stream::ALL {
-        streams.spawn(serve_stream(Arc::clone(&plants), Arc::clone(hub), stream));
+        streams.spawn(serve_stream(
+            Arc::clone(&plants),
+            Arc::clone(hub),
+            stream,
+            state.timing.error_backoff,
+        ));
     }
     loop {
         tokio::select! {
@@ -140,10 +174,10 @@ async fn reconnect_loop(
             if let Err(e) = guard.connect().await {
                 drop(guard);
                 eprintln!(
-                    "rithmic-gateway: reconnect failed: {e}; retrying in {}s",
-                    CONNECT_RETRY.as_secs()
+                    "rithmic-gateway: reconnect failed: {e}; retrying in {:.1}s",
+                    state.timing.connect_retry.as_secs_f64()
                 );
-                tokio::time::sleep(CONNECT_RETRY).await;
+                tokio::time::sleep(state.timing.connect_retry).await;
                 continue;
             }
         }
@@ -167,16 +201,16 @@ async fn reconnect_loop(
                 break;
             }
             if attempt < RESTORE_ATTEMPTS {
-                tokio::time::sleep(restore_backoff()).await;
+                tokio::time::sleep(state.timing.restore_backoff).await;
             }
         }
         if account {
             eprintln!(
                 "rithmic-gateway: account restore still incomplete after {RESTORE_ATTEMPTS} \
-                 attempts; full reconnect in {}s",
-                CONNECT_RETRY.as_secs()
+                 attempts; full reconnect in {:.1}s",
+                state.timing.connect_retry.as_secs_f64()
             );
-            tokio::time::sleep(CONNECT_RETRY).await;
+            tokio::time::sleep(state.timing.connect_retry).await;
             continue;
         }
         for intent in failed_md {

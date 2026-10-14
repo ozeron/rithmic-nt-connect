@@ -167,6 +167,8 @@ pub struct GatewayState {
     /// Notifies connected clients when [`Self::transport_generation`] bumps so
     /// they drop and re-handshake (otherwise they keep a stale Ready frame).
     pub transport_epoch: watch::Sender<u64>,
+    /// The event pump's pauses.
+    pub timing: pump::PumpTiming,
 }
 
 impl GatewayState {
@@ -279,6 +281,8 @@ pub struct GatewayParams {
     pub idle_policy: IdleExitPolicy,
     pub gates: ParentGates,
     pub session: SessionHandle,
+    /// The event pump's pauses ([`pump::PumpTiming::default`] in production).
+    pub timing: pump::PumpTiming,
 }
 
 /// Serve the gateway over an already-connected session until the listener
@@ -294,6 +298,7 @@ pub async fn run_gateway(params: GatewayParams) -> Result<(), String> {
         idle_policy,
         gates,
         session,
+        timing,
     } = params;
     let hub = Arc::new(FanoutHub::new(crate::subscriptions::DEFAULT_QUEUE_CAP));
     let reconnect = Arc::new(ReconnectController::new(hub.clone()));
@@ -316,6 +321,7 @@ pub async fn run_gateway(params: GatewayParams) -> Result<(), String> {
         gateway_instance_id,
         transport_generation,
         transport_epoch,
+        timing,
     });
 
     let pump = tokio::spawn(pump::run_event_pump(

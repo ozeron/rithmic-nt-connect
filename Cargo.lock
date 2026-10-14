@@ -850,10 +850,13 @@ name = "rithmic-plants"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures-util",
  "rithmic-exec",
+ "rithmic-plants",
  "rithmic-rs",
  "thiserror",
  "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]

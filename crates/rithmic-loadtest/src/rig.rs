@@ -73,6 +73,7 @@ impl Rig {
                 cancel_all_enabled: false,
             },
             session: SessionHandle::new(fake.clone()),
+            timing: rithmic_gateway::server::pump::PumpTiming::default(),
         };
         let server = tokio::spawn(async move {
             let _ = run_gateway(params).await;

@@ -431,3 +431,23 @@ pub fn mock_config(path: &Path) -> GatewayConfig {
     cfg.attach_timeout = Duration::from_secs(5);
     cfg
 }
+
+/// Wait until the async `cond` holds, bounded by `timeout` (the async twin of
+/// `rithmic_gateway::testing::wait_until`). Tests wait on an observable
+/// condition instead of a fixed sleep.
+pub async fn wait_until_async<F, Fut>(timeout: Duration, mut cond: F) -> bool
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if cond().await {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}

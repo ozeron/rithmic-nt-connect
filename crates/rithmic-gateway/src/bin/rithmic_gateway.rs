@@ -153,6 +153,7 @@ async fn run() -> Result<(), String> {
         idle_policy,
         gates,
         session: SessionHandle::new(session),
+        timing: rithmic_gateway::server::pump::PumpTiming::default(),
     })
     .await
 }
