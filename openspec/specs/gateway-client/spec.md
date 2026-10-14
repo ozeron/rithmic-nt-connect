@@ -2,9 +2,7 @@
 
 ## Purpose
 The Rust gateway client: attach to an explicitly started parent, share one socket per process with typed event routing, recover the transport with a generation counter, classify outcomes, and load history in chunks.
-
 ## Requirements
-
 ### Requirement: Attach to an explicitly started gateway parent
 The Rust gateway client SHALL connect to an existing parent unix socket and SHALL NOT spawn any process (see `simplify-gateway-modes`, which this change depends on). When the credential flock is held but the socket is not yet accepting, the client SHALL wait up to a bounded attach timeout; otherwise it SHALL fail with `parent_not_running`.
 
@@ -106,8 +104,17 @@ Disconnecting the last client in a process SHALL close the socket and release cl
 - **THEN** the socket SHALL be closed and no client-held resource SHALL leak
 
 ### Requirement: Protocol compatibility with the lake client
-The Rust client and the pure-Python `rithmic_gateway` client SHALL both be exercised by the same integration harness against the same gateway binary, with `session.proto` as the single contract.
+The Rust client and the pure-Python single-connection `rithmic_gateway.GatewayClient` SHALL both be exercised by the same integration harness against the same gateway binary, with `session.proto` as the single contract. The Python package SHALL NOT contain a multiplexing runtime; sharing one socket across sessions is the Rust client's responsibility.
 
 #### Scenario: Both clients pass the shared harness
 - **WHEN** the integration harness runs against the fake-plant gateway binary
-- **THEN** the same scenarios (subscribe, fan-out, gates, restore, re-dial) SHALL pass for the Rust client and the Python client
+- **THEN** the same scenarios (subscribe, fan-out, gates, restore, re-dial) SHALL pass for the Rust client and the Python `GatewayClient`
+
+#### Scenario: Python package imports without a mux
+- **WHEN** `rithmic_gateway` is imported
+- **THEN** it SHALL expose `GatewayClient` and SHALL NOT expose `GatewayMux`, `MuxGatewayClient`, `GatewayRuntimeRegistry`, or `create_gateway_client`
+
+#### Scenario: Wide history window is sequential
+- **WHEN** `load_time_bars_range` splits a window into slices
+- **THEN** the slices SHALL be fetched sequentially over the one connection and the merged result SHALL be ordered and deduplicated
+
