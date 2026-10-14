@@ -94,6 +94,79 @@ impl SessionLock {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// Like [`Self::try_acquire`], but retries `AlreadyHeld` for up to `grace`.
+    ///
+    /// Clients probe the flock (see [`flock_held`]) by briefly taking it, so a
+    /// parent that starts at that instant would otherwise refuse to start. A
+    /// lock that stays held past `grace` is a real second process and still fails.
+    pub fn try_acquire_patient(
+        user: &str,
+        system_name: &str,
+        url: &str,
+        env: &str,
+        grace: std::time::Duration,
+    ) -> Result<Self, SingletonError> {
+        let deadline = std::time::Instant::now() + grace;
+        loop {
+            match Self::try_acquire(user, system_name, url, env) {
+                Err(SingletonError::AlreadyHeld { .. }) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                other => return other,
+            }
+        }
+    }
+
+    /// [`Self::try_acquire_patient`] for async startup: the retry sleeps run on a
+    /// blocking thread instead of stalling an executor worker.
+    pub async fn acquire_patient(
+        user: &str,
+        system_name: &str,
+        url: &str,
+        env: &str,
+        grace: std::time::Duration,
+    ) -> Result<Self, SingletonError> {
+        let (user, system_name, url, env) = (
+            user.to_string(),
+            system_name.to_string(),
+            url.to_string(),
+            env.to_string(),
+        );
+        tokio::task::spawn_blocking(move || {
+            Self::try_acquire_patient(&user, &system_name, &url, &env, grace)
+        })
+        .await
+        .expect("flock acquisition task panicked")
+    }
+}
+
+/// How long a parent waits out a transient flock probe before refusing to start.
+pub const STARTUP_LOCK_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// True when another live process holds the credential flock.
+///
+/// Probes without taking ownership: it never truncates the lock file or writes
+/// a pid (unlike [`SessionLock::try_acquire`]), so a client can attest that a
+/// parent is alive without disturbing it.
+pub fn flock_held(user: &str, system_name: &str, url: &str, env: &str) -> bool {
+    let path = SessionLock::lock_path(user, system_name, url, env);
+    let Ok(file) = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+    else {
+        return false;
+    };
+    match file.try_lock_exclusive() {
+        Ok(()) => {
+            let _ = fs2::FileExt::unlock(&file);
+            false
+        }
+        Err(_) => true,
+    }
 }
 
 fn simple_hash(s: &str) -> u64 {
@@ -125,6 +198,57 @@ mod tests {
         assert!(matches!(err, SingletonError::AlreadyHeld { .. }));
         drop(a);
         let _b = SessionLock::try_acquire(&user, system, url, env).expect("after drop");
+    }
+
+    #[test]
+    fn patient_acquire_rides_out_a_transient_probe_but_not_a_real_holder() {
+        let user = format!("patient-user-{}", std::process::id());
+        let (system, url, env) = ("LucidTrading", "wss://patient.example", "Live");
+        let grace = std::time::Duration::from_millis(500);
+
+        // A holder that lets go after 60ms (a probe): the patient acquire waits.
+        let holder = SessionLock::try_acquire(&user, system, url, env).expect("holder");
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            drop(holder);
+        });
+        let started = std::time::Instant::now();
+        let lock = SessionLock::try_acquire_patient(&user, system, url, env, grace)
+            .expect("acquired after the probe released it");
+        assert!(started.elapsed() >= std::time::Duration::from_millis(50));
+        release.join().unwrap();
+
+        // A real holder never lets go: it fails, but only after the grace.
+        let started = std::time::Instant::now();
+        let err = SessionLock::try_acquire_patient(
+            &user,
+            system,
+            url,
+            env,
+            std::time::Duration::from_millis(100),
+        )
+        .unwrap_err();
+        assert!(matches!(err, SingletonError::AlreadyHeld { .. }));
+        assert!(started.elapsed() >= std::time::Duration::from_millis(90));
+        drop(lock);
+    }
+
+    #[test]
+    fn flock_held_probes_without_taking_the_lock() {
+        let user = format!("probe-user-{}", std::process::id());
+        let (system, url, env) = ("LucidTrading", "wss://probe.example", "Live");
+        assert!(!flock_held(&user, system, url, env), "free before acquire");
+        // Probing must leave the lock acquirable.
+        let lock = SessionLock::try_acquire(&user, system, url, env).expect("acquire");
+        assert!(flock_held(&user, system, url, env), "held while owned");
+        let pid = std::fs::read_to_string(lock.path()).expect("pid file");
+        assert_eq!(
+            pid,
+            std::process::id().to_string(),
+            "probe must not rewrite the pid"
+        );
+        drop(lock);
+        assert!(!flock_held(&user, system, url, env), "free after release");
     }
 
     #[test]

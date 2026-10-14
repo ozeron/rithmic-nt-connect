@@ -13,14 +13,21 @@ Read that file (or the sections you are touching) before implementing or reviewi
 
 ### Direct ↔ gateway plant-surface parity (hard)
 
-`rithmic-plants` / PyO3 **direct** and **gateway** (`proto` → dispatch → `GatewayClient` → `gateway_wire`) must stay capability-compatible for every plant order/exec surface.
+Direct and gateway are two implementations of one Rust trait, `Session`
+(`crates/rithmic-plants/src/backend.rs`): `DirectSession` (in-process plants, owns
+the order-op gate) and `GatewaySession` (`crates/rithmic-gateway/src/client`,
+attach-only, one socket per fingerprint). The PyO3 `Session` and the gateway
+**server** (`crates/rithmic-gateway/src/server`) are both generic over that trait,
+so the adapter has one call surface in either mode, including the read-only
+fill-history and order-history queries (one-shot, trading-gated reads).
 
 When you add or change a plant RPC (place / cancel / modify / brackets / ensure / subscribe / …):
 
-1. Wire it on **both** paths in the same change (plants + PyO3 **and** `session.proto` + gateway dispatch + Python client + `gateway_wire`).
-2. Do not ship “direct-only” for a new live capability unless STATUS explicitly marks gateway as deferred **and** book/runners refuse that mode.
+1. Add it to the `Session` trait, with `DirectSession` and `FakeSession` (feature `testing`) implementations.
+2. Add its row to the RPC table (`crates/rithmic-gateway/src/rpc_table.rs`: kind + gate), then the `session.proto` message, the server dispatch, the `GatewaySession` call (with its call mode: Read / Command / Intent), and the PyO3 method plus `_lib.pyi`.
 3. Keep request field names and semantics aligned (e.g. bracket `localid` / `stop_ticks` / `target_ticks`).
-4. Add or extend a test that would fail if one path drifts (proto framing, client method, or wire façade).
+4. Tests that fail on drift: `tests/rpc_table.rs` (proto ↔ trait ↔ table ↔ `RestorePlan`), `tests/client_scenarios.rs` + `tests/test_gateway_scenarios.py` (same scenarios through every client), `tests/test_wire_trait_parity.py` (PyO3 ↔ `WireSession`).
+5. Do not ship “direct-only” for a new live capability unless STATUS marks gateway as deferred **and** book/runners refuse that mode.
 
 Structure now enforces the first half of this: declare the RPC on `WireSession` in `session.py` and
 `tests/test_wire_session_parity.py` fails until every adapter (direct facade, gateway facade over
@@ -31,14 +38,30 @@ dispatch/gate tests (`crates/rithmic-gateway/tests`) are still yours to extend.
 
 #### Learning: gateway RPC kinds (do not confuse)
 
-Gateway plant RPCs are **not** all the same shape. Shipping a new stream as a bare `session.subscribe_*` + Ack is how bracket updates lost fan-out delivery and reconnect restore.
+Gateway plant RPCs are **not** all the same shape. Shipping a new stream as a bare `session.subscribe_*` + Ack is how bracket updates lost fan-out delivery and reconnect restore. The RPC table's `kind` column is the single place this is decided, and its tests enforce it.
 
 | Kind | Examples | Must include |
 | --- | --- | --- |
-| **One-shot command** | `place_*`, `adjust_*`, `cancel_*`, `modify_*` | Trading gate → plant call → map error. No fanout / `note_*` / restore. |
+| **One-shot command** | `place_*`, `adjust_*`, `cancel_*`, `modify_*` | Trading gate → plant call → map error. No fanout / `note_*` / restore. Client side: never retried after the request was written (`OutcomeUnknown`). |
 | **Subscription intent** | ticker, book, time bars, PnL, **order updates**, **bracket updates** | Gate → attach hub fanout → `note_*` refcount → plant only on 0→1 → rollback on fail → **`restore_intents` re-issues after plant reconnect**. |
 
-Bracket notifications ride the **order-plant** stream. Use `subscribe_order_plant_stream` in `dispatch.rs` (order and/or brackets flags) — never a one-shot plant call. Extend `RestorePlan` + `restore_intents` and add a gate/reconnect test that asserts the new intent bit (see `gates` / `reconnect` tests). Proto string greps alone are not enough.
+Bracket notifications ride the **order-plant** stream. Use `subscribe_order_plant_stream` in `server/dispatch/subscriptions.rs` (order and/or brackets flags) — never a one-shot plant call. Extend `RestorePlan` + `restore_intents` and the table row; `intent_rows_cover_exactly_the_restore_plan_fields` and `every_subscription_intent_is_reissued_by_restore_intents` fail otherwise. Proto string greps alone are not enough.
+
+### Execution rules live in `rithmic-exec`
+
+Venue-semantics rules that do not need Nautilus are implemented once, in the pure
+`crates/rithmic-exec` crate (no plants, tokio, or Nautilus): the order-plant
+lifecycle policy, exposure and commission lookup, the notification-kind mapping
+(shared with `rithmic-plants`), fill identity and dedup, the instrument-id codec,
+the bounded recency cache, drain-row trust / freshest-row / stale-row decisions,
+and inventory rules. The Python modules (`_order_plant.py`, `exposure.py`,
+`commission.py`, `_convert.py`, `_orders.py`, `recon.py`, `inventory.py`) keep
+only Nautilus translation, Python-object coercion (`enum_int`, `sentinel_none`,
+`format_price_str`) and effects (publish, cache write, ordering).
+
+- Change a ported rule in Rust, with a Rust test. Do not re-add it in Python.
+- `tests/test_exec_rules_parity.py` keeps the original Python of each ported rule as an oracle; extend it when a rule gains inputs.
+- New rule over typed values with no Nautilus dependency: add it to the crate. Rule that depends on what Python does to an arbitrary object: keep it at the Python boundary.
 
 Related:
 
@@ -64,6 +87,7 @@ After a change that emits Nautilus data or execution events, check the rows that
 - [ ] Live / Demo / Test endpoints cannot mix accidentally
 - [ ] Distinct venue instruments never share an `InstrumentId`
 - [ ] `connect_mode` / `RITHMIC_CONNECT_MODE` is explicit (`ConnectMode.DIRECT` \| `GATEWAY`; no silent default)
+- [ ] Gateway-mode clients hold no Rithmic password and never spawn the parent (attach-only, mux-only; the parent is started explicitly)
 
 ### Data
 
@@ -99,6 +123,7 @@ After a change that emits Nautilus data or execution events, check the rows that
 
 - One Rithmic login session — do not run against LucidTrading while MotiveWave / R|Trader is open.
 - Trading is off unless `enable_trading=True` / `RITHMIC_ENABLE_TRADING=1`.
+- Only the gateway **parent** holds `RITHMIC_PASSWORD`; gateway-mode clients (`SessionConfig`, `GatewayConfig`) never read, hold, log, or send it, and the client library never spawns a parent. Start the parent explicitly (`python -m rithmic_gateway`, a service manager, or the harness helper `scripts/_gateway_parent.py` for smokes/live e2e). Retired knobs (`RITHMIC_GATEWAY_CLIENT_MODE=dual`, `SPAWN_POLICY=if_missing|auto|default`, `AUTO_SPAWN=1`) raise a config error (`ConfigError` from `SessionConfig`, `GatewayConfigError` from the `rithmic_gateway` library).
 - Do **not** run `scripts/verify_order_dry_run.py --live-place` unless `RITHMIC_ENABLE_TRADING=1` is set and an explicit far `--price` is passed (BUY below / SELL above market). Test-plant order routing with `DEFAULT_APP_NAME` is confirmed authorized (proven 2026-08-17: order routed to exchange); production `Rithmic 01` / LucidTrading place still needs a conformance `app_name`.
 - Do not commit secrets, certs, or gated `.proto` sources.
 - Do not commit one-off dev probe scripts; live checks belong in mechanism-only e2e tests (`tests/e2e/`) or documented runbook commands.
@@ -126,7 +151,7 @@ uv sync --extra dev
 # locally via the hk hooks but is NOT a CI gate (the pre-commit hook enforces it).
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test -p rithmic-plants -p rithmic-gateway -p rithmic-nt-connect
+cargo test -p rithmic-plants -p rithmic-gateway -p rithmic-exec -p rithmic-nt-connect
 uv run ruff check .
 uv run ruff format --check .
 uv run ty check python/rithmic_nt_connect python/rithmic_gateway tests

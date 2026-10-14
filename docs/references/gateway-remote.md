@@ -7,6 +7,7 @@ How clients reach a `rithmic-gateway` parent that holds the single Rithmic login
 - Listen: `unix://$XDG_RUNTIME_DIR/rithmic-gateway-<hash>.sock` (mode `0600`)
 - Auth: same UID + optional empty `auth_token`; Handshake fingerprint must match parent
 - Only the gateway process (or `connect_mode=direct` with flock) opens Rithmic plants
+- Clients: the adapter's `connect_mode=gateway` is the Rust client inside the extension (`rithmic-gateway` crate `client`); lake consumers use the pure-Python `rithmic_gateway.GatewayClient`. Both speak this protocol, attach-only, and are exercised by one scenario suite (`tests/test_gateway_scenarios.py`, `crates/rithmic-gateway/tests/client_scenarios.rs`)
 
 ## v1.5 — tunnel (no protocol change)
 

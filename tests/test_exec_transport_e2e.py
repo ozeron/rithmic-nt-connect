@@ -715,7 +715,7 @@ def test_transport_generation_bump_schedules_l3_rearm(
     async def _run() -> None:
         loop = asyncio.get_running_loop()
         client._loop = loop  # type: ignore[attr-defined]
-        from rithmic_gateway.transport_recovery import (
+        from rithmic_nt_connect.transport import (
             TransportDown,
             TransportFault,
             TransportFaultKind,
@@ -770,7 +770,7 @@ def _restore_client(
 
 
 def _transport_down(gen: int = 1) -> Any:
-    from rithmic_gateway.transport_recovery import (
+    from rithmic_nt_connect.transport import (
         TransportDown,
         TransportFault,
         TransportFaultKind,
@@ -785,7 +785,7 @@ def _transport_down(gen: int = 1) -> Any:
 def test_recovery_failed_latches_the_order_plant(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from rithmic_gateway.transport_recovery import RecoveryFailed
+    from rithmic_nt_connect.transport import RecoveryFailed
 
     client = _restore_client(_ConnectSession(fail_load_orders=False), monkeypatch)
 
@@ -797,7 +797,7 @@ def test_recovery_failed_latches_the_order_plant(
 def test_up_while_a_restore_is_in_flight_is_dropped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from rithmic_gateway.transport_recovery import TransportUp
+    from rithmic_nt_connect.transport import TransportUp
 
     session = _ConnectSession(fail_load_orders=False)
     client = _restore_client(session, monkeypatch)
@@ -817,7 +817,7 @@ def test_up_while_a_restore_is_in_flight_is_dropped(
 def test_restore_exhaustion_leaves_the_plant_latched(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from rithmic_gateway.transport_recovery import TransportUp
+    from rithmic_nt_connect.transport import TransportUp
 
     session = _FailingSubscribeSession(fail_load_orders=False)
     client = _restore_client(session, monkeypatch)
@@ -846,7 +846,7 @@ def test_restore_exhaustion_leaves_the_plant_latched(
 def test_restore_is_skipped_when_trading_is_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from rithmic_gateway.transport_recovery import TransportUp
+    from rithmic_nt_connect.transport import TransportUp
 
     session = _ConnectSession(fail_load_orders=False)
     client = _restore_client(session, monkeypatch, enable_trading=False)
@@ -870,7 +870,7 @@ def test_exec_restores_once_per_generation(
 ) -> None:
     """A repeated Up for an already-restored generation is dropped; the next
     generation restores again (exec used to restore on every duplicate)."""
-    from rithmic_gateway.transport_recovery import TransportUp
+    from rithmic_nt_connect.transport import TransportUp
 
     session = _ConnectSession(fail_load_orders=False)
     client = _restore_client(session, monkeypatch)

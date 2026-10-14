@@ -20,11 +20,11 @@ from nautilus_trader.model.identifiers import (
     InstrumentId,
     VenueOrderId,
 )
-from rithmic_gateway.types import AccountRmsInfo, ProductRmsInfo
 from rithmic_nt_connect.commission import CommissionRegistry
 from rithmic_nt_connect.data import RithmicDataClient
 from rithmic_nt_connect.execution import RithmicExecutionClient
 from rithmic_nt_connect.session import WireSession
+from rithmic_nt_connect.wire_types import AccountRmsInfo, ProductRmsInfo
 
 
 class WireSessionStub:

@@ -4,13 +4,16 @@ password on IPC).
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
 
-SpawnPolicy = Literal["never", "if_missing"]
+_LOG = logging.getLogger(__name__)
+
+#: Retired knobs already warned about in this process (one warning per variable).
+_DEPRECATION_WARNED: set[str] = set()
 
 
 class GatewayConfigError(ValueError):
@@ -126,28 +129,66 @@ def _clamp_unix_path(path: str, hash_u64: int) -> str:
     return str(short)
 
 
-def parse_spawn_policy(env: Mapping[str, str]) -> SpawnPolicy:
-    """Resolve spawn policy from env (``never`` = dial-only attach)."""
-    explicit = env.get("RITHMIC_GATEWAY_SPAWN_POLICY")
-    if explicit is not None and str(explicit).strip():
-        key = str(explicit).strip().lower()
-        if key == "never":
-            return "never"
-        if key in {"if_missing", "auto", "default"}:
-            return "if_missing"
-        raise GatewayConfigError(
-            f"invalid RITHMIC_GATEWAY_SPAWN_POLICY {explicit!r}; "
-            f"expected never or if_missing"
-        )
-    auto_raw = env.get("RITHMIC_GATEWAY_AUTO_SPAWN")
-    if auto_raw is not None and str(auto_raw).strip().lower() in {
-        "0",
-        "false",
-        "no",
-        "off",
-    }:
-        return "never"
-    return "if_missing"
+_SPAWN_REMOVED = (
+    "the gateway client no longer spawns the parent; start the parent explicitly "
+    "with `python -m rithmic_gateway` (or a service manager) and remove {name}"
+)
+_DUAL_REMOVED = "dual was removed; mux is the only gateway client mode, remove {name}"
+
+# name -> (values requesting removed behavior, why, values equal to the sole
+# remaining behavior). The latter are accepted as deprecated no-ops.
+_RETIRED_KNOBS: dict[str, tuple[frozenset[str], str, frozenset[str]]] = {
+    "RITHMIC_GATEWAY_CLIENT_MODE": (
+        frozenset({"dual"}),
+        _DUAL_REMOVED,
+        frozenset({"mux"}),
+    ),
+    "RITHMIC_GATEWAY_SPAWN_POLICY": (
+        frozenset({"if_missing", "auto", "default"}),
+        _SPAWN_REMOVED,
+        frozenset({"never"}),
+    ),
+    "RITHMIC_GATEWAY_AUTO_SPAWN": (
+        frozenset({"1", "true", "yes", "on"}),
+        _SPAWN_REMOVED,
+        frozenset({"0", "false", "no", "off"}),
+    ),
+}
+
+
+def _warn_deprecated(name: str, value: str) -> None:
+    if name in _DEPRECATION_WARNED:
+        return
+    _DEPRECATION_WARNED.add(name)
+    _LOG.warning(
+        "%s=%s is deprecated and has no effect (attach-only, mux-only gateway "
+        "client); remove it from your environment",
+        name,
+        value,
+    )
+
+
+def reject_retired_client_knobs(env: Mapping[str, str]) -> None:
+    """Fail fast on retired gateway client variables.
+
+    A value that asks for removed behavior (``dual`` client mode, client-side
+    spawn) raises; a value equal to the sole remaining behavior (``mux``,
+    ``never``, ``AUTO_SPAWN=0``) is accepted as a deprecated no-op so existing
+    env files neither break nor silently change behavior.
+    """
+    for name, (removed, why, accepted) in _RETIRED_KNOBS.items():
+        raw = _env_first(env, name)
+        if raw is None:
+            continue
+        key = raw.lower()
+        if key in removed:
+            raise GatewayConfigError(f"{name}={raw}: " + why.format(name=name))
+        if key not in accepted:
+            raise GatewayConfigError(
+                f"invalid {name} {raw!r}; retired knob, only "
+                f"{'/'.join(sorted(accepted))} is accepted"
+            )
+        _warn_deprecated(name, key)
 
 
 def default_unix_path(user: str, system_name: str, url: str, env: str = "Live") -> str:
@@ -175,12 +216,10 @@ class GatewayConfig:
     ib_id: str = ""
     auth_token: str = field(default="", repr=False)
     listen: str | None = None
-    auto_spawn: bool = True
-    spawn_policy: SpawnPolicy | None = None
-    gateway_bin: str | None = None
-    spawn_timeout_sec: float = 90.0
-    #: Extra env merged into auto-spawn child (e.g. RITHMIC_PASSWORD). Never logged.
-    spawn_environ: dict[str, str] | None = field(default=None, repr=False)
+    #: Bounded wait for an already-starting parent (credential flock held, socket
+    #: not yet accepting) and for a silent parent's Ready. Not a spawn timeout:
+    #: the client never starts the parent.
+    attach_timeout_sec: float = 90.0
     #: Require credential flock held before accepting Ready (disable only for
     # mock-parent unit tests).
     attest_flock: bool = True
@@ -196,20 +235,6 @@ class GatewayConfig:
         else:
             # validate early
             parse_listen_url(str(self.listen))
-        if self.spawn_policy is None:
-            self.spawn_policy = "if_missing" if self.auto_spawn else "never"
-        elif self.spawn_policy not in {"never", "if_missing"}:
-            raise GatewayConfigError(
-                f"invalid spawn_policy {self.spawn_policy!r}; "
-                f"expected never or if_missing"
-            )
-        elif not self.auto_spawn:
-            # Explicit dial-only wins over a default/forwarded "if_missing"
-            # (SessionConfig / gateway_wire may pass both).
-            self.spawn_policy = "never"
-        else:
-            # Explicit policy is authoritative when auto_spawn was left enabled.
-            self.auto_spawn = self.spawn_policy != "never"
 
     @property
     def socket_path(self) -> str:
@@ -224,6 +249,7 @@ class GatewayConfig:
         # Precedence matches SessionConfig / lake: GATEWAY before URL, SYSTEM before
         # SYSTEM_NAME.
         env = environ if environ is not None else os.environ
+        reject_retired_client_knobs(env)
         url = _env_first(env, "RITHMIC_GATEWAY", "RITHMIC_URL") or (
             "wss://rprotocol.rithmic.com:443"
         )
@@ -241,6 +267,4 @@ class GatewayConfig:
             ib_id=_env_first(env, "RITHMIC_IB_ID") or "",
             auth_token=_env_first(env, "RITHMIC_GATEWAY_AUTH_TOKEN") or "",
             listen=_env_first(env, "RITHMIC_GATEWAY_LISTEN"),
-            spawn_policy=parse_spawn_policy(env),
-            gateway_bin=_env_first(env, "RITHMIC_GATEWAY_BIN"),
         )

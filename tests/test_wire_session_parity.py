@@ -3,9 +3,9 @@
 Direct (PyO3) and gateway sessions are two adapters of one seam, so a plant RPC
 added to one path and not the other (AGENTS.md "direct <-> gateway parity")
 must fail here, not in a live session. Adapters checked: the in-process
-facade, the gateway facade over a real ``GatewayClient``, the test double, and
-the compiled extension (through its hand-written ``_lib.pyi`` stub, which is in
-turn checked against the extension itself).
+facade, the Rust gateway wrapper, the test double, and the compiled extension
+(through its hand-written ``_lib.pyi`` stub, which is in turn checked against
+the extension itself).
 
 Compatibility rule (callers pass required arguments positionally): an adapter
 may not require more positional arguments than the protocol, must accept at
@@ -27,13 +27,11 @@ from typing import Any
 import pytest
 import rithmic_nt_connect
 from _stubs import WireSessionStub
-from rithmic_gateway.client import GatewayClient
-from rithmic_gateway.config import GatewayConfig
-from rithmic_nt_connect.gateway_wire import GatewayWireSession
 from rithmic_nt_connect.session import (
     TransportAware,
     WireSession,
     _FlockedDirectSession,
+    _RustGatewaySession,
 )
 
 
@@ -115,9 +113,19 @@ def _check_surface(adapter: Any, label: str) -> None:
     )
 
 
-def _gateway_facade() -> GatewayWireSession:
-    config = GatewayConfig(user="u", system_name="s", url="wss://x", env="Test")
-    return GatewayWireSession(GatewayClient(config))
+def _rust_gateway() -> _RustGatewaySession:
+    """The production gateway adapter over a real (unconnected) Rust client."""
+    from rithmic_nt_connect import _lib
+
+    return _RustGatewaySession(
+        _lib.Session(
+            user="u",
+            system_name="s",
+            url="wss://x",
+            env="Test",
+            connect_mode="gateway",
+        )
+    )
 
 
 def test_protocol_is_non_trivial() -> None:
@@ -131,8 +139,8 @@ def test_direct_facade_matches_protocol() -> None:
     _check_surface(_FlockedDirectSession, "_FlockedDirectSession")
 
 
-def test_gateway_facade_matches_protocol() -> None:
-    _check_surface(_gateway_facade(), "GatewayWireSession")
+def test_rust_gateway_matches_protocol() -> None:
+    _check_surface(_rust_gateway(), "_RustGatewaySession")
 
 
 def test_test_double_matches_protocol() -> None:
@@ -141,8 +149,8 @@ def test_test_double_matches_protocol() -> None:
 
 @pytest.mark.parametrize(
     "adapter",
-    [WireSessionStub(), _gateway_facade()],
-    ids=["stub", "gateway"],
+    [WireSessionStub(), _rust_gateway()],
+    ids=["stub", "rust-gateway"],
 )
 def test_transport_aware_adapters_expose_transport_events(adapter: Any) -> None:
     for member in TRANSPORT_MEMBERS:
@@ -163,6 +171,10 @@ def _pyi_session_methods() -> dict[str, list[Param]]:
     for node in session.body:
         if not isinstance(node, ast.FunctionDef):
             continue
+        if any(
+            isinstance(d, ast.Name) and d.id == "property" for d in node.decorator_list
+        ):
+            continue  # a getset descriptor on the extension, not a routine
         args = [a.arg for a in node.args.args if a.arg != "self"]
         n_default = len(node.args.defaults)
         first_default = len(args) - n_default

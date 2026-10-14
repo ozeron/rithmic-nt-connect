@@ -2,19 +2,16 @@
 //! unix socket. See `docs/references/ops-runbook.md`.
 
 use std::str::FromStr;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use rithmic_gateway::env_keys::{self, process_env_first};
-use rithmic_gateway::idle_exit::{parse_idle_exit_sec, IdleExit};
+use rithmic_gateway::idle_exit::parse_idle_exit_sec;
 use rithmic_gateway::listen::{bind_unix, default_unix_path, ListenEndpoint};
-use rithmic_gateway::reconnect::ReconnectController;
-use rithmic_gateway::server::{pump::run_event_pump, serve, Fingerprint, GatewayState};
-use rithmic_gateway::singleton::SessionLock;
-use rithmic_gateway::subscriptions::{FanoutHub, ParentGates, DEFAULT_QUEUE_CAP};
-use rithmic_plants::{PlantSet, RithmicSession, SessionConfig};
+use rithmic_gateway::server::{run_gateway, Fingerprint, GatewayParams, SessionHandle};
+use rithmic_gateway::singleton::{SessionLock, STARTUP_LOCK_GRACE};
+use rithmic_gateway::subscriptions::ParentGates;
+use rithmic_plants::{DirectSession, PlantSet, Session, SessionConfig};
 use rithmic_rs::RithmicEnv;
-use tokio::sync::Mutex as TokioMutex;
 
 #[tokio::main]
 async fn main() {
@@ -73,8 +70,10 @@ async fn run() -> Result<(), String> {
 
     // Flock first (R10 / AGENTS.md single-login): refuse before ever
     // touching Rithmic if a direct or parent process already holds it.
-    let _lock = SessionLock::try_acquire(&user, &system_name, &url, &env_name)
-        .map_err(|e| format!("credential flock: {e}"))?;
+    let _lock =
+        SessionLock::acquire_patient(&user, &system_name, &url, &env_name, STARTUP_LOCK_GRACE)
+            .await
+            .map_err(|e| format!("credential flock: {e}"))?;
 
     let listen_raw = std::env::var("RITHMIC_GATEWAY_LISTEN").unwrap_or_else(|_| {
         format!(
@@ -124,7 +123,7 @@ async fn run() -> Result<(), String> {
         path.display()
     );
 
-    let mut session = RithmicSession::with_plants(cfg, plants);
+    let session = Arc::new(DirectSession::new(cfg, plants));
     if let Err(e) = session.connect().await {
         let _ = session.disconnect().await;
         drop(listener);
@@ -133,19 +132,9 @@ async fn run() -> Result<(), String> {
     }
     eprintln!("rithmic-gateway: plants connected ({plants:?}; history ready)");
 
-    let gates = ParentGates::from_env();
-    let hub = Arc::new(FanoutHub::new(DEFAULT_QUEUE_CAP));
-    let reconnect = Arc::new(ReconnectController::new(hub.clone()));
-    let session = Arc::new(TokioMutex::new(session));
-    // Ready only after plants are up (KTD5).
-    let ready = AtomicBool::new(true);
-
-    let (gateway_instance_id, transport_generation, transport_epoch) =
-        rithmic_gateway::server::boot_gateway_metadata();
-
-    let state = Arc::new(GatewayState {
-        gates,
-        hub: hub.clone(),
+    run_gateway(GatewayParams {
+        listener,
+        path,
         fingerprint: Fingerprint {
             user,
             system_name,
@@ -155,34 +144,10 @@ async fn run() -> Result<(), String> {
             fcm_id,
             ib_id,
         },
-        ready,
-        force_reconnect: AtomicBool::new(false),
         expected_auth_token,
-        session: Some(session.clone()),
-        reconnect: reconnect.clone(),
-        topic_locks: TokioMutex::new(std::collections::HashMap::new()),
-        recon_lock: Arc::new(TokioMutex::new(())),
-        md_history_gate: Arc::new(TokioMutex::new(())),
-        idle: IdleExit::new(idle_policy),
-        gateway_instance_id,
-        transport_generation,
-        transport_epoch,
-    });
-
-    let pump = tokio::spawn(run_event_pump(
-        session.clone(),
-        hub,
-        reconnect,
-        Arc::clone(&state),
-    ));
-
-    let serve_result = serve(listener, state).await.map_err(|e| e.to_string());
-    pump.abort();
-    let _ = pump.await;
-    {
-        let mut guard = session.lock().await;
-        let _ = guard.disconnect().await;
-    }
-    let _ = std::fs::remove_file(&path);
-    serve_result
+        idle_policy,
+        gates: ParentGates::from_env(),
+        session: SessionHandle::new(session),
+    })
+    .await
 }

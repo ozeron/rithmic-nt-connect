@@ -30,6 +30,15 @@ impl PlantSet {
         pnl: true,
     };
 
+    /// The name [`PlantSet::parse`] accepts for this set (the gateway wire form).
+    pub fn wire_name(&self) -> &'static str {
+        if self.pnl {
+            "execution"
+        } else {
+            "market_data"
+        }
+    }
+
     /// Parse `"market_data"` / `"execution"`.
     pub fn parse(raw: &str) -> Result<Self> {
         match raw.trim() {
@@ -60,5 +69,12 @@ mod tests {
         );
         assert_eq!(PlantSet::parse("execution").unwrap(), PlantSet::EXECUTION);
         assert!(PlantSet::parse("orders").is_err());
+    }
+
+    #[test]
+    fn wire_name_round_trips_through_parse() {
+        for set in [PlantSet::MARKET_DATA, PlantSet::EXECUTION] {
+            assert_eq!(PlantSet::parse(set.wire_name()).unwrap(), set);
+        }
     }
 }

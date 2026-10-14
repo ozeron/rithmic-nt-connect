@@ -14,7 +14,6 @@ import pytest
 from rithmic_gateway.client import GatewayClient
 from rithmic_gateway.config import GatewayConfig
 from rithmic_gateway.framing import encode_frame
-from rithmic_gateway.spawn import spawn_gateway
 from rithmic_gateway.v1 import session_pb2 as pb
 
 
@@ -150,7 +149,6 @@ def test_two_clients_share_one_parent_and_receive_own_ticks() -> None:
             system_name="LucidTrading",
             url="wss://example",
             listen=listen,
-            auto_spawn=False,
             attest_flock=False,
         )
         cfg_b = GatewayConfig(
@@ -158,7 +156,6 @@ def test_two_clients_share_one_parent_and_receive_own_ticks() -> None:
             system_name="LucidTrading",
             url="wss://example",
             listen=listen,
-            auto_spawn=False,
             attest_flock=False,
         )
         a = GatewayClient(cfg_a, rpc_timeout_sec=5.0)
@@ -202,54 +199,22 @@ def test_two_clients_share_one_parent_and_receive_own_ticks() -> None:
             sock.unlink()
 
 
-def test_second_connect_dials_existing_socket_without_spawn(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When the listen path already accepts, connect must not call spawn_gateway."""
-    sock = Path(f"/tmp/rgw-nosspawn-{os.getpid()}.sock")
-    spawn_calls: list[object] = []
-
-    def _boom(_cfg: GatewayConfig) -> object:
-        spawn_calls.append(1)
-        raise AssertionError("spawn_gateway should not run when socket exists")
-
-    monkeypatch.setattr("rithmic_gateway.spawn.spawn_gateway", _boom)
-    try:
-        _serve_shared_md_parent(sock, clients=2)
-        cfg = GatewayConfig(
-            user="u",
-            system_name="LucidTrading",
-            url="wss://example",
-            listen=f"unix://{sock}",
-            auto_spawn=True,
-            attest_flock=False,
-        )
-        first = GatewayClient(cfg, rpc_timeout_sec=5.0)
-        second = GatewayClient(cfg, rpc_timeout_sec=5.0)
-        first.connect()
-        second.connect()
-        assert spawn_calls == []
-        first.disconnect()
-        second.disconnect()
-    finally:
-        if sock.exists():
-            sock.unlink()
-
-
 def test_connect_waits_for_parent_when_flock_held_before_socket(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Dial fail + flock held must attach to the existing parent, not spawn."""
+    """Dial fail + flock held must attach to the existing parent; nothing spawns."""
+    import subprocess
+
     from rithmic_gateway.flock import SessionLock
 
     sock = Path(f"/tmp/rgw-flockwait-{os.getpid()}.sock")
-    spawn_calls: list[object] = []
+    popen_calls: list[object] = []
 
-    def _boom(_cfg: GatewayConfig, **_k: object) -> object:
-        spawn_calls.append(1)
-        raise AssertionError("spawn_gateway must not run when flock is held")
+    def _boom(*_a: object, **_k: object) -> object:
+        popen_calls.append(1)
+        raise AssertionError("the gateway client must never start a process")
 
-    monkeypatch.setattr("rithmic_gateway.spawn.spawn_gateway", _boom)
+    monkeypatch.setattr(subprocess, "Popen", _boom)
 
     lock = SessionLock.try_acquire(
         "u-flockwait", "LucidTrading", "wss://example", "Live"
@@ -269,64 +234,13 @@ def test_connect_waits_for_parent_when_flock_held_before_socket(
             url="wss://example",
             env="Live",
             listen=f"unix://{sock}",
-            auto_spawn=True,
             attest_flock=False,
-            spawn_timeout_sec=3.0,
+            attach_timeout_sec=3.0,
         )
         client = GatewayClient(cfg, rpc_timeout_sec=5.0)
         client.connect()
-        assert spawn_calls == []
-        client.disconnect()
-    finally:
-        lock.close()
-        if sock.exists():
-            sock.unlink()
-
-
-def test_spawn_gateway_skips_popen_when_flock_held(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """spawn_gateway must wait for socket only when flock is already held."""
-    from rithmic_gateway.flock import SessionLock
-
-    sock = Path(f"/tmp/rgw-spawn-skip-{os.getpid()}.sock")
-    popen_calls: list[object] = []
-
-    def _boom(*_a: object, **_k: object) -> object:
-        popen_calls.append(1)
-        raise AssertionError("Popen must not run when flock is held")
-
-    monkeypatch.setattr("rithmic_gateway.spawn.subprocess.Popen", _boom)
-
-    lock = SessionLock.try_acquire(
-        "u-spawn-skip", "LucidTrading", "wss://example", "Live"
-    )
-    try:
-
-        def _late_parent() -> None:
-            time.sleep(0.15)
-            # Extra accept slots: wait_for_parent_socket probe dials consume one.
-            _serve_shared_md_parent(sock, clients=3)
-
-        threading.Thread(target=_late_parent, daemon=True).start()
-        cfg = GatewayConfig(
-            user="u-spawn-skip",
-            system_name="LucidTrading",
-            url="wss://example",
-            env="Live",
-            listen=f"unix://{sock}",
-            spawn_timeout_sec=3.0,
-        )
-        proc = spawn_gateway(
-            cfg,
-            wait_socket=True,
-            environ={
-                "RITHMIC_USER": "u-spawn-skip",
-                "RITHMIC_PASSWORD": "unit-test-secret-zz9",
-            },
-        )
-        assert proc is None
         assert popen_calls == []
+        client.disconnect()
     finally:
         lock.close()
         if sock.exists():

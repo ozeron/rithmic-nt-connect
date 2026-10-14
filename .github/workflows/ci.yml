@@ -28,7 +28,7 @@ jobs:
       - name: Sync Python deps
         run: uv sync --extra dev
       - name: Cargo test
-        run: cargo test -p rithmic-plants -p rithmic-gateway -p rithmic-nt-connect
+        run: cargo test -p rithmic-plants -p rithmic-gateway -p rithmic-exec -p rithmic-nt-connect
       - name: Cargo clippy (lint, -D warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Ruff lint

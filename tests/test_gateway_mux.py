@@ -134,12 +134,11 @@ def test_mux_routes_md_and_exec_events_to_separate_pollers() -> None:
             system_name="LucidTrading",
             url="wss://example",
             listen=f"unix://{sock}",
-            auto_spawn=False,
             attest_flock=False,
-            spawn_timeout_sec=3.0,
+            attach_timeout_sec=3.0,
         )
-        md_client = create_gateway_client(cfg, mode="mux")
-        exec_client = create_gateway_client(cfg, mode="mux")
+        md_client = create_gateway_client(cfg)
+        exec_client = create_gateway_client(cfg)
         md_client.connect()
         exec_client.connect()
         md_client.subscribe("NQH6", "CME")
@@ -173,11 +172,10 @@ def test_mux_stays_connected_when_parent_is_quiet() -> None:
             system_name="LucidTrading",
             url="wss://example",
             listen=f"unix://{sock}",
-            auto_spawn=False,
             attest_flock=False,
-            spawn_timeout_sec=3.0,
+            attach_timeout_sec=3.0,
         )
-        client = create_gateway_client(cfg, mode="mux")
+        client = create_gateway_client(cfg)
         assert isinstance(client, MuxGatewayClient)
         client.connect()
         mux = client._runtime.mux
@@ -199,7 +197,6 @@ def test_mux_reconnect_notifies_listeners_without_wiping_queues(
         user="u-mux-reconnect",
         system_name="LucidTrading",
         url="wss://example",
-        auto_spawn=False,
         attest_flock=False,
     )
     mux = GatewayMux(cfg)
@@ -222,7 +219,6 @@ def test_mux_poll_raises_eof_when_transport_down_and_queues_empty() -> None:
         user="u-mux-poll-eof",
         system_name="LucidTrading",
         url="wss://example",
-        auto_spawn=False,
         attest_flock=False,
     )
     mux = GatewayMux(cfg)
@@ -259,7 +255,6 @@ def test_mux_fanout_delivers_to_each_subscriber() -> None:
         user="u-mux-fanout",
         system_name="LucidTrading",
         url="wss://example",
-        auto_spawn=False,
         attest_flock=False,
     )
     mux = GatewayMux(cfg)
@@ -280,49 +275,3 @@ def test_mux_fanout_delivers_to_each_subscriber() -> None:
     got_b = mux.poll_filtered(b, 0, lambda e: e.get("type") == "last_trade")
     assert got_a is not None and got_a["type"] == "last_trade"
     assert got_b is not None and got_b["type"] == "last_trade"
-
-
-def test_mux_reset_ticker_never_disconnects_transport(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    sock = Path(f"/tmp/rgw-mux-reset-{os.getpid()}.sock")
-    try:
-        _serve_shared_md_parent(sock, clients=2)
-        cfg = GatewayConfig(
-            user="u-mux-reset",
-            system_name="LucidTrading",
-            url="wss://example",
-            listen=f"unix://{sock}",
-            auto_spawn=False,
-            attest_flock=False,
-            spawn_timeout_sec=3.0,
-        )
-        from rithmic_nt_connect.gateway_wire import GatewayWireSession
-
-        client = create_gateway_client(cfg, mode="mux")
-        assert isinstance(client, MuxGatewayClient)
-        session = GatewayWireSession(client)
-        session.connect()
-
-        calls: list[str] = []
-
-        def _boom() -> None:
-            calls.append("plant")
-            raise GatewayError("plant_reset_failed", "mock")
-
-        monkeypatch.setattr(client, "reset_ticker_plant", _boom)
-        real_disconnect = client.disconnect
-
-        def _track_disconnect() -> None:
-            calls.append("disconnect")
-            real_disconnect()
-
-        monkeypatch.setattr(client, "disconnect", _track_disconnect)
-
-        with pytest.raises(GatewayError, match="plant_reset_failed"):
-            session.reset_ticker()
-        assert calls == ["plant"]
-        session.disconnect()
-    finally:
-        if sock.exists():
-            sock.unlink()

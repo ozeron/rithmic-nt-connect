@@ -11,12 +11,14 @@ systems are refused by the adapter before any connection.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import pytest
-from rithmic_nt_connect.config import env_truthy, system_kind
+from _gateway_parent import running_parent
+from rithmic_nt_connect.config import ConnectMode, env_truthy, system_kind
 
 if TYPE_CHECKING:
     from rithmic_nt_connect.session import WireSession
@@ -57,6 +59,47 @@ def test_env() -> dict[str, str] | None:
     is unavailable.
     """
     return _test_env()
+
+
+def parent_trading_env(test_env: dict[str, str] | None) -> dict[str, str]:
+    """The trading flag for a harness-started parent (process env wins, as for the
+    exec fixtures): the same inputs everywhere, so every user of the session
+    parent agrees on its gate.
+    """
+    trading = env_truthy(
+        os.environ.get("RITHMIC_ENABLE_TRADING")
+        or (test_env or {}).get("RITHMIC_ENABLE_TRADING")
+    )
+    return {"RITHMIC_ENABLE_TRADING": "1"} if trading else {}
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _gateway_parent(test_env) -> Iterator[None]:
+    """In gateway mode, start the parent for the whole session.
+
+    The gateway client only attaches (it never spawns), so a live run whose test
+    env says ``RITHMIC_CONNECT_MODE=gateway`` needs a parent. Only this process's
+    parent holds the Rithmic password. Direct mode needs none.
+    """
+    from _gateway_parent import gateway_config_from_session
+    from rithmic_nt_connect.config import (
+        parse_connect_mode,
+        session_config_from_explicit_test_env,
+    )
+
+    mode = (test_env or {}).get("RITHMIC_CONNECT_MODE", "")
+    if not test_env or not mode or parse_connect_mode(mode) != ConnectMode.GATEWAY:
+        yield
+        return
+    password = test_env.get("RITHMIC_PASSWORD")
+    if not password:
+        yield
+        return
+    gcfg = gateway_config_from_session(session_config_from_explicit_test_env())
+    with running_parent(
+        gcfg, password=password, extra_env=parent_trading_env(test_env)
+    ):
+        yield
 
 
 @pytest.fixture(scope="session")

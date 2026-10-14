@@ -6,7 +6,6 @@ from typing import Any
 
 import pytest
 from _stubs import WireSessionStub
-from rithmic_gateway.flock import SessionLock, SessionLockError
 from rithmic_nt_connect.config import SessionConfig
 
 
@@ -91,60 +90,6 @@ def test_flocked_session_forwards_resolved_account() -> None:
     }
 
 
-def test_gateway_create_session_returns_fresh_wire_session(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Gateway mode returns distinct wire facades; mux shares runtime underneath."""
-    import rithmic_nt_connect.gateway_wire as gw
-    from rithmic_nt_connect.config import ConnectMode, SessionConfig
-    from rithmic_nt_connect.session import create_session
-
-    created: list[object] = []
-
-    def _fake_gateway(session):
-        obj = object()
-        created.append(obj)
-        return obj
-
-    monkeypatch.setattr(gw, "create_gateway_wire_session", _fake_gateway)
-    cfg = SessionConfig(
-        user="u",
-        password="p",
-        connect_mode=ConnectMode.GATEWAY,
-        gateway_client_mode="mux",
-    )
-    a = create_session(cfg)
-    b = create_session(cfg)
-    assert a is not b
-    assert len(created) == 2
-
-
-def test_gateway_dual_mode_create_session_isolated(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from typing import Any, cast
-
-    from rithmic_gateway.runtime import GatewayRuntimeRegistry
-    from rithmic_nt_connect.config import ConnectMode, SessionConfig
-    from rithmic_nt_connect.session import create_session
-
-    GatewayRuntimeRegistry.reset_for_tests()
-    monkeypatch.delenv("RITHMIC_GATEWAY_CLIENT_MODE", raising=False)
-    cfg = SessionConfig(
-        user="u-dual-factory",
-        password="p",
-        connect_mode=ConnectMode.GATEWAY,
-        gateway_listen=f"unix:///tmp/rgw-dual-factory-{id(object())}.sock",
-        gateway_auto_spawn=False,
-        gateway_client_mode="dual",
-    )
-    a = create_session(cfg)
-    b = create_session(cfg)
-    assert a is not b
-    assert cast(Any, a)._client is not cast(Any, b)._client
-    GatewayRuntimeRegistry.reset_for_tests()
-
-
 def test_connect_once_swallows_only_typed_already_connected() -> None:
     from rithmic_nt_connect.errors import AlreadyConnectedError
     from rithmic_nt_connect.session import _connect_once
@@ -163,15 +108,33 @@ def test_connect_once_swallows_only_typed_already_connected() -> None:
 
 
 def test_second_flock_acquire_fails() -> None:
+    _lib = pytest.importorskip("rithmic_nt_connect._lib")
     user = f"flock-test-{id(object())}"
     system = "LucidTrading"
     url = "wss://rprotocol.rithmic.com:443"
-    first = SessionLock.try_acquire(user, system, url)
-    with pytest.raises(SessionLockError, match="already held"):
-        SessionLock.try_acquire(user, system, url)
+    first = _lib.SessionLock.try_acquire(user, system, url)
+    with pytest.raises(_lib.SessionLockError, match="already held"):
+        _lib.SessionLock.try_acquire(user, system, url)
     first.close()
-    second = SessionLock.try_acquire(user, system, url)
+    second = _lib.SessionLock.try_acquire(user, system, url)
     second.close()
+
+
+def test_the_extension_flock_is_the_one_the_python_lake_client_probes() -> None:
+    """Direct mode (Rust lock) and the lake client's probe must agree on the file."""
+    from pathlib import Path
+
+    from rithmic_gateway.flock import lock_path
+
+    _lib = pytest.importorskip("rithmic_nt_connect._lib")
+    user = f"flock-path-{id(object())}"
+    system = "LucidTrading"
+    url = "wss://rprotocol.rithmic.com:443"
+    held = _lib.SessionLock.try_acquire(user, system, url, "Live")
+    try:
+        assert Path(held.path) == lock_path(user, system, url, "Live")
+    finally:
+        held.close()
 
 
 class _FakeSessionInner(WireSessionStub):

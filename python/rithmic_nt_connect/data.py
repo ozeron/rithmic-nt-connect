@@ -45,7 +45,7 @@ from nautilus_trader.model.identifiers import ClientId, InstrumentId, TradeId, V
 from nautilus_trader.model.objects import Quantity
 
 if TYPE_CHECKING:
-    from rithmic_gateway.transport_recovery import RecoveryFailed, TransportDown
+    from rithmic_nt_connect.transport import RecoveryFailed, TransportDown
 
 from rithmic_nt_connect._convert import (
     ConvertError,

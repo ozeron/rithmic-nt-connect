@@ -1,0 +1,10 @@
+[package]
+name = "rithmic-exec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pure, Nautilus-independent execution rules for rithmic-nt-connect (lifecycle policy, exposure, commission, coercion, dedup)"
+
+# Deliberately no dependency on rithmic-plants, tokio, or any Python/Nautilus
+# crate: the rules take plain values and return plain values.
+[dependencies]

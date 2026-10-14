@@ -94,65 +94,6 @@ fn proto_schema_has_auth_token_not_password_field() {
     }
 }
 
-#[test]
-fn proto_schema_has_bracket_rpcs_parity_with_plants() {
-    let proto = include_str!("../../../proto/rithmic_gateway/v1/session.proto");
-    for needle in [
-        "SubscribeBracketUpdatesRequest",
-        "PlaceBracketOrderRequest",
-        "AdjustBracketStopRequest",
-        "AdjustBracketTargetRequest",
-        "place_bracket_order",
-        "subscribe_bracket_updates",
-        "adjust_bracket_stop",
-        "adjust_bracket_target",
-    ] {
-        assert!(
-            proto.contains(needle),
-            "gateway proto must keep direct/gateway parity for {needle}"
-        );
-    }
-}
-
-#[test]
-fn proto_schema_has_ticker_reset_parity_with_plants() {
-    // The data client's ticker resync is a plant RPC on the direct path
-    // (``RithmicSession::reset_ticker_plant``): the gateway wire must expose
-    // the same surface so the two paths cannot drift.
-    let proto = include_str!("../../../proto/rithmic_gateway/v1/session.proto");
-    for needle in ["ResetTickerPlantRequest", "reset_ticker_plant"] {
-        assert!(
-            proto.contains(needle),
-            "gateway proto must keep direct/gateway parity for {needle}"
-        );
-    }
-}
-
-#[test]
-fn proto_schema_has_history_read_parity_with_plants() {
-    // Fill / order-history reads are plant RPCs on the direct path
-    // (`rithmic_plants::session::{load_fill_history_on, load_order_history_dates_on,
-    // load_order_history_on}`): the gateway wire must carry the same request,
-    // response, and Frame arms so the two paths cannot drift.
-    let proto = include_str!("../../../proto/rithmic_gateway/v1/session.proto");
-    for needle in [
-        "LoadFillHistoryRequest",
-        "LoadFillHistoryResponse",
-        "FillHistory ",
-        "LoadOrderHistoryDatesRequest",
-        "LoadOrderHistoryDatesResponse",
-        "LoadOrderHistoryRequest",
-        "LoadOrderHistoryResponse",
-        "load_fill_history = 43",
-        "load_order_history_dates = 44",
-        "load_order_history = 45",
-        "load_fill_history_response = 62",
-        "load_order_history_dates_response = 63",
-        "load_order_history_response = 64",
-    ] {
-        assert!(
-            proto.contains(needle),
-            "gateway proto must keep direct/gateway parity for {needle}"
-        );
-    }
-}
+// Direct/gateway RPC parity (bracket RPCs, ticker reset, every request variant)
+// is checked structurally by `tests/rpc_table.rs` against `rpc_table::RPC_TABLE`,
+// the `Session` trait, `RestorePlan`, and the gates; string greps are retired.

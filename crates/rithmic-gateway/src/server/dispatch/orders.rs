@@ -4,11 +4,9 @@
 //! error code, and the post-send `plant_err_frame` unknown-vs-failed mapping
 //! is the honesty boundary.
 
-use rithmic_plants::session::{
-    load_account_rms_info_on, load_fill_history_on, load_order_history_dates_on,
-    load_order_history_on, load_orders_on, load_product_rms_info_on,
-};
-use rithmic_rs::plants::order_plant::RithmicOrderPlantHandle;
+use std::sync::Arc;
+
+use rithmic_plants::{ModifyOrder, PlaceBracketOrder, PlaceOrder, Session};
 
 use crate::convert::{
     account_rms_info_to_pb, fill_history_to_pb, order_notification_to_pb, product_rms_info_to_pb,
@@ -19,33 +17,16 @@ use super::{
     ack_frame, err_to_frame, error_frame, no_session_frame, plant_err_frame, GatewayState,
 };
 
-/// Outcome of the order-handle prelude. A dedicated enum (not
-/// `Result<_, Frame>`) keeps the error path small: `pb::Frame` embeds large
-/// response bodies, which clippy rightly refuses as a `Result` `Err` type.
-enum OrderHandleOutcome {
-    Handle(RithmicOrderPlantHandle),
-    Fail(Box<Frame>),
-}
-
-/// Ensure the order plant exists and clone a detached handle for bounded
-/// drains, mapping either failure to `err_code`. Callers run their load
-/// without holding the session lock so the event pump keeps forwarding.
-async fn order_handle_or_frame(
+/// The shared session for a long read, taken *outside* the session gate so the
+/// event pump keeps forwarding while the load runs. Waits for the gate once, so
+/// a read issued mid-reconnect queues behind it.
+async fn checkout_session(
     state: &GatewayState,
     request_id: u64,
-    err_code: &str,
-) -> OrderHandleOutcome {
-    let Some(session) = &state.session else {
-        return OrderHandleOutcome::Fail(Box::new(no_session_frame(request_id)));
-    };
-    let mut guard = session.lock().await;
-    match guard.ensure_order_plant().await {
-        Ok(()) => {}
-        Err(e) => return OrderHandleOutcome::Fail(Box::new(err_to_frame(request_id, err_code, e))),
-    }
-    match guard.clone_order_handle() {
-        Ok(handle) => OrderHandleOutcome::Handle(handle),
-        Err(e) => OrderHandleOutcome::Fail(Box::new(err_to_frame(request_id, err_code, e))),
+) -> Result<Arc<dyn Session>, Box<Frame>> {
+    match &state.session {
+        Some(session) => Ok(session.checkout().await),
+        None => Err(Box::new(no_session_frame(request_id))),
     }
 }
 
@@ -66,11 +47,11 @@ pub(super) async fn load_orders(state: &GatewayState, request_id: u64) -> Frame 
     // and return mixed/duplicated snapshots. This lock is separate from
     // the session lock so the drain never blocks the event pump.
     let _recon_guard = state.recon_lock.lock().await;
-    let handle = match order_handle_or_frame(state, request_id, "load_orders_failed").await {
-        OrderHandleOutcome::Handle(handle) => handle,
-        OrderHandleOutcome::Fail(frame) => return *frame,
+    let session = match checkout_session(state, request_id).await {
+        Ok(session) => session,
+        Err(frame) => return *frame,
     };
-    match load_orders_on(&handle).await {
+    match session.load_orders(0, 0).await {
         Ok(events) => Frame {
             request_id,
             body: Some(Body::LoadOrdersResponse(pb::LoadOrdersResponse {
@@ -115,17 +96,17 @@ async fn load_rms_info(state: &GatewayState, request_id: u64, kind: RmsKind) -> 
     if !state.gates.trading_enabled {
         return error_frame(request_id, "trading_disabled", kind.denied_msg());
     }
-    let handle = match order_handle_or_frame(state, request_id, "fetch_rms_failed").await {
-        OrderHandleOutcome::Handle(handle) => handle,
-        OrderHandleOutcome::Fail(frame) => return *frame,
+    let session = match checkout_session(state, request_id).await {
+        Ok(session) => session,
+        Err(frame) => return *frame,
     };
     let outcome: rithmic_plants::Result<Body> = match kind {
-        RmsKind::Product => load_product_rms_info_on(&handle).await.map(|rows| {
+        RmsKind::Product => session.load_product_rms_info().await.map(|rows| {
             Body::LoadProductRmsInfoResponse(pb::LoadProductRmsInfoResponse {
                 rows: rows.into_iter().map(product_rms_info_to_pb).collect(),
             })
         }),
-        RmsKind::Account => load_account_rms_info_on(&handle).await.map(|rows| {
+        RmsKind::Account => session.load_account_rms_info().await.map(|rows| {
             Body::LoadAccountRmsInfoResponse(pb::LoadAccountRmsInfoResponse {
                 rows: rows.into_iter().map(account_rms_info_to_pb).collect(),
             })
@@ -168,11 +149,14 @@ pub(super) async fn load_fill_history(
             "load_fill_history denied: parent trading disabled",
         );
     }
-    let handle = match order_handle_or_frame(state, request_id, "load_fill_history_failed").await {
-        OrderHandleOutcome::Handle(handle) => handle,
-        OrderHandleOutcome::Fail(frame) => return *frame,
+    let session = match checkout_session(state, request_id).await {
+        Ok(session) => session,
+        Err(frame) => return *frame,
     };
-    match load_fill_history_on(&handle, req.start_date, req.finish_date).await {
+    match session
+        .load_fill_history(req.start_date, req.finish_date)
+        .await
+    {
         Ok(rows) => Frame {
             request_id,
             body: Some(Body::LoadFillHistoryResponse(pb::LoadFillHistoryResponse {
@@ -191,12 +175,11 @@ pub(super) async fn load_order_history_dates(state: &GatewayState, request_id: u
             "load_order_history_dates denied: parent trading disabled",
         );
     }
-    let handle =
-        match order_handle_or_frame(state, request_id, "load_order_history_dates_failed").await {
-            OrderHandleOutcome::Handle(handle) => handle,
-            OrderHandleOutcome::Fail(frame) => return *frame,
-        };
-    match load_order_history_dates_on(&handle).await {
+    let session = match checkout_session(state, request_id).await {
+        Ok(session) => session,
+        Err(frame) => return *frame,
+    };
+    match session.load_order_history_dates().await {
         Ok(dates) => Frame {
             request_id,
             body: Some(Body::LoadOrderHistoryDatesResponse(
@@ -222,11 +205,11 @@ pub(super) async fn load_order_history(
     // Same serialization as load_orders: the replay drains the shared
     // order-updates channel, so concurrent drains would mix their rows.
     let _recon_guard = state.recon_lock.lock().await;
-    let handle = match order_handle_or_frame(state, request_id, "load_order_history_failed").await {
-        OrderHandleOutcome::Handle(handle) => handle,
-        OrderHandleOutcome::Fail(frame) => return *frame,
+    let session = match checkout_session(state, request_id).await {
+        Ok(session) => session,
+        Err(frame) => return *frame,
     };
-    match load_order_history_on(&handle, &req.date).await {
+    match session.load_order_history(&req.date).await {
         Ok(events) => Frame {
             request_id,
             body: Some(Body::LoadOrderHistoryResponse(
@@ -243,7 +226,7 @@ pub(super) async fn ensure_pnl(state: &GatewayState, request_id: u64) -> Frame {
     let Some(session) = &state.session else {
         return no_session_frame(request_id);
     };
-    let mut guard = session.lock().await;
+    let guard = session.lock().await;
     if let Err(e) = guard.ensure_pnl_plant().await {
         return err_to_frame(request_id, "ensure_pnl_failed", e);
     }
@@ -261,7 +244,7 @@ pub(super) async fn ensure_order(state: &GatewayState, request_id: u64) -> Frame
     let Some(session) = &state.session else {
         return no_session_frame(request_id);
     };
-    let mut guard = session.lock().await;
+    let guard = session.lock().await;
     if let Err(e) = guard.ensure_order_plant().await {
         return err_to_frame(request_id, "ensure_order_failed", e);
     }
@@ -283,23 +266,21 @@ pub(super) async fn place_order(
     let Some(session) = &state.session else {
         return no_session_frame(request_id);
     };
-    let mut guard = session.lock().await;
-    match guard
-        .place_order(
-            &req.symbol,
-            &req.exchange,
-            &req.side,
-            &req.price_type,
-            req.quantity,
-            &req.user_tag,
-            req.price,
-            req.trigger_price,
-            &req.duration,
-            req.trail_by_ticks,
-            req.trail_by_price_id,
-        )
-        .await
-    {
+    let order = PlaceOrder {
+        symbol: req.symbol,
+        exchange: req.exchange,
+        side: req.side,
+        price_type: req.price_type,
+        quantity: req.quantity,
+        user_tag: req.user_tag,
+        price: req.price,
+        trigger_price: req.trigger_price,
+        duration: req.duration,
+        trail_by_ticks: req.trail_by_ticks,
+        trail_by_price_id: req.trail_by_price_id,
+    };
+    let guard = session.lock().await;
+    match guard.place_order(&order).await {
         Ok(()) => ack_frame(request_id),
         Err(e) => plant_err_frame(request_id, "place_failed", e),
     }
@@ -320,23 +301,21 @@ pub(super) async fn place_bracket_order(
     let Some(session) = &state.session else {
         return no_session_frame(request_id);
     };
-    let mut guard = session.lock().await;
-    match guard
-        .place_bracket_order(
-            &req.symbol,
-            &req.exchange,
-            &req.side,
-            &req.price_type,
-            req.quantity,
-            &req.localid,
-            req.price,
-            req.trigger_price,
-            &req.duration,
-            req.stop_ticks,
-            req.target_ticks,
-        )
-        .await
-    {
+    let order = PlaceBracketOrder {
+        symbol: req.symbol,
+        exchange: req.exchange,
+        side: req.side,
+        price_type: req.price_type,
+        quantity: req.quantity,
+        localid: req.localid,
+        price: req.price,
+        trigger_price: req.trigger_price,
+        duration: req.duration,
+        stop_ticks: req.stop_ticks,
+        target_ticks: req.target_ticks,
+    };
+    let guard = session.lock().await;
+    match guard.place_bracket_order(&order).await {
         Ok(()) => ack_frame(request_id),
         Err(e) => plant_err_frame(request_id, "place_bracket_failed", e),
     }
@@ -357,7 +336,7 @@ pub(super) async fn adjust_bracket_stop(
     let Some(session) = &state.session else {
         return no_session_frame(request_id);
     };
-    let mut guard = session.lock().await;
+    let guard = session.lock().await;
     match guard
         .adjust_bracket_stop(&req.basket_id, req.ticks, req.level)
         .await
@@ -382,7 +361,7 @@ pub(super) async fn adjust_bracket_target(
     let Some(session) = &state.session else {
         return no_session_frame(request_id);
     };
-    let mut guard = session.lock().await;
+    let guard = session.lock().await;
     match guard
         .adjust_bracket_target(&req.basket_id, req.ticks, req.level)
         .await
@@ -407,7 +386,7 @@ pub(super) async fn cancel_order(
     let Some(session) = &state.session else {
         return no_session_frame(request_id);
     };
-    let mut guard = session.lock().await;
+    let guard = session.lock().await;
     match guard.cancel_order(&req.basket_id).await {
         Ok(()) => ack_frame(request_id),
         Err(e) => plant_err_frame(request_id, "cancel_failed", e),
@@ -429,20 +408,18 @@ pub(super) async fn modify_order(
     let Some(session) = &state.session else {
         return no_session_frame(request_id);
     };
-    let mut guard = session.lock().await;
-    match guard
-        .modify_order(
-            &req.basket_id,
-            &req.symbol,
-            &req.exchange,
-            req.quantity,
-            &req.price_type,
-            req.price,
-            req.trigger_price,
-            req.trail_by_ticks,
-        )
-        .await
-    {
+    let order = ModifyOrder {
+        basket_id: req.basket_id,
+        symbol: req.symbol,
+        exchange: req.exchange,
+        quantity: req.quantity,
+        price_type: req.price_type,
+        price: req.price,
+        trigger_price: req.trigger_price,
+        trail_by_ticks: req.trail_by_ticks,
+    };
+    let guard = session.lock().await;
+    match guard.modify_order(&order).await {
         Ok(()) => ack_frame(request_id),
         Err(e) => plant_err_frame(request_id, "modify_failed", e),
     }
@@ -459,7 +436,7 @@ pub(super) async fn cancel_all_orders(state: &GatewayState, request_id: u64) -> 
     let Some(session) = &state.session else {
         return no_session_frame(request_id);
     };
-    let mut guard = session.lock().await;
+    let guard = session.lock().await;
     match guard.cancel_all_orders().await {
         Ok(()) => ack_frame(request_id),
         Err(e) => plant_err_frame(request_id, "cancel_all_failed", e),

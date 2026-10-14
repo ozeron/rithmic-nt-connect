@@ -50,7 +50,7 @@ pub(super) async fn load_ticks(
     };
     let guard = session.lock().await;
     match guard
-        .load_ticks_all(
+        .load_ticks(
             &req.symbol,
             &req.exchange,
             req.start_time_sec,
@@ -116,20 +116,22 @@ async fn run_time_bar_op(state: &GatewayState, request_id: u64, op: TimeBarOp) -
     let Some(session) = &state.session else {
         return no_session_frame(request_id);
     };
-    let bar_type = match parse_time_bar_type(op.raw_bar_type()) {
-        Ok(bt) => bt,
-        Err(e) => return err_to_frame(request_id, "invalid_bar_type", e),
-    };
+    // Validate here so a bad bar type keeps its own error code; the session
+    // parses the raw value again when it runs the load.
+    if let Err(e) = parse_time_bar_type(op.raw_bar_type()) {
+        return err_to_frame(request_id, "invalid_bar_type", e);
+    }
+    let bar_type = op.raw_bar_type();
     let guard = session.lock().await;
     let outcome = match &op {
         TimeBarOp::Load(req) => guard
-            .load_time_bars_all(
+            .load_time_bars(
                 &req.symbol,
                 &req.exchange,
-                bar_type,
-                req.period,
                 req.start_time_sec,
                 req.end_time_sec,
+                bar_type,
+                req.period,
             )
             .await
             .map(|bars| {
@@ -141,10 +143,10 @@ async fn run_time_bar_op(state: &GatewayState, request_id: u64, op: TimeBarOp) -
             .probe_time_bars(
                 &req.symbol,
                 &req.exchange,
-                bar_type,
-                req.period,
                 req.start_time_sec,
                 req.end_time_sec,
+                bar_type,
+                req.period,
             )
             .await
             .map(|rows| {

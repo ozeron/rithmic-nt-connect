@@ -7,24 +7,16 @@ import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
-from rithmic_nt_connect.config import ConnectMode, SessionConfig
+from rithmic_nt_connect.config import ConfigError, ConnectMode, SessionConfig
 from rithmic_nt_connect.errors import AlreadyConnectedError
 
 if TYPE_CHECKING:
-    from rithmic_gateway.types import AccountRmsInfo, ProductRmsInfo
+    from rithmic_nt_connect.wire_types import AccountRmsInfo, ProductRmsInfo
 
 
 def _load_session_lock() -> Any:
-    """Load ``SessionLock`` from the pure-Python gateway package.
-
-    The ``rithmic_gateway`` gencode is generated with protoc 5.29.6 to match
-    the ``nautilus_trader[ib]==1.231.0`` pin of ``protobuf==5.29.6``, so the
-    wire client imports on that runtime (and any newer one).
-    ``rithmic_gateway/__init__.py`` imports ``GatewayClient`` lazily via
-    ``__getattr__``, so importing
-    ``SessionLock`` from ``flock`` does not trigger protobuf at all.
-    """
-    from rithmic_gateway.flock import SessionLock
+    """The credential flock, from the extension (the gateway parent's own Rust code)."""
+    from rithmic_nt_connect._lib import SessionLock
 
     return SessionLock
 
@@ -39,7 +31,7 @@ class TickerSession(Protocol):
     def unsubscribe_order_book_summary(self, symbol: str, exchange: str) -> None: ...
     def get_front_month(self, symbol: str, exchange: str) -> Any: ...
     def get_reference_data(self, symbol: str, exchange: str) -> Any: ...
-    def poll_event(self) -> dict[str, Any] | None: ...
+    def poll_event(self, timeout_ms: int = 0) -> dict[str, Any] | None: ...
     def load_ticks(
         self, symbol: str, exchange: str, start_ssboe: int, end_ssboe: int, /
     ) -> list[dict[str, Any]]: ...
@@ -163,7 +155,6 @@ class TransportAware(Protocol):
         self, listener: Callable[[object], None]
     ) -> Callable[[], None]: ...
     def ensure_transport_live(self) -> int: ...
-    def reconnect_transport(self) -> None: ...
 
 
 PLANTS_MARKET_DATA = "market_data"
@@ -220,6 +211,8 @@ def create_rust_session(
     plant into the set (``request_plants`` attaches it even when already
     connected).
     """
+    if session.password is None:
+        raise ConfigError("direct mode requires a password (RITHMIC_PASSWORD)")
     key = _session_cache_key(session)
     existing = cast(_FlockedDirectSession | None, _SESSION_CACHE.get(key))
     if existing is not None:
@@ -360,8 +353,8 @@ class _FlockedDirectSession:
     def resolved_account(self) -> dict[str, Any] | None:
         return self._inner.resolved_account()
 
-    def poll_event(self) -> dict[str, Any] | None:
-        return self._inner.poll_event()
+    def poll_event(self, timeout_ms: int = 0) -> dict[str, Any] | None:
+        return self._inner.poll_event(timeout_ms)
 
     def load_ticks(
         self, symbol: str, exchange: str, start_ssboe: int, end_ssboe: int
@@ -585,6 +578,74 @@ def _connect_once(session: Any) -> None:
         return
 
 
+class _RustGatewaySession:
+    """The Rust gateway client (one shared socket per process) as a ``WireSession``.
+
+    A thin shell over the extension's ``Session``: every call is the extension's.
+    It only adapts the extension's transport callback to the adapter's event
+    types, and fans one extension registration out to the clients' listeners so
+    a client can detach (the extension has no unsubscribe).
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self._listeners: list[Callable[[object], None]] = []
+        self._registered = False
+
+    def __getattr__(self, name: str) -> Any:
+        # Private names are never the extension's surface; probes must see them absent.
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self._inner, name)
+
+    def _fan_out(
+        self, kind: str, generation: int, attempts: int, cause: str | None
+    ) -> None:
+        from rithmic_nt_connect.transport import event_from_rust
+
+        event = event_from_rust(kind, generation, attempts, cause)
+        if event is None:
+            return
+        for listener in tuple(self._listeners):
+            listener(event)
+
+    def subscribe_transport_events(
+        self, listener: Callable[[object], None]
+    ) -> Callable[[], None]:
+        if not self._registered:
+            self._inner.subscribe_transport_events(self._fan_out)
+            self._registered = True
+        self._listeners.append(listener)
+
+        def unsubscribe() -> None:
+            with contextlib.suppress(ValueError):
+                self._listeners.remove(listener)
+
+        return unsubscribe
+
+
+def create_rust_gateway_session(session: SessionConfig) -> WireSession:
+    """A gateway-mode session backed by the Rust client.
+
+    The client holds no password: only the parent (started explicitly) has it.
+    """
+    from rithmic_nt_connect._lib import Session
+
+    inner = Session(
+        user=session.user,
+        system_name=session.system_name,
+        url=session.url,
+        env=session.env,
+        account_id=session.account_id,
+        fcm_id=session.fcm_id,
+        ib_id=session.ib_id,
+        connect_mode="gateway",
+        gateway_listen=session.gateway_listen,
+        gateway_auth_token=session.gateway_auth_token or None,
+    )
+    return cast(WireSession, _RustGatewaySession(inner))
+
+
 def create_session(
     session: SessionConfig,
     *,
@@ -595,18 +656,13 @@ def create_session(
     Direct is a process-wide singleton per credential fingerprint (see
     ``create_rust_session``): the data factory, exec factory, and
     ``connect_market_data_session`` share one in-process Rithmic login.
-    Gateway dials ``rithmic-gateway`` and never opens plants locally. Each
-    call returns a **fresh** ``GatewayWireSession`` facade. In ``mux`` mode
-    (default) data and exec factories share one ``GatewayRuntime`` socket;
-    ``dual`` mode gives each factory its own ``GatewayClient`` unix peer.
+    Gateway attaches to an explicitly started ``rithmic-gateway`` parent (it
+    never spawns one, never holds the password) and never opens plants locally.
+    Each call returns a **fresh** facade; data and exec factories share one
+    gateway socket.
     """
     if session.connect_mode == ConnectMode.GATEWAY:
-        from rithmic_nt_connect.gateway_wire import create_gateway_wire_session
-
-        # The façade delegates most members to the gateway client, which a type
-        # checker cannot see; tests/test_wire_session_parity.py proves the surface.
-        return cast(WireSession, create_gateway_wire_session(session))
-
+        return create_rust_gateway_session(session)
     return create_rust_session(session, plants=plants)
 
 

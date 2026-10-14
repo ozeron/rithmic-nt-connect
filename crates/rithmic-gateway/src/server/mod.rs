@@ -15,7 +15,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc, watch, Mutex as TokioMutex};
 use tokio::task::JoinHandle;
 
-use rithmic_plants::RithmicSession;
+use rithmic_plants::Session;
 
 use crate::codec;
 use crate::idle_exit::{IdleExit, IdleExitPolicy};
@@ -46,6 +46,55 @@ pub fn boot_gateway_metadata() -> (u64, AtomicU64, watch::Sender<u64>) {
     (id, AtomicU64::new(1), epoch_tx)
 }
 
+/// The parent's plant session behind the [`Session`] trait, guarded by one gate.
+///
+/// `lock()` serializes compound operations (event-pump polls, reconnect, intent
+/// restore) exactly as the old `Mutex<RithmicSession>` did. Long reads that must
+/// not stall the pump take [`SessionHandle::checkout`] instead: wait for the gate
+/// once (so they queue behind a reconnect), then run on the shared session
+/// without holding it.
+#[derive(Clone)]
+pub struct SessionHandle {
+    gate: Arc<TokioMutex<()>>,
+    session: Arc<dyn Session>,
+}
+
+/// Guard returned by [`SessionHandle::lock`]; derefs to the session.
+pub struct SessionGuard<'a> {
+    _gate: tokio::sync::MutexGuard<'a, ()>,
+    session: &'a Arc<dyn Session>,
+}
+
+impl std::ops::Deref for SessionGuard<'_> {
+    type Target = dyn Session;
+
+    fn deref(&self) -> &Self::Target {
+        &**self.session
+    }
+}
+
+impl SessionHandle {
+    pub fn new(session: Arc<dyn Session>) -> Self {
+        Self {
+            gate: Arc::new(TokioMutex::new(())),
+            session,
+        }
+    }
+
+    pub async fn lock(&self) -> SessionGuard<'_> {
+        SessionGuard {
+            _gate: self.gate.lock().await,
+            session: &self.session,
+        }
+    }
+
+    /// Wait for the gate, then return the session without holding it.
+    pub async fn checkout(&self) -> Arc<dyn Session> {
+        drop(self.gate.lock().await);
+        Arc::clone(&self.session)
+    }
+}
+
 /// Shared gateway runtime state, held for the process lifetime.
 pub struct GatewayState {
     pub gates: ParentGates,
@@ -62,7 +111,7 @@ pub struct GatewayState {
     pub expected_auth_token: String,
     /// `None` only in gate / RPC-sequence unit tests without plants.
     /// Plant RPCs return `Error(no_session)` — never Ack / empty success.
-    pub session: Option<Arc<TokioMutex<RithmicSession>>>,
+    pub session: Option<SessionHandle>,
     pub reconnect: Arc<ReconnectController>,
     /// Serialize first venue-subscribe per topic so a failing peer cannot
     /// leave concurrent Ack'd clients without a live venue join.
@@ -180,6 +229,72 @@ fn env_aliases_match(a: &str, b: &str) -> bool {
     let ca = canon(a);
     let cb = canon(b);
     !ca.is_empty() && ca == cb
+}
+
+/// Everything `run_gateway` needs besides the already-connected session.
+pub struct GatewayParams {
+    pub listener: UnixListener,
+    /// Socket path to remove on shutdown.
+    pub path: std::path::PathBuf,
+    pub fingerprint: Fingerprint,
+    pub expected_auth_token: String,
+    pub idle_policy: IdleExitPolicy,
+    pub gates: ParentGates,
+    pub session: SessionHandle,
+}
+
+/// Serve the gateway over an already-connected session until the listener
+/// ends: build state, run the event pump, serve clients, then disconnect the
+/// session and remove the socket. The production binary and the test-only
+/// fake-plant binary both run exactly this.
+pub async fn run_gateway(params: GatewayParams) -> Result<(), String> {
+    let GatewayParams {
+        listener,
+        path,
+        fingerprint,
+        expected_auth_token,
+        idle_policy,
+        gates,
+        session,
+    } = params;
+    let hub = Arc::new(FanoutHub::new(crate::subscriptions::DEFAULT_QUEUE_CAP));
+    let reconnect = Arc::new(ReconnectController::new(hub.clone()));
+    let (gateway_instance_id, transport_generation, transport_epoch) = boot_gateway_metadata();
+    let state = Arc::new(GatewayState {
+        gates,
+        hub: hub.clone(),
+        fingerprint,
+        // Ready only after plants are up (KTD5): the caller connected already.
+        ready: AtomicBool::new(true),
+        force_reconnect: AtomicBool::new(false),
+        expected_auth_token,
+        session: Some(session.clone()),
+        reconnect: reconnect.clone(),
+        topic_locks: TokioMutex::new(HashMap::new()),
+        recon_lock: Arc::new(TokioMutex::new(())),
+        md_history_gate: Arc::new(TokioMutex::new(())),
+        idle: IdleExit::new(idle_policy),
+        gateway_instance_id,
+        transport_generation,
+        transport_epoch,
+    });
+
+    let pump = tokio::spawn(pump::run_event_pump(
+        session.clone(),
+        hub,
+        reconnect,
+        Arc::clone(&state),
+    ));
+
+    let serve_result = serve(listener, state).await.map_err(|e| e.to_string());
+    pump.abort();
+    let _ = pump.await;
+    {
+        let guard = session.lock().await;
+        let _ = guard.disconnect().await;
+    }
+    let _ = std::fs::remove_file(&path);
+    serve_result
 }
 
 /// Accept connections until idle-exit fires (or forever when policy is Never).
@@ -339,7 +454,7 @@ impl ClientCtx {
         if intent.forget(&state.reconnect).await {
             if let Some(session) = &state.session {
                 let guard = session.lock().await;
-                let _ = intent.venue_leave(&guard).await;
+                let _ = intent.venue_leave(&*guard).await;
             }
         }
     }
@@ -380,7 +495,7 @@ impl ClientCtx {
         self.pnl = false;
         if state.reconnect.forget_pnl().await {
             if let Some(session) = &state.session {
-                let mut guard = session.lock().await;
+                let guard = session.lock().await;
                 let _ = guard.disconnect_pnl_plant().await;
             }
         }
@@ -406,7 +521,7 @@ impl ClientCtx {
             };
             if last_order {
                 if let Some(session) = &state.session {
-                    let mut guard = session.lock().await;
+                    let guard = session.lock().await;
                     let _ = guard.disconnect_order_plant().await;
                 }
             } else if last_brackets && state.reconnect.restore_plan().await.order {
@@ -420,7 +535,7 @@ impl ClientCtx {
             self.order = false;
             if state.reconnect.forget_order().await {
                 if let Some(session) = &state.session {
-                    let mut guard = session.lock().await;
+                    let guard = session.lock().await;
                     let _ = guard.disconnect_order_plant().await;
                 }
             }

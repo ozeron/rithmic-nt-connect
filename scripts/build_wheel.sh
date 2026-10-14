@@ -46,11 +46,15 @@ if [ ! -x "$bin_path" ]; then
   exit 1
 fi
 
-# Bundle the rithmic_gateway pure-Python client AND the native binary into the
+# Bundle the rithmic_gateway pure-Python package AND the native binary into the
 # wheel data dir under purelib, so both install as
 # <site-packages>/rithmic_gateway/... . maturin's python-source only packages
-# the module matching the lib name (rithmic_nt_connect), so the shared gateway
-# client package must be carried here alongside the binary it auto-spawns.
+# the module matching the lib name (rithmic_nt_connect), so the package must be
+# carried here alongside the binary that `python -m rithmic_gateway` execs (the
+# client itself never spawns the parent). The adapter's gateway mode does NOT use
+# it: that is the Rust client inside the extension (no Python protobuf). The
+# package ships for the launcher and for lake consumers (`GatewayClient`).
+# Only the production binary may land here (tests/test_packaging.py guards it).
 # The committed marker wheel-data/purelib/.gitkeep is preserved so maturin's
 # data dir always exists (non-script builds/CI do not hard-fail on its absence).
 dest="wheel-data/purelib/rithmic_gateway"

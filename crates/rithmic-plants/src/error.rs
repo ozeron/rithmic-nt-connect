@@ -60,6 +60,26 @@ pub enum Error {
     /// Unexpected message shape.
     #[error("protocol error: {0}")]
     Protocol(String),
+
+    /// The gateway parent answered with a typed error (`code` is the wire code,
+    /// e.g. `trading_disabled`, `parent_not_running`).
+    #[error("gateway error: {code}: {message}")]
+    Gateway {
+        /// Stable machine code from the wire.
+        code: String,
+        /// Human-readable message (never contains secrets).
+        message: String,
+    },
+
+    /// A state-changing request was written to the gateway and its outcome is
+    /// unknown (transport loss or timeout after send). Never retried and never
+    /// a venue rejection: the order may or may not be live.
+    #[error("outcome unknown: {0}")]
+    OutcomeUnknown(String),
+
+    /// Gateway transport failure (no request outcome to report).
+    #[error("transport error: {0}")]
+    Transport(String),
 }
 
 impl From<rithmic_rs::RithmicError> for Error {

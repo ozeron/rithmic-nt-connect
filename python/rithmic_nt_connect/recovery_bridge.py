@@ -1,6 +1,6 @@
 """Shared gateway transport-recovery wiring for the data and exec clients.
 
-``rithmic_gateway.transport_recovery`` owns dialling and emits
+The gateway runtime (Rust client) owns dialling and emits
 ``TransportDown`` / ``TransportUp`` / ``RecoveryFailed``. What to restore after
 a re-dial is client policy (MD replay vs order-plant re-arm) and stays in the
 client's ``restore`` callback; this module owns the rest: listener wiring, the
@@ -20,7 +20,7 @@ import contextlib
 from collections.abc import Callable, Coroutine
 from typing import Any
 
-from rithmic_gateway.transport_recovery import (
+from rithmic_nt_connect.transport import (
     RecoveryFailed,
     TransportDown,
     TransportUp,

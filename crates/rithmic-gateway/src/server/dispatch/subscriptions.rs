@@ -99,7 +99,7 @@ impl TopicIntent {
 
     pub(in crate::server) async fn venue_join(
         &self,
-        session: &rithmic_plants::RithmicSession,
+        session: &dyn rithmic_plants::Session,
     ) -> rithmic_plants::Result<()> {
         match self {
             Self::Ticker(key) => session.subscribe(&key.symbol, &key.exchange).await,
@@ -123,7 +123,7 @@ impl TopicIntent {
 
     pub(in crate::server) async fn venue_leave(
         &self,
-        session: &rithmic_plants::RithmicSession,
+        session: &dyn rithmic_plants::Session,
     ) -> rithmic_plants::Result<()> {
         match self {
             Self::Ticker(key) => session.unsubscribe(&key.symbol, &key.exchange).await,
@@ -253,7 +253,7 @@ pub(super) async fn subscribe_topic(
         // MD joins take `&self`; holding the guard only serializes against
         // plant reset / teardown.
         let session_guard = session.lock().await;
-        if let Err(e) = intent.venue_join(&session_guard).await {
+        if let Err(e) = intent.venue_join(&*session_guard).await {
             drop(session_guard);
             intent.client_remove(client);
             intent.forget(&state.reconnect).await;
@@ -289,7 +289,7 @@ pub(super) async fn unsubscribe_topic(
     if last {
         if let Some(session) = &state.session {
             let session_guard = session.lock().await;
-            if let Err(e) = intent.venue_leave(&session_guard).await {
+            if let Err(e) = intent.venue_leave(&*session_guard).await {
                 drop(session_guard);
                 // Restore intent so reconnect still re-joins venue.
                 intent.note(&state.reconnect).await;
@@ -323,7 +323,7 @@ pub(super) async fn subscribe_pnl(
             rollback_shared_topic(state, client, &key, had_forwarder).await;
             return no_session_frame(request_id);
         };
-        let mut session_guard = session.lock().await;
+        let session_guard = session.lock().await;
         let venue_err = match session_guard.ensure_pnl_plant().await {
             Err(e) => Some(e),
             Ok(()) => session_guard.subscribe_pnl().await.err(),
@@ -350,7 +350,7 @@ pub(super) async fn disconnect_pnl(
         let last = state.reconnect.forget_pnl().await;
         if last {
             if let Some(session) = &state.session {
-                let mut guard = session.lock().await;
+                let guard = session.lock().await;
                 if let Err(e) = guard.disconnect_pnl_plant().await {
                     drop(guard);
                     state.reconnect.note_pnl().await;
@@ -389,7 +389,7 @@ async fn rollback_order_plant_stream_introductions(
     let last = state.reconnect.forget_order().await;
     if last {
         if let Some(session) = &state.session {
-            let mut guard = session.lock().await;
+            let guard = session.lock().await;
             if let Err(e) = guard.disconnect_order_plant().await {
                 // Venue may still be subscribed; keep order intent for restore.
                 drop(guard);
@@ -432,7 +432,7 @@ pub(in crate::server) async fn reseat_order_plant_without_brackets(
     let Some(session) = &state.session else {
         return Ok(());
     };
-    let mut guard = session.lock().await;
+    let guard = session.lock().await;
     let _ = guard.disconnect_order_plant().await;
     guard.subscribe_order_updates().await
 }
@@ -506,7 +506,7 @@ pub(super) async fn subscribe_order_plant_stream(
         return ack_frame(request_id);
     }
 
-    let mut session_guard = session.lock().await;
+    let session_guard = session.lock().await;
     if first_order {
         if let Err(e) = session_guard.subscribe_order_updates().await {
             drop(session_guard);
@@ -557,7 +557,7 @@ pub(super) async fn disconnect_order(
         last_order = state.reconnect.forget_order().await;
         if last_order {
             if let Some(session) = &state.session {
-                let mut guard = session.lock().await;
+                let guard = session.lock().await;
                 if let Err(e) = guard.disconnect_order_plant().await {
                     drop(guard);
                     state.reconnect.note_order().await;
@@ -591,8 +591,8 @@ pub(super) async fn reset_ticker_plant(state: &GatewayState, request_id: u64) ->
     let Some(session) = &state.session else {
         return no_session_frame(request_id);
     };
-    let mut guard = session.lock().await;
-    if let Err(e) = guard.reset_ticker_plant().await {
+    let guard = session.lock().await;
+    if let Err(e) = guard.reset_ticker().await {
         return err_to_frame(request_id, "reset_ticker_plant_failed", e);
     }
     // The recreated ticker plant carries no subscriptions: re-issue

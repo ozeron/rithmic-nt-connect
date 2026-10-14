@@ -20,11 +20,10 @@ from nautilus_trader.model.enums import (
     TriggerType,
 )
 
+from rithmic_nt_connect import _lib
 from rithmic_nt_connect._orders import (
     RITHMIC_DURATION_TO_TIF,
     RITHMIC_PRICE_TYPE_TO_ORDER_TYPE,
-    TRUSTWORTHY_DURATIONS,
-    TRUSTWORTHY_PRICE_TYPES,
     enum_int,
     order_side_from_notification,
 )
@@ -46,30 +45,6 @@ TRIGGERABLE_ORDER_TYPES = frozenset(
         OrderType.LIMIT_IF_TOUCHED,
     }
 )
-
-
-# Canonical notification kinds that describe a real order state (see
-# ``kind_from_notify`` in ``_orders.py``) — the strict trust boundary for
-# binding a venue id from a drain row.
-_RECOGNIZABLE_KINDS = frozenset(
-    {
-        "accepted",
-        "updated",
-        "canceled",
-        "filled",
-        "rejected",
-        "modify_rejected",
-        "cancel_rejected",
-        "expired",
-        "triggered",
-    }
-)
-
-# Status substrings that mark a drain row as a real venue order state.
-# "TRIGGER" covers resting stop rows ("TRIGGER_PENDING" / "trigger pending"):
-# live-proven on Rithmic Test 2026-08-21 — stops never emit an OPEN
-# notification, so this is the only state their drain rows ever carry.
-_STATUS_MARKERS = ("OPEN", "WORKING", "CANCEL", "REJECT", "EXPIRED", "TRIGGER")
 
 
 def order_type_from_fields(fields: dict[str, Any]) -> OrderType:
@@ -156,23 +131,17 @@ def row_is_trustworthy(fields: dict[str, Any]) -> bool:
     are real: side present, ``price_type``/``duration`` present and mappable,
     and a recognizable order state. Never fabricates terms (a row with
     missing/unknown closed-set values is advisory-only).
+
+    The decision lives in the ``rithmic-exec`` crate; here the Python-object
+    coercions (``enum_int``, the side) are applied and the result passed on.
+    The closed-set values are exact integers or None, so a bool/non-integral
+    value can never coerce into a valid enum.
     """
-    if order_side_from_notification(fields) is None:
-        return False
-    # The closed-set values are exact integers or None (``enum_int`` at the
-    # convert boundary; the same whitelist defends raw fields here too, so a
-    # bool/non-integral value can never coerce into a valid enum).
-    price_type = enum_int(fields.get("price_type"))
-    duration = enum_int(fields.get("duration"))
-    if (
-        price_type is None
-        or duration is None
-        or price_type not in TRUSTWORTHY_PRICE_TYPES
-        or duration not in TRUSTWORTHY_DURATIONS
-    ):
-        return False
     kind = fields.get("kind")
-    status_u = str(fields.get("status") or "").upper()
-    return kind in _RECOGNIZABLE_KINDS or any(
-        marker in status_u for marker in _STATUS_MARKERS
+    return _lib.row_is_trustworthy(
+        order_side_from_notification(fields) is not None,
+        enum_int(fields.get("price_type")),
+        enum_int(fields.get("duration")),
+        kind if isinstance(kind, str) else None,
+        str(fields.get("status") or ""),
     )

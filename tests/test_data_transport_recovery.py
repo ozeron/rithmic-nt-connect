@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 from _stubs import _CaptureLog, _TestDataClient
-from rithmic_gateway.transport_recovery import (
+from rithmic_nt_connect.transport import (
     RecoveryFailed,
     TransportDown,
     TransportFault,

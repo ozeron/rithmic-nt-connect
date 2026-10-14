@@ -22,6 +22,7 @@ from nautilus_trader.model.enums import OrderSide, OrderStatus
 from nautilus_trader.model.identifiers import ClientOrderId, VenueOrderId
 from nautilus_trader.model.objects import Quantity
 
+from rithmic_nt_connect import _lib
 from rithmic_nt_connect._orders import (
     fill_dedup_key,
     order_notification_to_fields,
@@ -248,17 +249,16 @@ class WorkingOrdersDrain:
         """Keep only the freshest drain row per basket id (optionally
         filtered to one instrument — ``None`` matches every instrument)."""
         host = self._host
-        latest: dict[str, DrainRowResult] = {}
+        candidates: list[DrainRowResult] = []
         for row in self.iter_drain_rows(events):
-            if not host._matches_instrument(row.fields, instrument_id, None):
-                continue
-            key = str(row.fields["basket_id"])
-            # Keep the latest row; on an equal timestamp (e.g. both 0 when
-            # ts_event is missing) prefer the last-arrived row so a terminal
-            # status following an earlier non-terminal is not masked.
-            if key not in latest or row.ts_event >= latest[key].ts_event:
-                latest[key] = row
-        return latest
+            if host._matches_instrument(row.fields, instrument_id, None):
+                candidates.append(row)
+        # Rows are keyed by basket id; the freshest per key wins, and on an equal
+        # timestamp the last-arrived row does (rule in ``rithmic-exec``).
+        winners = _lib.freshest_per_key(
+            [(str(row.fields["basket_id"]), row.ts_event) for row in candidates]
+        )
+        return {str(candidates[i].fields["basket_id"]): candidates[i] for i in winners}
 
     def row_stale_reason(
         self,
@@ -287,27 +287,20 @@ class WorkingOrdersDrain:
         """
         if client_order_id is None:
             return None
-        host = self._host
-        order = host._cache.order(client_order_id)
+        order = self._host._cache.order(client_order_id)
         if order is None:
             return None
-        if getattr(order, "is_closed", False):
-            if live_stream_authoritative:
-                return "order closed locally"
-            report = row.report
-            if report is None or report.order_status in TERMINAL_ORDER_STATUSES:
-                return None
-            return "non-terminal snapshot for locally closed order"
-        if (
-            live_stream_authoritative
-            and row.ts_event
-            and int(getattr(order, "ts_last", 0) or 0) > row.ts_event
-        ):
-            # ``row.ts_event == 0`` is the iterator's synthetic missing-ts
-            # value: skipping on it would drop a valid snapshot whenever the
-            # tracked order has any live history.
-            return "live stream advanced past the snapshot"
-        return None
+        closed = bool(getattr(order, "is_closed", False))
+        report = row.report
+        non_terminal = (
+            report is not None and report.order_status not in TERMINAL_ORDER_STATUSES
+        )
+        # Only read the order's last event time when the rule can use it.
+        needs_age = not closed and live_stream_authoritative and row.ts_event
+        ts_last = int(getattr(order, "ts_last", 0) or 0) if needs_age else 0
+        return _lib.stale_reason(
+            closed, live_stream_authoritative, non_terminal, row.ts_event, ts_last
+        )
 
     def apply_drain_rows(self, events: list[dict[str, Any]]) -> None:
         """Apply a working-orders drain to the local cache before re-arming.

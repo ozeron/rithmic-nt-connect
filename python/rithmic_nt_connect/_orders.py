@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
 from nautilus_trader.model.enums import OrderStatus, OrderType, TimeInForce
 
+from rithmic_nt_connect import _lib
 from rithmic_nt_connect._convert import ConvertError, _ts_ns, instrument_id_from_symbol
+from rithmic_nt_connect._lib import SeenKeyCache
 from rithmic_nt_connect.constants import VENUE
 
 # Rithmic price_type / duration closed-set ints (shared by report mapping +
@@ -83,54 +84,8 @@ class OrderAction:
     trade_id: str | None = None
 
 
-class SeenKeyCache:
-    """Internal bounded LRU; prefer FillDedupStore / UntrackedStatusBook at call sites.
-
-    Hit paths (``has_seen``, ``get``, ``__getitem__``, ``__contains__``) refresh
-    recency so repeatedly observed keys are not evicted by one-shot churn.
-    """
-
-    def __init__(self, max_size: int = 10_000) -> None:
-        self._entries: OrderedDict[str, Any] = OrderedDict()
-        self._max_size = max_size
-
-    def has_seen(self, key: str) -> bool:
-        """Return whether ``key`` is present; refresh recency on hit."""
-        if key in self._entries:
-            self._entries.move_to_end(key)
-            return True
-        return False
-
-    def mark(self, key: str, value: Any = None) -> None:
-        """Record ``key``, refresh recency, and evict oldest past ``max_size``."""
-        self._entries[key] = value
-        self._entries.move_to_end(key)
-        while len(self._entries) > self._max_size:
-            self._entries.popitem(last=False)
-
-    def get(self, key: str, default: Any = None) -> Any:
-        """Return stored value; refresh recency on hit (same as ``has_seen``)."""
-        if key not in self._entries:
-            return default
-        self._entries.move_to_end(key)
-        return self._entries[key]
-
-    def clear(self) -> None:
-        self._entries.clear()
-
-    def __len__(self) -> int:
-        return len(self._entries)
-
-    def __contains__(self, key: str) -> bool:
-        return self.has_seen(key)
-
-    def __getitem__(self, key: str) -> Any:
-        val = self._entries[key]
-        self._entries.move_to_end(key)
-        return val
-
-    def __setitem__(self, key: str, value: Any) -> None:
-        self.mark(key, value)
+# ``SeenKeyCache`` (bounded LRU; hits refresh recency) is the ``rithmic-exec`` one.
+# Prefer FillDedupStore / UntrackedStatusBook at call sites.
 
 
 class FillDedupStore:
@@ -331,45 +286,13 @@ def kind_from_notify(
     status: Any | None = None,
     text: Any | None = None,
 ) -> str | None:
-    """Map plant notify_type_name to a canonical action kind (also set in Rust)."""
-    name = notify_type_name.upper()
-    if source == "rithmic":
-        if name == "OPEN":
-            return "accepted"
-        if name == "TRIGGER_PENDING":
-            # Live-proven (Rithmic Test 2026-08-21): resting STOP_MARKET
-            # orders never receive OPEN — TRIGGER_PENDING is their working
-            # state, i.e. acceptance evidence (emit guarded from SUBMITTED).
-            return "accepted"
-        if name == "MODIFIED":
-            return "updated"
-        if name == "MODIFICATION_FAILED":
-            return "modify_rejected"
-        if name == "CANCELLATION_FAILED":
-            return "cancel_rejected"
-        if name == "COMPLETE":
-            status_u = str(status or "").upper()
-            if status_u in {"CANCELLED", "CANCELED"}:
-                return "canceled"
-            if str(text or "").strip():
-                return "rejected"
-            return None
-        return None
-    if source == "exchange":
-        if name == "FILL":
-            return "filled"
-        if name == "REJECT":
-            return "rejected"
-        if name == "CANCEL":
-            return "canceled"
-        if name == "TRIGGER":
-            return "triggered"
-        if name == "NOT_MODIFIED":
-            return "modify_rejected"
-        if name in {"NOT_CANCELLED", "NOT_CANCELED"}:
-            return "cancel_rejected"
-        return None
-    return None
+    """Map plant notify_type_name to a canonical action kind.
+
+    The same mapping the plant uses (``rithmic_exec::kind_from_notify``).
+    """
+    return _lib.kind_from_notify(
+        source, notify_type_name, str(status or ""), str(text or "")
+    )
 
 
 def enum_int(value: Any) -> int | None:
@@ -418,15 +341,21 @@ def sentinel_none(value: Any) -> Any:
     return value
 
 
-def trade_id_from_fill_fields(fields: Mapping[str, Any], ts_event: int) -> str:
+def _fill_parts(fields: Mapping[str, Any]) -> tuple[str | None, str, str, str, str]:
+    """Fill identity inputs as text; the printed form of a number is identity."""
     fill_id = fields.get("fill_id")
-    if fill_id:
-        return str(fill_id)
-    basket = fields.get("basket_id") or ""
-    exch = fields.get("exchange_order_id") or ""
-    fill_sz = fields.get("fill_size")
-    fill_px = fields.get("fill_price")
-    return f"{basket}:{exch}:{ts_event}:{fill_sz}:{fill_px}"
+    return (
+        str(fill_id) if fill_id else None,
+        str(fields.get("basket_id") or ""),
+        str(fields.get("exchange_order_id") or ""),
+        str(fields.get("fill_size")),
+        str(fields.get("fill_price")),
+    )
+
+
+def trade_id_from_fill_fields(fields: Mapping[str, Any], ts_event: int) -> str:
+    fill_id, basket, exch, size, px = _fill_parts(fields)
+    return _lib.fill_trade_id(fill_id, basket, exch, size, px, ts_event)
 
 
 def fill_dedup_key(fields: Mapping[str, Any], *, ts_event: int) -> str:
@@ -437,12 +366,17 @@ def fill_dedup_key(fields: Mapping[str, Any], *, ts_event: int) -> str:
     venue never tagged is still deduped consistently with Nautilus (which
     collapses identical trade ids downstream).
     """
-    acct = fields.get("account_id") or ""
-    inst = fields.get("instrument_id") or ""
-    fill_id = fields.get("fill_id")
-    if fill_id:
-        return f"{acct}|{inst}|{fill_id}"
-    return f"{acct}|{inst}|{trade_id_from_fill_fields(fields, ts_event)}"
+    fill_id, basket, exch, size, px = _fill_parts(fields)
+    return _lib.fill_dedup_key(
+        str(fields.get("account_id") or ""),
+        str(fields.get("instrument_id") or ""),
+        fill_id,
+        basket,
+        exch,
+        size,
+        px,
+        ts_event,
+    )
 
 
 def order_side_from_notification(fields: Mapping[str, Any]) -> Any | None:

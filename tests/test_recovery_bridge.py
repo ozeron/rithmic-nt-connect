@@ -9,14 +9,14 @@ from typing import Any
 
 import pytest
 from _stubs import _CaptureLog
-from rithmic_gateway.transport_recovery import (
+from rithmic_nt_connect.recovery_bridge import TransportRecoveryBridge
+from rithmic_nt_connect.transport import (
     RecoveryFailed,
     TransportDown,
     TransportFault,
     TransportFaultKind,
     TransportUp,
 )
-from rithmic_nt_connect.recovery_bridge import TransportRecoveryBridge
 
 
 class _Session:

@@ -59,7 +59,7 @@ from nautilus_trader.model.objects import (
 from nautilus_trader.model.orders import Order
 
 if TYPE_CHECKING:
-    from rithmic_gateway.transport_recovery import RecoveryFailed, TransportDown
+    from rithmic_nt_connect.transport import RecoveryFailed, TransportDown
 
 from rithmic_nt_connect._convert import (
     ConvertError,

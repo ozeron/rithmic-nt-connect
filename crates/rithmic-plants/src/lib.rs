@@ -7,19 +7,25 @@
 #![allow(missing_docs)]
 
 pub mod account;
+pub mod backend;
 pub mod config;
+pub mod direct;
 pub mod dto;
 pub mod error;
+#[cfg(feature = "testing")]
+pub mod fake;
 pub mod history;
 pub mod plants;
 pub mod session;
 pub mod systems;
 
 pub use account::{pick_account, rows_from_account_list, AccountRow};
+pub use backend::{AccountTriple, ModifyOrder, PlaceBracketOrder, PlaceOrder, Session};
 pub use config::{
     SessionConfig, SessionConfigBuilder, DEFAULT_APP_NAME, DEFAULT_APP_VERSION, DEFAULT_LUCID_URL,
     DEFAULT_SYSTEM_NAME,
 };
+pub use direct::DirectSession;
 pub use dto::{
     AccountPnlDto, BboDto, FillHistoryDto, FrontMonthDto, HistoryBarDto, HistoryTickDto,
     InstrumentPnlDto, LastTradeDto, OrderBookDto, OrderNotificationDto, PlantEvent,

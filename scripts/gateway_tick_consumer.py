@@ -2,7 +2,8 @@
 """Single-symbol tick consumer over the shared ``rithmic-gateway``.
 
 Designed to run as one of several processes against the same credential set.
-Uses ``GatewayClient`` auto-spawn (or an already-running parent).
+Attaches with ``GatewayClient`` to an already-running parent (start one with
+``python -m rithmic_gateway``); it never spawns one and holds no password.
 
 Exit codes:
   0 — received ``--min-ticks`` MD events for the resolved front-month symbol
@@ -63,7 +64,8 @@ def main(argv: list[str] | None = None) -> int:
     os.environ.setdefault("RITHMIC_CONNECT_MODE", "gateway")
 
     try:
-        from rithmic_gateway import GatewayClient, GatewayConfig
+        from _gateway_parent import gateway_config_from_session
+        from rithmic_gateway import GatewayClient
         from rithmic_gateway.flock import SessionLock, SessionLockError
         from rithmic_nt_connect.config import SessionConfig
     except Exception as exc:
@@ -76,27 +78,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[{label}] SKIP (no credentials): {exc}")
         return 2
 
-    gcfg = GatewayConfig(
-        user=session_cfg.user,
-        system_name=session_cfg.system_name,
-        url=session_cfg.url,
-        env=session_cfg.env,
-        account_id=session_cfg.account_id or "",
-        fcm_id=session_cfg.fcm_id or "",
-        ib_id=session_cfg.ib_id or "",
-        auth_token=getattr(session_cfg, "gateway_auth_token", None) or "",
-        listen=getattr(session_cfg, "gateway_listen", None),
-        auto_spawn=bool(getattr(session_cfg, "gateway_auto_spawn", True)),
-        gateway_bin=getattr(session_cfg, "gateway_bin", None)
-        or os.environ.get("RITHMIC_GATEWAY_BIN"),
-    )
+    gcfg = gateway_config_from_session(session_cfg)
 
     client = GatewayClient(gcfg, rpc_timeout_sec=30.0)
     try:
-        print(
-            f"[{label}] connecting socket={gcfg.socket_path} "
-            f"auto_spawn={gcfg.auto_spawn} user={gcfg.user[:2]}***"
-        )
+        print(f"[{label}] attaching socket={gcfg.socket_path} user={gcfg.user[:2]}***")
         client.connect()
         pid = _gateway_pid(gcfg)
         print(f"[{label}] READY gateway_pid={pid} scopes={client.scopes}")
