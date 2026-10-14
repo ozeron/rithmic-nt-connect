@@ -387,6 +387,9 @@ fn map_reply(frame: Frame) -> Result<Frame> {
         // gateway client reports exactly what a direct session would.
         Some(Body::Error(e)) if e.code == "venue_rejected" => Err(Error::Rejected(e.message)),
         Some(Body::Error(e)) if e.code == "not_sent" => Err(Error::NotSent(e.message)),
+        // Older parents refuse requests with `not_ready` while rebuilding; nothing
+        // reached the venue. (The handshake matches `not_ready` itself in runtime.rs.)
+        Some(Body::Error(e)) if e.code == "not_ready" => Err(Error::NotSent(e.message)),
         Some(Body::Error(e)) if e.code == "venue_unknown" => Err(Error::OutcomeUnknown(e.message)),
         Some(Body::Error(e)) => Err(Error::Gateway {
             code: e.code,
