@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
+import sysconfig
 from pathlib import Path
 
 
@@ -21,12 +23,8 @@ _GATEWAY_BIN_NAMES = (_GATEWAY_BIN_NAME, _GATEWAY_BIN_NAME + ".exe")
 
 
 def _bin_search_starts() -> list[Path]:
-    """Roots to walk for cargo ``target/`` binaries.
-
-    Include the editable ``rithmic_nt_connect`` tree. The installed
-    ``rithmic_gateway`` wheel carries its own ``bin/`` (resolved separately via
-    :func:`_bundled_bin`) and has no ``target/``.
-    """
+    """Roots to walk for a source checkout's cargo ``target/`` binaries (the
+    dev fallback; installed wheels carry the binary in their scripts dir)."""
     starts = [Path.cwd(), Path(__file__).resolve().parent]
     try:
         import rithmic_nt_connect
@@ -58,18 +56,15 @@ def _cargo_target_candidates(start: Path) -> list[Path]:
     return out
 
 
-def _bundled_bin() -> str | None:
-    """Return the gateway binary bundled inside the installed package, if present.
-
-    Wheels built via ``scripts/build_wheel.sh`` carry ``rithmic_gateway/bin/``
-    alongside the Python client, so an installed wheel self-contains the native
-    binary with no ``cargo build`` and no ``target/`` on the consumer's disk.
-    """
-    base = Path(__file__).resolve().parent / "bin"
-    for name in _GATEWAY_BIN_NAMES:
-        path = base / name
-        if path.is_file() and os.access(path, os.X_OK):
-            return str(path.resolve())
+def _wheel_bin() -> str | None:
+    """The binary the ``rithmic-gateway`` wheel installed into this environment's
+    scripts dir (next to the interpreter for a venv), if present."""
+    dirs = {sysconfig.get_path("scripts"), str(Path(sys.executable).parent)}
+    for base in dirs:
+        for name in _GATEWAY_BIN_NAMES:
+            path = Path(base) / name
+            if path.is_file() and os.access(path, os.X_OK):
+                return str(path.resolve())
     return None
 
 
@@ -86,13 +81,12 @@ def _resolve_user_bin(raw: str | None, label: str) -> str | None:
 
 
 def resolve_gateway_bin(explicit: str | None = None) -> str:
-    """Resolve ``rithmic-gateway`` from explicit path, env, bundled, PATH, or
-    cargo targets.
+    """Resolve ``rithmic-gateway``.
 
-    Does not run ``cargo build`` — set ``RITHMIC_GATEWAY_BIN`` or build the
-    binary first.
-    Search order: explicit → ``RITHMIC_GATEWAY_BIN`` → bundled ``rithmic_gateway/bin`` →
-    ``PATH`` → cwd then package ``target/{release,debug}`` (and ``CARGO_TARGET_DIR``).
+    Search order: explicit → ``RITHMIC_GATEWAY_BIN`` → the binary the
+    ``rithmic-gateway`` wheel installed in this environment → ``PATH`` → a
+    source checkout's ``target/{release,debug}`` (and ``CARGO_TARGET_DIR``).
+    Never runs ``cargo build``.
     """
     for label, raw in (
         ("gateway bin", explicit),
@@ -101,9 +95,9 @@ def resolve_gateway_bin(explicit: str | None = None) -> str:
         resolved = _resolve_user_bin(raw, label)
         if resolved is not None:
             return resolved
-    bundled = _bundled_bin()
-    if bundled is not None:
-        return bundled
+    installed = _wheel_bin()
+    if installed is not None:
+        return installed
     found = shutil.which(_GATEWAY_BIN_NAME)
     if found:
         return found
@@ -117,7 +111,7 @@ def resolve_gateway_bin(explicit: str | None = None) -> str:
             if candidate.is_file() and os.access(candidate, os.X_OK):
                 return str(candidate.resolve())
     raise GatewayBinaryError(
-        "rithmic-gateway not on PATH or under target/{release,debug}; "
-        "set RITHMIC_GATEWAY_BIN or build with "
+        "rithmic-gateway not found: install the rithmic-gateway wheel (it carries "
+        "the binary), or set RITHMIC_GATEWAY_BIN, or in a source checkout run "
         "`cargo build -p rithmic-gateway --release`"
     )

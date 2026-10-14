@@ -85,7 +85,7 @@ Distribution today:
 **11. Distribution like NautilusTrader.**
 - What:
   - `python/pyproject.toml` switches to maturin `bindings = "bin"` (crate `rithmic-gateway`) with `python-source` for `rithmic_gateway`, the way ruff and uv ship binaries.
-  - `rithmic-nt-connect` depends on `rithmic-gateway`, so `wheel-data` bundling and `build_wheel.sh` are retired.
+  - `rithmic-nt-connect` stops bundling the gateway (`wheel-data`, its `build.rs` copy and `build_wheel.sh` are retired) and offers `rithmic-gateway` as a `gateway` extra; it is not a hard dependency because the adapter never imports the lake package.
   - `wheels.yml` uses `PyO3/maturin-action` (manylinux_2_35 x86_64/aarch64, macOS arm64) with protoc installed, on push to `main` and on tags.
   - A no-Rust smoke runs before publishing. Assets go to a rolling `main` prerelease. A small script regenerates a PEP 503 index (sha256 fragments, last 30 dev builds) on GitHub Pages. `actions/attest-build-provenance` attests every wheel.
 - Why: no account or token to manage, nothing public beyond the already-public repo. uv supports the index natively.

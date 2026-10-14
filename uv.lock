@@ -420,6 +420,17 @@ wheels = [
 ]
 
 [[package]]
+name = "rithmic-gateway"
+version = "0.1.0"
+source = { directory = "python" }
+dependencies = [
+    { name = "protobuf" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "protobuf", specifier = "==5.29.6" }]
+
+[[package]]
 name = "rithmic-nt-connect"
 version = "0.1.0"
 source = { editable = "." }
@@ -431,6 +442,9 @@ dependencies = [
 [package.optional-dependencies]
 dev = [
     { name = "pytest" },
+]
+gateway = [
+    { name = "rithmic-gateway" },
 ]
 nautilus = [
     { name = "nautilus-trader" },
@@ -449,8 +463,9 @@ requires-dist = [
     { name = "nautilus-trader", marker = "extra == 'nautilus'", specifier = "==1.231.0" },
     { name = "protobuf", specifier = "==5.29.6" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
+    { name = "rithmic-gateway", marker = "extra == 'gateway'", directory = "python" },
 ]
-provides-extras = ["dev", "nautilus"]
+provides-extras = ["dev", "nautilus", "gateway"]
 
 [package.metadata.requires-dev]
 dev = [

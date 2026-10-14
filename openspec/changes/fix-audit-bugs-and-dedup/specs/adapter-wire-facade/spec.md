@@ -1,7 +1,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Packaging and lake client unaffected
-The `rithmic-gateway` wheel SHALL carry the pure-Python `rithmic_gateway` package and the `rithmic-gateway` binary. The `rithmic-nt-connect` wheel SHALL depend on `rithmic-gateway` instead of bundling the binary. No wheel SHALL contain any fake-plant binary. The `rithmic_gateway` package SHALL remain importable without Nautilus or the extension.
+The `rithmic-gateway` wheel SHALL carry the pure-Python `rithmic_gateway` package and the `rithmic-gateway` binary. The `rithmic-nt-connect` wheel SHALL NOT bundle the gateway client or binary; it SHALL offer `rithmic-gateway` as its `gateway` extra (the adapter never imports the lake package). No wheel SHALL contain any fake-plant binary. The `rithmic_gateway` package SHALL remain importable without Nautilus or the extension.
 
 #### Scenario: Wheel contents
 - **WHEN** the wheels are built by the CI wheel workflow

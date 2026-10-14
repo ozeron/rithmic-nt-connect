@@ -21,6 +21,10 @@ async fn main() {
             print_help();
             return;
         }
+        if arg == "--version" || arg == "-V" {
+            println!("rithmic-gateway {}", env!("CARGO_PKG_VERSION"));
+            return;
+        }
         eprintln!("unknown argument: {arg}");
         print_help();
         std::process::exit(2);

@@ -1,113 +1,70 @@
-"""Packaging guards: the maturin wheel-data mirror must stay in sync.
+"""Packaging guards for the two wheels.
 
-`wheel-data/purelib/rithmic_gateway` is the snapshot maturin bundles into the
-wheel (see `crates/rithmic-nt-connect/build.rs`). If it drifts from
-`python/rithmic_gateway`, the shipped wheel carries stale bindings or client
-code — the exact failure that shipped a protobuf-7.34.1 `session_pb2.py` and a
-pre-Windows `spawn.py`. These tests fail on any drift.
+`rithmic-gateway` (`python/pyproject.toml`) is a maturin ``bindings = "bin"``
+wheel, like ruff / uv: the `rithmic-gateway` binary lands in the venv's scripts
+dir next to the pure-Python `rithmic_gateway` client. `rithmic-nt-connect`
+(root `pyproject.toml`) carries only the adapter and its extension; it never
+bundles the gateway (that copy drifted once and shipped a protobuf-7.34.1
+`session_pb2.py`). These tests fail if either layout regresses or a fake-plant
+binary could ship.
 """
 
 from __future__ import annotations
 
-import subprocess  # nosec B404 - runs the launcher under test
-import sys
-import tempfile
+import tomllib
 import zipfile
 from pathlib import Path
 
-import pytest
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SRC = REPO_ROOT / "python" / "rithmic_gateway"
-MIRROR = REPO_ROOT / "wheel-data" / "purelib" / "rithmic_gateway"
+GATEWAY_SRC = REPO_ROOT / "python" / "rithmic_gateway"
 
 
-def test_wheel_data_mirrors_gateway_client_sources() -> None:
-    if not MIRROR.is_dir():
-        pytest.skip("wheel-data not populated yet (run a maturin/cargo build first)")
-
-    src_files = {p.relative_to(SRC) for p in SRC.rglob("*.py")}
-    mirror_files = {p.relative_to(MIRROR) for p in MIRROR.rglob("*.py")}
-
-    assert mirror_files == src_files, (
-        "wheel-data mirror diverged from python/rithmic_gateway; "
-        "missing: "
-        f"{sorted(src_files - mirror_files) or 'none'}, "
-        f"orphaned: {sorted(mirror_files - src_files) or 'none'}"
-    )
-
-    for rel in sorted(src_files):
-        assert (MIRROR / rel).read_bytes() == (SRC / rel).read_bytes(), (
-            f"stale wheel-data mirror: {rel}"
-        )
+def _toml(path: Path) -> dict:
+    return tomllib.loads(path.read_text())
 
 
-def test_wheel_data_pb2_matches_regenerated_bindings() -> None:
-    """The wheel must carry the same session_pb2 gencode the source tree does."""
-    if not MIRROR.is_dir():
-        pytest.skip("wheel-data not populated yet (run a maturin/cargo build first)")
-
-    mirror = MIRROR / "v1" / "session_pb2.py"
-    source = SRC / "v1" / "session_pb2.py"
-    assert mirror.is_file() and source.is_file()
-    assert mirror.read_bytes() == source.read_bytes()
-    # Sanity: the shipped bindings must be the 5.29.6-compatible generation.
-    assert b"Protobuf Python Version: 5.29.6" in mirror.read_bytes()
-
-
-def test_bundled_gateway_binary_is_launchable_via_the_launcher() -> None:
-    """``python -m rithmic_gateway`` execs the binary bundled in the wheel layout.
-
-    The credential-free parent refuses to start (``RITHMIC_USER required``); that
-    refusal comes from the real binary, which proves the launcher resolved and
-    exec'd it without cargo or a ``target/`` directory.
-    """
-    bundled = MIRROR / "bin"
-    if not any(
-        (bundled / n).is_file() for n in ("rithmic-gateway", "rithmic-gateway.exe")
-    ):
-        pytest.skip("no bundled gateway binary (run scripts/build_wheel.sh)")
-
-    proc = subprocess.run(  # nosec B603 - fixed argv, test-controlled env
-        [sys.executable, "-m", "rithmic_gateway"],
-        # Import the wheel layout, not the source tree; empty env, no cargo target.
-        env={"PYTHONPATH": str(MIRROR.parent), "PATH": "/usr/bin:/bin"},
-        cwd=Path(tempfile.gettempdir()),
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
-    assert "rithmic_gateway:" not in proc.stderr  # launcher did not fail to resolve
-    assert "RITHMIC_USER" in proc.stderr  # the real binary ran and refused to start
-    assert proc.returncode != 0
+def test_gateway_wheel_is_a_maturin_bin_wheel_with_the_production_binary_only() -> None:
+    cfg = _toml(REPO_ROOT / "python" / "pyproject.toml")
+    assert cfg["build-system"]["build-backend"] == "maturin"
+    maturin = cfg["tool"]["maturin"]
+    assert maturin["bindings"] == "bin"
+    assert maturin["module-name"] == "rithmic_gateway"
+    assert maturin["manifest-path"] == "../crates/rithmic-gateway/Cargo.toml"
+    assert maturin["targets"] == [{"name": "rithmic-gateway", "kind": "bin"}]
+    assert "features" not in maturin
+    # The lake client must stay installable without Nautilus.
+    assert not [d for d in cfg["project"]["dependencies"] if "nautilus" in d]
 
 
-def test_wheel_bundles_the_production_gateway_and_never_the_fake() -> None:
-    """The fake-plant gateway is test-only: never built, bundled, or selectable."""
+def test_adapter_wheel_does_not_bundle_the_gateway() -> None:
+    cfg = _toml(REPO_ROOT / "pyproject.toml")
+    assert "data" not in cfg["tool"]["maturin"]
+    assert cfg["project"]["optional-dependencies"]["gateway"] == ["rithmic-gateway"]
+    assert not (REPO_ROOT / "wheel-data").exists()
+    assert not (REPO_ROOT / "crates" / "rithmic-nt-connect" / "build.rs").exists()
+
+
+def test_fake_gateway_is_test_only() -> None:
     manifest = (REPO_ROOT / "crates" / "rithmic-gateway" / "Cargo.toml").read_text()
-    # The fake bin only builds with the `testing` feature.
     fake_bin = manifest.split('name = "rithmic-gateway-fake"')[1].split("[[bin]]")[0]
     assert 'required-features = ["testing"]' in fake_bin
-
-    # The wheel script builds the production binary only, without features.
-    script = (REPO_ROOT / "scripts" / "build_wheel.sh").read_text()
-    assert "cargo build -p rithmic-gateway --release" in script
-    assert "fake" not in script.lower()
-    build_line = script.split("cargo build -p rithmic-gateway")[1].split("\n")[0]
-    assert "--features" not in build_line
 
     # The production binary has no switch that selects a fake plant.
     prod = REPO_ROOT / "crates/rithmic-gateway/src/bin/rithmic_gateway.rs"
     assert "fake" not in prod.read_text().lower()
 
-    # Whatever is bundled (mirror) or built into a wheel contains no fake binary.
-    bin_dir = MIRROR / "bin"
-    if bin_dir.is_dir():
-        assert not [p.name for p in bin_dir.iterdir() if "fake" in p.name]
-    for wheel in sorted(
-        (REPO_ROOT / "target" / "wheels").glob("rithmic_nt_connect-*.whl")
-    ):
+
+def test_shipped_pb2_is_the_5_29_6_generation() -> None:
+    pb2 = (GATEWAY_SRC / "v1" / "session_pb2.py").read_bytes()
+    assert b"Protobuf Python Version: 5.29.6" in pb2
+
+
+def test_built_wheels_never_contain_the_fake_gateway() -> None:
+    """Any wheel a local or CI build left under ``target/wheels`` is checked."""
+    for wheel in sorted((REPO_ROOT / "target" / "wheels").glob("rithmic_*.whl")):
         with zipfile.ZipFile(wheel) as zf:
             names = zf.namelist()
         assert not [n for n in names if "rithmic-gateway-fake" in n], wheel
+        if wheel.name.startswith("rithmic_gateway-"):
+            assert [n for n in names if n.endswith("/scripts/rithmic-gateway")], wheel
+            assert "rithmic_gateway/client.py" in names, wheel

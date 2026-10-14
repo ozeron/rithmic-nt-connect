@@ -1,6 +1,6 @@
 """``python -m rithmic_gateway`` — start the parent gateway explicitly.
 
-Resolves the bundled ``rithmic-gateway`` binary and replaces this process with
+Resolves the installed ``rithmic-gateway`` binary and replaces this process with
 it. The environment is passed through unchanged, so the parent's credentials
 (``RITHMIC_PASSWORD`` etc.) come from the launching shell, service unit, or
 container. This does not detach, set idle-exit, or edit the environment: the
