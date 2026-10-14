@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
-### Requirement: Notification classification and coercion rules live in the crate
-The notification-to-action classification (`notification_action`), the price sentinel rule (`sentinel_none`) and closed-set enum coercion (`enum_int`) SHALL be implemented once in `rithmic-exec` and called from Python. The former Python implementations SHALL remain only as test oracles.
+### Requirement: Notification classification lives in the crate
+The notification-to-action classification (which action each kind asks for, and a refusal's reason: the venue text, else report text, else status, else a fixed default) SHALL be implemented once in `rithmic-exec` and called from Python. The former Python implementation SHALL remain only as a test oracle. Coercion of arbitrary Python values (`sentinel_none`, `enum_int`) stays at the Python boundary.
 
 #### Scenario: Parity with the oracle
 - **WHEN** the parity suite runs the Rust rules and the Python oracles over the same inputs

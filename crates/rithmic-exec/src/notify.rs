@@ -41,6 +41,67 @@ pub fn kind_from_notify(
     }
 }
 
+/// What a tracked order's notification asks of the adapter: the action, and
+/// for a refusal the reason shown (the venue's text, else its report text, else
+/// its status, else a fixed default). `None` for a kind that asks for nothing.
+pub fn notification_action(
+    kind: &str,
+    text: Option<&str>,
+    report_text: Option<&str>,
+    status: Option<&str>,
+) -> Option<(&'static str, Option<String>)> {
+    let refusal = |default: &str| {
+        [text, report_text, status]
+            .into_iter()
+            .flatten()
+            .find(|s| !s.is_empty())
+            .unwrap_or(default)
+            .to_string()
+    };
+    Some(match kind {
+        "accepted" => ("accepted", None),
+        "updated" => ("updated", None),
+        "canceled" => ("canceled", None),
+        "triggered" => ("triggered", None),
+        "filled" => ("filled", None),
+        "rejected" => ("rejected", Some(refusal("REJECT"))),
+        "modify_rejected" => ("modify_rejected", Some(refusal("NOT_MODIFIED"))),
+        "cancel_rejected" => ("cancel_rejected", Some(refusal("NOT_CANCELLED"))),
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod action_tests {
+    use super::notification_action;
+
+    #[test]
+    fn refusals_take_the_first_non_empty_reason_then_a_default() {
+        assert_eq!(
+            notification_action("rejected", Some(""), Some("margin"), Some("x")),
+            Some(("rejected", Some("margin".into())))
+        );
+        assert_eq!(
+            notification_action("modify_rejected", None, None, None),
+            Some(("modify_rejected", Some("NOT_MODIFIED".into())))
+        );
+        assert_eq!(
+            notification_action("cancel_rejected", None, None, Some("too late")),
+            Some(("cancel_rejected", Some("too late".into())))
+        );
+    }
+
+    #[test]
+    fn other_kinds_carry_no_reason_and_unknown_kinds_ask_for_nothing() {
+        assert_eq!(
+            notification_action("filled", Some("t"), None, None),
+            Some(("filled", None))
+        );
+        assert_eq!(notification_action("open", None, None, None), None);
+        assert_eq!(notification_action("", None, None, None), None);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::kind_from_notify as kind;

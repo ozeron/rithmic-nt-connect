@@ -188,6 +188,34 @@ fn kind_from_notify(
     rithmic_exec::kind_from_notify(source, notify_type_name, status, text)
 }
 
+/// History slice length for a wire bar type (1 second .. 4 weekly) and period:
+/// the Rust rule the pure-Python lake client mirrors (pinned by a parity test).
+#[pyfunction]
+fn history_bar_slice_secs(bar_type: i32, period: i32) -> PyResult<i32> {
+    let bar_type = rithmic_plants::history::parse_time_bar_type(bar_type)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(rithmic_plants::history::bar_slice_secs(bar_type, period))
+}
+
+/// Inclusive history slices of at most `step_secs` (see `history_bar_slice_secs`).
+#[pyfunction]
+fn history_window_slices(start: i32, end: i32, step_secs: i32) -> Vec<(i32, i32)> {
+    rithmic_plants::history::window_slices(start, end, step_secs)
+}
+
+/// The action a tracked order's notification asks for, and a refusal's reason
+/// (``rithmic_exec::notification_action``).
+#[pyfunction]
+#[pyo3(signature = (kind, text = None, report_text = None, status = None))]
+fn notification_action(
+    kind: &str,
+    text: Option<&str>,
+    report_text: Option<&str>,
+    status: Option<&str>,
+) -> Option<(&'static str, Option<String>)> {
+    rithmic_exec::notification_action(kind, text, report_text, status)
+}
+
 /// The kind of an order-book message by its venue `update_type` (`"snapshot"`,
 /// `"solo"`, ...), or `None` for a value outside the venue's closed set.
 #[pyfunction]
@@ -442,6 +470,9 @@ pub(super) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySeenKeyCache>()?;
     m.add_function(wrap_pyfunction!(kind_from_notify, m)?)?;
     m.add_function(wrap_pyfunction!(book_update_kind, m)?)?;
+    m.add_function(wrap_pyfunction!(notification_action, m)?)?;
+    m.add_function(wrap_pyfunction!(history_bar_slice_secs, m)?)?;
+    m.add_function(wrap_pyfunction!(history_window_slices, m)?)?;
     m.add_function(wrap_pyfunction!(fill_trade_id, m)?)?;
     m.add_function(wrap_pyfunction!(fill_dedup_key, m)?)?;
     m.add_function(wrap_pyfunction!(instrument_id_from_symbol, m)?)?;

@@ -39,3 +39,18 @@ def test_range_loads_take_no_worker_count() -> None:
 
     sig = inspect.signature(rithmic_gateway.GatewayClient.load_time_bars_range)
     assert "max_workers" not in sig.parameters
+
+
+def test_the_two_rms_row_shapes_stay_identical() -> None:
+    """The adapter and the lake package each keep a copy of the RMS row types
+    (neither may import the other, see test_import_isolation); this pins them
+    to one shape."""
+    from typing import get_type_hints
+
+    from rithmic_gateway import types as lake
+    from rithmic_nt_connect import wire_types as adapter
+
+    for name in ("ProductRmsInfo", "AccountRmsInfo"):
+        assert get_type_hints(getattr(lake, name)) == get_type_hints(
+            getattr(adapter, name)
+        ), name

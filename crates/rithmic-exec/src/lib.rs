@@ -33,5 +33,5 @@ pub use inventory::{
     StatusClass,
 };
 pub use lru::Lru;
-pub use notify::kind_from_notify;
+pub use notify::{kind_from_notify, notification_action};
 pub use plant::{PlantPolicy, PlantState};

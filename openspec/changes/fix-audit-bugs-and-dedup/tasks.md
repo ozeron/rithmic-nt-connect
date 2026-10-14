@@ -70,12 +70,12 @@
 - [x] 6.8 `session.rs`: generic `connect_plant`; `ensure_pnl_plant` uses `connect_pnl`; shared `parse_order_terms`; one `adjust_bracket_on`; simplified error helpers; misplaced doc comments removed
 - [x] 6.9 `dto.rs`: one order-notification builder for both arms; `TimeBarProbeRow` built on `HistoryBarDto` parsing
 - [x] 6.10 `history.rs` uses `rithmic_exec::product_root` for the listed-contract check; test for `ESZ26` and lowercase input
-- [ ] 6.11 `execution.py`: `_deny` / `_deny_all` with one ordered gate list; `_make_poll_task`; modify/cancel rejects use the resolved venue id
-- [ ] 6.12 Move `notification_action`, `sentinel_none`, `enum_int` into `rithmic-exec` with Rust tests and PyO3 bindings; Python originals kept as oracles in `test_exec_rules_parity.py`
-- [ ] 6.13 RMS types defined once in `rithmic_gateway.types` (fields reconciled); `wire_types.py` re-exports
-- [ ] 6.14 `history_window.py` parity test against the Rust slice functions (exposed via `_lib` if missing)
-- [ ] 6.15 `_FlockedDirectSession`: explicit methods only where they add locking or refcount, forward the rest, `TYPE_CHECKING` protocol base; `test_wire_session_parity.py` and ty still pass
-- [ ] 6.16 Fix the stale comment at `session.py:167-173`
+- [x] 6.11 `execution.py`: `_deny` / `_deny_all` with one ordered gate list; `_make_poll_task`; modify/cancel rejects use the resolved venue id
+- [x] 6.12 Move the `notification_action` rule (action per kind, refusal reason fallback) into `rithmic-exec` with Rust tests and a PyO3 binding; the Python original is the oracle in `test_exec_rules_parity.py`. `sentinel_none` / `enum_int` stay in Python: AGENTS.md keeps Python-object coercion at the Python boundary
+- [x] 6.13 RMS row types: the adapter and the lake package must not import each other (`test_import_isolation`), so the two copies stay and a test pins them to one shape
+- [x] 6.14 `history_window.py` parity test against the Rust slice functions (exposed via `_lib` if missing)
+- [x] 6.15 `_FlockedDirectSession`: kept explicit (decided on review): checkers cannot see `WireSession` conformance through `__getattr__` (its docstring says so), the surface is class-checked by `test_wire_session_parity.py`, and every forwarder is one line; generating them would hide the surface without removing a drift risk the test does not already catch
+- [x] 6.16 Fix the stale comment at `session.py:167-173`
 
 ## 7. Distribution
 

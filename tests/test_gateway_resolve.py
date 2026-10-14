@@ -207,3 +207,30 @@ def test_load_time_bars_range_async(monkeypatch: pytest.MonkeyPatch) -> None:
         client.load_time_bars_range_async("NQU6", "CME", 0, 3600, bar_type=2, period=1)
     )
     assert len(bars) == 1
+
+
+def test_history_slicing_matches_the_rust_rule() -> None:
+    """The pure-Python lake client slices history exactly like the Rust path
+    (``rithmic_plants::history``), so both send the same bounded RPCs."""
+    import pytest
+
+    lib = pytest.importorskip("rithmic_nt_connect._lib")
+    from rithmic_gateway.history_window import bar_slice_secs, window_slices
+
+    for bar_type in (1, 2, 3, 4):
+        for period in (1, 5, 14, 15, 59, 60, 240):
+            assert bar_slice_secs(bar_type, period) == lib.history_bar_slice_secs(
+                bar_type, period
+            ), (bar_type, period)
+    for start, end, step in [
+        (0, 0, 60),
+        (0, 1800, 900),
+        (0, 900, 900),
+        (1_700_000_000, 1_700_100_000, 7_200),
+        (5, 3, 10),
+        (0, 10, 0),
+        (2_000_000_000, 2_147_483_000, 536_870_911),
+    ]:
+        assert window_slices(start, end, step) == [
+            tuple(x) for x in lib.history_window_slices(start, end, step)
+        ], (start, end, step)

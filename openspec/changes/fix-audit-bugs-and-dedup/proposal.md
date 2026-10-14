@@ -68,9 +68,8 @@ Installing is also harder than it should be. Consumers either build the extensio
   - Unified notification/bar DTO parsing.
   - `product_root` and `ts_ns` used from `rithmic-exec` only.
   - Python deny helpers and poll-task factory.
-  - `notification_action` / `sentinel_none` / `enum_int` moved to `rithmic-exec`.
-  - RMS types defined once.
-  - Thinner `_FlockedDirectSession`.
+  - The `notification_action` rule moved to `rithmic-exec` (Python-object coercion stays in Python, per AGENTS.md).
+  - The two RMS row-type copies (adapter and lake package cannot import each other) pinned to one shape by a test.
 - **Distribution like Nautilus.**
   - `rithmic-gateway` becomes a maturin `bindings = "bin"` wheel carrying the client and the `rithmic-gateway` binary.
   - `rithmic-nt-connect` depends on it instead of bundling the binary.
@@ -89,7 +88,7 @@ Installing is also harder than it should be. Consumers either build the extensio
 - `gateway-client`: per-facade intent refcount; `account_id` in the runtime key; `bad_request` maps to NotSent; command errors default to unknown; no compounded history retries; pure-Python client framing fix.
 - `gateway-parent-lifecycle`: idle-exit wakeup; command-lane panic does not leak intents; pre-handshake limits; singleton lock file kept intact by contenders; binary lookup order.
 - `adapter-wire-facade`: no blocking RPC on the loop; position recon gated on live PnL; book `update_type`; history requests always complete; bracket events and denial; clock-free fill identity; bar timestamp option; stream survives a bad notification.
-- `exec-core`: `notification_action`, `sentinel_none` and `enum_int` move into `rithmic-exec`.
+- `exec-core`: the `notification_action` rule moves into `rithmic-exec`.
 
 ## Impact
 

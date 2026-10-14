@@ -490,3 +490,50 @@ def test_event_time_is_a_field_read_when_the_extension_already_computed_it() -> 
         assert _ts_ns(d) == oracle(
             d.get("ts_event_ns"), d.get("ssboe"), d.get("usecs")
         ), d
+
+
+def _reference_notification_reason(kind: str, fields: dict[str, str | None]) -> object:
+    """The original Python classification (kind and refusal reason), kept as the
+    oracle for ``rithmic_exec::notification_action``."""
+    reason = fields.get("text") or fields.get("report_text") or fields.get("status")
+    defaults = {
+        "rejected": "REJECT",
+        "modify_rejected": "NOT_MODIFIED",
+        "cancel_rejected": "NOT_CANCELLED",
+    }
+    if kind in defaults:
+        return (kind, str(reason or defaults[kind]))
+    if kind in ("accepted", "updated", "canceled", "triggered", "filled"):
+        return (kind, None)
+    return None
+
+
+def test_notification_action_matches_the_reference() -> None:
+    from rithmic_nt_connect import _lib
+
+    kinds = [
+        "accepted",
+        "rejected",
+        "modify_rejected",
+        "cancel_rejected",
+        "updated",
+        "canceled",
+        "triggered",
+        "filled",
+        "open",
+        "complete",
+        "",
+    ]
+    texts = [None, "", "margin", "Too late"]
+    for kind in kinds:
+        for text in texts:
+            for report in texts:
+                for status in texts:
+                    fields: dict[str, str | None] = {
+                        "text": text,
+                        "report_text": report,
+                        "status": status,
+                    }
+                    got = _lib.notification_action(kind, text, report, status)
+                    want = _reference_notification_reason(kind, fields)
+                    assert (got if got is None else tuple(got)) == want, (kind, fields)
