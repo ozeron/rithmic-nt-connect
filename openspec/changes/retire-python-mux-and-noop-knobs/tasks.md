@@ -35,7 +35,7 @@ Moved to `harden-gateway-runtime` (tasks 2.x to 5.x): they overlap its event-pat
 - [x] 6.3 Delete one-off probes `crates/rithmic-nt-connect/examples/probe_daily_bars.rs` and `scripts/probe_hydrate_under_live_md.py` (AGENTS.md: no one-off probes)
 - [x] 6.4 Delete duplicate tests `test_order_book_empty_levels_raises`, `test_emit_accepted_only_while_submitted` (tests/test_notification_intake.py)
 - [ ] 6.5 Delete the six duplicated tests in `tests/test_data_transport_recovery.py` that `tests/test_recovery_bridge.py` already covers
-- [ ] 6.6 Stale docs: rewrite README, crates/README, scripts/README, AGENTS facade line, STATUS/runbook/exec-matrix facts; delete `docs/plans`, ADR 0001, dated reference notes (in progress)
+- [x] 6.6 Stale docs: rewrite README, crates/README, scripts/README, AGENTS facade line, STATUS/runbook/exec-matrix facts; delete `docs/plans`, ADR 0001, dated reference notes
 - [ ] 6.7 Decide: `request_bars_error` registry, Python `GatewayClient` order/PnL methods, `scripts/spike_bracket_order.py` + test (need owner decision)
 - [ ] 6.8 Verify then delete the unused `RithmicSession` place/cancel/modify/load wrappers in `session.rs` (~170 lines; only two tests call them)
 

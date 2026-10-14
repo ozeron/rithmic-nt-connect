@@ -38,4 +38,4 @@ This repo uses **`rithmic-nt-connect`** (import / crate lib: `rithmic_nt_connect
 - **1.231.x (v1):** out-of-tree Python adapters via `TradingNode.add_data_client_factory` / `add_exec_client_factory` are the supported path for External adapters.
 - **Python v2 / LiveNode on published wheels:** as of issue [#4694](https://github.com/nautechsystems/nautilus_trader/issues/4694), no supported out-of-tree adapter seam; factories must be compiled into the PyO3 module. Native Rust binaries can still link external adapters.
 
-**This project Phase 1 targets 1.231.x.**
+**This project targets 1.231.x.**

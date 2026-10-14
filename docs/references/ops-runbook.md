@@ -4,7 +4,7 @@
 2. Copy `.env.example` → `.env` and set `RITHMIC_USER` / `RITHMIC_PASSWORD`. Only direct mode and the gateway **parent** need the password; gateway-mode clients never read, hold, or send it.
 3. Install system `protoc` (`protobuf-compiler` / `brew install protobuf`) if missing. The **Rust** gateway build invokes `protoc` from PATH (prost-build). The **Python** `session_pb2.py` gencode is pinned instead: it is regenerated from `proto/rithmic_gateway/v1/session.proto` with the uv dev dependency `grpcio-tools==1.71.0` (bundles protoc 29.0) via `uv run python scripts/gen_gateway_proto.py`, which restores the repo's `5.29.6` gencode marker (protoc 29.0 and 29.6 emit byte-identical gencode except the version header). The script fails loudly if the gencode shape drifts.
 4. Sync + build extension: `uv sync --extra dev && uv run maturin develop`
-5. Unit tests: `cargo test -p rithmic-plants -p rithmic-gateway -p rithmic-nt-connect && uv run pytest -q`
+5. Unit tests: `cargo test -p rithmic-plants -p rithmic-gateway -p rithmic-exec -p rithmic-nt-connect && uv run pytest -q`
 6. Live smoke: `uv run python scripts/smoke_lucid_nq.py` (exits `2` if credentials missing — CI-safe).
 7. Shared gateway (two consumers, one parent): `uv run python scripts/smoke_gateway_shared_ticks.py --seconds 25` (NQ + MNQ; exits `2` if no creds).
 
@@ -54,7 +54,7 @@ Unknown system names stay refused. Venue gaps: skipped-spec below.
 ## Skipped-spec register
 
 Known test skips that are venue/environment facts, not adapter bugs. Each
-entry names what would unblock it. Phase 7 deliverable (gap-closure plan P3).
+entry names what would unblock it. Phase 7 deliverable.
 
 | Skip | Reason | Unblock |
 | --- | --- | --- |
@@ -124,8 +124,8 @@ RITHMIC_GATEWAY_BIN=$PWD/target/release/rithmic-gateway python -m rithmic_gatewa
 #   RITHMIC_GATEWAY_CLIENT_MODE, RITHMIC_GATEWAY_SPAWN_POLICY or
 #   RITHMIC_GATEWAY_AUTO_SPAWN to any value raises ConfigError; unset them
 #   (start the parent explicitly).
-# Adapter gateway mode always uses the Rust client; the rollout selector
-#   RITHMIC_GATEWAY_CLIENT=rust|python no longer exists and is ignored.
+# Adapter gateway mode uses the Rust client inside the extension (there is no
+#   client-implementation selector).
 # Trading / cancel_all are parent-gated (independent toggles):
 #   RITHMIC_ENABLE_TRADING=1          # place / modify / cancel / order updates
 #   RITHMIC_GATEWAY_CANCEL_ALL=1      # plant-wide cancel_all panic button (does not require trading)
@@ -141,7 +141,9 @@ RITHMIC_GATEWAY_BIN=$PWD/target/release/rithmic-gateway python -m rithmic_gatewa
 # (impostor protection).
 #
 # Wide history: GatewayClient.load_time_bars_range chunks calendar windows
-# (~4h for 1m bars) so each unix RPC stays within timeout/frame limits.
+# sequentially (same slice lengths as Rust `bar_slice_secs`: 2h for ticks and 1s
+# bars, 40 days for 1m bars, 90 / 180 days for 15m / 60m+ bars, one wide window
+# for daily/weekly) so each unix RPC stays within timeout/frame limits.
 #
 # --- Live XOR heavy history ingest (2026-08-25 MY043 / RC2) ---
 # Do NOT run multi-year catalog ingest (or other long LoadTicks/LoadTimeBars)
@@ -220,8 +222,8 @@ If a second direct/parent process hits the same `user|system|url|env` flock, it 
 
 Remote / Docker / TLS: [`gateway-remote.md`](gateway-remote.md) (v1 local unix; v1.5 tunnel recipe; v2 TLS not implemented).
 
-Phase 1 does **not** submit orders by default. Phase 2 order APIs exist on the
-session / exec client when `enable_trading=True` (or `RITHMIC_ENABLE_TRADING=1`).
+The adapter does **not** submit orders by default. Order APIs exist on the
+session / exec client only when `enable_trading=True` (or `RITHMIC_ENABLE_TRADING=1`).
 Prefer `python scripts/verify_order_dry_run.py` before any live place. Never use
 `--live-place` until conformance / `app_name` authorization is confirmed.
 `RITHMIC_ACCOUNT_ID` / `FCM_ID` / `IB_ID` are optional: the order plant discovers
@@ -363,7 +365,8 @@ in `tests/test_exec_engine_repro.py`:
 - `InvalidStateTrigger: CANCELED -> ACCEPTED` — an open-order drain row taken
   before a cancel propagated used to reconcile ACCEPTED over a locally
   CANCELED leg. The bulk drain now suppresses stale non-terminal rows for
-  locally closed orders (`_row_regresses_terminal_order`); terminal-vs-
+  locally closed orders (`row_stale_reason` in `recon.py`, backed by
+  `stale_reason` in `crates/rithmic-exec`); terminal-vs-
   terminal rows (venue FILLED vs local CANCELED) still pass through.
 
 Residual exposure: Nautilus applies recon reports without a monotonic guard,
@@ -457,4 +460,11 @@ assigns the state directly — every transition goes through the policy, and
   interval; validate the real interval on the P5 canary and raise
   `_REARM_PNL_SNAPSHOT_TIMEOUT_S` if needed.
 
-See also: `docs/references/my046-rithmic-access.md`, `docs/references/plant-probe-2026-08-12.md`.
+## Venue and account quirks
+
+- **Wrong system looks like "permission denied".** A LucidTrading prop login fails on Rithmic Test (`rituz00100`); use system `LucidTrading` with `wss://rprotocol.rithmic.com:443`. Rithmic Test needs its own test credentials.
+- **Expired contract months have no history.** Rithmic history for expired contracts is empty; use another venue or the lake for deep history and Rithmic for the listed front month and live-adjacent checks.
+- **Continuous roots are front aliases.** `CME:NQ`-style roots behave like the front month, so roll days diverge from continuous research series (e.g. Databento `NQ.c.0`).
+- **Account state comes from the exec client.** On Nautilus 1.231.x account state is published by `ExecutionClient.generate_account_state`, not by a data client, so PnL / positions need the exec client even when trading is disabled (read-only exec client; it never submits).
+- **Order-plant reachability is not submit authorization.** Logging in to the order plant works on a LucidTrading account; routing orders needs trading enabled and a conformance-issued `app_name` (see `AGENTS.md` Safety).
+- Do not redistribute gated Rithmic `.proto` sources; keep them out of public git.

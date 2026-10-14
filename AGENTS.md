@@ -30,9 +30,10 @@ When you add or change a plant RPC (place / cancel / modify / brackets / ensure 
 5. Do not ship “direct-only” for a new live capability unless STATUS marks gateway as deferred **and** book/runners refuse that mode.
 
 Structure now enforces the first half of this: declare the RPC on `WireSession` in `session.py` and
-`tests/test_wire_session_parity.py` fails until every adapter (direct facade, gateway facade over
-`GatewayClient`, `WireSessionStub`, and the compiled extension via `_lib.pyi`, which is itself checked
-against the built extension) exposes it with a compatible signature. `tests/test_gateway_proto_parity.py`
+`tests/test_wire_session_parity.py` fails until every adapter exposes it with a compatible signature: `_FlockedDirectSession` (direct),
+`_RustGatewaySession` (gateway; both in `python/rithmic_nt_connect/session.py`), the test double
+`WireSessionStub` (`tests/_stubs.py`), and the compiled extension via the hand-written `_lib.pyi` (itself
+checked against the built extension). `tests/test_gateway_proto_parity.py`
 fails when `session_pb2.py` was not regenerated after editing `session.proto`. Proto framing and gateway
 dispatch/gate tests (`crates/rithmic-gateway/tests`) are still yours to extend.
 

@@ -7,7 +7,7 @@ Cargo workspace members (see the root `Cargo.toml`):
 | `rithmic-exec` | Pure, Nautilus-independent execution rules (order-plant lifecycle policy, exposure and commission lookup, fill identity / dedup keys, drain-row trust and staleness, inventory rules). No dependency on plants, tokio, or Python. |
 | `rithmic-plants` | Shared plant session façade over `rithmic-rs` (ticker, history, PnL, order plants): config, DTOs, history slicing and retry, account discovery, and the `Session` trait with its `DirectSession` implementation. A `testing`-feature `fake` session backs gateway tests. |
 | `rithmic-gateway` | Shared-login broker: length-delimited protobuf framing, the `rithmic-gateway` server binary (generic over `Session`, RPC surface in `rpc_table.rs`), and `GatewaySession`, the Rust gateway client that implements `Session` over a unix socket. |
-| `rithmic-nt-connect` | PyO3 extension (`rithmic_nt_connect._lib`, built with the `python` feature via maturin). Re-exports `rithmic-plants` and binds direct sessions, the gateway client, `SessionLock`, and the `rithmic-exec` rules to Python. |
+| `rithmic-nt-connect` | PyO3 extension (`rithmic_nt_connect._lib`, built with the `python` feature via maturin). Binds direct sessions (`rithmic-plants`), the gateway client (`rithmic-gateway`), `SessionLock`, and the `rithmic-exec` rules to Python as one `Session` class. |
 
 Dependency direction (arrow = depends on):
 
