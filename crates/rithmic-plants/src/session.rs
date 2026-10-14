@@ -836,16 +836,16 @@ pub async fn place_order_on(
 ) -> Result<()> {
     let side: OrderSide = side
         .parse()
-        .map_err(|e| Error::Config(format!("invalid order side: {e}")))?;
+        .map_err(|e| Error::NotSent(format!("invalid order side: {e}")))?;
     let price_type: OrderType = price_type
         .parse()
-        .map_err(|e| Error::Config(format!("invalid price type: {e}")))?;
+        .map_err(|e| Error::NotSent(format!("invalid price type: {e}")))?;
     let duration: TimeInForce = if duration.is_empty() {
         TimeInForce::Day
     } else {
         duration
             .parse()
-            .map_err(|e| Error::Config(format!("invalid duration: {e}")))?
+            .map_err(|e| Error::NotSent(format!("invalid duration: {e}")))?
     };
 
     let mut builder = RithmicOrder::new()
@@ -867,8 +867,8 @@ pub async fn place_order_on(
         let price_id = trail_by_price_id.unwrap_or(1);
         builder = builder.trailing_stop_by(ticks, price_id);
     }
-    let order = builder.build()?;
-    check_responses(&handle.place_order(order).await?, "place_order")
+    let order = builder.build().map_err(|e| Error::NotSent(e.to_string()))?;
+    order_result_many(handle.place_order(order).await, "place_order")
 }
 
 /// Cancel an order on an already-connected handle (no session lock).
@@ -876,8 +876,9 @@ pub async fn cancel_order_on(handle: &RithmicOrderPlantHandle, basket_id: &str) 
     let cancel = RithmicCancelOrder::new()
         .id(basket_id)
         .manual_or_auto(ManualOrAutoEntry::Auto)
-        .build()?;
-    check_responses(&handle.cancel_order(cancel).await?, "cancel_order")
+        .build()
+        .map_err(|e| Error::NotSent(e.to_string()))?;
+    order_result_many(handle.cancel_order(cancel).await, "cancel_order")
 }
 
 /// Place a plant bracket on an already-connected handle (no session lock).
@@ -899,22 +900,22 @@ pub async fn place_bracket_order_on(
     target_ticks: Option<i32>,
 ) -> Result<()> {
     if stop_ticks.is_none() && target_ticks.is_none() {
-        return Err(Error::Config(
+        return Err(Error::NotSent(
             "place_bracket_order requires stop_ticks and/or target_ticks".into(),
         ));
     }
     let side: OrderSide = side
         .parse()
-        .map_err(|e| Error::Config(format!("invalid order side: {e}")))?;
+        .map_err(|e| Error::NotSent(format!("invalid order side: {e}")))?;
     let price_type: OrderType = price_type
         .parse()
-        .map_err(|e| Error::Config(format!("invalid price type: {e}")))?;
+        .map_err(|e| Error::NotSent(format!("invalid price type: {e}")))?;
     let duration: TimeInForce = if duration.is_empty() {
         TimeInForce::Day
     } else {
         duration
             .parse()
-            .map_err(|e| Error::Config(format!("invalid duration: {e}")))?
+            .map_err(|e| Error::NotSent(format!("invalid duration: {e}")))?
     };
 
     let mut builder = RithmicBracketOrder::new()
@@ -938,9 +939,9 @@ pub async fn place_bracket_order_on(
     if let Some(ticks) = stop_ticks {
         builder = builder.stop(ticks);
     }
-    let order = builder.build()?;
-    check_responses(
-        &handle.place_bracket_order(order).await?,
+    let order = builder.build().map_err(|e| Error::NotSent(e.to_string()))?;
+    order_result_many(
+        handle.place_bracket_order(order).await,
         "place_bracket_order",
     )
 }
@@ -958,8 +959,8 @@ pub async fn adjust_bracket_stop_on(
     if let Some(lvl) = level {
         builder = builder.level(lvl);
     }
-    let adj = builder.build()?;
-    check_response(handle.adjust_stop(adj).await?, "adjust_bracket_stop")
+    let adj = builder.build().map_err(|e| Error::NotSent(e.to_string()))?;
+    order_result_one(handle.adjust_stop(adj).await, "adjust_bracket_stop")
 }
 
 /// Adjust bracket target ticks on an already-connected handle.
@@ -975,8 +976,8 @@ pub async fn adjust_bracket_target_on(
     if let Some(lvl) = level {
         builder = builder.level(lvl);
     }
-    let adj = builder.build()?;
-    check_response(handle.adjust_target(adj).await?, "adjust_bracket_target")
+    let adj = builder.build().map_err(|e| Error::NotSent(e.to_string()))?;
+    order_result_one(handle.adjust_target(adj).await, "adjust_bracket_target")
 }
 
 /// Modify an order on an already-connected handle (no session lock).
@@ -994,7 +995,7 @@ pub async fn modify_order_on(
 ) -> Result<()> {
     let price_type: OrderType = price_type
         .parse()
-        .map_err(|e| Error::Config(format!("invalid price type: {e}")))?;
+        .map_err(|e| Error::NotSent(format!("invalid price type: {e}")))?;
 
     let mut builder = RithmicModifyOrder::new()
         .id(basket_id)
@@ -1012,16 +1013,67 @@ pub async fn modify_order_on(
     if let Some(ticks) = trail_by_ticks {
         builder = builder.trail_by_ticks(ticks);
     }
-    let order = builder.build()?;
-    check_responses(&handle.modify_order(order).await?, "modify_order")
+    let order = builder.build().map_err(|e| Error::NotSent(e.to_string()))?;
+    order_result_many(handle.modify_order(order).await, "modify_order")
 }
 
 /// Cancel all orders on an already-connected handle (no session lock).
 pub async fn cancel_all_orders_on(handle: &RithmicOrderPlantHandle) -> Result<()> {
     let cmd = RithmicCancelAllOrders::new()
         .manual_or_auto(ManualOrAutoEntry::Auto)
-        .build()?;
-    check_response(handle.cancel_all_orders(cmd).await?, "cancel_all_orders")
+        .build()
+        .map_err(|e| Error::NotSent(e.to_string()))?;
+    order_result_one(handle.cancel_all_orders(cmd).await, "cancel_all_orders")
+}
+
+/// Classify a failed state-changing order call at its source, so the class
+/// survives every layer above (trait, gateway wire, Python).
+///
+/// * a reject the venue sent back: [`Error::Rejected`] (definitively not live);
+/// * a call that never left (invalid argument, no trade route): [`Error::NotSent`];
+/// * anything else (connection closed or write failed mid-call, an undecodable
+///   answer): [`Error::OutcomeUnknown`], the order may or may not be live.
+fn order_failure(e: rithmic_rs::RithmicError) -> Error {
+    use rithmic_rs::RithmicError as E;
+    match &e {
+        E::RequestRejected(_) => Error::Rejected(e.to_string()),
+        E::NoTradeRoute { .. } | E::InvalidArgument(_) => Error::NotSent(e.to_string()),
+        _ => Error::OutcomeUnknown(e.to_string()),
+    }
+}
+
+fn order_response_failure(resp: &rithmic_rs::RithmicResponse, ctx: &str) -> Option<Error> {
+    resp.error.as_ref().map(|e| match order_failure(e.clone()) {
+        Error::Rejected(m) => Error::Rejected(format!("{ctx}: {m}")),
+        Error::NotSent(m) => Error::NotSent(format!("{ctx}: {m}")),
+        Error::OutcomeUnknown(m) => Error::OutcomeUnknown(format!("{ctx}: {m}")),
+        other => other,
+    })
+}
+
+fn order_result_many(
+    result: std::result::Result<Vec<rithmic_rs::RithmicResponse>, rithmic_rs::RithmicError>,
+    ctx: &str,
+) -> Result<()> {
+    let responses = result.map_err(order_failure)?;
+    match responses
+        .iter()
+        .find_map(|r| order_response_failure(r, ctx))
+    {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
+}
+
+fn order_result_one(
+    result: std::result::Result<rithmic_rs::RithmicResponse, rithmic_rs::RithmicError>,
+    ctx: &str,
+) -> Result<()> {
+    let response = result.map_err(order_failure)?;
+    match order_response_failure(&response, ctx) {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
 }
 
 /// Drain current working orders on an already-connected handle (no session lock).
@@ -1874,5 +1926,48 @@ mod connect_deadline_tests {
     async fn a_connect_that_finishes_in_time_is_returned() {
         let quick = async { Ok::<_, rithmic_rs::RithmicError>(7) };
         assert_eq!(connect_within_deadline("ticker", quick).await.unwrap(), 7);
+    }
+}
+
+#[cfg(test)]
+mod order_class_tests {
+    use super::*;
+    use rithmic_rs::RithmicError as E;
+
+    // `RequestRejected` has no public constructor (the type is non-exhaustive), so
+    // the reject arm is exercised end to end through `FakeFailure::Rejected` in the
+    // gateway scenarios; the arms below are the ones a test can build.
+
+    #[test]
+    fn a_call_that_never_left_is_not_sent() {
+        assert!(matches!(
+            order_failure(E::InvalidArgument("quantity".into())),
+            Error::NotSent(_)
+        ));
+    }
+
+    #[test]
+    fn anything_that_may_have_reached_the_venue_is_unknown() {
+        for e in [
+            E::ConnectionClosed,
+            E::SendFailed,
+            E::EmptyResponse,
+            E::ProtocolError("bad frame".into()),
+            E::ConnectionFailed("reset".into()),
+        ] {
+            assert!(
+                matches!(order_failure(e.clone()), Error::OutcomeUnknown(_)),
+                "{e:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_call_keeps_its_class_through_the_result_helpers() {
+        let unknown = order_result_many(Err(E::ConnectionClosed), "place_order");
+        assert!(matches!(unknown, Err(Error::OutcomeUnknown(_))));
+        let not_sent = order_result_one(Err(E::InvalidArgument("x".into())), "cancel_all_orders");
+        assert!(matches!(not_sent, Err(Error::NotSent(_))));
+        assert!(order_result_many(Ok(Vec::new()), "place_order").is_ok());
     }
 }

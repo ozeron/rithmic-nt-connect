@@ -688,3 +688,70 @@ async fn the_same_lag_reads_identically_through_direct_and_gateway() {
     assert_eq!(via_direct, ["trade", "lagged ticker 41", "trade"]);
     assert_eq!(via_direct, via_gateway);
 }
+
+// --- failure classes are assigned at the source and survive both modes -----------------
+
+/// What a failed `place_order` reads as, class only.
+fn class_of(err: &Error) -> &'static str {
+    match err {
+        Error::Rejected(_) => "rejected",
+        Error::NotSent(_) => "not_sent",
+        Error::OutcomeUnknown(_) => "unknown",
+        Error::Gateway { code, .. } if code == "trading_disabled" => "denied",
+        _ => "other",
+    }
+}
+
+#[tokio::test]
+async fn the_same_failure_class_reads_identically_through_direct_and_gateway() {
+    for (kind, fail, want) in [
+        (
+            "rejected",
+            rithmic_plants::fake::FakeFailure::Rejected("price".into()),
+            "rejected",
+        ),
+        (
+            "not_sent",
+            rithmic_plants::fake::FakeFailure::NotSent("no route".into()),
+            "not_sent",
+        ),
+        (
+            "unknown",
+            rithmic_plants::fake::FakeFailure::Unknown("write failed".into()),
+            "unknown",
+        ),
+    ] {
+        // Direct: the fake session stands in for DirectSession's plant calls.
+        let direct = rithmic_plants::fake::FakeSession::new();
+        direct.connect().await.unwrap();
+        direct.fail_next("place_order", fail);
+        let via_direct = direct.place_order(&place("t")).await.unwrap_err();
+
+        // Gateway: the same failure scripted at the parent's plant.
+        let parent = FakeParent::start(Opts {
+            trading: true,
+            ..Opts::default()
+        })
+        .await;
+        let s = session_for(&parent).await;
+        parent
+            .command(&format!("fail_next place_order {kind} boom"))
+            .await;
+        let via_gateway = s.place_order(&place("t")).await.unwrap_err();
+
+        assert_eq!(class_of(&via_direct), want, "direct {kind}: {via_direct}");
+        assert_eq!(
+            class_of(&via_gateway),
+            want,
+            "gateway {kind}: {via_gateway}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_gateway_denial_is_a_denial_not_a_venue_class() {
+    let parent = FakeParent::start(Opts::default()).await; // trading off
+    let s = session_for(&parent).await;
+    let err = s.place_order(&place("t")).await.unwrap_err();
+    assert_eq!(class_of(&err), "denied", "{err}");
+}

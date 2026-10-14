@@ -9,7 +9,7 @@ use rithmic_plants::dto::{
 use rithmic_plants::AccountTriple;
 
 use crate::pb;
-use crate::subscriptions::SubKey;
+use crate::subscriptions::{Kind, SubKey};
 
 pub fn last_trade_to_pb(t: LastTradeDto) -> pb::LastTrade {
     pb::LastTrade {
@@ -308,93 +308,98 @@ pub fn other_key() -> SubKey {
     }
 }
 
+/// Where an event is delivered, described with borrowed strings so deciding it
+/// allocates nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Route<'a> {
+    /// A symbol topic, and the kind of frame it carries.
+    Topic {
+        symbol: &'a str,
+        exchange: &'a str,
+        kind: Kind,
+    },
+    Pnl,
+    Order,
+    Other,
+    /// A gap on `stream`.
+    Gap(rithmic_plants::Stream),
+}
+
+fn text(field: &Option<String>) -> &str {
+    field.as_deref().unwrap_or("")
+}
+
+/// The route of `event`, without consuming or copying it.
+pub fn route_of(event: &PlantEvent) -> Route<'_> {
+    match event {
+        PlantEvent::LastTrade(t) => Route::Topic {
+            symbol: text(&t.symbol),
+            exchange: text(&t.exchange),
+            kind: Kind::Ticker,
+        },
+        PlantEvent::Bbo(b) => Route::Topic {
+            symbol: text(&b.symbol),
+            exchange: text(&b.exchange),
+            kind: Kind::Ticker,
+        },
+        PlantEvent::OrderBook(o) => Route::Topic {
+            symbol: text(&o.symbol),
+            exchange: text(&o.exchange),
+            kind: Kind::Book,
+        },
+        PlantEvent::TimeBar(b) => Route::Topic {
+            symbol: text(&b.symbol),
+            exchange: text(&b.exchange),
+            kind: Kind::Bars,
+        },
+        PlantEvent::AccountPnl(_) | PlantEvent::InstrumentPnl(_) => Route::Pnl,
+        PlantEvent::OrderNotification(_) => Route::Order,
+        PlantEvent::Gap(g) => Route::Gap(g.stream),
+        PlantEvent::Other { .. } => Route::Other,
+    }
+}
+
+/// Convert a plant event to its wire form. Strings move into the message; nothing
+/// is copied.
+pub fn plant_event_to_pb(event: PlantEvent) -> pb::Event {
+    use pb::event::Body;
+    let body = match event {
+        PlantEvent::LastTrade(t) => Body::LastTrade(last_trade_to_pb(t)),
+        PlantEvent::Bbo(b) => Body::Bbo(bbo_to_pb(b)),
+        PlantEvent::OrderBook(o) => Body::OrderBook(order_book_to_pb(o)),
+        PlantEvent::TimeBar(b) => Body::TimeBar(history_bar_to_pb(b)),
+        PlantEvent::AccountPnl(a) => Body::AccountPnl(account_pnl_to_pb(a)),
+        PlantEvent::InstrumentPnl(i) => Body::InstrumentPnl(instrument_pnl_to_pb(i)),
+        PlantEvent::OrderNotification(n) => Body::OrderNotification(order_notification_to_pb(n)),
+        PlantEvent::Gap(g) => Body::Gap(pb::Gap {
+            stream: g.stream.plant().into(),
+            skipped: g.skipped,
+        }),
+        PlantEvent::Other { type_name, source } => {
+            Body::Other(pb::OtherEvent { type_name, source })
+        }
+    };
+    pb::Event { body: Some(body) }
+}
+
 /// Convert a plant event to its wire form, plus the routing key that
 /// determines which fan-out subscribers receive it. Symbol/exchange events
 /// route by `(symbol, exchange)`; account-level events use the internal
-/// `pnl` / `order` / `other` sentinel keys (see [`pnl_key`]).
+/// `pnl` / `order` / `other` sentinel keys (see [`pnl_key`]). The server hot
+/// path uses [`route_of`] and [`plant_event_to_pb`] directly so it can skip an
+/// event nobody subscribed to without building a key.
 pub fn plant_event_to_routed(event: PlantEvent) -> (SubKey, pb::Event) {
-    use pb::event::Body;
-    match event {
-        PlantEvent::LastTrade(t) => {
-            let key = SubKey {
-                symbol: t.symbol.clone().unwrap_or_default(),
-                exchange: t.exchange.clone().unwrap_or_default(),
-            };
-            (
-                key,
-                pb::Event {
-                    body: Some(Body::LastTrade(last_trade_to_pb(t))),
-                },
-            )
-        }
-        PlantEvent::Bbo(b) => {
-            let key = SubKey {
-                symbol: b.symbol.clone().unwrap_or_default(),
-                exchange: b.exchange.clone().unwrap_or_default(),
-            };
-            (
-                key,
-                pb::Event {
-                    body: Some(Body::Bbo(bbo_to_pb(b))),
-                },
-            )
-        }
-        PlantEvent::OrderBook(o) => {
-            let key = SubKey {
-                symbol: o.symbol.clone().unwrap_or_default(),
-                exchange: o.exchange.clone().unwrap_or_default(),
-            };
-            (
-                key,
-                pb::Event {
-                    body: Some(Body::OrderBook(order_book_to_pb(o))),
-                },
-            )
-        }
-        PlantEvent::TimeBar(b) => {
-            let key = SubKey {
-                symbol: b.symbol.clone().unwrap_or_default(),
-                exchange: b.exchange.clone().unwrap_or_default(),
-            };
-            (
-                key,
-                pb::Event {
-                    body: Some(Body::TimeBar(history_bar_to_pb(b))),
-                },
-            )
-        }
-        PlantEvent::AccountPnl(a) => (
-            pnl_key(),
-            pb::Event {
-                body: Some(Body::AccountPnl(account_pnl_to_pb(a))),
-            },
-        ),
-        PlantEvent::InstrumentPnl(i) => (
-            pnl_key(),
-            pb::Event {
-                body: Some(Body::InstrumentPnl(instrument_pnl_to_pb(i))),
-            },
-        ),
-        PlantEvent::OrderNotification(n) => (
-            order_key(),
-            pb::Event {
-                body: Some(Body::OrderNotification(order_notification_to_pb(n))),
-            },
-        ),
-        PlantEvent::Gap(g) => (
-            gap_key(g.stream),
-            pb::Event {
-                body: Some(Body::Gap(pb::Gap {
-                    stream: g.stream.plant().into(),
-                    skipped: g.skipped,
-                })),
-            },
-        ),
-        PlantEvent::Other { type_name, source } => (
-            other_key(),
-            pb::Event {
-                body: Some(Body::Other(pb::OtherEvent { type_name, source })),
-            },
-        ),
-    }
+    let key = match route_of(&event) {
+        Route::Topic {
+            symbol, exchange, ..
+        } => SubKey {
+            symbol: symbol.to_string(),
+            exchange: exchange.to_string(),
+        },
+        Route::Pnl => pnl_key(),
+        Route::Order => order_key(),
+        Route::Other => other_key(),
+        Route::Gap(stream) => gap_key(stream),
+    };
+    (key, plant_event_to_pb(event))
 }

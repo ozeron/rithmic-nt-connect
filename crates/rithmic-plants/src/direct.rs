@@ -43,6 +43,12 @@ pub struct DirectSession {
     /// none starts underneath it.
     session_ops: RwLock<()>,
     disconnecting: AtomicBool,
+    /// Trading gate (place, cancel, modify, brackets, order subscriptions and the
+    /// order-plant loads). Off by default: nothing reaches the order plant until
+    /// the owner opens it.
+    trading_enabled: AtomicBool,
+    /// Plant-wide cancel-all gate, independent of trading.
+    cancel_all_enabled: AtomicBool,
 }
 
 /// Marks a disconnect in progress for its lifetime (cleared on every exit path).
@@ -69,13 +75,65 @@ impl DirectSession {
             inner: Mutex::new(session),
             session_ops: RwLock::new(()),
             disconnecting: AtomicBool::new(false),
+            trading_enabled: AtomicBool::new(false),
+            cancel_all_enabled: AtomicBool::new(false),
+        }
+    }
+
+    /// Open the trading and/or cancel-all gate at construction.
+    pub fn with_gates(self, trading_enabled: bool, cancel_all_enabled: bool) -> Self {
+        self.allow(trading_enabled, cancel_all_enabled);
+        self
+    }
+
+    /// Open (never close) a gate. A direct session is shared by every client in
+    /// the process, so the gate is open when any holder asked for it; closing one
+    /// would let one client take trading away from another mid-flight.
+    pub fn allow(&self, trading_enabled: bool, cancel_all_enabled: bool) {
+        if trading_enabled {
+            self.trading_enabled.store(true, Ordering::SeqCst);
+        }
+        if cancel_all_enabled {
+            self.cancel_all_enabled.store(true, Ordering::SeqCst);
+        }
+    }
+
+    pub fn trading_enabled(&self) -> bool {
+        self.trading_enabled.load(Ordering::SeqCst)
+    }
+
+    pub fn cancel_all_enabled(&self) -> bool {
+        self.cancel_all_enabled.load(Ordering::SeqCst)
+    }
+
+    /// Deny a trading RPC while the gate is closed. Same error code the gateway
+    /// parent answers, so both modes fail identically and before anything is sent.
+    fn require_trading(&self, what: &str) -> Result<()> {
+        if self.trading_enabled() {
+            Ok(())
+        } else {
+            Err(Error::Gateway {
+                code: "trading_disabled".into(),
+                message: format!("{what} denied: trading disabled"),
+            })
+        }
+    }
+
+    fn require_cancel_all(&self) -> Result<()> {
+        if self.cancel_all_enabled() {
+            Ok(())
+        } else {
+            Err(Error::Gateway {
+                code: "cancel_all_denied".into(),
+                message: "cancel_all_orders denied: cancel_all disabled".into(),
+            })
         }
     }
 
     /// Begin a place / cancel / modify: rejected while a disconnect is in progress.
     async fn begin_order_op(&self) -> Result<RwLockReadGuard<'_, ()>> {
         if self.disconnecting.load(Ordering::SeqCst) {
-            return Err(Error::Session(
+            return Err(Error::NotSent(
                 "session disconnect in progress; order operation rejected".into(),
             ));
         }
@@ -87,6 +145,15 @@ impl DirectSession {
         tokio::time::timeout(DISCONNECT_WAIT, self.session_ops.write())
             .await
             .map_err(|_| Error::Session("timed out waiting for in-flight order operations".into()))
+    }
+
+    /// The order handle for a state-changing call. Nothing has been sent when this
+    /// fails, so a missing or unreachable plant is [`Error::NotSent`], never an
+    /// unknown outcome.
+    async fn command_handle(&self) -> Result<rithmic_rs::RithmicOrderPlantHandle> {
+        self.order_handle()
+            .await
+            .map_err(|e| Error::NotSent(e.to_string()))
     }
 
     /// Clone the plant handles under an instant's lock; the I/O that follows runs
@@ -121,6 +188,7 @@ impl Session for DirectSession {
     }
 
     async fn ensure_order_plant(&self) -> Result<()> {
+        self.require_trading("ensure_order_plant")?;
         self.inner.lock().await.ensure_order_plant().await
     }
 
@@ -210,11 +278,13 @@ impl Session for DirectSession {
     }
 
     async fn subscribe_order_updates(&self) -> Result<()> {
+        self.require_trading("subscribe_order_updates")?;
         // Must use the session's own handle (the one poll_order_event reads).
         self.inner.lock().await.subscribe_order_updates().await
     }
 
     async fn subscribe_bracket_updates(&self) -> Result<()> {
+        self.require_trading("subscribe_bracket_updates")?;
         self.inner.lock().await.subscribe_bracket_updates().await
     }
 
@@ -293,6 +363,7 @@ impl Session for DirectSession {
         _start_sec: i32,
         _end_sec: i32,
     ) -> Result<Vec<OrderNotificationDto>> {
+        self.require_trading("load_orders")?;
         // Detached handle: the drain can run for seconds and must not block the
         // event pump / pollers on the session lock. The window is ignored: only
         // the current working set is requested.
@@ -301,33 +372,39 @@ impl Session for DirectSession {
     }
 
     async fn load_product_rms_info(&self) -> Result<Vec<ProductRmsInfoDto>> {
+        self.require_trading("load_product_rms_info")?;
         let handle = self.order_handle().await?;
         load_product_rms_info_on(&handle).await
     }
 
     async fn load_account_rms_info(&self) -> Result<Vec<AccountRmsInfoDto>> {
+        self.require_trading("load_account_rms_info")?;
         let handle = self.order_handle().await?;
         load_account_rms_info_on(&handle).await
     }
 
     async fn load_fill_history(&self, start: i32, finish: i32) -> Result<Vec<FillHistoryDto>> {
+        self.require_trading("load_fill_history")?;
         let handle = self.order_handle().await?;
         load_fill_history_on(&handle, start, finish).await
     }
 
     async fn load_order_history(&self, date: &str) -> Result<Vec<OrderNotificationDto>> {
+        self.require_trading("load_order_history")?;
         let handle = self.order_handle().await?;
         load_order_history_on(&handle, date).await
     }
 
     async fn load_order_history_dates(&self) -> Result<Vec<String>> {
+        self.require_trading("load_order_history_dates")?;
         let handle = self.order_handle().await?;
         load_order_history_dates_on(&handle).await
     }
 
     async fn place_order(&self, o: &PlaceOrder) -> Result<()> {
+        self.require_trading("place_order")?;
         let _op = self.begin_order_op().await?;
-        let handle = self.order_handle().await?;
+        let handle = self.command_handle().await?;
         place_order_on(
             &handle,
             &o.symbol,
@@ -346,8 +423,9 @@ impl Session for DirectSession {
     }
 
     async fn place_bracket_order(&self, o: &PlaceBracketOrder) -> Result<()> {
+        self.require_trading("place_bracket_order")?;
         let _op = self.begin_order_op().await?;
-        let handle = self.order_handle().await?;
+        let handle = self.command_handle().await?;
         place_bracket_order_on(
             &handle,
             &o.symbol,
@@ -371,8 +449,9 @@ impl Session for DirectSession {
         ticks: i32,
         level: Option<i32>,
     ) -> Result<()> {
+        self.require_trading("adjust_bracket_stop")?;
         let _op = self.begin_order_op().await?;
-        let handle = self.order_handle().await?;
+        let handle = self.command_handle().await?;
         adjust_bracket_stop_on(&handle, basket_id, ticks, level).await
     }
 
@@ -382,20 +461,23 @@ impl Session for DirectSession {
         ticks: i32,
         level: Option<i32>,
     ) -> Result<()> {
+        self.require_trading("adjust_bracket_target")?;
         let _op = self.begin_order_op().await?;
-        let handle = self.order_handle().await?;
+        let handle = self.command_handle().await?;
         adjust_bracket_target_on(&handle, basket_id, ticks, level).await
     }
 
     async fn cancel_order(&self, basket_id: &str) -> Result<()> {
+        self.require_trading("cancel_order")?;
         let _op = self.begin_order_op().await?;
-        let handle = self.order_handle().await?;
+        let handle = self.command_handle().await?;
         cancel_order_on(&handle, basket_id).await
     }
 
     async fn modify_order(&self, o: &ModifyOrder) -> Result<()> {
+        self.require_trading("modify_order")?;
         let _op = self.begin_order_op().await?;
-        let handle = self.order_handle().await?;
+        let handle = self.command_handle().await?;
         modify_order_on(
             &handle,
             &o.basket_id,
@@ -411,8 +493,9 @@ impl Session for DirectSession {
     }
 
     async fn cancel_all_orders(&self) -> Result<()> {
+        self.require_cancel_all()?;
         let _op = self.begin_order_op().await?;
-        let handle = self.order_handle().await?;
+        let handle = self.command_handle().await?;
         cancel_all_orders_on(&handle).await
     }
 
@@ -472,6 +555,107 @@ mod tests {
                 .contains("session disconnect in progress; order operation rejected"),
             "{err}"
         );
+    }
+
+    fn place() -> crate::backend::PlaceOrder {
+        crate::backend::PlaceOrder {
+            symbol: "NQU6".into(),
+            exchange: "CME".into(),
+            side: "BUY".into(),
+            price_type: "LIMIT".into(),
+            quantity: 1,
+            user_tag: "t".into(),
+            price: Some(1.0),
+            trigger_price: None,
+            duration: "DAY".into(),
+            trail_by_ticks: None,
+            trail_by_price_id: None,
+        }
+    }
+
+    fn code(err: &Error) -> &str {
+        match err {
+            Error::Gateway { code, .. } => code,
+            other => panic!("expected a gateway-coded denial, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn every_trading_rpc_is_denied_while_the_gate_is_closed_and_nothing_is_sent() {
+        let s = offline();
+        assert!(!s.trading_enabled() && !s.cancel_all_enabled());
+        let bracket = crate::backend::PlaceBracketOrder {
+            symbol: "NQU6".into(),
+            exchange: "CME".into(),
+            side: "BUY".into(),
+            price_type: "LIMIT".into(),
+            quantity: 1,
+            localid: "b".into(),
+            price: Some(1.0),
+            trigger_price: None,
+            duration: "DAY".into(),
+            stop_ticks: Some(10),
+            target_ticks: None,
+        };
+        let modify = crate::backend::ModifyOrder {
+            basket_id: "B1".into(),
+            symbol: "NQU6".into(),
+            exchange: "CME".into(),
+            quantity: 1,
+            price_type: "LIMIT".into(),
+            price: Some(1.0),
+            trigger_price: None,
+            trail_by_ticks: None,
+        };
+        let denials = [
+            s.place_order(&place()).await.unwrap_err(),
+            s.place_bracket_order(&bracket).await.unwrap_err(),
+            s.adjust_bracket_stop("B1", 1, None).await.unwrap_err(),
+            s.adjust_bracket_target("B1", 1, None).await.unwrap_err(),
+            s.cancel_order("B1").await.unwrap_err(),
+            s.modify_order(&modify).await.unwrap_err(),
+            s.ensure_order_plant().await.unwrap_err(),
+            s.subscribe_order_updates().await.unwrap_err(),
+            s.subscribe_bracket_updates().await.unwrap_err(),
+            s.load_orders(0, 0).await.unwrap_err(),
+            s.load_product_rms_info().await.unwrap_err(),
+            s.load_account_rms_info().await.unwrap_err(),
+            s.load_fill_history(0, 0).await.unwrap_err(),
+            s.load_order_history("20260101").await.unwrap_err(),
+            s.load_order_history_dates().await.unwrap_err(),
+        ];
+        for err in &denials {
+            assert_eq!(code(err), "trading_disabled", "{err}");
+        }
+        assert_eq!(denials.len(), 15);
+    }
+
+    #[tokio::test]
+    async fn cancel_all_has_its_own_gate_that_trading_does_not_open() {
+        let s = offline().with_gates(true, false);
+        assert!(s.trading_enabled() && !s.cancel_all_enabled());
+        let err = s.cancel_all_orders().await.unwrap_err();
+        assert_eq!(code(&err), "cancel_all_denied", "{err}");
+    }
+
+    #[tokio::test]
+    async fn gates_only_ever_open_and_do_not_depend_on_each_other() {
+        let s = offline();
+        s.allow(false, true);
+        assert!(!s.trading_enabled() && s.cancel_all_enabled());
+        s.allow(true, false);
+        assert!(s.trading_enabled() && s.cancel_all_enabled());
+        // A later holder that did not ask for trading cannot close it.
+        s.allow(false, false);
+        assert!(s.trading_enabled() && s.cancel_all_enabled());
+    }
+
+    #[tokio::test]
+    async fn an_order_op_during_a_disconnect_is_not_sent() {
+        let s = Arc::new(offline().with_gates(true, true));
+        s.disconnecting.store(true, Ordering::SeqCst);
+        let err = s.place_order(&place()).await.unwrap_err();
+        assert!(matches!(err, Error::NotSent(_)), "{err}");
     }
 
     #[tokio::test]

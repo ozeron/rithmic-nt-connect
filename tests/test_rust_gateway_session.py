@@ -79,18 +79,31 @@ def test_history_reads_are_served_in_gateway_mode() -> None:
             call()
 
 
-def test_gateway_gates_are_read_only_and_none_in_direct_mode() -> None:
+def test_gates_are_closed_by_default_in_both_modes_and_only_direct_can_open_them() -> (
+    None
+):
     direct = _lib.Session(user="u", password="pw")
-    assert direct.trading_enabled is None
-    assert direct.cancel_all_enabled is None
+    assert direct.is_direct is True
+    # Direct mode owns its gates: closed until configured, opened (never closed).
+    assert direct.trading_enabled is False
+    assert direct.cancel_all_enabled is False
+    direct.configure_gates(trading_enabled=True)
+    assert (direct.trading_enabled, direct.cancel_all_enabled) == (True, False)
+    direct.configure_gates(cancel_all_enabled=True)
+    direct.configure_gates()  # asking for nothing closes nothing
+    assert (direct.trading_enabled, direct.cancel_all_enabled) == (True, True)
     assert direct.ensure_transport_live() == 0
     assert direct.transport_connected() is True
     assert direct.transport_generation() == 0
 
     gateway = _lib.Session(user="u", connect_mode="gateway")
+    assert gateway.is_direct is False
     assert gateway.trading_enabled is False  # nothing advertised before connect
     with pytest.raises(AttributeError):
         gateway.trading_enabled = True  # type: ignore[misc]
+    # The parent owns a gateway's gates: a client cannot open them.
+    with pytest.raises(RuntimeError, match="owned by the gateway parent"):
+        gateway.configure_gates(trading_enabled=True)
 
 
 def test_a_gateway_session_before_connect_is_not_connected() -> None:
@@ -150,10 +163,22 @@ class _TransportInner:
     def __init__(self) -> None:
         self.registrations = 0
         self.callback: Any = None
+        self.cancelled = 0
+        self.disconnected = 0
 
-    def subscribe_transport_events(self, callback: Any) -> None:
+    def subscribe_transport_events(self, callback: Any) -> Any:
         self.registrations += 1
         self.callback = callback
+        owner = self
+
+        class _Subscription:
+            def cancel(self) -> None:
+                owner.cancelled += 1
+
+        return _Subscription()
+
+    def disconnect(self) -> None:
+        self.disconnected += 1
 
 
 def test_the_wrapper_bridges_rust_callbacks_to_adapter_events() -> None:
@@ -189,6 +214,49 @@ def test_listeners_share_one_registration_and_can_detach() -> None:
     inner.callback("up", 2, 0, None)
     assert len(first) == 1
     assert len(second) == 2
+
+
+def test_the_extension_registration_is_cancelled_when_the_last_listener_leaves() -> (
+    None
+):
+    inner = _TransportInner()
+    wrapper = _RustGatewaySession(inner)
+    drop_a = wrapper.subscribe_transport_events(lambda e: None)
+    drop_b = wrapper.subscribe_transport_events(lambda e: None)
+    drop_a()
+    assert inner.cancelled == 0, "another listener is still attached"
+    drop_b()
+    assert inner.cancelled == 1
+    drop_b()  # idempotent
+    assert inner.cancelled == 1
+    # A later listener registers afresh.
+    wrapper.subscribe_transport_events(lambda e: None)
+    assert inner.registrations == 2
+
+
+def test_disconnect_cancels_the_registration_and_reaches_the_extension() -> None:
+    inner = _TransportInner()
+    wrapper = _RustGatewaySession(inner)
+    wrapper.subscribe_transport_events(lambda e: None)
+    wrapper.disconnect()
+    assert (inner.cancelled, inner.disconnected) == (1, 1)
+
+
+def test_the_extension_callback_does_not_keep_the_session_alive() -> None:
+    """The extension's task holds its callback for the life of the process, so the
+    callback must not reference the wrapper (and through it the whole session)."""
+    import gc
+    import weakref
+
+    inner = _TransportInner()
+    wrapper = _RustGatewaySession(inner)
+    wrapper.subscribe_transport_events(lambda e: None)
+    relay = inner.callback  # what the extension's task would keep
+    ref = weakref.ref(wrapper)
+    del wrapper
+    gc.collect()
+    assert ref() is None, "the relay held the session alive"
+    relay("up", 1, 0, None)  # a late event after the session is gone is harmless
 
 
 def test_create_rust_gateway_session_never_passes_a_password(

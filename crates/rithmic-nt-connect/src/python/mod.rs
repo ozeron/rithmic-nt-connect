@@ -105,6 +105,10 @@ fn to_py_err(err: Error) -> PyErr {
         // Written but unanswered: the order may or may not be live. The adapter
         // latches the order plant on any failure after send.
         Error::OutcomeUnknown(msg) => gateway_error("outcome_unknown", &msg),
+        // The venue refused it: definitively not live.
+        Error::Rejected(msg) => gateway_error("venue_rejected", &msg),
+        // Nothing was written: never at risk, not a venue reject.
+        Error::NotSent(msg) => gateway_error("not_sent", &msg),
         // A transport failure is a reconnectable gateway code.
         Error::Transport(msg) => gateway_error("transport_reset", &msg),
         Error::Config(msg) => PyValueError::new_err(msg),
@@ -147,6 +151,26 @@ fn set_opt_u64(dict: &Bound<'_, PyDict>, key: &str, value: Option<u64>) -> PyRes
     Ok(())
 }
 
+/// Set `ts_event_ns` to the event's effective time: the plant's own when present,
+/// else derived from `ssboe` + `usecs` (the `rithmic-exec` rule). Computed here,
+/// once, so Python reads one field instead of crossing back into Rust per tick.
+fn set_event_ts(
+    dict: &Bound<'_, PyDict>,
+    ts_event_ns: Option<u64>,
+    ssboe: Option<i32>,
+    usecs: Option<i32>,
+) -> PyResult<()> {
+    let ts = rithmic_exec::event_ts_ns(
+        ts_event_ns.map(i128::from),
+        ssboe.map(i128::from),
+        usecs.map(i128::from),
+    );
+    if let Some(ts) = ts {
+        dict.set_item("ts_event_ns", ts)?;
+    }
+    Ok(())
+}
+
 fn set_opt_u32(dict: &Bound<'_, PyDict>, key: &str, value: Option<u32>) -> PyResult<()> {
     if let Some(v) = value {
         dict.set_item(key, v)?;
@@ -171,7 +195,7 @@ fn last_trade_dict(py: Python<'_>, t: LastTradeDto) -> PyResult<Py<PyDict>> {
     set_opt_i32(&d, "aggressor", t.aggressor)?;
     set_opt_i32(&d, "ssboe", t.ssboe)?;
     set_opt_i32(&d, "usecs", t.usecs)?;
-    set_opt_u64(&d, "ts_event_ns", t.ts_event_ns)?;
+    set_event_ts(&d, t.ts_event_ns, t.ssboe, t.usecs)?;
     set_opt_bool(&d, "is_snapshot", t.is_snapshot)?;
     Ok(d.unbind())
 }
@@ -187,7 +211,7 @@ fn bbo_dict(py: Python<'_>, b: BboDto) -> PyResult<Py<PyDict>> {
     set_opt_i32(&d, "ask_size", b.ask_size)?;
     set_opt_i32(&d, "ssboe", b.ssboe)?;
     set_opt_i32(&d, "usecs", b.usecs)?;
-    set_opt_u64(&d, "ts_event_ns", b.ts_event_ns)?;
+    set_event_ts(&d, b.ts_event_ns, b.ssboe, b.usecs)?;
     set_opt_bool(&d, "is_snapshot", b.is_snapshot)?;
     Ok(d.unbind())
 }
@@ -245,7 +269,7 @@ fn order_book_dict(py: Python<'_>, o: OrderBookDto) -> PyResult<Py<PyDict>> {
     d.set_item("ask_size", o.ask_size)?;
     set_opt_i32(&d, "ssboe", o.ssboe)?;
     set_opt_i32(&d, "usecs", o.usecs)?;
-    set_opt_u64(&d, "ts_event_ns", o.ts_event_ns)?;
+    set_event_ts(&d, o.ts_event_ns, o.ssboe, o.usecs)?;
     Ok(d.unbind())
 }
 
@@ -513,6 +537,8 @@ pub struct PySession {
     session: Arc<dyn Session>,
     /// The gateway client, when `connect_mode` is `gateway` (transport hooks).
     gateway: Option<Arc<GatewaySession>>,
+    /// The in-process session, when `connect_mode` is `direct` (it owns the gates).
+    direct: Option<Arc<DirectSession>>,
 }
 
 impl PySession {
@@ -596,6 +622,7 @@ impl PySession {
                 Ok(Self {
                     session: gateway.clone(),
                     gateway: Some(gateway),
+                    direct: None,
                 })
             }
             "direct" => {
@@ -627,6 +654,7 @@ impl PySession {
                 Ok(Self {
                     session: direct.clone(),
                     gateway: None,
+                    direct: Some(direct),
                 })
             }
             other => Err(PyValueError::new_err(format!(
@@ -635,17 +663,49 @@ impl PySession {
         }
     }
 
-    /// The parent's trading gate in gateway mode (read-only; clients cannot
-    /// elevate it). `None` in direct mode, where this process owns the gate.
+    /// The trading gate: the parent's in gateway mode (read-only; a client cannot
+    /// elevate it) and this process's own in direct mode (closed until
+    /// `configure_gates`). Enforced inside the Rust session in both modes.
     #[getter]
     fn trading_enabled(&self) -> Option<bool> {
-        self.gateway.as_ref().map(|g| g.trading_enabled())
+        match (&self.gateway, &self.direct) {
+            (Some(g), _) => Some(g.trading_enabled()),
+            (_, Some(d)) => Some(d.trading_enabled()),
+            _ => None,
+        }
     }
 
-    /// The parent's plant-wide cancel-all gate (gateway mode); `None` in direct mode.
+    /// The plant-wide cancel-all gate, independent of trading (same split as above).
     #[getter]
     fn cancel_all_enabled(&self) -> Option<bool> {
-        self.gateway.as_ref().map(|g| g.cancel_all_enabled())
+        match (&self.gateway, &self.direct) {
+            (Some(g), _) => Some(g.cancel_all_enabled()),
+            (_, Some(d)) => Some(d.cancel_all_enabled()),
+            _ => None,
+        }
+    }
+
+    /// `True` for an in-process session (it owns its gates), `False` for a gateway
+    /// client (the parent owns them).
+    #[getter]
+    fn is_direct(&self) -> bool {
+        self.direct.is_some()
+    }
+
+    /// Direct mode only: open the trading and/or cancel-all gate for this process.
+    /// A gate is only ever opened (the session is shared by every client in the
+    /// process); a gateway client cannot change the parent's gates and gets an error.
+    #[pyo3(signature = (trading_enabled=false, cancel_all_enabled=false))]
+    fn configure_gates(&self, trading_enabled: bool, cancel_all_enabled: bool) -> PyResult<()> {
+        match &self.direct {
+            Some(direct) => {
+                direct.allow(trading_enabled, cancel_all_enabled);
+                Ok(())
+            }
+            None => Err(PyRuntimeError::new_err(
+                "gates are owned by the gateway parent; a client cannot change them",
+            )),
+        }
     }
 
     /// Incarnation of the gateway transport (bumps on every re-dial); 0 in direct mode.
@@ -676,10 +736,8 @@ impl PySession {
     /// Call `callback(kind, generation, attempts, cause)` on every gateway
     /// transport event: `kind` is `"down"`, `"up"` or `"recovery_failed"`.
     /// Fire-and-forget from a runtime thread; a no-op in direct mode.
-    fn subscribe_transport_events(&self, callback: Py<PyAny>) {
-        let Some(gateway) = &self.gateway else {
-            return;
-        };
+    fn subscribe_transport_events(&self, callback: Py<PyAny>) -> Option<PyTransportSubscription> {
+        let gateway = self.gateway.as_ref()?;
         let mut transport = gateway.subscribe_transport();
         let mut failed = gateway.subscribe_recovery_failed();
         let notify = move |kind: &'static str, generation: u64, attempts: u32, cause: String| {
@@ -690,7 +748,7 @@ impl PySession {
                 }
             });
         };
-        runtime().spawn(async move {
+        let task = runtime().spawn(async move {
             loop {
                 tokio::select! {
                     event = transport.recv() => match event {
@@ -713,6 +771,9 @@ impl PySession {
                 }
             }
         });
+        Some(PyTransportSubscription {
+            task: task.abort_handle(),
+        })
     }
 
     fn request_plants(&self, py: Python<'_>, plants: &str) -> PyResult<()> {
@@ -1227,6 +1288,28 @@ impl PySession {
     }
 }
 
+/// A running `subscribe_transport_events` registration. Cancelling (or dropping)
+/// it stops the task that holds the Python callback, so a session that no longer
+/// has listeners is not kept alive by it.
+#[pyclass(name = "TransportSubscription")]
+struct PyTransportSubscription {
+    task: tokio::task::AbortHandle,
+}
+
+#[pymethods]
+impl PyTransportSubscription {
+    /// Stop delivering transport events and release the callback. Idempotent.
+    fn cancel(&self) {
+        self.task.abort();
+    }
+}
+
+impl Drop for PyTransportSubscription {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 /// List system names advertised by a gateway (no login).
 #[pyfunction]
 #[pyo3(signature = (url=None))]
@@ -1243,6 +1326,7 @@ fn list_systems(py: Python<'_>, url: Option<&str>) -> PyResult<Vec<String>> {
 fn _lib(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySession>()?;
     m.add_class::<PySessionLock>()?;
+    m.add_class::<PyTransportSubscription>()?;
     exec::register(m)?;
     m.add("SessionLockError", m.py().get_type::<SessionLockError>())?;
     m.add_function(wrap_pyfunction!(list_systems, m)?)?;

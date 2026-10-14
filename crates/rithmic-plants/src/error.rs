@@ -71,6 +71,18 @@ pub enum Error {
         message: String,
     },
 
+    /// The venue definitively refused a state-changing request (a reject it sent
+    /// back). The order is not live; unlike an unknown outcome this does not
+    /// need a recon cycle.
+    #[error("venue rejected: {0}")]
+    Rejected(String),
+
+    /// A state-changing request failed before anything was written (invalid
+    /// argument, no trade route, plant missing, session disconnecting). The
+    /// order is not live and was never at risk.
+    #[error("not sent: {0}")]
+    NotSent(String),
+
     /// A state-changing request was written to the gateway and its outcome is
     /// unknown (transport loss or timeout after send). Never retried and never
     /// a venue rejection: the order may or may not be live.

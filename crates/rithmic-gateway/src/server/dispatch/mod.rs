@@ -66,15 +66,16 @@ pub(super) fn plant_err_frame(
     failed_code: &str,
     e: rithmic_plants::Error,
 ) -> Frame {
-    let code = if matches!(
-        &e,
-        rithmic_plants::Error::Rithmic(_)
-            | rithmic_plants::Error::ChannelClosed { .. }
-            | rithmic_plants::Error::NotConnected { .. }
-    ) {
-        "venue_unknown"
-    } else {
-        failed_code
+    use rithmic_plants::Error as E;
+    // The class assigned where the error arose survives the wire: a venue reject,
+    // a request that was never sent, or an outcome that may be live.
+    let code = match &e {
+        E::Rejected(_) => "venue_rejected",
+        E::NotSent(_) => "not_sent",
+        E::OutcomeUnknown(_) | E::Rithmic(_) | E::ChannelClosed { .. } | E::NotConnected { .. } => {
+            "venue_unknown"
+        }
+        _ => failed_code,
     };
     err_to_frame(request_id, code, e)
 }

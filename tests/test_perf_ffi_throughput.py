@@ -157,6 +157,41 @@ def test_ffi_to_thread_poll_throughput(fake_bin) -> None:
     assert got + skipped >= EVENTS, "every event is received or reported as skipped"
 
 
+def test_ffi_next_events_batch_throughput(fake_bin) -> None:
+    """The adapter's pollers: one thread hop and one lock-free wait per batch."""
+
+    async def run(session: Any) -> tuple[int, int, float]:
+        got = gaps = 0
+        start = time.perf_counter()
+        deadline = start + DEADLINE_SEC
+        while got + gaps < EVENTS and time.perf_counter() < deadline:
+            batch = await asyncio.to_thread(session.next_events, "ticker", 256, 50)
+            for event in batch:
+                if event.get("type") == "gap":
+                    gaps += int(event["skipped"])
+                else:
+                    got += 1
+        return got, gaps, time.perf_counter() - start
+
+    with running_fake(fake_bin) as parent:
+        session = _session(parent)
+        try:
+            session.subscribe(SYMBOL, EXCHANGE)
+            parent.push_last_trades(SYMBOL, EVENTS)
+            got, skipped, secs = asyncio.run(run(session))
+        finally:
+            session.disconnect()
+    _record(
+        "py_to_thread_next_events_batch",
+        events=EVENTS,
+        received=got,
+        reported_skipped=skipped,
+        seconds=round(secs, 3),
+        events_per_sec=round(got / secs, 1) if secs else 0.0,
+    )
+    assert got + skipped >= EVENTS, "every event is received or reported as skipped"
+
+
 def test_ffi_empty_poll_cost(fake_bin) -> None:
     with running_fake(fake_bin) as parent:
         session = _session(parent)

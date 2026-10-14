@@ -32,6 +32,12 @@ pub enum FakeFailure {
     ChannelClosed(&'static str),
     /// A config / validation style error that is not a connection issue.
     Config(String),
+    /// The venue definitively refused the request (`Error::Rejected`).
+    Rejected(String),
+    /// The request failed before anything was written (`Error::NotSent`).
+    NotSent(String),
+    /// The request may have reached the venue (`Error::OutcomeUnknown`).
+    Unknown(String),
 }
 
 impl FakeFailure {
@@ -40,6 +46,9 @@ impl FakeFailure {
             Self::Rithmic(msg) => Error::Rithmic(msg.clone()),
             Self::ChannelClosed(plant) => Error::ChannelClosed { plant },
             Self::Config(msg) => Error::Config(msg.clone()),
+            Self::Rejected(msg) => Error::Rejected(msg.clone()),
+            Self::NotSent(msg) => Error::NotSent(msg.clone()),
+            Self::Unknown(msg) => Error::OutcomeUnknown(msg.clone()),
         }
     }
 }

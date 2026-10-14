@@ -292,7 +292,7 @@ impl MockParent {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let connections = Arc::new(AtomicUsize::new(0));
         let handshakes = Arc::new(Mutex::new(Vec::new()));
-        let (events_tx, _) = tokio::sync::broadcast::channel::<Body>(16_384);
+        let (events_tx, _) = tokio::sync::broadcast::channel::<Body>(65_536);
         let handler: Arc<Handler> = Arc::new(handler);
         let (reqs, conns, hs, events) = (
             requests.clone(),

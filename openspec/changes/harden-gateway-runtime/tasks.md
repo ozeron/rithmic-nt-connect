@@ -37,20 +37,20 @@
 
 ## 5. Copy diet and FFI batching (review M6, M7, L4, L8; moved from retire-python-mux-and-noop-knobs 3.1 to 3.3)
 
-- [ ] 5.1 One receiver per stream; convert to `PlantEvent` once; check for a subscriber before encoding
-- [ ] 5.2 Hub topics keyed `(symbol, exchange, kind)`; clients receive only the kinds they subscribed; `data.py` skips unsubscribed book/bar work
-- [ ] 5.3 Client queues hold `Arc<PlantEvent>`; arm a queue on first subscribe/poll; push the clone only to armed queues and move into the last
-- [ ] 5.4 `poll_events(channel, max, timeout_ms)` batch API blocking on the awaitable receiver with the GIL released; migrate `data.py`, `execution.py`, `polling.py`; remove the idle sleeps
-- [ ] 5.5 Compute `ts_event_ns` in Rust; `_convert.py` reads the field; cache `symbol_and_exchange_from_instrument_id`
-- [ ] 5.6 `subscribe_transport_events` returns a cancel handle; Python wrapper cancels on last listener and close; test the task ends and the session is freed
-- [ ] 5.7 Gate: allocation microbench at most two allocations per event; S6 soak RSS growth at most 5 percent
+- [x] 5.1 One receiver per stream; convert to `PlantEvent` once; check for a subscriber before encoding
+- [x] 5.2 Fan-out frames carry a `Kind`; each client's forwarder filters to the kinds it subscribed (a mask kept in `client_insert`/`client_remove`) instead of re-keying topics; `data.py` book/bar skipping unchanged
+- [x] 5.3 Client queues hold `Arc<PlantEvent>`; arm a queue on first subscribe/poll; push the clone only to armed queues and move into the last
+- [x] 5.4 `poll_events(channel, max, timeout_ms)` batch API blocking on the awaitable receiver with the GIL released; migrate `data.py`, `execution.py`, `polling.py`; remove the idle sleeps
+- [x] 5.5 Compute `ts_event_ns` in Rust; `_convert.py` reads the field; cache `symbol_and_exchange_from_instrument_id`
+- [x] 5.6 `subscribe_transport_events` returns a cancel handle; Python wrapper cancels on last listener and close; test the task ends and the session is freed
+- [x] 5.7 Gate: allocation microbench at most two allocations per event; S6 soak RSS growth at most 5 percent
 
 ## 6. Error taxonomy and direct trading gate (review M1, M2)
 
-- [ ] 6.1 Add `Error::Rejected`, `Error::NotSent`, `Error::Unknown`; mark the send boundary in `session.rs`; map at the source
-- [ ] 6.2 Gateway wire codes for the three classes; client and PyO3 map them; `execution.py` emits deny / `OrderRejected` / latch accordingly
-- [ ] 6.3 Parity test: the same scripted failures yield the same class through both modes
-- [ ] 6.4 `DirectSession` takes the trading and cancel-all flags and enforces them; `trading_enabled()` returns `Some(bool)` in both modes; test that a direct place with trading off is denied without the Python client
+- [x] 6.1 Add `Error::Rejected`, `Error::NotSent`, `Error::Unknown`; mark the send boundary in `session.rs`; map at the source
+- [x] 6.2 Gateway wire codes for the three classes; client and PyO3 map them; `execution.py` emits deny / `OrderRejected` / latch accordingly
+- [x] 6.3 Parity test: the same scripted failures yield the same class through both modes
+- [x] 6.4 `DirectSession` takes the trading and cancel-all flags and enforces them; `trading_enabled()` returns `Some(bool)` in both modes; test that a direct place with trading off is denied without the Python client
 
 ## 7. Recovery semantics (spike; after S5 passes on current code)
 

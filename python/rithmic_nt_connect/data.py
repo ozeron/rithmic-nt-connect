@@ -66,6 +66,10 @@ from rithmic_nt_connect.session import WireSession
 # capability_denied after the bounded wait, ``history_error`` otherwise). Keyed so
 # concurrent lookbacks (several strategies hydrating at once) never read each
 # other's failure; NT's request callback only carries the request id.
+# Plant events taken per wake, and how long one wait blocks inside the extension.
+_POLL_BATCH = 256
+_POLL_WAIT_MS = 50
+
 _REQUEST_BARS_ERRORS: OrderedDict[str, str] = OrderedDict()
 _MAX_REQUEST_BARS_ERRORS = 256
 
@@ -817,52 +821,63 @@ class RithmicDataClient(LiveMarketDataClient):
         self,
         *,
         label: str,
-        poll,
+        stream: str,
         idle_sleep: float,
         should_poll=None,
     ) -> None:
+        """Deliver one plant stream: wait in Rust for events, then handle a batch.
+
+        ``next_events`` blocks inside the extension (GIL released) until an event
+        arrives or the wait elapses, so there is no idle sleep and a tick is handled
+        the moment it lands. A ``gap`` event (the stream dropped events for a slow
+        consumer) is handled exactly like a channel error: resync the subscription.
+        """
         backoff = 0.05
         while True:
             if should_poll is not None and not should_poll():
                 await asyncio.sleep(idle_sleep)
                 continue
             try:
-                event = await asyncio.to_thread(poll)
+                events = await asyncio.to_thread(
+                    self._session.next_events, stream, _POLL_BATCH, _POLL_WAIT_MS
+                )
             except Exception as exc:
                 if not _reconnectable_poll_error(exc):
                     self._log.exception(f"{label} poll transient error", exc)
                     await asyncio.sleep(0.1)
                     continue
                 self._log.warning(f"{label} poll reconnect: {exc}")
-                try:
-                    await self._resync_ticker_subscription()
-                    self._log.warning(
-                        f"{label} subscription resynced after channel error"
-                    )
-                    backoff = 0.05
-                except Exception as resync_exc:
-                    self._log.warning(
-                        f"{label} subscription resync failed: {resync_exc}"
-                    )
-                    backoff = min(backoff * 2, 2.0)
-                await asyncio.sleep(backoff)
+                backoff = await self._resync_channel(label, backoff)
                 continue
-            if event is None:
-                await asyncio.sleep(idle_sleep)
-                continue
-            self._dispatch_event(event)
+            for event in events:
+                if event.get("type") == "gap":
+                    self._log.warning(
+                        f"{label} stream dropped {event.get('skipped')} events; "
+                        "resyncing"
+                    )
+                    backoff = await self._resync_channel(label, backoff)
+                    continue
+                self._dispatch_event(event)
+
+    async def _resync_channel(self, label: str, backoff: float) -> float:
+        """Resubscribe after a channel error or a gap; returns the next backoff."""
+        try:
+            await self._resync_ticker_subscription()
+            self._log.warning(f"{label} subscription resynced after channel error")
+            backoff = 0.05
+        except Exception as resync_exc:
+            self._log.warning(f"{label} subscription resync failed: {resync_exc}")
+            backoff = min(backoff * 2, 2.0)
+        await asyncio.sleep(backoff)
+        return backoff
 
     async def _poll_loop(self) -> None:
-        await self._poll_channel_loop(
-            label="ticker",
-            poll=self._session.poll_event,
-            idle_sleep=0.01,
-        )
+        await self._poll_channel_loop(label="ticker", stream="ticker", idle_sleep=0.01)
 
     async def _history_poll_loop(self) -> None:
         await self._poll_channel_loop(
             label="history",
-            poll=self._session.poll_history_event,
+            stream="history",
             idle_sleep=0.05,
             should_poll=lambda: bool(self._bar_types),
         )

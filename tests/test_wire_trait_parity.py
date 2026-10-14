@@ -55,6 +55,10 @@ GATEWAY_HOOKS = {
     "transport_connected",
     "ensure_transport_live",
     "subscribe_transport_events",
+    # Direct-mode gate surface (the Rust session enforces the gates in both modes;
+    # only direct can be configured, a gateway client raises).
+    "is_direct",
+    "configure_gates",
 }
 
 

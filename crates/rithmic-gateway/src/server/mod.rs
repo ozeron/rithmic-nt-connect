@@ -5,7 +5,7 @@
 //! peer leaves (see [`crate::idle_exit`]).
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,7 +21,7 @@ use crate::codec;
 use crate::idle_exit::{IdleExit, IdleExitPolicy};
 use crate::pb::{self, frame::Body, Frame, Handshake, Ready};
 use crate::reconnect::{ReconnectController, TimeBarIntent};
-use crate::subscriptions::{ClientId, FanoutHub, ParentGates, SharedFanout, SubKey};
+use crate::subscriptions::{ClientId, Fan, FanoutHub, Kind, ParentGates, SharedFanout, SubKey};
 
 mod dispatch;
 pub mod pump;
@@ -435,6 +435,9 @@ pub(super) struct ClientCtx {
     order: bool,
     brackets: bool,
     forwarders: HashMap<SubKey, JoinHandle<()>>,
+    /// Per forwarded topic: which frame kinds this client asked for (bit mask of
+    /// [`Kind::bit`]). A forwarder drops frames of other kinds.
+    kinds: HashMap<SubKey, Arc<AtomicU8>>,
     out_tx: mpsc::Sender<OutMsg>,
 }
 
@@ -449,8 +452,37 @@ impl ClientCtx {
             order: false,
             brackets: false,
             forwarders: HashMap::new(),
+            kinds: HashMap::new(),
             out_tx,
         }
+    }
+
+    /// Recompute and publish the frame kinds this client wants on `key`'s topic,
+    /// after one of its ticker / book / time-bar intents changed.
+    pub(super) fn sync_kinds(&mut self, key: &SubKey) {
+        let mut mask = 0u8;
+        if self.ticker.contains(key) {
+            mask |= Kind::Ticker.bit();
+        }
+        if self.book.contains(key) {
+            mask |= Kind::Book.bit();
+        }
+        if self
+            .time_bars
+            .iter()
+            .any(|tb| tb.symbol == key.symbol && tb.exchange == key.exchange)
+        {
+            mask |= Kind::Bars.bit();
+        }
+        if mask == 0 && !self.forwarders.contains_key(key) {
+            // Nothing forwarded and nothing wanted: keep no empty entry around.
+            self.kinds.remove(key);
+            return;
+        }
+        self.kinds
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(AtomicU8::new(0)))
+            .store(mask, Ordering::SeqCst);
     }
 
     fn wants_md(&self, key: &SubKey) -> bool {
@@ -469,7 +501,12 @@ impl ClientCtx {
             return;
         }
         if let Some(rx) = hub.subscribe_receiver(key).await {
-            let handle = spawn_forwarder(rx, self.out_tx.clone(), stream_of_topic(key));
+            let kinds = Arc::clone(
+                self.kinds
+                    .entry(key.clone())
+                    .or_insert_with(|| Arc::new(AtomicU8::new(0))),
+            );
+            let handle = spawn_forwarder(rx, self.out_tx.clone(), stream_of_topic(key), kinds);
             self.forwarders.insert(key.clone(), handle);
             self.subscribed.insert(key.clone());
         }
@@ -479,6 +516,7 @@ impl ClientCtx {
         if let Some(handle) = self.forwarders.remove(key) {
             handle.abort();
         }
+        self.kinds.remove(key);
         self.subscribed.remove(key);
     }
 
@@ -594,16 +632,22 @@ fn stream_of_topic(key: &SubKey) -> rithmic_plants::Stream {
 /// `Gap` in order with the rest) and keeps going. A client that stops reading
 /// altogether is cut by the writer's timeout.
 fn spawn_forwarder(
-    rx: broadcast::Receiver<Bytes>,
+    rx: broadcast::Receiver<Fan>,
     out_tx: mpsc::Sender<OutMsg>,
     stream: rithmic_plants::Stream,
+    kinds: Arc<AtomicU8>,
 ) -> JoinHandle<()> {
     let mut queue = crate::subscriptions::ClientQueue::from_receiver(ClientId::new(), rx);
     tokio::spawn(async move {
         loop {
             match queue.recv().await {
-                Ok(bytes) => {
-                    if out_tx.send(OutMsg::Frame(bytes)).await.is_err() {
+                Ok(fan) => {
+                    // A frame of a kind this client never asked for (a book
+                    // update for a ticker-only client) is dropped here, before
+                    // it costs a socket write or a decode on the far side.
+                    let wanted = fan.kind == Kind::Any
+                        || kinds.load(Ordering::Relaxed) & fan.kind.bit() != 0;
+                    if wanted && out_tx.send(OutMsg::Frame(fan.bytes)).await.is_err() {
                         return;
                     }
                 }
@@ -630,20 +674,29 @@ fn spawn_forwarder(
     })
 }
 
-/// Encode a plant event as a wire frame and publish it to `key`'s topic.
-pub async fn publish_event(hub: &FanoutHub, key: &SubKey, event: pb::Event) -> usize {
+/// Encode one event as a wire frame (a single allocation) ready to fan out.
+fn encode_event(event: pb::Event, kind: Kind) -> Option<Fan> {
     let frame = Frame {
         request_id: 0,
         body: Some(Body::Event(event)),
     };
-    let wire = match codec::encode(&frame) {
-        Ok(w) => w,
-        Err(_) => return 0,
+    let wire = codec::encode(&frame).ok()?;
+    Some(Fan {
+        kind,
+        bytes: Bytes::from(wire),
+    })
+}
+
+/// Encode a wire event and publish it to `key`'s topic (a gap on the ticker or
+/// history stream goes to every symbol topic).
+pub async fn publish_event(hub: &FanoutHub, key: &SubKey, event: pb::Event) -> usize {
+    let Some(fan) = encode_event(event, Kind::Any) else {
+        return 0;
     };
     if key.symbol == crate::convert::GAP_BROADCAST {
-        return hub.publish_symbols(Bytes::from(wire)).await;
+        return hub.publish_symbols(fan).await;
     }
-    hub.publish(key, Bytes::from(wire)).await
+    hub.publish(key, fan).await
 }
 
 async fn handle_client(mut stream: UnixStream, state: Arc<GatewayState>) -> Result<(), String> {
@@ -949,8 +1002,34 @@ async fn write_replies(
 /// [`ReconnectController`]-visible hub so late subscribers still see the
 /// venue-declared topic.
 pub async fn publish_plant_event(hub: &FanoutHub, event: rithmic_plants::dto::PlantEvent) {
-    let (key, wire_event) = crate::convert::plant_event_to_routed(event);
-    publish_event(hub, &key, wire_event).await;
+    use crate::convert::{plant_event_to_pb, route_of, Route};
+
+    match route_of(&event) {
+        // A symbol event: look the topic up from borrowed strings and, when nobody
+        // is attached to it, drop the event before converting or encoding it.
+        Route::Topic {
+            symbol,
+            exchange,
+            kind,
+        } => {
+            let Some(tx) = hub.live_sender(symbol, exchange).await else {
+                return;
+            };
+            if let Some(fan) = encode_event(plant_event_to_pb(event), kind) {
+                let _ = tx.send(fan);
+            }
+        }
+        Route::Gap(rithmic_plants::Stream::Ticker | rithmic_plants::Stream::History) => {
+            if let Some(fan) = encode_event(plant_event_to_pb(event), Kind::Any) {
+                hub.publish_symbols(fan).await;
+            }
+        }
+        // Account-level events and order/PnL gaps ride their sentinel topics.
+        Route::Pnl | Route::Order | Route::Other | Route::Gap(_) => {
+            let (key, wire_event) = crate::convert::plant_event_to_routed(event);
+            publish_event(hub, &key, wire_event).await;
+        }
+    }
 }
 
 #[cfg(test)]

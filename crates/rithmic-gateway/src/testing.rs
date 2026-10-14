@@ -128,7 +128,7 @@ pub fn order_notification(kind: &str, basket_id: &str, user_tag: &str, symbol: &
 ///
 /// One command per line; every reply ends with a line containing only `END`.
 /// Commands: `ping`, `calls`, `clear_calls`, `drop_plants`,
-/// `fail_next <method> <rithmic|closed|config> [message]`,
+/// `fail_next <method> <rithmic|closed|config|rejected|not_sent|unknown> [message]`,
 /// `push last_trade <sym> <exch> <price> <size>`,
 /// `push bbo <sym> <exch> <bid> <bid_size> <ask> <ask_size>`,
 /// `push time_bar <sym> <exch> <close>`, `push account_pnl <acct> <day_pnl>`,
@@ -186,6 +186,9 @@ fn run_command(fake: &FakeSession, line: &str) -> String {
                 "rithmic" => FakeFailure::Rithmic(message),
                 "closed" => FakeFailure::ChannelClosed("ticker"),
                 "config" => FakeFailure::Config(message),
+                "rejected" => FakeFailure::Rejected(message),
+                "not_sent" => FakeFailure::NotSent(message),
+                "unknown" => FakeFailure::Unknown(message),
                 other => return format!("err unknown failure kind {other}\n"),
             };
             fake.fail_next(method, failure);

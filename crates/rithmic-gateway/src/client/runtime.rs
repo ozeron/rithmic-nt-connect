@@ -30,7 +30,7 @@ use crate::framing::MAX_FRAME_LEN;
 use crate::pb::{self, frame::Body, Frame};
 
 /// Capacity of each facade's per-channel event queue.
-pub const EVENT_QUEUE_CAP: usize = 4096;
+pub const EVENT_QUEUE_CAP: usize = 16_384;
 const HANDSHAKE_RETRY_PAUSE: Duration = Duration::from_millis(100);
 const DISCONNECT_GRACE: Duration = Duration::from_secs(1);
 
@@ -77,15 +77,16 @@ fn transport(msg: impl Into<String>) -> Error {
 
 #[derive(Default)]
 struct QueueState {
-    items: VecDeque<PlantEvent>,
+    /// Events are shared by reference between every facade's queue: a decoded
+    /// event is allocated once however many facades read it.
+    items: VecDeque<Arc<PlantEvent>>,
     /// Events dropped (oldest first) since the consumer last looked.
     lagged: u64,
 }
 
 /// What a non-blocking look at a queue found.
 pub(super) enum Take {
-    /// Boxed: `PlantEvent` is large and the other variants are tiny.
-    Event(Box<PlantEvent>),
+    Event(Arc<PlantEvent>),
     /// The consumer fell behind by this many events; it must resync.
     Lagged(u64),
     Empty,
@@ -94,6 +95,9 @@ pub(super) enum Take {
 pub(super) struct EventQueue {
     state: StdMutex<QueueState>,
     pub(super) notify: Notify,
+    /// Set by the first subscribe or poll of this channel. An unarmed queue is
+    /// never filled, so a facade that does not use a channel pays nothing for it.
+    armed: AtomicBool,
 }
 
 impl EventQueue {
@@ -101,10 +105,19 @@ impl EventQueue {
         Self {
             state: StdMutex::new(QueueState::default()),
             notify: Notify::new(),
+            armed: AtomicBool::new(false),
         }
     }
 
-    fn push(&self, event: PlantEvent) {
+    pub(super) fn arm(&self) {
+        self.armed.store(true, Ordering::Release);
+    }
+
+    fn is_armed(&self) -> bool {
+        self.armed.load(Ordering::Acquire)
+    }
+
+    fn push(&self, event: Arc<PlantEvent>) {
         {
             let mut s = self.state.lock().expect("event queue");
             if s.items.len() >= EVENT_QUEUE_CAP {
@@ -125,7 +138,7 @@ impl EventQueue {
             return Take::Lagged(skipped);
         }
         match s.items.pop_front() {
-            Some(event) => Take::Event(Box::new(event)),
+            Some(event) => Take::Event(event),
             None => Take::Empty,
         }
     }
@@ -462,8 +475,20 @@ impl Runtime {
 
     pub(super) fn deliver(&self, event: PlantEvent) {
         let channel = Channel::of(&event);
-        for queues in self.facades.lock().expect("facades").values() {
-            queues.get(channel).push(event.clone());
+        let facades = self.facades.lock().expect("facades");
+        // The event is wrapped once, and only if some facade reads this channel;
+        // every armed queue then holds a reference, never a copy.
+        let mut event = Some(event);
+        let mut shared: Option<Arc<PlantEvent>> = None;
+        for queues in facades.values() {
+            let queue = queues.get(channel);
+            if !queue.is_armed() {
+                continue;
+            }
+            let arc = shared
+                .get_or_insert_with(|| Arc::new(event.take().expect("event delivered once")))
+                .clone();
+            queue.push(arc);
         }
     }
 

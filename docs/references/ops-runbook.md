@@ -129,6 +129,9 @@ RITHMIC_GATEWAY_BIN=$PWD/target/release/rithmic-gateway python -m rithmic_gatewa
 # Trading / cancel_all are parent-gated (independent toggles):
 #   RITHMIC_ENABLE_TRADING=1          # place / modify / cancel / order updates
 #   RITHMIC_GATEWAY_CANCEL_ALL=1      # plant-wide cancel_all panic button (does not require trading)
+#     Direct mode honors the same two switches: the Rust session itself denies trading RPCs
+#     (`trading_disabled`) until the exec client opens the gate from `enable_trading`, and
+#     denies plant-wide cancel_all (`cancel_all_denied`) unless RITHMIC_GATEWAY_CANCEL_ALL is set.
 # Optional remote-ready token (non-empty client auth_token must match):
 #   RITHMIC_GATEWAY_AUTH_TOKEN=…
 # Idle-exit after last client (parent lifetime):
@@ -468,3 +471,16 @@ assigns the state directly — every transition goes through the policy, and
 - **Account state comes from the exec client.** On Nautilus 1.231.x account state is published by `ExecutionClient.generate_account_state`, not by a data client, so PnL / positions need the exec client even when trading is disabled (read-only exec client; it never submits).
 - **Order-plant reachability is not submit authorization.** Logging in to the order plant works on a LucidTrading account; routing orders needs trading enabled and a conformance-issued `app_name` (see `AGENTS.md` Safety).
 - Do not redistribute gated Rithmic `.proto` sources; keep them out of public git.
+
+
+## Load harness
+
+`rithmic-load` (crate `crates/rithmic-loadtest`) drives the real gateway server, client and PyO3 layers over a fake plant, in one process, with no credentials. See `docs/perf/README.md` for the commands, how to read a report, and the recorded baselines.
+
+```bash
+cargo build -p rithmic-loadtest --release
+./target/release/rithmic-load suite --out docs/perf/report.json     # ~8 min
+RITHMIC_PERF=1 uv run pytest tests/test_perf_ffi_throughput.py -s    # Python boundary
+```
+
+Run it on a quiet machine and repeat before trusting a tail number: with a load average above the core count, tail latencies move by 10x between runs.

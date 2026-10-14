@@ -133,6 +133,12 @@ impl GatewayConfig {
     }
 }
 
+/// Take an event out of its shared handle: moved when this is the last holder,
+/// cloned only when another facade's queue still references it.
+fn own(event: Arc<PlantEvent>) -> PlantEvent {
+    Arc::try_unwrap(event).unwrap_or_else(|shared| (*shared).clone())
+}
+
 /// How a request treats failure and retry.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -277,6 +283,7 @@ impl GatewaySession {
     /// this client's own queue overflow) is returned as `PlantEvent::Gap`.
     async fn poll_raw(&self, channel: Channel, timeout: Duration) -> Result<Option<PlantEvent>> {
         self.require_connected()?;
+        self.queues.get(channel).arm();
         let queue = self.queues.get(channel);
         let deadline = Instant::now() + timeout;
         loop {
@@ -286,7 +293,7 @@ impl GatewaySession {
             tokio::pin!(notified);
             notified.as_mut().enable();
             match queue.take() {
-                Take::Event(event) => return Ok(Some(*event)),
+                Take::Event(event) => return Ok(Some(own(event))),
                 Take::Lagged(skipped) => {
                     return Ok(Some(PlantEvent::Gap(rithmic_plants::GapDto {
                         stream: channel.stream(),
@@ -367,6 +374,11 @@ fn map_reply(frame: Frame) -> Result<Frame> {
         Some(Body::Error(e)) if e.code == "reconciliation_unavailable" => {
             Err(Error::ReconciliationUnavailable(e.message))
         }
+        // Classes assigned at the source survive the wire as typed errors, so a
+        // gateway client reports exactly what a direct session would.
+        Some(Body::Error(e)) if e.code == "venue_rejected" => Err(Error::Rejected(e.message)),
+        Some(Body::Error(e)) if e.code == "not_sent" => Err(Error::NotSent(e.message)),
+        Some(Body::Error(e)) if e.code == "venue_unknown" => Err(Error::OutcomeUnknown(e.message)),
         Some(Body::Error(e)) => Err(Error::Gateway {
             code: e.code,
             message: e.message,
@@ -468,6 +480,7 @@ impl Session for GatewaySession {
     }
 
     async fn subscribe(&self, symbol: &str, exchange: &str) -> Result<()> {
+        self.queues.get(Channel::Market).arm();
         self.ack(
             Body::Subscribe(pb::SubscribeRequest {
                 symbol: symbol.into(),
@@ -490,6 +503,7 @@ impl Session for GatewaySession {
     }
 
     async fn subscribe_order_book_summary(&self, symbol: &str, exchange: &str) -> Result<()> {
+        self.queues.get(Channel::Market).arm();
         self.ack(
             Body::SubscribeBook(pb::SubscribeBookRequest {
                 symbol: symbol.into(),
@@ -518,6 +532,7 @@ impl Session for GatewaySession {
         bar_type: i32,
         period: i32,
     ) -> Result<()> {
+        self.queues.get(Channel::History).arm();
         self.ack(
             Body::SubscribeTimeBars(pb::SubscribeTimeBarsRequest {
                 symbol: symbol.into(),
@@ -550,11 +565,13 @@ impl Session for GatewaySession {
     }
 
     async fn subscribe_pnl(&self) -> Result<()> {
+        self.queues.get(Channel::Pnl).arm();
         self.ack(Body::SubscribePnl(pb::SubscribePnlRequest {}), Mode::Intent)
             .await
     }
 
     async fn subscribe_order_updates(&self) -> Result<()> {
+        self.queues.get(Channel::Order).arm();
         self.ack(
             Body::SubscribeOrderUpdates(pb::SubscribeOrderUpdatesRequest {}),
             Mode::Intent,
@@ -563,6 +580,7 @@ impl Session for GatewaySession {
     }
 
     async fn subscribe_bracket_updates(&self) -> Result<()> {
+        self.queues.get(Channel::Order).arm();
         self.ack(
             Body::SubscribeBracketUpdates(pb::SubscribeBracketUpdatesRequest {}),
             Mode::Intent,
@@ -885,7 +903,7 @@ impl Session for GatewaySession {
         let queue = self.queues.get(channel);
         while out.len() < max.max(1) {
             match queue.take() {
-                Take::Event(event) => out.push(*event),
+                Take::Event(event) => out.push(own(event)),
                 Take::Lagged(skipped) => {
                     out.push(PlantEvent::Gap(rithmic_plants::GapDto { stream, skipped }))
                 }

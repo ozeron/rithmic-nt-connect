@@ -31,12 +31,17 @@ def _opt_int(value: Any) -> int | None:
 
 
 def _ts_ns(d: Mapping[str, Any]) -> int | None:
-    """Event time in unix ns: ``ts_event_ns`` when present, else ssboe + usecs."""
-    return _lib.event_ts_ns(
-        _opt_int(d.get("ts_event_ns")),
-        _opt_int(d.get("ssboe")),
-        int(d.get("usecs") or 0),
-    )
+    """Event time in unix ns: ``ts_event_ns`` when present, else ssboe + usecs.
+
+    Market-data dicts from the extension already carry the effective time in
+    ``ts_event_ns`` (the Rust side applies the ssboe fallback once), so the common
+    case is a dict read with no call back into Rust. A dict that has only ssboe
+    (a test fixture, an order notification) still takes the shared rule.
+    """
+    ts = d.get("ts_event_ns")
+    if ts is not None:
+        return int(ts)
+    return _lib.event_ts_ns(None, _opt_int(d.get("ssboe")), int(d.get("usecs") or 0))
 
 
 @lru_cache(maxsize=4096)
@@ -63,6 +68,14 @@ def instrument_id_from_symbol(symbol: str, exchange: str | None = None) -> str:
     return _instrument_id(str(symbol), None if exchange is None else str(exchange))
 
 
+@lru_cache(maxsize=4096)
+def _split_instrument_id(instrument_id: str) -> tuple[str, str | None]:
+    try:
+        return _lib.symbol_and_exchange_from_instrument_id(instrument_id, VENUE)
+    except ValueError as exc:
+        raise ConvertError(str(exc)) from None
+
+
 def symbol_and_exchange_from_instrument_id(
     instrument_id: str,
 ) -> tuple[str, str | None]:
@@ -71,10 +84,7 @@ def symbol_and_exchange_from_instrument_id(
     Returns ``(symbol, exchange)`` where ``exchange`` is ``None`` when the
     instrument id has no encoded exchange.
     """
-    try:
-        return _lib.symbol_and_exchange_from_instrument_id(str(instrument_id), VENUE)
-    except ValueError as exc:
-        raise ConvertError(str(exc)) from None
+    return _split_instrument_id(str(instrument_id))
 
 
 def format_price_str(value: float | Decimal | str) -> str:

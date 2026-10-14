@@ -229,6 +229,14 @@ class FakeParent:
         for reply in self.control(*cmds):
             assert reply == ["ok"], reply
 
+    def fail_next(self, method: str, kind: str, message: str = "injected") -> None:
+        """Fail the next call of ``method``: kind is rithmic, closed, config,
+        rejected, not_sent or unknown."""
+        self.push_command(f"fail_next {method} {kind} {message}")
+
+    def push_command(self, command: str) -> None:
+        assert self.command(command) == ["ok"]
+
     def push_gap(self, stream: str, skipped: int) -> None:
         """Script a plant lag: ``stream`` is ticker, history, pnl or order."""
         self.push("gap", stream, str(skipped))

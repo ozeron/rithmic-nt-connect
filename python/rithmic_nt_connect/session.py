@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import threading
+import weakref
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
@@ -592,13 +593,14 @@ class _RustGatewaySession:
     A thin shell over the extension's ``Session``: every call is the extension's.
     It only adapts the extension's transport callback to the adapter's event
     types, and fans one extension registration out to the clients' listeners so
-    a client can detach (the extension has no unsubscribe).
+    a client can detach; the extension registration is cancelled when the last
+    listener leaves and on disconnect.
     """
 
     def __init__(self, inner: Any) -> None:
         self._inner = inner
         self._listeners: list[Callable[[object], None]] = []
-        self._registered = False
+        self._subscription: Any = None
 
     def __getattr__(self, name: str) -> Any:
         # Private names are never the extension's surface; probes must see them absent.
@@ -620,16 +622,38 @@ class _RustGatewaySession:
     def subscribe_transport_events(
         self, listener: Callable[[object], None]
     ) -> Callable[[], None]:
-        if not self._registered:
-            self._inner.subscribe_transport_events(self._fan_out)
-            self._registered = True
+        if self._subscription is None and not self._listeners:
+            # The extension's task holds this callback for as long as it runs.
+            # It gets a weak relay, so the task never keeps this session alive,
+            # and it is cancelled below once nobody is listening.
+            ref = weakref.ref(self)
+
+            def relay(
+                kind: str, generation: int, attempts: int, cause: str | None
+            ) -> None:
+                target = ref()
+                if target is not None:
+                    target._fan_out(kind, generation, attempts, cause)
+
+            self._subscription = self._inner.subscribe_transport_events(relay)
         self._listeners.append(listener)
 
         def unsubscribe() -> None:
             with contextlib.suppress(ValueError):
                 self._listeners.remove(listener)
+            if not self._listeners:
+                self._cancel_subscription()
 
         return unsubscribe
+
+    def _cancel_subscription(self) -> None:
+        subscription, self._subscription = self._subscription, None
+        if subscription is not None:
+            subscription.cancel()
+
+    def disconnect(self) -> None:
+        self._cancel_subscription()
+        self._inner.disconnect()
 
 
 def create_rust_gateway_session(session: SessionConfig) -> WireSession:

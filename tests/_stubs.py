@@ -10,6 +10,7 @@ silently.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any, cast
@@ -81,8 +82,23 @@ class WireSessionStub:
     def poll_event(self, *args: Any, **kwargs: Any) -> Any:
         raise NotImplementedError
 
-    def next_events(self, *args: Any, **kwargs: Any) -> Any:
-        raise NotImplementedError
+    def next_events(
+        self, stream: str, max_events: int = 256, timeout_ms: int = 100
+    ) -> list[Any]:
+        """Batch form built on the per-stream ``poll_*`` doubles: fixtures keep
+        overriding those, and the adapter's batch pollers see the same events."""
+        poll = {
+            "ticker": self.poll_event,
+            "history": self.poll_history_event,
+            "pnl": self.poll_pnl_event,
+            "order": self.poll_order_event,
+        }[stream]
+        event = poll(0)
+        if event is None:
+            # The real extension blocks in Rust until an event or the timeout.
+            time.sleep(min(timeout_ms, 10) / 1000)
+            return []
+        return [event]
 
     def load_ticks(self, *args: Any, **kwargs: Any) -> Any:
         raise NotImplementedError

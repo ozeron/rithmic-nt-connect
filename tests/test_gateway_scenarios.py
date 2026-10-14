@@ -435,3 +435,30 @@ def test_next_events_rejects_an_unknown_stream(fake_bin, make_client) -> None:
         client = make_client(parent)
         with pytest.raises(ValueError, match="unknown stream"):
             client.next_events("quotes", 8, 10)
+
+
+# -- failure classes survive the wire in every client ----------------------------
+
+
+@pytest.mark.parametrize(
+    ("kind", "plain_code", "rust_code"),
+    [
+        ("rejected", "venue_rejected", "venue_rejected"),
+        ("not_sent", "not_sent", "not_sent"),
+        # The plain lake client reports the wire code as is; the adapter's session
+        # reports the same outcome under the extension's name for it.
+        ("unknown", "venue_unknown", "outcome_unknown"),
+    ],
+)
+def test_a_failed_place_carries_its_class(
+    fake_bin, make_client, kind: str, plain_code: str, rust_code: str
+) -> None:
+    with running_fake(fake_bin, trading=True) as parent:
+        client = make_client(parent)
+        parent.fail_next("place_order", kind, "boom")
+        with pytest.raises(GatewayError) as err:
+            client.place_order(
+                NQ, EXCHANGE, "BUY", "LIMIT", 1, user_tag="tag-1", price=1.0
+            )
+        want = plain_code if make_client.kind == "python-plain" else rust_code
+        assert err.value.code == want

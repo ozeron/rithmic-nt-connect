@@ -123,7 +123,12 @@ async fn run() -> Result<(), String> {
         path.display()
     );
 
-    let session = Arc::new(DirectSession::new(cfg, plants));
+    // The parent's own gates, enforced in the session as well as at dispatch, so
+    // no caller of this session can bypass them.
+    let gates = ParentGates::from_env();
+    let session = Arc::new(
+        DirectSession::new(cfg, plants).with_gates(gates.trading_enabled, gates.cancel_all_enabled),
+    );
     if let Err(e) = session.connect().await {
         let _ = session.disconnect().await;
         drop(listener);
@@ -146,7 +151,7 @@ async fn run() -> Result<(), String> {
         },
         expected_auth_token,
         idle_policy,
-        gates: ParentGates::from_env(),
+        gates,
         session: SessionHandle::new(session),
     })
     .await

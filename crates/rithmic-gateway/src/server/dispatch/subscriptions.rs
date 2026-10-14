@@ -63,6 +63,7 @@ impl TopicIntent {
                 client.time_bars.insert(intent.clone());
             }
         }
+        client.sync_kinds(&self.key());
     }
 
     fn client_remove(&self, client: &mut ClientCtx) {
@@ -77,6 +78,7 @@ impl TopicIntent {
                 client.time_bars.remove(intent);
             }
         }
+        client.sync_kinds(&self.key());
     }
 
     /// Returns whether this was the first peer for the intent (0→1).
