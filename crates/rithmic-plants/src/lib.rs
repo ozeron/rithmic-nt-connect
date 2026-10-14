@@ -34,7 +34,7 @@ pub use dto::{
 };
 pub use error::{Error, Result};
 pub use plants::PlantSet;
-pub use session::RithmicSession;
+pub use session::{Handles, RithmicSession};
 pub use streams::{Stream, StreamHub};
 pub use systems::{list_systems, normalize_gateway_url};
 

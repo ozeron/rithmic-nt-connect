@@ -134,6 +134,7 @@ pub fn order_notification(kind: &str, basket_id: &str, user_tag: &str, symbol: &
 /// `push time_bar <sym> <exch> <close>`, `push account_pnl <acct> <day_pnl>`,
 /// `push order <kind> <basket_id> <user_tag> <symbol>`,
 /// `push gap <ticker|history|pnl|order> <skipped>` (a scripted plant lag),
+/// `delay <method> <ms>` (a slow venue call: load_ticks, load_time_bars, load_fill_history),
 /// `set_account <account_id> <fcm_id> <ib_id>`.
 pub async fn serve_control(listener: UnixListener, fake: Arc<FakeSession>) {
     loop {
@@ -221,6 +222,13 @@ fn run_command(fake: &FakeSession, line: &str) -> String {
             Stream::Order,
             Some(order_notification(kind, basket, tag, sym)),
         ),
+        ["delay", method, ms] => match ms.parse::<u64>() {
+            Ok(ms) => {
+                fake.set_delay(method, Duration::from_millis(ms));
+                "ok\n".into()
+            }
+            Err(_) => "err bad delay\n".into(),
+        },
         ["push", "gap", stream, skipped] => {
             match (
                 rithmic_plants::Stream::from_plant(stream),

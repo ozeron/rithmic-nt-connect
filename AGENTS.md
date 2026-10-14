@@ -46,6 +46,8 @@ Gateway plant RPCs are **not** all the same shape. Shipping a new stream as a ba
 | **One-shot command** | `place_*`, `adjust_*`, `cancel_*`, `modify_*` | Trading gate → plant call → map error. No fanout / `note_*` / restore. Client side: never retried after the request was written (`OutcomeUnknown`). |
 | **Subscription intent** | ticker, book, time bars, PnL, **order updates**, **bracket updates** | Gate → attach hub fanout → `note_*` refcount → plant only on 0→1 → rollback on fail → **`restore_intents` re-issues after plant reconnect**. |
 
+Every RPC also declares a **lane** in the table. A connection reads requests on its own task and serves them on two lanes: the **command** lane (subscriptions and every state-changing request) runs one request at a time in arrival order; the **slow** lane (history, order-history and fill-history loads) runs a few at a time and replies as each finishes, so a slow read can never hold up a place or cancel on the same socket. New RPCs default to the command lane; a read that can take seconds must be added to `rpc_table::lane_of` **and** marked `slow(...)` in its table row (`tests/lanes.rs` fails if the two disagree). Never put a request that mutates the connection's `ClientCtx` on the slow lane.
+
 Bracket notifications ride the **order-plant** stream. Use `subscribe_order_plant_stream` in `server/dispatch/subscriptions.rs` (order and/or brackets flags) — never a one-shot plant call. Extend `RestorePlan` + `restore_intents` and the table row; `intent_rows_cover_exactly_the_restore_plan_fields` and `every_subscription_intent_is_reissued_by_restore_intents` fail otherwise. Proto string greps alone are not enough.
 
 ### Execution rules live in `rithmic-exec`

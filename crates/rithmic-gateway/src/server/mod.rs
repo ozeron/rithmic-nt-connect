@@ -12,7 +12,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{broadcast, mpsc, watch, Mutex as TokioMutex};
+use tokio::sync::{broadcast, mpsc, watch, Mutex as TokioMutex, RwLock};
 use tokio::task::JoinHandle;
 
 use rithmic_plants::Session;
@@ -48,20 +48,22 @@ pub fn boot_gateway_metadata() -> (u64, AtomicU64, watch::Sender<u64>) {
 
 /// The parent's plant session behind the [`Session`] trait, guarded by one gate.
 ///
-/// `lock()` serializes compound operations (event-pump polls, reconnect, intent
-/// restore) exactly as the old `Mutex<RithmicSession>` did. Long reads that must
-/// not stall the pump take [`SessionHandle::checkout`] instead: wait for the gate
-/// once (so they queue behind a reconnect), then run on the shared session
-/// without holding it.
+/// The gate only separates *using* the plants from *rebuilding* them. RPCs take it
+/// shared ([`SessionHandle::lock`]) and run concurrently, so no call waits behind
+/// another; reconnect and shutdown take it exclusively
+/// ([`SessionHandle::lock_exclusive`]), which waits for in-flight calls and keeps
+/// new ones out. Waiting for events needs no gate at all: the pump uses
+/// [`SessionHandle::checkout`] once and then runs on the shared session.
 #[derive(Clone)]
 pub struct SessionHandle {
-    gate: Arc<TokioMutex<()>>,
+    gate: Arc<RwLock<()>>,
     session: Arc<dyn Session>,
 }
 
-/// Guard returned by [`SessionHandle::lock`]; derefs to the session.
+/// Shared guard returned by [`SessionHandle::lock`]; derefs to the session. Any
+/// number of RPCs hold it at once, so a slow call never queues the others.
 pub struct SessionGuard<'a> {
-    _gate: tokio::sync::MutexGuard<'a, ()>,
+    _gate: tokio::sync::RwLockReadGuard<'a, ()>,
     session: &'a Arc<dyn Session>,
 }
 
@@ -73,24 +75,49 @@ impl std::ops::Deref for SessionGuard<'_> {
     }
 }
 
+/// Exclusive guard for rebuilding the plants (reconnect, shutdown): it waits for
+/// in-flight RPCs to finish and keeps new ones out while it is held.
+pub struct ExclusiveSessionGuard<'a> {
+    _gate: tokio::sync::RwLockWriteGuard<'a, ()>,
+    session: &'a Arc<dyn Session>,
+}
+
+impl std::ops::Deref for ExclusiveSessionGuard<'_> {
+    type Target = dyn Session;
+
+    fn deref(&self) -> &Self::Target {
+        &**self.session
+    }
+}
+
 impl SessionHandle {
     pub fn new(session: Arc<dyn Session>) -> Self {
         Self {
-            gate: Arc::new(TokioMutex::new(())),
+            gate: Arc::new(RwLock::new(())),
             session,
         }
     }
 
+    /// Shared access: RPCs run concurrently and only wait while plants are being
+    /// rebuilt.
     pub async fn lock(&self) -> SessionGuard<'_> {
         SessionGuard {
-            _gate: self.gate.lock().await,
+            _gate: self.gate.read().await,
             session: &self.session,
         }
     }
 
-    /// Wait for the gate, then return the session without holding it.
+    /// Exclusive access, for disconnect / connect / restore.
+    pub async fn lock_exclusive(&self) -> ExclusiveSessionGuard<'_> {
+        ExclusiveSessionGuard {
+            _gate: self.gate.write().await,
+            session: &self.session,
+        }
+    }
+
+    /// Wait out any rebuild, then return the session without holding the gate.
     pub async fn checkout(&self) -> Arc<dyn Session> {
-        drop(self.gate.lock().await);
+        drop(self.gate.read().await);
         Arc::clone(&self.session)
     }
 }
@@ -302,7 +329,7 @@ pub async fn run_gateway(params: GatewayParams) -> Result<(), String> {
     pump.abort();
     let _ = pump.await;
     {
-        let guard = session.lock().await;
+        let guard = session.lock_exclusive().await;
         let _ = guard.disconnect().await;
     }
     let _ = std::fs::remove_file(&path);
@@ -341,7 +368,9 @@ pub async fn serve(listener: UnixListener, state: Arc<GatewayState>) -> std::io:
     }
 }
 
-async fn read_frame_bytes(stream: &mut UnixStream) -> std::io::Result<Option<Vec<u8>>> {
+async fn read_frame_bytes<R: tokio::io::AsyncRead + Unpin>(
+    stream: &mut R,
+) -> std::io::Result<Option<Vec<u8>>> {
     // Idle wait for the next frame length has no short timeout (clients may
     // pause between RPCs). Once a length is known, bound the payload read so a
     // peer cannot allocate MAX_FRAME_LEN and stall forever.
@@ -669,74 +698,250 @@ async fn handle_client(mut stream: UnixStream, state: Arc<GatewayState>) -> Resu
         return Err("shutting_down".into());
     }
 
-    let (out_tx, mut out_rx) = mpsc::channel::<OutMsg>(crate::subscriptions::DEFAULT_QUEUE_CAP);
-    let mut client = ClientCtx::new(out_tx);
+    let (out_tx, out_rx) = mpsc::channel::<OutMsg>(crate::subscriptions::DEFAULT_QUEUE_CAP);
+    let client = ClientCtx::new(out_tx);
     let mut epoch_rx = state.transport_epoch.subscribe();
     // Ignore the current value; only react to subsequent generation bumps.
     epoch_rx.borrow_and_update();
 
-    let loop_result: Result<(), String> = loop {
+    // One connection is four tasks so no request can hold up another:
+    //   reader   owns the read half, decodes frames and hands each to a lane;
+    //   commands runs state-changing / subscription requests in arrival order;
+    //   slow     runs read RPCs (history loads) a few at a time, off that lane;
+    //   writer   owns the write half; replies go out ahead of fan-out events.
+    let (reply_tx, reply_rx) = mpsc::channel::<Frame>(COMMAND_QUEUE + SLOW_QUEUE);
+    let (cmd_tx, cmd_rx) = mpsc::channel::<Request>(COMMAND_QUEUE);
+    let (slow_tx, slow_rx) = mpsc::channel::<Request>(SLOW_QUEUE);
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let (read_half, write_half) = stream.into_split();
+
+    let mut reader = tokio::spawn(read_requests(read_half, cmd_tx, slow_tx, reply_tx.clone()));
+    let slow = tokio::spawn(run_slow_lane(Arc::clone(&state), slow_rx, reply_tx.clone()));
+    let mut commands = tokio::spawn(run_commands(
+        Arc::clone(&state),
+        client,
+        cmd_rx,
+        reply_tx,
+        stop_rx,
+    ));
+    let mut writer = tokio::spawn(write_replies(write_half, reply_rx, out_rx));
+
+    let mut result: Result<(), String> = Ok(());
+    let mut reader_done = false;
+    let mut writer_done = false;
+    let client = loop {
         tokio::select! {
-            biased;
+            // The peer closed or the stream broke: let the command lane finish
+            // what was already queued, then it ends on its own.
+            r = &mut reader, if !reader_done => {
+                reader_done = true;
+                if let Ok(Err(e)) = r {
+                    result = Err(e);
+                }
+            }
+            // The command lane ended: a Disconnect, or the connection is done.
+            done = &mut commands => break done.ok(),
+            // The client stopped draining its socket (or it died).
+            _ = &mut writer => {
+                writer_done = true;
+                let _ = stop_tx.send(true);
+                break (&mut commands).await.ok();
+            }
+            // Plants rebuilt — force re-handshake so Ready carries the new
+            // transport_generation (Macroscope).
             _ = epoch_rx.changed() => {
-                // Plants rebuilt — force re-handshake so Ready carries the new
-                // transport_generation (Macroscope).
-                break Ok(());
-            }
-            frame = read_frame_bytes(&mut stream) => {
-                match frame {
-                    Ok(Some(payload)) => {
-                        let mut framed = (payload.len() as u32).to_be_bytes().to_vec();
-                        framed.extend_from_slice(&payload);
-                        let req = match codec::decode::<Frame>(&framed) {
-                            Ok((f, _)) => f,
-                            Err(e) => break Err(format!("proto: {e}")),
-                        };
-                        let request_id = req.request_id;
-                        let Some(body) = req.body else { continue };
-                        let close_after = matches!(body, Body::Disconnect(_));
-                        // During plant reconnect, refuse new RPCs (except
-                        // detach) so callers do not observe Ack against a
-                        // half-rebuilt venue session.
-                        let resp = if !close_after && !state.ready.load(Ordering::SeqCst) {
-                            dispatch::error_frame(
-                                request_id,
-                                "not_ready",
-                                "gateway not Ready (plants reconnecting)",
-                            )
-                        } else {
-                            dispatch::dispatch(&state, &mut client, request_id, body).await
-                        };
-                        if write_frame(&mut stream, &resp).await.is_err() {
-                            break Ok(());
-                        }
-                        if close_after {
-                            break Ok(());
-                        }
-                    }
-                    Ok(None) => break Ok(()),
-                    Err(e) => break Err(format!("read: {e}")),
-                }
-            }
-            msg = out_rx.recv() => {
-                match msg {
-                    Some(OutMsg::Frame(bytes)) => {
-                        match tokio::time::timeout(Duration::from_secs(5), stream.write_all(&bytes))
-                            .await
-                        {
-                            Ok(Ok(())) => {}
-                            _ => break Ok(()), // slow / dead client
-                        }
-                    }
-                    None => {}
-                }
+                let _ = stop_tx.send(true);
+                break (&mut commands).await.ok();
             }
         }
     };
 
-    client.teardown(&state).await;
+    reader.abort();
+    slow.abort();
+    if let Some(mut client) = client {
+        client.teardown(&state).await;
+    }
+    // With every sender gone the writer flushes what is queued (a Disconnect
+    // ack) and ends; bound the wait so a dead peer cannot hold the teardown.
+    if !writer_done {
+        let _ = tokio::time::timeout(Duration::from_secs(2), &mut writer).await;
+        writer.abort();
+    }
     state.idle.peer_detached().await;
-    loop_result
+    result
+}
+
+/// Requests a connection may have queued for each lane before the reader waits
+/// (command) or answers `busy` (slow).
+const COMMAND_QUEUE: usize = 256;
+const SLOW_QUEUE: usize = 64;
+/// Slow read RPCs one connection runs at once.
+const SLOW_CONCURRENCY: usize = 4;
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+struct Request {
+    id: u64,
+    body: Body,
+}
+
+/// Read and decode frames on their own task: nothing selects over this read, so
+/// a partly received frame is never abandoned, and a frame is decoded straight
+/// from its payload with no intermediate copy.
+async fn read_requests(
+    mut read: tokio::net::unix::OwnedReadHalf,
+    commands: mpsc::Sender<Request>,
+    slow: mpsc::Sender<Request>,
+    replies: mpsc::Sender<Frame>,
+) -> Result<(), String> {
+    use prost::Message;
+    loop {
+        match read_frame_bytes(&mut read).await {
+            Ok(Some(payload)) => {
+                let frame = Frame::decode(payload.as_slice()).map_err(|e| format!("proto: {e}"))?;
+                let Some(body) = frame.body else { continue };
+                let req = Request {
+                    id: frame.request_id,
+                    body,
+                };
+                match crate::rpc_table::lane_of(&req.body) {
+                    crate::rpc_table::Lane::Command => {
+                        if commands.send(req).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                    crate::rpc_table::Lane::Slow => match slow.try_send(req) {
+                        Ok(()) => {}
+                        Err(mpsc::error::TrySendError::Full(req)) => {
+                            let busy = dispatch::error_frame(
+                                req.id,
+                                "busy",
+                                "too many slow requests in flight on this connection",
+                            );
+                            if replies.send(busy).await.is_err() {
+                                return Ok(());
+                            }
+                        }
+                        Err(mpsc::error::TrySendError::Closed(_)) => return Ok(()),
+                    },
+                }
+            }
+            Ok(None) => return Ok(()),
+            Err(e) => return Err(format!("read: {e}")),
+        }
+    }
+}
+
+/// Serve state-changing and subscription requests one at a time, in the order
+/// they arrived. A dispatch in progress is never cancelled (a half-applied
+/// subscription would leak intent); a stop is noticed between requests. Returns
+/// the client context for teardown.
+async fn run_commands(
+    state: Arc<GatewayState>,
+    mut client: ClientCtx,
+    mut requests: mpsc::Receiver<Request>,
+    replies: mpsc::Sender<Frame>,
+    mut stop: watch::Receiver<bool>,
+) -> ClientCtx {
+    loop {
+        let req = tokio::select! {
+            biased;
+            _ = stop.changed() => break,
+            r = requests.recv() => match r {
+                Some(r) => r,
+                None => break,
+            },
+        };
+        let close_after = matches!(req.body, Body::Disconnect(_));
+        // During plant reconnect, refuse new RPCs (except detach) so callers do
+        // not observe Ack against a half-rebuilt venue session.
+        let resp = if !close_after && !state.ready.load(Ordering::SeqCst) {
+            not_ready_frame(req.id)
+        } else {
+            dispatch::dispatch(&state, &mut client, req.id, req.body).await
+        };
+        if replies.send(resp).await.is_err() || close_after {
+            break;
+        }
+    }
+    client
+}
+
+fn not_ready_frame(request_id: u64) -> Frame {
+    dispatch::error_frame(
+        request_id,
+        "not_ready",
+        "gateway not Ready (plants reconnecting)",
+    )
+}
+
+/// Serve slow read RPCs concurrently (bounded), replying as each finishes.
+async fn run_slow_lane(
+    state: Arc<GatewayState>,
+    mut requests: mpsc::Receiver<Request>,
+    replies: mpsc::Sender<Frame>,
+) {
+    let permits = Arc::new(tokio::sync::Semaphore::new(SLOW_CONCURRENCY));
+    let mut running = tokio::task::JoinSet::new();
+    while let Some(req) = requests.recv().await {
+        let Ok(permit) = Arc::clone(&permits).acquire_owned().await else {
+            return;
+        };
+        let (state, replies) = (Arc::clone(&state), replies.clone());
+        running.spawn(async move {
+            let _permit = permit;
+            let resp = if !state.ready.load(Ordering::SeqCst) {
+                not_ready_frame(req.id)
+            } else {
+                dispatch::dispatch_read(&state, req.id, req.body).await
+            };
+            let _ = replies.send(resp).await;
+        });
+        while running.try_join_next().is_some() {}
+    }
+    while running.join_next().await.is_some() {}
+}
+
+/// Own the write half. Replies are written ahead of fan-out events; a write that
+/// takes longer than [`WRITE_TIMEOUT`] means the client stopped draining, and
+/// the connection ends. The task ends once every reply sender is gone and the
+/// queue is flushed.
+async fn write_replies(
+    mut write: tokio::net::unix::OwnedWriteHalf,
+    mut replies: mpsc::Receiver<Frame>,
+    mut events: mpsc::Receiver<OutMsg>,
+) {
+    let mut events_open = true;
+    // Ends when the reply channel has closed and drained (that flushes a final
+    // ack); fan-out events are best effort and never keep the socket open.
+    let mut replies_open = true;
+    while replies_open {
+        let wire: Option<Bytes> = tokio::select! {
+            biased;
+            frame = replies.recv(), if replies_open => match frame {
+                Some(frame) => match codec::encode(&frame) {
+                    Ok(wire) => Some(Bytes::from(wire)),
+                    Err(_) => None,
+                },
+                None => {
+                    replies_open = false;
+                    None
+                }
+            },
+            msg = events.recv(), if events_open => match msg {
+                Some(OutMsg::Frame(bytes)) => Some(bytes),
+                None => {
+                    events_open = false;
+                    None
+                }
+            },
+        };
+        if let Some(wire) = wire {
+            match tokio::time::timeout(WRITE_TIMEOUT, write.write_all(&wire)).await {
+                Ok(Ok(())) => {}
+                _ => return, // slow / dead client
+            }
+        }
+    }
 }
 
 /// Rebroadcast a plant event to all interested fan-out subscribers, keyed by

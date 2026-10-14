@@ -39,6 +39,36 @@ pub enum Gate {
     CancelAll,
 }
 
+/// Which lane of a connection serves an RPC.
+///
+/// A connection reads requests on its own task and serves them on two lanes so a
+/// slow read can never hold up a command: the **command** lane runs state-changing
+/// and subscription requests one at a time, in arrival order; the **slow** lane
+/// runs read RPCs that can take seconds (history and order/fill history loads)
+/// concurrently, a few at a time, and replies when each finishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lane {
+    Command,
+    Slow,
+}
+
+/// The lane for a request body. The table's `lane` column must agree (checked in
+/// `tests/rpc_table.rs`), so a new slow RPC is declared in both places.
+pub fn lane_of(body: &Body) -> Lane {
+    match body {
+        Body::LoadTicks(_)
+        | Body::LoadTimeBars(_)
+        | Body::ProbeTimeBars(_)
+        | Body::LoadOrders(_)
+        | Body::LoadProductRmsInfo(_)
+        | Body::LoadAccountRmsInfo(_)
+        | Body::LoadFillHistory(_)
+        | Body::LoadOrderHistoryDates(_)
+        | Body::LoadOrderHistory(_) => Lane::Slow,
+        _ => Lane::Command,
+    }
+}
+
 /// How a subscription intent is restored after a plant reconnect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Restore {
@@ -59,6 +89,8 @@ pub struct Rpc {
     pub make_body: Option<fn() -> Body>,
     pub kind: Kind,
     pub gate: Gate,
+    /// The connection lane that serves this request.
+    pub lane: Lane,
     /// Set for (and only for) [`Kind::SubscriptionIntent`].
     pub restore: Option<Restore>,
 }
@@ -76,7 +108,16 @@ const fn rpc(
         make_body: Some(make_body),
         kind,
         gate,
+        lane: Lane::Command,
         restore: None,
+    }
+}
+
+/// Mark a row as served by the slow lane.
+const fn slow(row: Rpc) -> Rpc {
+    Rpc {
+        lane: Lane::Slow,
+        ..row
     }
 }
 
@@ -94,6 +135,7 @@ const fn intent(
         make_body: Some(make_body),
         kind: Kind::SubscriptionIntent,
         gate,
+        lane: Lane::Command,
         restore: Some(Restore { plan_field, call }),
     }
 }
@@ -106,6 +148,7 @@ const fn local(method: &'static str) -> Rpc {
         make_body: None,
         kind: Kind::OneShot,
         gate: Gate::None,
+        lane: Lane::Command,
         restore: None,
     }
 }
@@ -274,69 +317,69 @@ pub const RPC_TABLE: &[Rpc] = &[
         OneShot,
         NoGate,
     ),
-    rpc(
+    slow(rpc(
         Some("load_ticks"),
         "load_ticks",
         || Body::LoadTicks(Default::default()),
         OneShot,
         NoGate,
-    ),
-    rpc(
+    )),
+    slow(rpc(
         Some("load_time_bars"),
         "load_time_bars",
         || Body::LoadTimeBars(Default::default()),
         OneShot,
         NoGate,
-    ),
-    rpc(
+    )),
+    slow(rpc(
         Some("probe_time_bars"),
         "probe_time_bars",
         || Body::ProbeTimeBars(Default::default()),
         OneShot,
         NoGate,
-    ),
-    rpc(
+    )),
+    slow(rpc(
         Some("load_orders"),
         "load_orders",
         || Body::LoadOrders(Default::default()),
         OneShot,
         Trading,
-    ),
-    rpc(
+    )),
+    slow(rpc(
         Some("load_product_rms_info"),
         "load_product_rms_info",
         || Body::LoadProductRmsInfo(Default::default()),
         OneShot,
         Trading,
-    ),
-    rpc(
+    )),
+    slow(rpc(
         Some("load_account_rms_info"),
         "load_account_rms_info",
         || Body::LoadAccountRmsInfo(Default::default()),
         OneShot,
         Trading,
-    ),
-    rpc(
+    )),
+    slow(rpc(
         Some("load_fill_history"),
         "load_fill_history",
         || Body::LoadFillHistory(Default::default()),
         OneShot,
         Trading,
-    ),
-    rpc(
+    )),
+    slow(rpc(
         Some("load_order_history_dates"),
         "load_order_history_dates",
         || Body::LoadOrderHistoryDates(Default::default()),
         OneShot,
         Trading,
-    ),
-    rpc(
+    )),
+    slow(rpc(
         Some("load_order_history"),
         "load_order_history",
         || Body::LoadOrderHistory(Default::default()),
         OneShot,
         Trading,
-    ),
+    )),
     // --- one-shot trading commands (never retried; no intent, no restore) ---
     rpc(
         Some("place_order"),

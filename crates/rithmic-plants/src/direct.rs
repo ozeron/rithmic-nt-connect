@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::sync::{Mutex, MutexGuard};
+use tokio::sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::backend::{AccountTriple, ModifyOrder, PlaceBracketOrder, PlaceOrder, Session};
 use crate::config::SessionConfig;
@@ -26,7 +26,7 @@ use crate::session::{
     adjust_bracket_stop_on, adjust_bracket_target_on, cancel_all_orders_on, cancel_order_on,
     load_account_rms_info_on, load_fill_history_on, load_order_history_dates_on,
     load_order_history_on, load_orders_on, load_product_rms_info_on, modify_order_on,
-    place_bracket_order_on, place_order_on, RithmicSession,
+    place_bracket_order_on, place_order_on, Handles, RithmicSession,
 };
 use crate::streams::{Stream, StreamHub};
 
@@ -38,8 +38,10 @@ pub struct DirectSession {
     inner: Mutex<RithmicSession>,
     /// Event lanes: consumers read them without taking `inner`.
     streams: Arc<StreamHub>,
-    /// Held for the full duration of place/cancel/modify so disconnect cannot interleave.
-    session_ops: Mutex<()>,
+    /// Order operations hold it shared for their whole duration (they run
+    /// concurrently); `disconnect` takes it exclusively, so it waits for them and
+    /// none starts underneath it.
+    session_ops: RwLock<()>,
     disconnecting: AtomicBool,
 }
 
@@ -65,26 +67,32 @@ impl DirectSession {
         Self {
             streams: session.streams(),
             inner: Mutex::new(session),
-            session_ops: Mutex::new(()),
+            session_ops: RwLock::new(()),
             disconnecting: AtomicBool::new(false),
         }
     }
 
     /// Begin a place / cancel / modify: rejected while a disconnect is in progress.
-    async fn begin_order_op(&self) -> Result<MutexGuard<'_, ()>> {
+    async fn begin_order_op(&self) -> Result<RwLockReadGuard<'_, ()>> {
         if self.disconnecting.load(Ordering::SeqCst) {
             return Err(Error::Session(
                 "session disconnect in progress; order operation rejected".into(),
             ));
         }
-        Ok(self.session_ops.lock().await)
+        Ok(self.session_ops.read().await)
     }
 
     /// Wait for in-flight order operations, bounded by [`DISCONNECT_WAIT`].
-    async fn wait_for_order_ops(&self) -> Result<MutexGuard<'_, ()>> {
-        tokio::time::timeout(DISCONNECT_WAIT, self.session_ops.lock())
+    async fn wait_for_order_ops(&self) -> Result<RwLockWriteGuard<'_, ()>> {
+        tokio::time::timeout(DISCONNECT_WAIT, self.session_ops.write())
             .await
             .map_err(|_| Error::Session("timed out waiting for in-flight order operations".into()))
+    }
+
+    /// Clone the plant handles under an instant's lock; the I/O that follows runs
+    /// without it.
+    async fn handles(&self) -> Handles {
+        self.inner.lock().await.handles()
     }
 
     /// Ensure the order plant under a short lock, then clone its handle so
@@ -149,24 +157,22 @@ impl Session for DirectSession {
     }
 
     async fn subscribe(&self, symbol: &str, exchange: &str) -> Result<()> {
-        self.inner.lock().await.subscribe(symbol, exchange).await
+        self.handles().await.subscribe(symbol, exchange).await
     }
 
     async fn unsubscribe(&self, symbol: &str, exchange: &str) -> Result<()> {
-        self.inner.lock().await.unsubscribe(symbol, exchange).await
+        self.handles().await.unsubscribe(symbol, exchange).await
     }
 
     async fn subscribe_order_book_summary(&self, symbol: &str, exchange: &str) -> Result<()> {
-        self.inner
-            .lock()
+        self.handles()
             .await
             .subscribe_order_book_summary(symbol, exchange)
             .await
     }
 
     async fn unsubscribe_order_book_summary(&self, symbol: &str, exchange: &str) -> Result<()> {
-        self.inner
-            .lock()
+        self.handles()
             .await
             .unsubscribe_order_book_summary(symbol, exchange)
             .await
@@ -179,8 +185,7 @@ impl Session for DirectSession {
         bar_type: i32,
         period: i32,
     ) -> Result<()> {
-        self.inner
-            .lock()
+        self.handles()
             .await
             .subscribe_time_bars(symbol, exchange, bar_type, period)
             .await
@@ -193,17 +198,15 @@ impl Session for DirectSession {
         bar_type: i32,
         period: i32,
     ) -> Result<()> {
-        self.inner
-            .lock()
+        self.handles()
             .await
             .unsubscribe_time_bars(symbol, exchange, bar_type, period)
             .await
     }
 
     async fn subscribe_pnl(&self) -> Result<()> {
-        let mut inner = self.inner.lock().await;
-        inner.ensure_pnl_plant().await?;
-        inner.subscribe_pnl().await
+        self.inner.lock().await.ensure_pnl_plant().await?;
+        self.handles().await.subscribe_pnl().await
     }
 
     async fn subscribe_order_updates(&self) -> Result<()> {
@@ -216,16 +219,11 @@ impl Session for DirectSession {
     }
 
     async fn get_front_month(&self, symbol: &str, exchange: &str) -> Result<FrontMonthDto> {
-        self.inner
-            .lock()
-            .await
-            .get_front_month(symbol, exchange)
-            .await
+        self.handles().await.get_front_month(symbol, exchange).await
     }
 
     async fn get_reference_data(&self, symbol: &str, exchange: &str) -> Result<ReferenceDataDto> {
-        self.inner
-            .lock()
+        self.handles()
             .await
             .get_reference_data(symbol, exchange)
             .await
@@ -238,8 +236,7 @@ impl Session for DirectSession {
         start_time_sec: i32,
         end_time_sec: i32,
     ) -> Result<Vec<HistoryTickDto>> {
-        self.inner
-            .lock()
+        self.handles()
             .await
             .load_ticks_all(symbol, exchange, start_time_sec, end_time_sec)
             .await
@@ -255,8 +252,7 @@ impl Session for DirectSession {
         period: i32,
     ) -> Result<Vec<HistoryBarDto>> {
         let bar_type = parse_time_bar_type(bar_type)?;
-        self.inner
-            .lock()
+        self.handles()
             .await
             .load_time_bars_all(
                 symbol,
@@ -279,8 +275,7 @@ impl Session for DirectSession {
         period: i32,
     ) -> Result<Vec<TimeBarProbeRow>> {
         let bar_type = parse_time_bar_type(bar_type)?;
-        self.inner
-            .lock()
+        self.handles()
             .await
             .probe_time_bars(
                 symbol,
@@ -477,6 +472,33 @@ mod tests {
                 .contains("session disconnect in progress; order operation rejected"),
             "{err}"
         );
+    }
+
+    #[tokio::test]
+    async fn order_ops_run_concurrently_and_do_not_queue_behind_each_other() {
+        let s = offline();
+        let first = s.begin_order_op().await.expect("first op");
+        // A second op while the first is still in flight must not wait for it.
+        let second = tokio::time::timeout(Duration::from_millis(100), s.begin_order_op())
+            .await
+            .expect("second op started without waiting")
+            .expect("second op");
+        drop((first, second));
+    }
+
+    #[tokio::test]
+    async fn a_waiting_disconnect_keeps_new_order_ops_out() {
+        let s = Arc::new(offline());
+        let op = s.begin_order_op().await.expect("order op");
+        let disconnecting = Arc::clone(&s);
+        let task = tokio::spawn(async move { disconnecting.disconnect().await });
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert!(
+            s.begin_order_op().await.is_err(),
+            "refused during disconnect"
+        );
+        drop(op);
+        task.await.expect("join").expect("disconnect ok");
     }
 
     #[tokio::test]

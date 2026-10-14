@@ -112,7 +112,7 @@ async fn reconnect_loop(
     state.ready.store(false, Ordering::SeqCst);
     loop {
         {
-            let guard = session.lock().await;
+            let guard = session.lock_exclusive().await;
             let _ = guard.disconnect().await;
             if let Err(e) = guard.connect().await {
                 drop(guard);
@@ -125,7 +125,7 @@ async fn reconnect_loop(
         // tearing TLS down. If still incomplete, full-reconnect (outer loop)
         // while staying Ready=false — never claim Ready with half-restored intent.
         for attempt in 1..=6u32 {
-            let guard = session.lock().await;
+            let guard = session.lock_exclusive().await;
             let (restored, attempted) = restore_intents(&*guard, reconnect).await;
             drop(guard);
             eprintln!(

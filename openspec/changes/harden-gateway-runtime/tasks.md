@@ -20,20 +20,20 @@
 
 ## 3. Connection lanes (review H2)
 
-- [ ] 3.1 Add a `Lane` column (command / slow) to `rpc_table.rs`; the table test fails for a row without one
-- [ ] 3.2 Split `handle_client` into reader, command, slow-lane (semaphore, default 4) and writer tasks; decode straight from the payload with no prefix copy; replies drain before events
-- [ ] 3.3 Tests: cancel behind a history load returns first; place then cancel stay ordered; partial frame during an event write does not desync
-- [ ] 3.4 Gate: S2 and S3 meet the order-isolation budget; S4 peers lose at most 10 percent
-- [ ] 3.5 Update the RPC-kinds table in `AGENTS.md` with the lane rule
+- [x] 3.1 Add a `Lane` column (command / slow) to `rpc_table.rs`; the table test fails for a row without one
+- [x] 3.2 Split `handle_client` into reader, command, slow-lane (semaphore, default 4) and writer tasks; decode straight from the payload with no prefix copy; replies drain before events
+- [x] 3.3 Tests: cancel behind a history load returns first; place then cancel stay ordered; partial frame during an event write does not desync
+- [x] 3.4 Gate: S2 and S3 meet the order-isolation budget; S4 peers lose at most 10 percent
+- [x] 3.5 Update the RPC-kinds table in `AGENTS.md` with the lane rule
 
 ## 4. Lock diet (review H3)
 
-- [ ] 4.1 `DirectSession`: clone plant handles under a short lock for subscribe, history, `ensure_*`; do I/O unlocked
-- [ ] 4.2 `session_ops` becomes an `RwLock` (read for place/cancel/modify, write for disconnect with the bounded wait)
-- [ ] 4.3 Explicit deadlines for connect and history; `list_systems` releases the GIL (`py.detach`) and has a deadline (review M8)
-- [ ] 4.4 Remove the gateway session gate from order one-shots and history (`dispatch/orders.rs`, `dispatch/history.rs`); keep a read-lock that reconnect can write-lock; in-flight calls fail as transport errors on replacement
-- [ ] 4.5 Tests: cancel during a history load, event retrieval during a retrying connect, connect deadline
-- [ ] 4.6 If S2 still shows contention on `inner`, spike an atomically swapped `Arc` plant snapshot (separate measured step)
+- [x] 4.1 `DirectSession`: clone plant handles under a short lock for subscribe, history, `ensure_*`; do I/O unlocked
+- [x] 4.2 `session_ops` becomes an `RwLock` (read for place/cancel/modify, write for disconnect with the bounded wait)
+- [x] 4.3 Explicit deadlines for connect and history; `list_systems` releases the GIL (`py.detach`) and has a deadline (review M8)
+- [x] 4.4 Remove the gateway session gate from order one-shots and history (`dispatch/orders.rs`, `dispatch/history.rs`); keep a read-lock that reconnect can write-lock; in-flight calls fail as transport errors on replacement
+- [x] 4.5 Tests: cancel during a history load, event retrieval during a retrying connect, connect deadline
+- [x] 4.6 Not triggered: the harness runs against the fake plant, which has no `inner` mutex; the fix is structural (no lock across I/O) and unit-tested. Snapshot design not pursued (see design, phase 4)
 
 ## 5. Copy diet and FFI batching (review M6, M7, L4, L8; moved from retire-python-mux-and-noop-knobs 3.1 to 3.3)
 

@@ -23,3 +23,6 @@ runs on the same machine.
 
 - `baseline-before.json`, `baseline-before-ffi.json`: the unmodified code, before `harden-gateway-runtime` (Rust suite and Python S7).
 - `after-phase2.json`, `after-phase2-ffi.json`: after event-driven delivery and gaps (phase 2).
+- `after-phase3.json`: after per-connection lanes (a slow read no longer holds up orders or events).
+
+Noise: the harness shares the machine with whatever else is running. On a quiet machine latencies are sub-millisecond; with a load average above the core count tails move by 10x between runs. Compare on a quiet host and repeat before trusting a single tail number.

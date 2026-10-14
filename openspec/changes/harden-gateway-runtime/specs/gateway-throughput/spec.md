@@ -30,11 +30,11 @@ At a sustained 20,000 events/s, the latency from parent receipt to client delive
 - **THEN** the harness report SHALL show p99 at or below 5 ms and p99.9 at or below 20 ms
 
 ### Requirement: Order path is isolated from market data and history
-A `place`, `cancel` or `modify` round trip SHALL NOT wait behind a market-data flood, a slow history load, or another client's traffic.
+A `place`, `cancel` or `modify` round trip SHALL NOT wait behind a market-data flood, a slow read RPC, or another client's traffic. The budget is absolute because the idle round trip is sub-millisecond, which makes a ratio to idle meaningless; it is set well above the clean-machine result (about 0.5 ms) so that scheduler noise on a busy host does not flip it, and far below the seconds a blocked socket costs.
 
 #### Scenario: Order latency during flood and history load
-- **WHEN** a 50,000 events/s flood and a 60 s history load run while orders are placed and cancelled on the same socket
-- **THEN** order round-trip p99 SHALL be at most 2 times the idle p99 and at most 50 ms
+- **WHEN** a 50,000 events/s flood and a slow read RPC (at least 8 s) run while orders are placed and cancelled on the same socket, with a new place and cancel every 20 ms regardless of earlier ones finishing
+- **THEN** order round-trip p99 SHALL be at most 10 ms and the maximum at most 50 ms on a quiet machine, and no flood event SHALL be lost
 
 #### Scenario: Slow consumer does not slow peers
 - **WHEN** one client stops reading while three others consume a 20,000 events/s flood

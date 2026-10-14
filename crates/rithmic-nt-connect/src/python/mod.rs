@@ -1230,10 +1230,11 @@ impl PySession {
 /// List system names advertised by a gateway (no login).
 #[pyfunction]
 #[pyo3(signature = (url=None))]
-fn list_systems(url: Option<&str>) -> PyResult<Vec<String>> {
-    let url = url.unwrap_or(DEFAULT_LUCID_URL);
-    runtime()
-        .block_on(rithmic_plants::systems::list_systems(url))
+fn list_systems(py: Python<'_>, url: Option<&str>) -> PyResult<Vec<String>> {
+    let url = url.unwrap_or(DEFAULT_LUCID_URL).to_string();
+    // The probe can wait on the network for up to its deadline; release the GIL
+    // so the rest of the Python process keeps running meanwhile.
+    py.detach(|| runtime().block_on(rithmic_plants::systems::list_systems(&url)))
         .map_err(to_py_err)
 }
 

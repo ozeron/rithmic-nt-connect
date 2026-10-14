@@ -91,6 +91,26 @@ Decisions that differ from or extend the plan above:
 - **Client queue cap (4,096) now binds.** With delivery no longer capped by the pump, a one-event-at-a-time Python poller overruns the library client's 4,096-event queue on a large burst (reported as `ChannelLaggedError`, never silent: 20,000 sent = 4,096 received + 15,904 reported skipped). The copy-diet phase should size this deliberately and move the adapter to batch polling.
 - **Not yet fixed (their phases):** order p99 under a slow RPC is still about 7.5 s and the shared-socket consumer is still dropped during it (the connection handler stays in dispatch and cannot drain events; Phase 3). Publish-path allocations are still 4 per event (Phase 5).
 
+## Phase 3 results
+
+`docs/perf/after-phase3.json`. Reader, command, slow and writer tasks per connection; a `Lane` column in the RPC table with `lane_of` and a test that the two agree; replies drain ahead of events; frames decode straight from the payload.
+
+| Scenario | Before | After |
+|---|---|---|
+| Place behind a 3 s read RPC, one raw connection | answered after 2,903 ms, replies in order slow, place | answered in 3.8 ms, replies in order place, slow |
+| Order p99 under 50k events/s flood plus an 8 s slow RPC (open-loop orders) | 7,577 ms (max 7,983 ms); the shared socket's consumer was dropped, 0.3 percent of events delivered | 0.49 ms (max 0.60 ms); 100 percent delivered |
+
+Notes from implementation: the writer must end when the reply channel closes and drains, not when the event channel closes (fan-out forwarders hold sender clones, so waiting for both left the socket open for up to 2 s after teardown and broke the reattach scenario about 40 percent of the time). The spec's order-isolation budget became an absolute 5 ms p99 because idle is 0.08 ms and a ratio is noise. The gateway session gate is still held by the time-bar and tick history loads and by the place/cancel one-shots; phase 4 removes it, and the isolation result above uses a fill-history load, which already runs without the gate.
+
+## Phase 4 results and decisions
+
+- **Gateway gate is shared/exclusive.** `SessionHandle` wraps an `RwLock`: RPCs take it shared (`lock()`), so no RPC waits behind another and a time-bar load that holds it no longer holds up a place; reconnect, restore and shutdown take it exclusively (`lock_exclusive()`), which waits for in-flight calls and keeps new ones out. Waiting for events needs no gate (`checkout()` once). A rebuild still waits for an in-flight RPC, bounded by that RPC's own deadline.
+- **`DirectSession` plant I/O runs on cloned handles.** `RithmicSession::handles()` returns owned clones of the ticker, history and PnL handles under an instant's lock; subscribe, unsubscribe, front month, reference data, tick and time-bar loads, probes, time-bar subscriptions and PnL subscribe all run on that snapshot, so a multi-minute history load no longer holds the mutex that `ensure_order_plant`, other subscribes and placements need. Event retrieval already bypassed the mutex in phase 2.
+- **Order operations are concurrent.** `session_ops` is an `RwLock`: place, cancel and modify hold it shared and run together; `disconnect` takes it exclusively with the existing bounded wait, and a waiting disconnect keeps new order ops out.
+- **Deadlines.** A plant connect fails after 60 s with a typed `Error::Session` instead of retrying forever (rithmic-rs' `Retry` has no deadline); the wrapper only abandons a connect that has assigned nothing, so no half-built state is left. `list_systems` has a 30 s deadline and runs with the GIL released.
+- **4.6 not triggered.** The harness's order-isolation scenario runs against the fake plant, which has no `inner` mutex, so it cannot show `DirectSession` contention either way. The fix is structural (the lock is no longer held across I/O) and is covered by unit tests of the gate and of concurrent order ops; a measured direct-mode comparison needs real plants and stays with the live verification that is already open. The atomically-swapped snapshot design is therefore not pursued.
+- **Measurement caveat.** This host runs unrelated heavy workloads (load average 15 to 19 on 10 cores during the final runs), so tail latencies vary by an order of magnitude between runs (order p99 under load: 0.5 ms clean, 1.4 to 8 ms busy). Records in `docs/perf` are single runs; budgets have headroom accordingly and CI gates only on loss, ordering and loose floors.
+
 ## Risks / Trade-offs
 
 - [Per-stream tasks reorder across streams] → ordering is only guaranteed within a stream today; the spec keeps it that way; order and PnL are separate streams already.
