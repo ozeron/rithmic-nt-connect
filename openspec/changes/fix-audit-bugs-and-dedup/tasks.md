@@ -92,7 +92,9 @@
 - [x] 8.2 ops-runbook lines 151-162: the lock is no longer held during the load; refusal unchanged
 - [x] 8.3 AGENTS.md conventions checklist reviewed for the data/exec changes; note any row that can't be marked
 - [x] 8.4 Full verify set: fmt, clippy `-D warnings`, cargo tests, ruff, ty, pytest, qlty, status check
-- [ ] 8.5 Live on the Rithmic test account (MotiveWave closed, no live place): `tests/e2e`, `smoke_gateway_shared_ticks.py`, `verify_order_dry_run.py`, `rithmic-load` S3 place latency
+- [x] 8.5 Live on the Rithmic test account (MotiveWave closed, no live place): `tests/e2e`, `smoke_gateway_shared_ticks.py`, `verify_order_dry_run.py`, `rithmic-load` S3 place latency
+  - 2026-10-14, Rithmic Test, `RITHMIC_HISTORY_READY_PROBE=0` (the account has no reference data): `tests/e2e` 8 passed / 63 skipped; the failures and errors are the same set as on `main` run the same way (front month missing for NQ/ES, order-plant/RMS `[13] permission denied`, discovery test needs the trading gate), plus the new D11 book test, which errors in the same front-month fixture. The shared-ticks smoke attaches both consumers to one parent pid but receives 0 ticks (no reference data); `verify_order_dry_run.py --seconds 5` stops at the same front-month lookup. The book `update_type` histogram and live tick delivery still need a market-data account.
+  - `rithmic-load`: `rpc_isolation_same_connection` place behind a 3 s read replied in 1.8 ms; `orders_flood_slow_rpc` order p99 1.0 ms loaded; `smoke` ok.
 
 ## 9. market-data-lake (separate repo and PR)
 
