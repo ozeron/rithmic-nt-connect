@@ -105,6 +105,9 @@ pub struct GatewayState {
     /// Set when a plant must be rebuilt outside the poll path (e.g. failed
     /// order-plant reseat). Event pump treats this like a connection issue.
     pub force_reconnect: AtomicBool,
+    /// Wakes the event pump when `force_reconnect` is set (a stored permit, so
+    /// a wake raised while the pump is busy is not lost).
+    pub reconnect_wake: tokio::sync::Notify,
     /// Parent secret for non-empty Handshake `auth_token` (from
     /// `RITHMIC_GATEWAY_AUTH_TOKEN`). Empty means only same-UID empty-token
     /// peers are accepted.
@@ -137,6 +140,14 @@ pub struct GatewayState {
     /// Notifies connected clients when [`Self::transport_generation`] bumps so
     /// they drop and re-handshake (otherwise they keep a stale Ready frame).
     pub transport_epoch: watch::Sender<u64>,
+}
+
+impl GatewayState {
+    /// Ask the event pump to rebuild the plants (outside the poll path).
+    pub fn request_reconnect(&self) {
+        self.force_reconnect.store(true, Ordering::SeqCst);
+        self.reconnect_wake.notify_one();
+    }
 }
 
 /// Credential fingerprint advertised/checked at Handshake (consistency
@@ -267,6 +278,7 @@ pub async fn run_gateway(params: GatewayParams) -> Result<(), String> {
         // Ready only after plants are up (KTD5): the caller connected already.
         ready: AtomicBool::new(true),
         force_reconnect: AtomicBool::new(false),
+        reconnect_wake: tokio::sync::Notify::new(),
         expected_auth_token,
         session: Some(session.clone()),
         reconnect: reconnect.clone(),
@@ -381,7 +393,6 @@ fn same_uid_peer(stream: &UnixStream) -> bool {
 
 pub(super) enum OutMsg {
     Frame(Bytes),
-    Overflow,
 }
 
 /// Per-connection fan-out bookkeeping: which topics this client forwards,
@@ -429,7 +440,7 @@ impl ClientCtx {
             return;
         }
         if let Some(rx) = hub.subscribe_receiver(key).await {
-            let handle = spawn_forwarder(rx, self.out_tx.clone());
+            let handle = spawn_forwarder(rx, self.out_tx.clone(), stream_of_topic(key));
             self.forwarders.insert(key.clone(), handle);
             self.subscribed.insert(key.clone());
         }
@@ -525,7 +536,7 @@ impl ClientCtx {
                 if let Err(e) = dispatch::reseat_order_plant_without_brackets(state).await {
                     eprintln!("rithmic-gateway: teardown reseat failed: {e}");
                     state.ready.store(false, Ordering::SeqCst);
-                    state.force_reconnect.store(true, Ordering::SeqCst);
+                    state.request_reconnect();
                 }
             }
         } else {
@@ -540,7 +551,24 @@ impl ClientCtx {
     }
 }
 
-fn spawn_forwarder(rx: broadcast::Receiver<Bytes>, out_tx: mpsc::Sender<OutMsg>) -> JoinHandle<()> {
+/// Which plant stream a topic's events come from, for a gap frame.
+fn stream_of_topic(key: &SubKey) -> rithmic_plants::Stream {
+    match key.symbol.as_str() {
+        "__pnl__" => rithmic_plants::Stream::Pnl,
+        "__order__" => rithmic_plants::Stream::Order,
+        _ => rithmic_plants::Stream::Ticker,
+    }
+}
+
+/// Forward one topic to one client. A receiver that falls behind the topic's
+/// ring is not disconnected: it is told exactly how many frames it missed (a
+/// `Gap` in order with the rest) and keeps going. A client that stops reading
+/// altogether is cut by the writer's timeout.
+fn spawn_forwarder(
+    rx: broadcast::Receiver<Bytes>,
+    out_tx: mpsc::Sender<OutMsg>,
+    stream: rithmic_plants::Stream,
+) -> JoinHandle<()> {
     let mut queue = crate::subscriptions::ClientQueue::from_receiver(ClientId::new(), rx);
     tokio::spawn(async move {
         loop {
@@ -550,9 +578,22 @@ fn spawn_forwarder(rx: broadcast::Receiver<Bytes>, out_tx: mpsc::Sender<OutMsg>)
                         return;
                     }
                 }
-                Err(crate::subscriptions::ClientQueueError::Overflow) => {
-                    let _ = out_tx.send(OutMsg::Overflow).await;
-                    return;
+                Err(crate::subscriptions::ClientQueueError::Overflow { skipped }) => {
+                    let gap = Frame {
+                        request_id: 0,
+                        body: Some(Body::Event(pb::Event {
+                            body: Some(pb::event::Body::Gap(pb::Gap {
+                                stream: stream.plant().into(),
+                                skipped,
+                            })),
+                        })),
+                    };
+                    let Ok(wire) = codec::encode(&gap) else {
+                        return;
+                    };
+                    if out_tx.send(OutMsg::Frame(Bytes::from(wire))).await.is_err() {
+                        return;
+                    }
                 }
                 Err(crate::subscriptions::ClientQueueError::Closed) => return,
             }
@@ -570,6 +611,9 @@ pub async fn publish_event(hub: &FanoutHub, key: &SubKey, event: pb::Event) -> u
         Ok(w) => w,
         Err(_) => return 0,
     };
+    if key.symbol == crate::convert::GAP_BROADCAST {
+        return hub.publish_symbols(Bytes::from(wire)).await;
+    }
     hub.publish(key, Bytes::from(wire)).await
 }
 
@@ -683,10 +727,6 @@ async fn handle_client(mut stream: UnixStream, state: Arc<GatewayState>) -> Resu
                             Ok(Ok(())) => {}
                             _ => break Ok(()), // slow / dead client
                         }
-                    }
-                    Some(OutMsg::Overflow) => {
-                        eprintln!("gateway: client overflowed its outbound queue; disconnecting");
-                        break Ok(());
                     }
                     None => {}
                 }

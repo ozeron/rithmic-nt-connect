@@ -81,6 +81,9 @@ class WireSessionStub:
     def poll_event(self, *args: Any, **kwargs: Any) -> Any:
         raise NotImplementedError
 
+    def next_events(self, *args: Any, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
     def load_ticks(self, *args: Any, **kwargs: Any) -> Any:
         raise NotImplementedError
 

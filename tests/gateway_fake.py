@@ -229,6 +229,10 @@ class FakeParent:
         for reply in self.control(*cmds):
             assert reply == ["ok"], reply
 
+    def push_gap(self, stream: str, skipped: int) -> None:
+        """Script a plant lag: ``stream`` is ticker, history, pnl or order."""
+        self.push("gap", stream, str(skipped))
+
     def push(self, *parts: str) -> None:
         assert self.command("push " + " ".join(parts)) == ["ok"]
 

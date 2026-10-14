@@ -355,6 +355,15 @@ fn event_to_dict(py: Python<'_>, event: PlantEvent) -> PyResult<Py<PyDict>> {
         PlantEvent::InstrumentPnl(i) => instrument_pnl_dict(py, i),
         PlantEvent::OrderNotification(n) => order_notification_dict(py, n),
         PlantEvent::TimeBar(b) => time_bar_event_dict(py, b),
+        PlantEvent::Gap(g) => {
+            // Polls report a gap as `ChannelLaggedError`; this form is for
+            // batch consumers that receive it in order with the events.
+            let d = PyDict::new(py);
+            d.set_item("type", "gap")?;
+            d.set_item("stream", g.stream.plant())?;
+            d.set_item("skipped", g.skipped)?;
+            Ok(d.unbind())
+        }
         PlantEvent::Other { type_name, source } => {
             let d = PyDict::new(py);
             d.set_item("type", "other")?;
@@ -789,6 +798,32 @@ impl PySession {
             self.session.poll_event(Duration::from_millis(timeout_ms)),
         )?;
         event_or_none(py, event)
+    }
+
+    /// Event-driven batch: wait up to `timeout_ms` for the stream's first event
+    /// (GIL released, no session lock held), then return up to `max_events`
+    /// already-queued events at once. `stream` is `ticker`, `history`, `pnl` or
+    /// `order`. A lag is `{"type": "gap", "stream": ..., "skipped": N}` in order
+    /// with the events. Empty on timeout and while the plant is not attached.
+    #[pyo3(signature = (stream, max_events=256, timeout_ms=100))]
+    fn next_events(
+        &self,
+        py: Python<'_>,
+        stream: &str,
+        max_events: usize,
+        timeout_ms: u64,
+    ) -> PyResult<Vec<Py<PyDict>>> {
+        let parsed = rithmic_plants::Stream::from_plant(stream).ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "unknown stream {stream:?}; expected ticker, history, pnl or order"
+            ))
+        })?;
+        let events = self.run(
+            py,
+            self.session
+                .next_events(parsed, max_events.max(1), Duration::from_millis(timeout_ms)),
+        )?;
+        events.into_iter().map(|e| event_to_dict(py, e)).collect()
     }
 
     /// Next PnL-plant event as a dict, or `None` after `timeout_ms`.

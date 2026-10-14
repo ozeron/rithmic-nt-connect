@@ -7,7 +7,8 @@
 //! poll never waits behind a place / cancel / modify.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::{Mutex, MutexGuard};
@@ -27,15 +28,16 @@ use crate::session::{
     load_order_history_on, load_orders_on, load_product_rms_info_on, modify_order_on,
     place_bracket_order_on, place_order_on, RithmicSession,
 };
+use crate::streams::{Stream, StreamHub};
 
 /// How long `disconnect` waits for in-flight order operations to finish.
 const DISCONNECT_WAIT: Duration = Duration::from_secs(30);
-/// Sleep between re-polls while a blocking `poll_*` waits for an event.
-const POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 /// In-process plants for one credential set.
 pub struct DirectSession {
     inner: Mutex<RithmicSession>,
+    /// Event lanes: consumers read them without taking `inner`.
+    streams: Arc<StreamHub>,
     /// Held for the full duration of place/cancel/modify so disconnect cannot interleave.
     session_ops: Mutex<()>,
     disconnecting: AtomicBool,
@@ -59,8 +61,10 @@ impl Drop for DisconnectGate<'_> {
 
 impl DirectSession {
     pub fn new(config: SessionConfig, plants: PlantSet) -> Self {
+        let session = RithmicSession::with_plants(config, plants);
         Self {
-            inner: Mutex::new(RithmicSession::with_plants(config, plants)),
+            streams: session.streams(),
+            inner: Mutex::new(session),
             session_ops: Mutex::new(()),
             disconnecting: AtomicBool::new(false),
         }
@@ -89,25 +93,6 @@ impl DirectSession {
         let mut inner = self.inner.lock().await;
         inner.ensure_order_plant().await?;
         inner.clone_order_handle()
-    }
-
-    /// Poll once under the lock; with a timeout, re-poll (releasing the lock
-    /// between attempts) until an event arrives or the deadline passes.
-    async fn poll_with<F>(&self, timeout: Duration, mut poll: F) -> Result<Option<PlantEvent>>
-    where
-        F: FnMut(&mut RithmicSession) -> Result<Option<PlantEvent>> + Send,
-    {
-        let deadline = Instant::now() + timeout;
-        loop {
-            if let Some(event) = poll(&mut *self.inner.lock().await)? {
-                return Ok(Some(event));
-            }
-            let now = Instant::now();
-            if now >= deadline {
-                return Ok(None);
-            }
-            tokio::time::sleep(POLL_INTERVAL.min(deadline - now)).await;
-        }
     }
 }
 
@@ -437,22 +422,28 @@ impl Session for DirectSession {
     }
 
     async fn poll_event(&self, timeout: Duration) -> Result<Option<PlantEvent>> {
-        self.poll_with(timeout, RithmicSession::poll_event).await
+        self.streams.poll(Stream::Ticker, timeout).await
     }
 
     async fn poll_history_event(&self, timeout: Duration) -> Result<Option<PlantEvent>> {
-        self.poll_with(timeout, RithmicSession::poll_history_event)
-            .await
+        self.streams.poll(Stream::History, timeout).await
     }
 
     async fn poll_pnl_event(&self, timeout: Duration) -> Result<Option<PlantEvent>> {
-        self.poll_with(timeout, RithmicSession::poll_pnl_event)
-            .await
+        self.streams.poll(Stream::Pnl, timeout).await
     }
 
     async fn poll_order_event(&self, timeout: Duration) -> Result<Option<PlantEvent>> {
-        self.poll_with(timeout, RithmicSession::poll_order_event)
-            .await
+        self.streams.poll(Stream::Order, timeout).await
+    }
+
+    async fn next_events(
+        &self,
+        stream: Stream,
+        max: usize,
+        timeout: Duration,
+    ) -> Result<Vec<PlantEvent>> {
+        self.streams.next_events(stream, max, timeout).await
     }
 }
 
@@ -460,6 +451,7 @@ impl Session for DirectSession {
 mod tests {
     use std::str::FromStr;
     use std::sync::Arc;
+    use std::time::Instant;
 
     use super::*;
 

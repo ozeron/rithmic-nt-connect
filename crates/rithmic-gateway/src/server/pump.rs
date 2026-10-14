@@ -7,8 +7,8 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rithmic_plants::dto::PlantEvent;
-use rithmic_plants::Session;
+use rithmic_plants::{Session, Stream};
+use tokio::task::JoinSet;
 
 use crate::reconnect::ReconnectController;
 use crate::subscriptions::FanoutHub;
@@ -16,41 +16,21 @@ use crate::subscriptions::FanoutHub;
 use super::dispatch::TopicIntent;
 use super::{publish_plant_event, GatewayState, SessionHandle};
 
-/// The four plant event streams, polled in this fixed order.
-#[derive(Clone, Copy)]
-enum PlantStream {
-    Ticker,
-    History,
-    Pnl,
-    Order,
-}
-
-impl PlantStream {
-    const ALL: [(&'static str, Self); 4] = [
-        ("ticker", Self::Ticker),
-        ("history", Self::History),
-        ("pnl", Self::Pnl),
-        ("order", Self::Order),
-    ];
-
-    /// Non-blocking drain of one event (`Duration::ZERO`).
-    async fn poll(self, session: &dyn Session) -> rithmic_plants::Result<Option<PlantEvent>> {
-        let now = Duration::ZERO;
-        match self {
-            Self::Ticker => session.poll_event(now).await,
-            Self::History => session.poll_history_event(now).await,
-            Self::Pnl => session.poll_pnl_event(now).await,
-            Self::Order => session.poll_order_event(now).await,
-        }
-    }
-}
+/// Events taken from a stream per wake. A busy ticker is drained in batches
+/// without a round trip per event; an idle one costs nothing.
+const BATCH: usize = 1024;
+/// Upper bound on one wait. It only bounds how soon a stream task notices that
+/// it should stop; events and plant attaches wake it immediately.
+const IDLE_WAIT: Duration = Duration::from_secs(1);
+/// Pause after a non-connection error so a persistent fault cannot spin.
+const ERROR_BACKOFF: Duration = Duration::from_millis(250);
 
 /// True for the subset of `rithmic_plants::Error` that the session
 /// constructor maps `is_connection_issue()` errors onto (see
-/// `rithmic_plants::session::check_response_ref` / broadcast poll helpers).
+/// `rithmic_plants::session::forward` / the stream lanes).
 ///
-/// `ChannelLagged` is a slow consumer of a live plant channel — not a
-/// transport failure — and must not tear plants down.
+/// A gap is a slow consumer of a live plant channel, not a transport failure:
+/// it is published to clients and must not tear plants down.
 fn is_connection_issue(e: &rithmic_plants::Error) -> bool {
     matches!(
         e,
@@ -58,31 +38,56 @@ fn is_connection_issue(e: &rithmic_plants::Error) -> bool {
     )
 }
 
-fn is_not_connected(e: &rithmic_plants::Error) -> bool {
-    matches!(e, rithmic_plants::Error::NotConnected { .. })
-}
-
-/// One plant poll + fan-out; returns whether the error is a connection issue.
-async fn poll_and_publish(
-    guard: &dyn Session,
-    hub: &FanoutHub,
-    label: &str,
-    stream: PlantStream,
-) -> bool {
-    match stream.poll(guard).await {
-        Ok(Some(event)) => publish_plant_event(hub, event).await,
-        Ok(None) => {}
-        Err(e) => {
-            if !is_not_connected(&e) {
-                eprintln!("rithmic-gateway: {label} poll error: {e}");
-                return is_connection_issue(&e);
+/// Serve one plant stream until it reports a connection issue. Waits on the
+/// stream (no session lock held, no polling) and publishes every event, and
+/// every gap, as it arrives.
+async fn serve_stream(session: Arc<dyn Session>, hub: Arc<FanoutHub>, stream: Stream) {
+    loop {
+        match session.next_events(stream, BATCH, IDLE_WAIT).await {
+            Ok(events) => {
+                for event in events {
+                    publish_plant_event(&hub, event).await;
+                }
+            }
+            Err(e) => {
+                eprintln!("rithmic-gateway: {} stream error: {e}", stream.plant());
+                if is_connection_issue(&e) {
+                    return;
+                }
+                tokio::time::sleep(ERROR_BACKOFF).await;
             }
         }
     }
-    false
 }
 
-/// Poll every connected plant, fan out events, and drive parent-owned
+/// Run until a plant connection issue (or a forced reconnect) is seen.
+async fn serve_until_issue(session: &SessionHandle, hub: &Arc<FanoutHub>, state: &GatewayState) {
+    if state.force_reconnect.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    // Wait for the gate once (a reconnect holds it) and then work on the plain
+    // session: waiting for events must never hold it.
+    let plants: Arc<dyn Session> = session.checkout().await;
+    let mut streams = JoinSet::new();
+    for stream in Stream::ALL {
+        streams.spawn(serve_stream(Arc::clone(&plants), Arc::clone(hub), stream));
+    }
+    loop {
+        tokio::select! {
+            // One stream task ending means that plant reported a connection issue.
+            _ = streams.join_next() => break,
+            _ = state.reconnect_wake.notified() => {
+                if state.force_reconnect.swap(false, Ordering::SeqCst) {
+                    break;
+                }
+            }
+        }
+    }
+    streams.abort_all();
+    while streams.join_next().await.is_some() {}
+}
+
+/// Serve every connected plant stream, fan events out, and drive parent-owned
 /// reconnect + refcounted intent restore (F6 / KTD11) on a connection issue.
 /// Clients never see this — they keep their broker connection and simply
 /// stop receiving events until plants are back.
@@ -93,22 +98,8 @@ pub async fn run_event_pump(
     state: Arc<GatewayState>,
 ) {
     loop {
-        let mut connection_issue = state.force_reconnect.swap(false, Ordering::SeqCst);
-        {
-            let guard = session.lock().await;
-            // MD / history / pnl / order plants, polled in that fixed order.
-            for (label, stream) in PlantStream::ALL {
-                if poll_and_publish(&*guard, &hub, label, stream).await {
-                    connection_issue = true;
-                }
-            }
-        }
-
-        if connection_issue {
-            reconnect_loop(&session, &reconnect, &state).await;
-        } else {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        serve_until_issue(&session, &hub, &state).await;
+        reconnect_loop(&session, &reconnect, &state).await;
     }
 }
 

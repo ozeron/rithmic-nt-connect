@@ -1,0 +1,24 @@
+[
+  {
+    "scenario": "py_blocking_poll_event",
+    "events": 20000,
+    "received": 4096,
+    "reported_skipped": 15904,
+    "seconds": 0.011,
+    "events_per_sec": 381421.0
+  },
+  {
+    "scenario": "py_to_thread_poll_event",
+    "events": 20000,
+    "received": 4096,
+    "reported_skipped": 15904,
+    "seconds": 0.166,
+    "events_per_sec": 24681.7
+  },
+  {
+    "scenario": "py_empty_poll_cost",
+    "polls": 5000,
+    "seconds": 0.0073,
+    "us_per_poll": 1.5
+  }
+]

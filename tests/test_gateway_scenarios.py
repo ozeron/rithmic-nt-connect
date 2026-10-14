@@ -328,13 +328,22 @@ def test_a_slow_client_is_disconnected_without_hurting_its_peer(
         slow.subscribe(NQ, EXCHANGE)
         fast.subscribe(NQ, EXCHANGE)
 
-        parent.push_last_trades(NQ, 20_000)
+        # Enough frames to overrun the slow client's kernel socket buffer.
+        parent.push_last_trades(NQ, 200_000)
         received = 0
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline and received < 1_000:
             if fast.poll_event(timeout_ms=100) is not None:
                 received += 1
         assert received >= 1_000, "the fast peer keeps receiving"
+
+        # The parent absorbs a burst (gaps, not drops) and cuts a client only when
+        # its socket stops draining past the writer timeout (5 s). Probing the slow
+        # client earlier would itself read its socket, so leave it alone first.
+        # The healthy peer keeps draining throughout, so only the slow one stalls.
+        quiet_until = time.monotonic() + 7
+        while time.monotonic() < quiet_until:
+            fast.poll_event(timeout_ms=50)
 
         def slow_is_gone() -> bool:
             try:
@@ -365,3 +374,64 @@ def test_rust_client_recovers_after_the_parent_restarts(fake_bin, make_client) -
         client.subscribe(NQ, EXCHANGE)  # the adapter re-issues intent after UP
         parent.push_last_trades(NQ, 1)
         assert len(drain(client.poll_event, 1)) == 1
+
+
+# -- a plant lag is a typed gap, never silence ----------------------------------
+
+
+def test_a_plant_lag_is_reported_in_order_not_swallowed(fake_bin, make_client) -> None:
+    from rithmic_nt_connect.errors import ChannelLaggedError
+
+    with running_fake(fake_bin) as parent:
+        client = make_client(parent)
+        client.subscribe(NQ, EXCHANGE)
+        parent.push_last_trades(NQ, 1)
+        parent.push_gap("ticker", 41)
+        parent.push_last_trades(NQ, 1)
+
+        assert len(drain(client.poll_event, 1)) == 1
+        if make_client.kind == "python-plain":
+            # The lake client delivers the gap in-band, in order, as a typed event.
+            gap = drain(client.poll_event, 1)[0]
+            assert gap["type"] == "gap" and gap["stream"] == "ticker"
+            assert int(gap["skipped"]) == 41
+        else:
+            # The adapter's session reports it as ChannelLaggedError so the
+            # existing resync path runs; the next poll continues in order.
+            with pytest.raises(ChannelLaggedError):
+                for _ in range(100):
+                    client.poll_event(timeout_ms=100)
+        assert len(drain(client.poll_event, 1)) == 1
+
+
+def test_next_events_returns_a_batch_with_the_gap_in_order(
+    fake_bin, make_client
+) -> None:
+    if make_client.kind == "python-plain":
+        pytest.skip("batch retrieval is an adapter-session API")
+    with running_fake(fake_bin) as parent:
+        client = make_client(parent)
+        client.subscribe(NQ, EXCHANGE)
+        parent.push_last_trades(NQ, 2)
+        parent.push_gap("ticker", 9)
+        parent.push_last_trades(NQ, 1)
+        got: list[dict[str, Any]] = []
+        deadline = time.monotonic() + 10
+        while len(got) < 4 and time.monotonic() < deadline:
+            got.extend(client.next_events("ticker", 64, 200))
+        assert [e["type"] for e in got] == [
+            "last_trade",
+            "last_trade",
+            "gap",
+            "last_trade",
+        ]
+        assert got[2]["stream"] == "ticker" and got[2]["skipped"] == 9
+
+
+def test_next_events_rejects_an_unknown_stream(fake_bin, make_client) -> None:
+    if make_client.kind == "python-plain":
+        pytest.skip("batch retrieval is an adapter-session API")
+    with running_fake(fake_bin) as parent:
+        client = make_client(parent)
+        with pytest.raises(ValueError, match="unknown stream"):
+            client.next_events("quotes", 8, 10)

@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 from gateway_fake import FakeParent, build_fake_gateway, running_fake
+from rithmic_nt_connect.errors import ChannelLaggedError
 
 pytestmark = [
     pytest.mark.perf,
@@ -72,14 +73,30 @@ def _record(name: str, **fields: Any) -> dict[str, Any]:
     return row
 
 
-def _drain_blocking(session: Any, want: int) -> tuple[int, float]:
-    got = 0
+def _drain_blocking(session: Any, want: int) -> tuple[int, int, float]:
+    """Returns (received, skipped_by_reported_gaps, seconds).
+
+    A burst larger than the client queue is reported as ``ChannelLaggedError``
+    (never silent); ``received + skipped`` accounts for every event.
+    """
+    got = skipped = 0
     start = time.perf_counter()
     deadline = start + DEADLINE_SEC
-    while got < want and time.perf_counter() < deadline:
-        if session.poll_event(timeout_ms=100) is not None:
-            got += 1
-    return got, time.perf_counter() - start
+    while got + skipped < want and time.perf_counter() < deadline:
+        try:
+            if session.poll_event(timeout_ms=100) is not None:
+                got += 1
+        except ChannelLaggedError as exc:
+            skipped += _lag_count(exc)
+    return got, skipped, time.perf_counter() - start
+
+
+def _lag_count(exc: Exception) -> int:
+    """The skipped count from a ``ChannelLaggedError`` message (``plant:skipped``)."""
+    try:
+        return int(str(exc).rsplit(":", 1)[-1])
+    except ValueError:
+        return 0
 
 
 def test_ffi_blocking_poll_throughput(fake_bin) -> None:
@@ -88,50 +105,56 @@ def test_ffi_blocking_poll_throughput(fake_bin) -> None:
         try:
             session.subscribe(SYMBOL, EXCHANGE)
             parent.push_last_trades(SYMBOL, EVENTS)
-            got, secs = _drain_blocking(session, EVENTS)
+            got, skipped, secs = _drain_blocking(session, EVENTS)
         finally:
             session.disconnect()
     _record(
         "py_blocking_poll_event",
         events=EVENTS,
         received=got,
+        reported_skipped=skipped,
         seconds=round(secs, 3),
         events_per_sec=round(got / secs, 1) if secs else 0.0,
     )
-    assert got > 0
+    assert got + skipped >= EVENTS, "every event is received or reported as skipped"
 
 
 def test_ffi_to_thread_poll_throughput(fake_bin) -> None:
     """The adapter's shape: one ``asyncio.to_thread`` hop per polled event."""
 
-    async def run(session: Any) -> tuple[int, float]:
-        got = 0
+    async def run(session: Any) -> tuple[int, int, float]:
+        got = skipped = 0
         start = time.perf_counter()
         deadline = start + DEADLINE_SEC
-        while got < EVENTS and time.perf_counter() < deadline:
-            event = await asyncio.to_thread(session.poll_event, 0)
+        while got + skipped < EVENTS and time.perf_counter() < deadline:
+            try:
+                event = await asyncio.to_thread(session.poll_event, 0)
+            except ChannelLaggedError as exc:
+                skipped += _lag_count(exc)
+                continue
             if event is None:
                 await asyncio.sleep(0.01)
             else:
                 got += 1
-        return got, time.perf_counter() - start
+        return got, skipped, time.perf_counter() - start
 
     with running_fake(fake_bin) as parent:
         session = _session(parent)
         try:
             session.subscribe(SYMBOL, EXCHANGE)
             parent.push_last_trades(SYMBOL, EVENTS)
-            got, secs = asyncio.run(run(session))
+            got, skipped, secs = asyncio.run(run(session))
         finally:
             session.disconnect()
     _record(
         "py_to_thread_poll_event",
         events=EVENTS,
         received=got,
+        reported_skipped=skipped,
         seconds=round(secs, 3),
         events_per_sec=round(got / secs, 1) if secs else 0.0,
     )
-    assert got > 0
+    assert got + skipped >= EVENTS, "every event is received or reported as skipped"
 
 
 def test_ffi_empty_poll_cost(fake_bin) -> None:

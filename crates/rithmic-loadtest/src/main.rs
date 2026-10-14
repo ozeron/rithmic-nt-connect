@@ -64,6 +64,15 @@ fn print_summary(r: &Report) {
         }
         return;
     }
+    let (gap_events, gap_skipped) = r.conns.iter().fold((0u64, 0u64), |a, c| {
+        (a.0 + c.gap_events, a.1 + c.gap_skipped)
+    });
+    if gap_events > 0 {
+        eprintln!(
+            "{:<28} gaps delivered: {gap_events} (reporting {gap_skipped} skipped events)",
+            ""
+        );
+    }
     for n in &r.notes {
         eprintln!("{:<28} note: {n}", "");
     }

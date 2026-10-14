@@ -281,6 +281,23 @@ pub fn order_key() -> SubKey {
     }
 }
 
+/// Sentinel key for a gap on the ticker or history stream: those streams are
+/// not scoped to one topic, so the pump publishes the gap to every symbol topic.
+pub const GAP_BROADCAST: &str = "__gap__";
+
+/// Routing key for a gap on `stream`.
+pub fn gap_key(stream: rithmic_plants::Stream) -> SubKey {
+    use rithmic_plants::Stream;
+    match stream {
+        Stream::Pnl => pnl_key(),
+        Stream::Order => order_key(),
+        Stream::Ticker | Stream::History => SubKey {
+            symbol: GAP_BROADCAST.into(),
+            exchange: String::new(),
+        },
+    }
+}
+
 /// Sentinel key for unclassified plant messages (template types with no
 /// symbol/exchange to route on). Routed separately from order notifications
 /// so order-update subscribers do not receive unrelated plant chatter.
@@ -362,6 +379,15 @@ pub fn plant_event_to_routed(event: PlantEvent) -> (SubKey, pb::Event) {
             order_key(),
             pb::Event {
                 body: Some(Body::OrderNotification(order_notification_to_pb(n))),
+            },
+        ),
+        PlantEvent::Gap(g) => (
+            gap_key(g.stream),
+            pb::Event {
+                body: Some(Body::Gap(pb::Gap {
+                    stream: g.stream.plant().into(),
+                    skipped: g.skipped,
+                })),
             },
         ),
         PlantEvent::Other { type_name, source } => (

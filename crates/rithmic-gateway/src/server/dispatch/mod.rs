@@ -255,6 +255,7 @@ pub(super) fn test_state(gates: ParentGates, hub: SharedFanout) -> GatewayState 
         },
         ready: AtomicBool::new(true),
         force_reconnect: AtomicBool::new(false),
+        reconnect_wake: tokio::sync::Notify::new(),
         expected_auth_token: "secret".into(),
         session: None,
         reconnect: Arc::new(ReconnectController::new(hub)),

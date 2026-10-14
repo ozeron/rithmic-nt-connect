@@ -14,7 +14,7 @@ use tokio::task::JoinHandle;
 
 use crate::alloc;
 use crate::metrics::{current_rss_kb, now_ns, peak_rss_kb, ConnReport, Lat, Report};
-use crate::rig::{tick, wait_until, RawClient, Rig, EXCHANGE, SYMBOL};
+use crate::rig::{tick, wait_until, Item, RawClient, Rig, EXCHANGE, SYMBOL};
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Params {
@@ -117,10 +117,14 @@ async fn raw_consumer(
             if stop.load(Ordering::Relaxed) {
                 break 'outer;
             }
-            match tokio::time::timeout(Duration::from_millis(100), client.next_tick()).await {
-                Ok(Ok(Some((seq, ts)))) => {
-                    account(&mut rep, &mut lat, &mut expected, seq, ts);
+            match tokio::time::timeout(Duration::from_millis(100), client.next_item()).await {
+                Ok(Ok(Some(Item::Tick { seq, created_ns }))) => {
+                    account(&mut rep, &mut lat, &mut expected, seq, created_ns);
                     counter.received.store(rep.received, Ordering::Relaxed);
+                }
+                Ok(Ok(Some(Item::Gap { skipped }))) => {
+                    rep.gap_events += 1;
+                    rep.gap_skipped += skipped;
                 }
                 Ok(Ok(None)) | Ok(Err(_)) => {
                     dropped_at = Some(Instant::now());
@@ -168,6 +172,10 @@ async fn session_consumer(
                 counter.received.store(rep.received, Ordering::Relaxed);
             }
             Ok(_) => {}
+            Err(rithmic_plants::Error::ChannelLagged { skipped, .. }) => {
+                rep.gap_events += 1;
+                rep.gap_skipped += skipped;
+            }
             Err(_) => tokio::time::sleep(Duration::from_millis(5)).await,
         }
     }
@@ -376,7 +384,7 @@ pub async fn run(p: Params) -> Report {
         let end = Instant::now() + Duration::from_secs(2);
         let mut gone = false;
         while Instant::now() < end {
-            match tokio::time::timeout(Duration::from_millis(200), c.next_tick()).await {
+            match tokio::time::timeout(Duration::from_millis(200), c.next_item()).await {
                 Ok(Ok(Some(_))) => {}
                 Ok(_) => {
                     gone = true;
@@ -432,6 +440,19 @@ pub async fn run(p: Params) -> Report {
         .iter()
         .map(|c| c.received as f64 / p.secs.max(0.001))
         .fold(f64::INFINITY, f64::min);
+    // Loss that nothing told the consumer about: a hole in the sequence that no
+    // gap accounts for, on a connection that never had to reattach (a reattach
+    // is itself the signal for events missed while disconnected).
+    let unsignalled: u64 = conns
+        .iter()
+        .filter(|c| c.reattaches == 0)
+        .map(|c| c.missing_in_stream.saturating_sub(c.gap_skipped))
+        .sum();
+    if unsignalled > 0 {
+        notes.push(format!(
+            "UNSIGNALLED LOSS: {unsignalled} events missing with no gap"
+        ));
+    }
     let rss_samples = rss.lock().unwrap().clone();
     Report {
         scenario: p.name.clone(),
@@ -452,6 +473,7 @@ pub async fn run(p: Params) -> Report {
         rss_samples_kb: rss_samples,
         allocs_per_event: None,
         alloc_bytes_per_event: None,
+        unsignalled_loss: unsignalled,
         notes,
     }
 }

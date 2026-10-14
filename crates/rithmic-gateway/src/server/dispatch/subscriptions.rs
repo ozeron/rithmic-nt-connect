@@ -576,7 +576,7 @@ pub(super) async fn disconnect_order(
     if last_brackets && !last_order && state.reconnect.restore_plan().await.order {
         if let Err(e) = reseat_order_plant_without_brackets(state).await {
             state.ready.store(false, Ordering::SeqCst);
-            state.force_reconnect.store(true, Ordering::SeqCst);
+            state.request_reconnect();
             return err_to_frame(request_id, "reseat_order_failed", e);
         }
     }
@@ -637,7 +637,7 @@ pub(super) async fn reset_ticker_plant(state: &GatewayState, request_id: u64) ->
     }
     if let Some(msg) = failed {
         drop(guard);
-        state.force_reconnect.store(true, Ordering::SeqCst);
+        state.request_reconnect();
         return err_to_frame(request_id, "reset_ticker_plant_restore_failed", msg);
     }
     ack_frame(request_id)

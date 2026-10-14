@@ -32,6 +32,9 @@ class TickerSession(Protocol):
     def get_front_month(self, symbol: str, exchange: str) -> Any: ...
     def get_reference_data(self, symbol: str, exchange: str) -> Any: ...
     def poll_event(self, timeout_ms: int = 0) -> dict[str, Any] | None: ...
+    def next_events(
+        self, stream: str, max_events: int = 256, timeout_ms: int = 100
+    ) -> list[dict[str, Any]]: ...
     def load_ticks(
         self, symbol: str, exchange: str, start_ssboe: int, end_ssboe: int, /
     ) -> list[dict[str, Any]]: ...
@@ -355,6 +358,11 @@ class _FlockedDirectSession:
 
     def poll_event(self, timeout_ms: int = 0) -> dict[str, Any] | None:
         return self._inner.poll_event(timeout_ms)
+
+    def next_events(
+        self, stream: str, max_events: int = 256, timeout_ms: int = 100
+    ) -> list[dict[str, Any]]:
+        return self._inner.next_events(stream, max_events, timeout_ms)
 
     def load_ticks(
         self, symbol: str, exchange: str, start_ssboe: int, end_ssboe: int

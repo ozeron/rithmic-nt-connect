@@ -1,6 +1,6 @@
 //! Unit tests for the session facade (no live network).
 
-use rithmic_plants::{DirectSession, Error, PlantSet, RithmicSession, Session, SessionConfig};
+use rithmic_plants::{DirectSession, Error, PlantSet, Session, SessionConfig};
 
 #[test]
 fn config_rejects_incomplete_lucid_settings() {
@@ -9,18 +9,6 @@ fn config_rejects_incomplete_lucid_settings() {
 
     let err = SessionConfig::builder().password("pw").build().unwrap_err();
     assert!(err.to_string().contains("user"));
-}
-
-#[test]
-fn disconnected_session_methods_error_without_network() {
-    let cfg = SessionConfig::builder()
-        .user("alice")
-        .password("pw")
-        .build()
-        .unwrap();
-    let mut session = RithmicSession::new(cfg);
-    let err = session.poll_event().unwrap_err();
-    assert!(matches!(err, Error::NotConnected { plant: "ticker" }));
 }
 
 #[tokio::test]

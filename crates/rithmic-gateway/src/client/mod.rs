@@ -262,7 +262,20 @@ impl GatewaySession {
         }
     }
 
+    /// Compatibility poll: a gap reads as [`Error::ChannelLagged`].
     async fn poll(&self, channel: Channel, timeout: Duration) -> Result<Option<PlantEvent>> {
+        match self.poll_raw(channel, timeout).await? {
+            Some(PlantEvent::Gap(g)) => Err(Error::ChannelLagged {
+                plant: g.stream.plant(),
+                skipped: g.skipped,
+            }),
+            other => Ok(other),
+        }
+    }
+
+    /// Wait for the first event on `channel`; a gap (from the parent or from
+    /// this client's own queue overflow) is returned as `PlantEvent::Gap`.
+    async fn poll_raw(&self, channel: Channel, timeout: Duration) -> Result<Option<PlantEvent>> {
         self.require_connected()?;
         let queue = self.queues.get(channel);
         let deadline = Instant::now() + timeout;
@@ -275,10 +288,10 @@ impl GatewaySession {
             match queue.take() {
                 Take::Event(event) => return Ok(Some(*event)),
                 Take::Lagged(skipped) => {
-                    return Err(Error::ChannelLagged {
-                        plant: channel.plant(),
+                    return Ok(Some(PlantEvent::Gap(rithmic_plants::GapDto {
+                        stream: channel.stream(),
                         skipped,
-                    })
+                    })))
                 }
                 Take::Empty => {}
             }
@@ -856,5 +869,29 @@ impl Session for GatewaySession {
 
     async fn poll_order_event(&self, timeout: Duration) -> Result<Option<PlantEvent>> {
         self.poll(Channel::Order, timeout).await
+    }
+
+    async fn next_events(
+        &self,
+        stream: rithmic_plants::Stream,
+        max: usize,
+        timeout: Duration,
+    ) -> Result<Vec<PlantEvent>> {
+        let channel = Channel::of_stream(stream);
+        let Some(first) = self.poll_raw(channel, timeout).await? else {
+            return Ok(Vec::new());
+        };
+        let mut out = vec![first];
+        let queue = self.queues.get(channel);
+        while out.len() < max.max(1) {
+            match queue.take() {
+                Take::Event(event) => out.push(*event),
+                Take::Lagged(skipped) => {
+                    out.push(PlantEvent::Gap(rithmic_plants::GapDto { stream, skipped }))
+                }
+                Take::Empty => break,
+            }
+        }
+        Ok(out)
     }
 }

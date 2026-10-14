@@ -128,6 +128,12 @@ pub fn tick(seq: u64) -> PlantEvent {
     })
 }
 
+/// What a raw consumer reads from the stream.
+pub enum Item {
+    Tick { seq: i32, created_ns: u64 },
+    Gap { skipped: u64 },
+}
+
 /// A minimal protocol client: handshake, subscribe, read frames. It lets the
 /// harness open many independent connections to the parent (the library client
 /// shares one socket per process).
@@ -220,18 +226,24 @@ impl RawClient {
         Ok(out)
     }
 
-    /// Next tick as `(seq, created_ns)`; `Ok(None)` on EOF; non-tick frames are skipped.
-    pub async fn next_tick(&mut self) -> std::io::Result<Option<(i32, u64)>> {
+    /// Next tick or gap; `Ok(None)` on EOF; other frames are skipped.
+    pub async fn next_item(&mut self) -> std::io::Result<Option<Item>> {
         loop {
             let Some(frame) = read_frame(&mut self.stream).await? else {
                 return Ok(None);
             };
             if let Some(Body::Event(ev)) = frame.body {
-                if let Some(rithmic_gateway::pb::event::Body::LastTrade(lt)) = ev.body {
-                    return Ok(Some((
-                        lt.trade_size.unwrap_or(0),
-                        lt.ts_event_ns.unwrap_or(0),
-                    )));
+                match ev.body {
+                    Some(rithmic_gateway::pb::event::Body::LastTrade(lt)) => {
+                        return Ok(Some(Item::Tick {
+                            seq: lt.trade_size.unwrap_or(0),
+                            created_ns: lt.ts_event_ns.unwrap_or(0),
+                        }))
+                    }
+                    Some(rithmic_gateway::pb::event::Body::Gap(g)) => {
+                        return Ok(Some(Item::Gap { skipped: g.skipped }))
+                    }
+                    _ => {}
                 }
             }
         }

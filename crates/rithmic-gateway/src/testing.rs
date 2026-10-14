@@ -133,6 +133,7 @@ pub fn order_notification(kind: &str, basket_id: &str, user_tag: &str, symbol: &
 /// `push bbo <sym> <exch> <bid> <bid_size> <ask> <ask_size>`,
 /// `push time_bar <sym> <exch> <close>`, `push account_pnl <acct> <day_pnl>`,
 /// `push order <kind> <basket_id> <user_tag> <symbol>`,
+/// `push gap <ticker|history|pnl|order> <skipped>` (a scripted plant lag),
 /// `set_account <account_id> <fcm_id> <ib_id>`.
 pub async fn serve_control(listener: UnixListener, fake: Arc<FakeSession>) {
     loop {
@@ -220,6 +221,21 @@ fn run_command(fake: &FakeSession, line: &str) -> String {
             Stream::Order,
             Some(order_notification(kind, basket, tag, sym)),
         ),
+        ["push", "gap", stream, skipped] => {
+            match (
+                rithmic_plants::Stream::from_plant(stream),
+                skipped.parse::<u64>(),
+            ) {
+                (Some(stream), Ok(skipped)) => {
+                    fake.push_event(
+                        stream,
+                        PlantEvent::Gap(rithmic_plants::GapDto { stream, skipped }),
+                    );
+                    "ok\n".into()
+                }
+                _ => "err bad gap\n".into(),
+            }
+        }
         ["set_account", account_id, fcm_id, ib_id] => {
             fake.set_account(AccountTriple {
                 account_id: (*account_id).into(),

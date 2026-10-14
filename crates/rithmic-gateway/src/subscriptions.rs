@@ -6,8 +6,12 @@ use std::sync::Arc;
 
 use tokio::sync::{broadcast, RwLock};
 
-/// Default per-client outbound queue capacity.
-pub const DEFAULT_QUEUE_CAP: usize = 1024;
+/// Default fan-out capacity: events a topic's broadcast ring, and a client's
+/// outbound queue, hold. A receiver that falls further behind than this is told
+/// of an exact gap; a client whose socket stops draining is disconnected by the
+/// writer's timeout. Sized so a 200k events/s burst of ~100-byte frames costs a
+/// few MB per topic, not so small that a brief stall drops events.
+pub const DEFAULT_QUEUE_CAP: usize = 65_536;
 
 static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -93,6 +97,17 @@ impl FanoutHub {
         guard.get(key).map(|st| st.tx.subscribe())
     }
 
+    /// Publish to every symbol topic (not the internal `__*__` sentinels). Used
+    /// for a gap on the ticker or history stream, which affects every symbol.
+    pub async fn publish_symbols(&self, payload: bytes::Bytes) -> usize {
+        let guard = self.subs.read().await;
+        guard
+            .iter()
+            .filter(|(key, _)| !key.symbol.starts_with("__"))
+            .map(|(_, st)| st.tx.send(payload.clone()).unwrap_or(0))
+            .sum()
+    }
+
     /// Publish an event to all receivers of `key`.
     pub async fn publish(&self, key: &SubKey, payload: bytes::Bytes) -> usize {
         let guard = self.subs.read().await;
@@ -103,7 +118,8 @@ impl FanoutHub {
     }
 }
 
-/// Per-client bounded queue. Lagging consumers get [`ClientQueueError::Overflow`].
+/// Per-client bounded queue. A lagging consumer gets [`ClientQueueError::Overflow`]
+/// carrying the exact number of skipped frames.
 pub struct ClientQueue {
     pub id: ClientId,
     rx: broadcast::Receiver<bytes::Bytes>,
@@ -117,7 +133,9 @@ impl ClientQueue {
     pub async fn recv(&mut self) -> Result<bytes::Bytes, ClientQueueError> {
         match self.rx.recv().await {
             Ok(b) => Ok(b),
-            Err(broadcast::error::RecvError::Lagged(_)) => Err(ClientQueueError::Overflow),
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                Err(ClientQueueError::Overflow { skipped })
+            }
             Err(broadcast::error::RecvError::Closed) => Err(ClientQueueError::Closed),
         }
     }
@@ -125,8 +143,8 @@ impl ClientQueue {
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ClientQueueError {
-    #[error("client queue overflow — disconnect slow client")]
-    Overflow,
+    #[error("client queue overflow: {skipped} frames skipped")]
+    Overflow { skipped: u64 },
     #[error("client queue closed")]
     Closed,
 }

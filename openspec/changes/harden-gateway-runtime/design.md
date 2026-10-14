@@ -67,6 +67,30 @@ Measured with `rithmic-load suite` on a 10-core macOS machine, all parties in on
 - **Per-client fan-out buffer is 1,024 events** (`DEFAULT_QUEUE_CAP`), and an overflow disconnects the client. At 50k events/s that is a 20 ms stall. The baseline cannot reach it (the pump is the bottleneck), so event-driven delivery must size this deliberately.
 - **Python boundary (S7):** about 80 events/s through `Session.poll_event` in gateway mode, the same ceiling seen from Python.
 
+## Phase 2 results and decisions taken during implementation
+
+Measured with the same harness (`docs/perf/after-phase2.json`). The numbers that matter, before to after:
+
+| Scenario | Before | After |
+|---|---|---|
+| Idle wake-to-deliver p99 | 11.6 ms | 0.3 ms |
+| 1k events/s, 1 connection | 13.8 percent delivered | 100 percent, p99 0.1 ms |
+| 10k events/s, 4 connections + 1 session | 1.4 percent, p99 7.9 s | 100 percent, p99 0.4 ms |
+| 50k events/s sustained, 4 connections | 0.4 percent | 100 percent, p99 1.5 ms |
+| 200k events/s burst, 4 connections | 0.7 percent | 100 percent |
+| 20k events/s latency, connection + session | p99 17.7 s | p99 0.5 ms |
+| Stalled consumer | peers 0.9 percent | peers 100 percent, staller cut |
+| Python `poll_event` (S7) | 80 events/s | about 380,000 events/s (blocking), 25,000 to 30,000 (one thread hop per event) |
+
+Decisions that differ from or extend the plan above:
+
+- **Stable lanes, not refreshed receivers.** The plan sketched `Session::event_streams()` returning owned receivers that consumers re-obtain on reconnect. Implementation uses a `StreamHub` of four bounded lanes that outlive plant connections, fed by one forwarder task per plant connection (one `resubscribe()` receiver per stream, so tokio's per-receiver clone happens once). Consumers call `Session::next_events(stream, max, timeout)` (batch, waits event-driven, no lock) or the compatibility `poll_*`. No refresh logic and no epoch plumbing for consumers.
+- **Gap as an event.** `PlantEvent::Gap(GapDto)` rides the existing hub, client queues and polls. A gap on the ticker or history stream is published to every symbol topic; pnl and order gaps use their sentinel topics.
+- **Fan-out overflow is a gap, not a disconnect.** The old behavior (disconnect at 1,024 events) lost the whole burst. Topic rings and client queues are now 65,536 frames; a receiver that still falls behind gets an exact gap and keeps its connection. A client whose socket stops draining is cut by the writer's 5 second timeout.
+- **Stale items are counted.** Events still queued when a plant detaches are discarded by the generation bump; they are reported as one exact gap on the next read instead of vanishing. A small carry buffer keeps a batch within `max` without dropping the gap's successor.
+- **Client queue cap (4,096) now binds.** With delivery no longer capped by the pump, a one-event-at-a-time Python poller overruns the library client's 4,096-event queue on a large burst (reported as `ChannelLaggedError`, never silent: 20,000 sent = 4,096 received + 15,904 reported skipped). The copy-diet phase should size this deliberately and move the adapter to batch polling.
+- **Not yet fixed (their phases):** order p99 under a slow RPC is still about 7.5 s and the shared-socket consumer is still dropped during it (the connection handler stays in dispatch and cannot drain events; Phase 3). Publish-path allocations are still 4 per event (Phase 5).
+
 ## Risks / Trade-offs
 
 - [Per-stream tasks reorder across streams] → ordering is only guaranteed within a stream today; the spec keeps it that way; order and PnL are separate streams already.

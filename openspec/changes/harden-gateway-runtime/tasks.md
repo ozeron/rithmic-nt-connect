@@ -11,12 +11,12 @@
 
 ## 2. Event-driven delivery and gaps (review H1, L9)
 
-- [ ] 2.1 Add `Session::event_streams()` (owned receivers + stream epoch, `Event`/`Gap`/`Closed`) to the trait; implement for `DirectSession`, `FakeSession` (broadcast-backed) and `GatewaySession`; RPC-table and parity tests updated
-- [ ] 2.2 Add the additive `Gap { stream, skipped }` event to `session.proto`; encode in the gateway convert layer, decode in the client convert layer, regenerate `session_pb2.py`; verify the Python lake client ignores unknown event bodies and add the test
-- [ ] 2.3 Replace `run_event_pump` polling with one awaiting task per stream; re-obtain receivers on epoch change before `restore_intents`; no sleep, no gate held while waiting
-- [ ] 2.4 Publish gaps on per-stream topics; client queues them; PyO3 raises `ChannelLaggedError`; the data client resyncs only that stream
-- [ ] 2.5 Parity test: the same scripted lag yields the same gap through `DirectSession` and `GatewaySession`
-- [ ] 2.6 Gate: S1 sustained 50k events/s and the burst case meet the budgets; idle wake-to-deliver p99 at most 2 ms
+- [x] 2.1 Add `Session::next_events()` over stable `StreamHub` lanes (one forwarder per plant connection) to the trait; implement for `DirectSession`, `FakeSession` and `GatewaySession`; RPC-table, PyO3 and Python parity tests updated
+- [x] 2.2 Add the additive `Gap { stream, skipped }` event to `session.proto`; encode in the gateway convert layer, decode in the client convert layer, regenerate `session_pb2.py`; verify the Python lake client ignores unknown event bodies and add the test
+- [x] 2.3 Replace `run_event_pump` polling with one awaiting task per stream; re-obtain receivers on epoch change before `restore_intents`; no sleep, no gate held while waiting
+- [x] 2.4 Publish gaps on per-stream topics; client queues them; PyO3 raises `ChannelLaggedError`; the data client resyncs only that stream
+- [x] 2.5 Parity test: the same scripted lag yields the same gap through `DirectSession` and `GatewaySession`
+- [x] 2.6 Gate: S1 sustained 50k events/s and the burst case meet the budgets; idle wake-to-deliver p99 at most 2 ms
 
 ## 3. Connection lanes (review H2)
 

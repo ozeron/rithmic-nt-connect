@@ -3,6 +3,13 @@
 use rithmic_rs::rti::messages::RithmicMessage;
 use rithmic_rs::{rithmic_to_unix_nanos, RithmicResponse};
 
+/// Events a plant stream dropped because its consumer lagged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GapDto {
+    pub stream: crate::streams::Stream,
+    pub skipped: u64,
+}
+
 /// Dict-friendly plant event for Python consumers (ticker, PnL, orders).
 ///
 /// `OrderNotification` is the largest variant (~500 bytes) because a venue
@@ -26,6 +33,9 @@ pub enum PlantEvent {
     OrderNotification(OrderNotificationDto),
     /// Live or replay time bar (history plant).
     TimeBar(HistoryBarDto),
+    /// A stream dropped events (a lagging consumer); carries the count so the
+    /// consumer can resynchronize instead of continuing as if nothing was lost.
+    Gap(GapDto),
     /// Catch-all with type name for unhandled templates.
     Other {
         /// Discriminator / message variant name.

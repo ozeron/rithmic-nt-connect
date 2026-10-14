@@ -22,3 +22,4 @@ All parties share one process and CPU, so absolute numbers are conservative; com
 runs on the same machine.
 
 - `baseline-before.json`, `baseline-before-ffi.json`: the unmodified code, before `harden-gateway-runtime` (Rust suite and Python S7).
+- `after-phase2.json`, `after-phase2-ffi.json`: after event-driven delivery and gaps (phase 2).

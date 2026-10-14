@@ -4,7 +4,7 @@
 //! The order plant stays lazy via [`RithmicSession::ensure_order_plant`].
 
 use std::future::Future;
-use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rithmic_rs::rti::request_time_bar_update;
@@ -17,7 +17,6 @@ use rithmic_rs::{
     RithmicPnlPlantHandle, RithmicTickerPlant, RithmicTickerPlantHandle, TimeBarType, TimeInForce,
 };
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::broadcast::error::TryRecvError;
 
 use crate::account::{pick_account, rows_from_account_list};
 use crate::config::SessionConfig;
@@ -32,6 +31,7 @@ use crate::history::{
     DEFAULT_TICK_SLICE_SECS,
 };
 use crate::plants::PlantSet;
+use crate::streams::{Stream, StreamGuard, StreamHub};
 
 /// Silence window (ms) that ends the best-effort `load_orders` drain.
 const ORDER_DRAIN_SETTLE_MS: u64 = 1_000;
@@ -41,47 +41,86 @@ const ORDER_DRAIN_MAX_MS: u64 = 10_000;
 /// truncated and carries no truncation marker, so it fails closed.
 const FILL_HISTORY_MAX_RECORDS: usize = 10_000;
 
-fn noop_waker() -> Waker {
-    fn clone(_: *const ()) -> RawWaker {
-        RawWaker::new(std::ptr::null(), &VTABLE)
-    }
-    fn wake(_: *const ()) {}
-    fn wake_by_ref(_: *const ()) {}
-    fn drop(_: *const ()) {}
-    static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, wake, wake_by_ref, drop);
-    // SAFETY: noop waker; never used to wake a task.
-    unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) }
-}
-
-/// Poll a future once without waiting (for non-blocking subscription drains).
-fn now_or_never<F: Future>(fut: F) -> Option<F::Output> {
-    let mut fut = std::pin::pin!(fut);
-    let waker = noop_waker();
-    let mut cx = Context::from_waker(&waker);
-    match fut.as_mut().poll(&mut cx) {
-        Poll::Ready(v) => Some(v),
-        Poll::Pending => None,
-    }
-}
-
 struct TickerPlant {
     _plant: RithmicTickerPlant,
     handle: RithmicTickerPlantHandle,
+    _stream: StreamGuard,
 }
 
 struct HistoryPlant {
     _plant: RithmicHistoryPlant,
     handle: RithmicHistoryPlantHandle,
+    _stream: StreamGuard,
 }
 
 struct PnlPlant {
     _plant: RithmicPnlPlant,
     handle: RithmicPnlPlantHandle,
+    _stream: StreamGuard,
 }
 
 struct OrderPlant {
     _plant: RithmicOrderPlant,
     handle: RithmicOrderPlantHandle,
+    _stream: StreamGuard,
+}
+
+/// Anything that yields plant messages one at a time (the broadcast receiver
+/// of the ticker / history plants and the account filter of the PnL / order plants).
+#[async_trait::async_trait]
+trait Feed: Send {
+    type Item: Send + 'static;
+
+    async fn next_item(&mut self) -> std::result::Result<Self::Item, RecvError>;
+}
+
+#[async_trait::async_trait]
+impl Feed for tokio::sync::broadcast::Receiver<rithmic_rs::RithmicResponse> {
+    type Item = rithmic_rs::RithmicResponse;
+
+    async fn next_item(&mut self) -> std::result::Result<Self::Item, RecvError> {
+        self.recv().await
+    }
+}
+
+#[async_trait::async_trait]
+impl Feed for SubscriptionFilter {
+    type Item = rithmic_rs::RithmicResponse;
+
+    async fn next_item(&mut self) -> std::result::Result<Self::Item, RecvError> {
+        self.recv().await
+    }
+}
+
+/// Attach a stream lane and start the single forwarder that moves a plant's
+/// broadcast messages into it. Lag becomes an in-band gap, a venue connection
+/// error and a closed channel are recorded for the consumer to see in order.
+fn forward<R: Feed + 'static>(
+    hub: &Arc<StreamHub>,
+    stream: Stream,
+    mut rx: R,
+    to_event: fn(R::Item) -> Result<Option<PlantEvent>>,
+) -> StreamGuard {
+    let tx = hub.attach(stream);
+    let task_tx = tx.clone();
+    let task = tokio::spawn(async move {
+        loop {
+            match rx.next_item().await {
+                Ok(item) => match to_event(item) {
+                    Ok(Some(event)) => task_tx.event(event).await,
+                    Ok(None) => {}
+                    Err(Error::Rithmic(text)) => task_tx.fail(text),
+                    Err(other) => task_tx.fail(other.to_string()),
+                },
+                Err(RecvError::Lagged(skipped)) => task_tx.gap(skipped).await,
+                Err(RecvError::Closed) => {
+                    task_tx.close();
+                    break;
+                }
+            }
+        }
+    });
+    StreamGuard::new(&tx, task)
 }
 
 /// Connected multi-plant session used by the Python adapter.
@@ -94,6 +133,8 @@ pub struct RithmicSession {
     order: Option<OrderPlant>,
     /// Cached account after explicit override or wire discovery.
     resolved_account: Option<RithmicAccount>,
+    /// Event lanes shared with consumers; they outlive plant reconnects.
+    streams: Arc<StreamHub>,
 }
 
 impl std::fmt::Debug for RithmicSession {
@@ -126,7 +167,13 @@ impl RithmicSession {
             pnl: None,
             order: None,
             resolved_account,
+            streams: StreamHub::new(),
         }
+    }
+
+    /// The event lanes. Consumers wait on these without touching the session.
+    pub fn streams(&self) -> Arc<StreamHub> {
+        Arc::clone(&self.streams)
     }
 
     /// Resolved FCM/IB/account after override or discovery (if any).
@@ -155,13 +202,13 @@ impl RithmicSession {
         // Attach without connect_or_rollback: a failed add must not tear down
         // plants that were already live (and their subscription intent).
         if self.plants.ticker && self.ticker.is_none() {
-            match connect_ticker(&rc).await {
+            match connect_ticker(&rc, &self.streams).await {
                 Ok(plant) => self.ticker = Some(plant),
                 Err(err) => return Err(err),
             }
         }
         if self.plants.history && self.history.is_none() {
-            match connect_history(&rc).await {
+            match connect_history(&rc, &self.streams).await {
                 Ok(plant) => self.history = Some(plant),
                 Err(err) => return Err(err),
             }
@@ -191,14 +238,15 @@ impl RithmicSession {
         }
 
         let rc = self.config.to_rithmic_config()?;
+        let hub = Arc::clone(&self.streams);
 
         if self.plants.ticker {
-            self.connect_or_rollback(connect_ticker(&rc), |s, p| s.ticker = Some(p))
+            self.connect_or_rollback(connect_ticker(&rc, &hub), |s, p| s.ticker = Some(p))
                 .await?;
         }
 
         if self.plants.history {
-            self.connect_or_rollback(connect_history(&rc), |s, p| s.history = Some(p))
+            self.connect_or_rollback(connect_history(&rc, &hub), |s, p| s.history = Some(p))
                 .await?;
             if let Err(err) = self.prove_history_ready().await {
                 let _ = self.disconnect().await;
@@ -208,7 +256,7 @@ impl RithmicSession {
 
         if self.plants.pnl {
             if let Some(account) = self.config.account() {
-                self.connect_or_rollback(connect_pnl(&rc, &account), |s, p| s.pnl = Some(p))
+                self.connect_or_rollback(connect_pnl(&rc, &account, &hub), |s, p| s.pnl = Some(p))
                     .await?;
             }
         }
@@ -301,9 +349,16 @@ impl RithmicSession {
             result,
         )
         .await?;
+        let stream = forward(
+            &self.streams,
+            Stream::Order,
+            order_handle.subscription_receiver.resubscribe(),
+            map_connection_response,
+        );
         self.order = Some(OrderPlant {
             _plant: order_plant,
             handle: order_handle,
+            _stream: stream,
         });
         Ok(())
     }
@@ -360,9 +415,16 @@ impl RithmicSession {
             result,
         )
         .await?;
+        let stream = forward(
+            &self.streams,
+            Stream::Pnl,
+            pnl_handle.subscription_receiver.resubscribe(),
+            map_connection_response,
+        );
         self.pnl = Some(PnlPlant {
             _plant: pnl_plant,
             handle: pnl_handle,
+            _stream: stream,
         });
         Ok(())
     }
@@ -589,12 +651,6 @@ impl RithmicSession {
         )
     }
 
-    /// Non-blocking poll of the history-plant subscription channel (live TimeBar).
-    pub fn poll_history_event(&mut self) -> Result<Option<PlantEvent>> {
-        let handle = self.history_handle_mut()?;
-        map_broadcast_poll("history", now_or_never(handle.subscription_receiver.recv()))
-    }
-
     /// Subscribe to PnL updates and request a snapshot when account is configured.
     pub async fn subscribe_pnl(&self) -> Result<()> {
         let handle = self.pnl_handle()?;
@@ -649,7 +705,7 @@ impl RithmicSession {
             return Ok(());
         }
         let rc = self.config.to_rithmic_config()?;
-        self.ticker = Some(connect_ticker(&rc).await?);
+        self.ticker = Some(connect_ticker(&rc, &self.streams.clone()).await?);
         Ok(())
     }
 
@@ -674,26 +730,6 @@ impl RithmicSession {
         cancel_all_orders_on(self.order_handle()?).await
     }
 
-    /// Non-blocking poll of the next ticker-plant subscription message.
-    pub fn poll_event(&mut self) -> Result<Option<PlantEvent>> {
-        let handle = self.ticker_handle_mut()?;
-        map_try_recv_poll("ticker", handle.subscription_receiver.try_recv())
-    }
-
-    /// Non-blocking poll of the next PnL-plant subscription message.
-    pub fn poll_pnl_event(&mut self) -> Result<Option<PlantEvent>> {
-        let Some(pnl) = self.pnl.as_mut() else {
-            return Ok(None);
-        };
-        map_broadcast_poll("pnl", now_or_never(pnl.handle.subscription_receiver.recv()))
-    }
-
-    /// Non-blocking poll of the next order-plant subscription message.
-    pub fn poll_order_event(&mut self) -> Result<Option<PlantEvent>> {
-        let handle = self.order_handle_mut()?;
-        map_broadcast_poll("order", now_or_never(handle.subscription_receiver.recv()))
-    }
-
     fn ticker_handle(&self) -> Result<&RithmicTickerPlantHandle> {
         self.ticker
             .as_ref()
@@ -701,24 +737,10 @@ impl RithmicSession {
             .ok_or(Error::NotConnected { plant: "ticker" })
     }
 
-    fn ticker_handle_mut(&mut self) -> Result<&mut RithmicTickerPlantHandle> {
-        self.ticker
-            .as_mut()
-            .map(|t| &mut t.handle)
-            .ok_or(Error::NotConnected { plant: "ticker" })
-    }
-
     fn history_handle(&self) -> Result<&RithmicHistoryPlantHandle> {
         self.history
             .as_ref()
             .map(|h| &h.handle)
-            .ok_or(Error::NotConnected { plant: "history" })
-    }
-
-    fn history_handle_mut(&mut self) -> Result<&mut RithmicHistoryPlantHandle> {
-        self.history
-            .as_mut()
-            .map(|h| &mut h.handle)
             .ok_or(Error::NotConnected { plant: "history" })
     }
 
@@ -733,13 +755,6 @@ impl RithmicSession {
         self.order
             .as_ref()
             .map(|o| &o.handle)
-            .ok_or(Error::NotConnected { plant: "order" })
-    }
-
-    fn order_handle_mut(&mut self) -> Result<&mut RithmicOrderPlantHandle> {
-        self.order
-            .as_mut()
-            .map(|o| &mut o.handle)
             .ok_or(Error::NotConnected { plant: "order" })
     }
 
@@ -1216,7 +1231,7 @@ fn login_result(
     }
 }
 
-async fn connect_ticker(rc: &RithmicConfig) -> Result<TickerPlant> {
+async fn connect_ticker(rc: &RithmicConfig, hub: &Arc<StreamHub>) -> Result<TickerPlant> {
     let plant = RithmicTickerPlant::connect(rc, ConnectStrategy::Retry).await?;
     let handle = plant.get_handle();
     let result = login_result(handle.login().await, "ticker login");
@@ -1227,13 +1242,20 @@ async fn connect_ticker(rc: &RithmicConfig) -> Result<TickerPlant> {
         result,
     )
     .await?;
+    let stream = forward(
+        hub,
+        Stream::Ticker,
+        handle.subscription_receiver.resubscribe(),
+        map_connection_response,
+    );
     Ok(TickerPlant {
         _plant: plant,
         handle,
+        _stream: stream,
     })
 }
 
-async fn connect_history(rc: &RithmicConfig) -> Result<HistoryPlant> {
+async fn connect_history(rc: &RithmicConfig, hub: &Arc<StreamHub>) -> Result<HistoryPlant> {
     let plant = RithmicHistoryPlant::connect(rc, ConnectStrategy::Retry).await?;
     let handle = plant.get_handle();
     let result = login_result(handle.login().await, "history login");
@@ -1244,13 +1266,24 @@ async fn connect_history(rc: &RithmicConfig) -> Result<HistoryPlant> {
         result,
     )
     .await?;
+    let stream = forward(
+        hub,
+        Stream::History,
+        handle.subscription_receiver.resubscribe(),
+        map_connection_response,
+    );
     Ok(HistoryPlant {
         _plant: plant,
         handle,
+        _stream: stream,
     })
 }
 
-async fn connect_pnl(rc: &RithmicConfig, account: &RithmicAccount) -> Result<PnlPlant> {
+async fn connect_pnl(
+    rc: &RithmicConfig,
+    account: &RithmicAccount,
+    hub: &Arc<StreamHub>,
+) -> Result<PnlPlant> {
     let plant = RithmicPnlPlant::connect(rc, ConnectStrategy::Retry).await?;
     let handle = plant.get_handle(account);
     let result = login_result(handle.login().await, "pnl login");
@@ -1261,9 +1294,16 @@ async fn connect_pnl(rc: &RithmicConfig, account: &RithmicAccount) -> Result<Pnl
         result,
     )
     .await?;
+    let stream = forward(
+        hub,
+        Stream::Pnl,
+        handle.subscription_receiver.resubscribe(),
+        map_connection_response,
+    );
     Ok(PnlPlant {
         _plant: plant,
         handle,
+        _stream: stream,
     })
 }
 
@@ -1358,31 +1398,6 @@ fn map_connection_response(resp: rithmic_rs::RithmicResponse) -> Result<Option<P
         }
     }
     Ok(Some(PlantEvent::from(&resp)))
-}
-
-/// Map a ticker `try_recv` result. Lag surfaces as [`Error::ChannelLagged`].
-fn map_try_recv_poll(
-    plant: &'static str,
-    polled: std::result::Result<rithmic_rs::RithmicResponse, TryRecvError>,
-) -> Result<Option<PlantEvent>> {
-    match polled {
-        Ok(resp) => map_connection_response(resp),
-        Err(TryRecvError::Empty) => Ok(None),
-        Err(TryRecvError::Lagged(skipped)) => Err(Error::ChannelLagged { plant, skipped }),
-        Err(TryRecvError::Closed) => Err(Error::ChannelClosed { plant }),
-    }
-}
-
-fn map_broadcast_poll(
-    plant: &'static str,
-    polled: Option<std::result::Result<rithmic_rs::RithmicResponse, RecvError>>,
-) -> Result<Option<PlantEvent>> {
-    match polled {
-        Some(Ok(resp)) => map_connection_response(resp),
-        Some(Err(RecvError::Lagged(skipped))) => Err(Error::ChannelLagged { plant, skipped }),
-        Some(Err(RecvError::Closed)) => Err(Error::ChannelClosed { plant }),
-        None => Ok(None),
-    }
 }
 
 fn check_response(resp: rithmic_rs::RithmicResponse, ctx: &str) -> Result<()> {
@@ -1542,40 +1557,6 @@ mod order_subscribe_rollback_tests {
 }
 
 #[cfg(test)]
-mod try_recv_poll_tests {
-    use super::*;
-
-    #[test]
-    fn lagged_surfaces_channel_lagged() {
-        let err = map_try_recv_poll("ticker", Err(TryRecvError::Lagged(42))).unwrap_err();
-        assert!(
-            matches!(
-                err,
-                Error::ChannelLagged {
-                    plant: "ticker",
-                    skipped: 42
-                }
-            ),
-            "got {err:?}"
-        );
-    }
-
-    #[test]
-    fn empty_is_idle() {
-        assert!(matches!(
-            map_try_recv_poll("ticker", Err(TryRecvError::Empty)),
-            Ok(None)
-        ));
-    }
-
-    #[test]
-    fn closed_surfaces_channel_closed() {
-        let err = map_try_recv_poll("ticker", Err(TryRecvError::Closed)).unwrap_err();
-        assert!(matches!(err, Error::ChannelClosed { plant: "ticker" }));
-    }
-}
-
-#[cfg(test)]
 mod drain_tests {
     use super::*;
     use tokio::sync::broadcast;
@@ -1686,5 +1667,130 @@ mod drain_tests {
             matches!(res, Err(Error::Rithmic(ref msg)) if msg.contains("connection closed")),
             "response-level connection error must abort the drain, got {res:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod forward_tests {
+    use super::*;
+    use crate::dto::LastTradeDto;
+    use std::time::Duration;
+
+    fn to_event(seq: i32) -> Result<Option<PlantEvent>> {
+        Ok(Some(PlantEvent::LastTrade(LastTradeDto {
+            symbol: None,
+            exchange: None,
+            trade_price: None,
+            trade_size: Some(seq),
+            aggressor: None,
+            ssboe: None,
+            usecs: None,
+            ts_event_ns: None,
+            is_snapshot: None,
+        })))
+    }
+
+    #[async_trait::async_trait]
+    impl Feed for tokio::sync::broadcast::Receiver<i32> {
+        type Item = i32;
+
+        async fn next_item(&mut self) -> std::result::Result<i32, RecvError> {
+            self.recv().await
+        }
+    }
+
+    /// The real forwarder over a real tokio broadcast channel that overflows:
+    /// the lag must arrive as an in-order gap carrying the exact skipped count,
+    /// not vanish into a log line.
+    #[tokio::test]
+    async fn a_broadcast_lag_becomes_an_exact_in_order_gap() {
+        let hub = StreamHub::new();
+        let (tx, rx) = tokio::sync::broadcast::channel(4);
+        // Overflow before the forwarder runs: 10 sent into a 4-slot ring.
+        for i in 0..10 {
+            tx.send(i).unwrap();
+        }
+        let _guard = forward(&hub, Stream::Ticker, rx, to_event);
+        let items = hub
+            .next_events(Stream::Ticker, 64, Duration::from_secs(2))
+            .await
+            .unwrap();
+        // 6 were overwritten, then the 4 retained events (6..=9) follow.
+        assert!(
+            matches!(
+                items[0],
+                PlantEvent::Gap(crate::dto::GapDto { skipped: 6, .. })
+            ),
+            "{items:?}"
+        );
+        let sizes: Vec<i32> = items[1..]
+            .iter()
+            .map(|e| match e {
+                PlantEvent::LastTrade(t) => t.trade_size.unwrap(),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(sizes, [6, 7, 8, 9]);
+    }
+
+    #[tokio::test]
+    async fn a_closed_broadcast_reports_closed_after_the_queued_events() {
+        let hub = StreamHub::new();
+        let (tx, rx) = tokio::sync::broadcast::channel(8);
+        let _guard = forward(&hub, Stream::History, rx, to_event);
+        tx.send(1).unwrap();
+        drop(tx);
+        let first = hub
+            .next_events(Stream::History, 8, Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(first.len(), 1);
+        let err = hub
+            .next_events(Stream::History, 8, Duration::from_secs(2))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::ChannelClosed { plant: "history" }),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_venue_connection_error_surfaces_after_the_queued_events() {
+        fn failing(seq: i32) -> Result<Option<PlantEvent>> {
+            if seq < 0 {
+                Err(Error::Rithmic("connection reset".into()))
+            } else {
+                to_event(seq)
+            }
+        }
+        let hub = StreamHub::new();
+        let (tx, rx) = tokio::sync::broadcast::channel(8);
+        let _guard = forward(&hub, Stream::Order, rx, failing);
+        tx.send(1).unwrap();
+        tx.send(-1).unwrap();
+        let first = hub
+            .next_events(Stream::Order, 8, Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(first.len(), 1);
+        let err = hub
+            .next_events(Stream::Order, 8, Duration::from_secs(2))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, Error::Rithmic(m) if m == "connection reset"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_the_guard_detaches_the_lane() {
+        let hub = StreamHub::new();
+        let (_tx, rx) = tokio::sync::broadcast::channel::<i32>(8);
+        let guard = forward(&hub, Stream::Ticker, rx, to_event);
+        assert!(hub.is_up(Stream::Ticker));
+        drop(guard);
+        assert!(!hub.is_up(Stream::Ticker));
     }
 }

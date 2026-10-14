@@ -47,5 +47,8 @@ async fn lagging_client_gets_overflow() {
         let _ = hub.publish(&key, Bytes::from(vec![i])).await;
     }
     let err = q.recv().await.expect_err("overflow");
-    assert_eq!(err, ClientQueueError::Overflow);
+    assert!(
+        matches!(err, ClientQueueError::Overflow { skipped } if skipped > 0),
+        "{err:?}"
+    );
 }

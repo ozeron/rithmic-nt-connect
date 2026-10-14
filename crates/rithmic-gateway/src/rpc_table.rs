@@ -394,6 +394,7 @@ pub const RPC_TABLE: &[Rpc] = &[
     local("poll_history_event"),
     local("poll_pnl_event"),
     local("poll_order_event"),
+    local("next_events"),
 ];
 
 /// Row for a proto request field name.

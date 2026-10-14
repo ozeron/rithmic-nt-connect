@@ -65,6 +65,9 @@ pub struct ConnReport {
     /// Events skipped inside the observed sequence (a gap the consumer saw).
     pub missing_in_stream: u64,
     pub reordered: u64,
+    /// Gap events delivered, and the events they reported as skipped.
+    pub gap_events: u64,
+    pub gap_skipped: u64,
     pub reattaches: u32,
     /// Longest time spent re-attaching after a drop, in milliseconds.
     pub max_outage_ms: u64,
@@ -88,6 +91,8 @@ pub struct Report {
     pub order_idle_latency: Option<LatSummary>,
     pub peak_rss_kb: u64,
     pub rss_samples_kb: Vec<u64>,
+    /// Events missing from a consumer's sequence that no gap accounts for.
+    pub unsignalled_loss: u64,
     pub allocs_per_event: Option<f64>,
     pub alloc_bytes_per_event: Option<f64>,
     pub notes: Vec<String>,

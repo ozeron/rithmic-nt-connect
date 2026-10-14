@@ -36,9 +36,13 @@ For a given credential fingerprint, a process SHALL use one gateway socket and o
 - **WHEN** a channel is armed by subscribe and an event arrives before the first poll
 - **THEN** the event SHALL be queued, not dropped
 
-#### Scenario: Consumer lags past capacity
-- **WHEN** the parent drops this client because its outbound queue overflowed (the parent closes the connection; it sends no overflow frame)
-- **THEN** the client SHALL surface the closed connection as a transport error on the next call or poll, SHALL NOT silently continue, and SHALL re-attach through the normal recovery path
+#### Scenario: Fan-out queue overflows
+- **WHEN** a client's fan-out queue falls further behind than its capacity
+- **THEN** the parent SHALL send that client a gap event carrying the exact number of skipped frames and SHALL keep the connection open
+
+#### Scenario: Client socket stops draining
+- **WHEN** a client's socket accepts no data for longer than the parent's write timeout
+- **THEN** the parent SHALL close the connection, and the client SHALL surface a transport error on the next call or poll, SHALL NOT silently continue, and SHALL re-attach through the normal recovery path
 
 #### Scenario: Gap event surfaced
 - **WHEN** the parent sends a gap event for the ticker stream

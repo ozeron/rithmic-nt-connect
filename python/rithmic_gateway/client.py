@@ -45,20 +45,27 @@ def _wire_error(code: str, message: str) -> GatewayError:
     return GatewayError(_normalize_error_code(code), message)
 
 
+def _gap_stream(evt: dict[str, Any]) -> str | None:
+    """The stream a ``gap`` event refers to: ticker, history, pnl or order."""
+    return str(evt.get("stream")) if evt.get("type") == "gap" else None
+
+
 def _is_md_event(evt: dict[str, Any]) -> bool:
+    if evt.get("type") == "gap":
+        return _gap_stream(evt) == "ticker"
     return evt.get("type") not in _NON_MD_EVENT_TYPES
 
 
 def _is_history_event(evt: dict[str, Any]) -> bool:
-    return evt.get("type") in _HISTORY_EVENT_TYPES
+    return evt.get("type") in _HISTORY_EVENT_TYPES or _gap_stream(evt) == "history"
 
 
 def _is_pnl_event(evt: dict[str, Any]) -> bool:
-    return evt.get("type") in _PNL_EVENT_TYPES
+    return evt.get("type") in _PNL_EVENT_TYPES or _gap_stream(evt) == "pnl"
 
 
 def _is_order_event(evt: dict[str, Any]) -> bool:
-    return evt.get("type") in _ORDER_EVENT_TYPES
+    return evt.get("type") in _ORDER_EVENT_TYPES or _gap_stream(evt) == "order"
 
 
 def _dial_with_attach(config: GatewayConfig, dial: Callable[[str], None]) -> None:
@@ -714,7 +721,11 @@ class GatewayClient(FramedConnection):
         self._rpc(pb.Frame(cancel_all_orders=pb.CancelAllOrdersRequest()))
 
     def poll_event(self, timeout_ms: int = 0) -> dict[str, Any] | None:
-        """Next MD event (last_trade / bbo / order_book / other), or None."""
+        """Next MD event (last_trade / bbo / order_book / other / gap), or None.
+
+        A ``{"type": "gap", "stream": "ticker", "skipped": N}`` event means the
+        parent dropped ``N`` events for a lagging consumer; resynchronize.
+        """
         return self._poll_filtered(timeout_ms, _is_md_event)
 
     def poll_history_event(self, timeout_ms: int = 0) -> dict[str, Any] | None:
