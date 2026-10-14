@@ -4,16 +4,10 @@ password on IPC).
 
 from __future__ import annotations
 
-import logging
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-
-_LOG = logging.getLogger(__name__)
-
-#: Retired knobs already warned about in this process (one warning per variable).
-_DEPRECATION_WARNED: set[str] = set()
 
 
 class GatewayConfigError(ValueError):
@@ -130,65 +124,30 @@ def _clamp_unix_path(path: str, hash_u64: int) -> str:
 
 
 _SPAWN_REMOVED = (
-    "the gateway client no longer spawns the parent; start the parent explicitly "
-    "with `python -m rithmic_gateway` (or a service manager) and remove {name}"
+    "{name} was removed: the gateway client no longer spawns the parent; start the "
+    "parent explicitly with `python -m rithmic_gateway` (or a service manager) and "
+    "unset {name}"
 )
-_DUAL_REMOVED = "dual was removed; mux is the only gateway client mode, remove {name}"
+_TOPOLOGY_REMOVED = (
+    "{name} was removed: the gateway client has one topology (one shared socket per "
+    "process); unset {name}"
+)
 
-# name -> (values requesting removed behavior, why, values equal to the sole
-# remaining behavior). The latter are accepted as deprecated no-ops.
-_RETIRED_KNOBS: dict[str, tuple[frozenset[str], str, frozenset[str]]] = {
-    "RITHMIC_GATEWAY_CLIENT_MODE": (
-        frozenset({"dual"}),
-        _DUAL_REMOVED,
-        frozenset({"mux"}),
-    ),
-    "RITHMIC_GATEWAY_SPAWN_POLICY": (
-        frozenset({"if_missing", "auto", "default"}),
-        _SPAWN_REMOVED,
-        frozenset({"never"}),
-    ),
-    "RITHMIC_GATEWAY_AUTO_SPAWN": (
-        frozenset({"1", "true", "yes", "on"}),
-        _SPAWN_REMOVED,
-        frozenset({"0", "false", "no", "off"}),
-    ),
+#: Retired variable -> why. Any non-empty value raises, including values that
+#: used to equal the sole remaining behavior (``mux``, ``never``, ``AUTO_SPAWN=0``).
+_RETIRED_KNOBS: dict[str, str] = {
+    "RITHMIC_GATEWAY_CLIENT_MODE": _TOPOLOGY_REMOVED,
+    "RITHMIC_GATEWAY_SPAWN_POLICY": _SPAWN_REMOVED,
+    "RITHMIC_GATEWAY_AUTO_SPAWN": _SPAWN_REMOVED,
 }
 
 
-def _warn_deprecated(name: str, value: str) -> None:
-    if name in _DEPRECATION_WARNED:
-        return
-    _DEPRECATION_WARNED.add(name)
-    _LOG.warning(
-        "%s=%s is deprecated and has no effect (attach-only, mux-only gateway "
-        "client); remove it from your environment",
-        name,
-        value,
-    )
-
-
 def reject_retired_client_knobs(env: Mapping[str, str]) -> None:
-    """Fail fast on retired gateway client variables.
-
-    A value that asks for removed behavior (``dual`` client mode, client-side
-    spawn) raises; a value equal to the sole remaining behavior (``mux``,
-    ``never``, ``AUTO_SPAWN=0``) is accepted as a deprecated no-op so existing
-    env files neither break nor silently change behavior.
-    """
-    for name, (removed, why, accepted) in _RETIRED_KNOBS.items():
+    """Fail fast on retired gateway client variables (unset is the only valid state)."""
+    for name, why in _RETIRED_KNOBS.items():
         raw = _env_first(env, name)
-        if raw is None:
-            continue
-        key = raw.lower()
-        if key in removed:
+        if raw is not None:
             raise GatewayConfigError(f"{name}={raw}: " + why.format(name=name))
-        if key not in accepted:
-            raise GatewayConfigError(
-                f"invalid {name} {raw!r}; retired knob, only "
-                f"{'/'.join(sorted(accepted))} is accepted"
-            )
-        _warn_deprecated(name, key)
 
 
 def default_unix_path(user: str, system_name: str, url: str, env: str = "Live") -> str:

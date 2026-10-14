@@ -1,10 +1,8 @@
 # session-backend Specification
 
 ## Purpose
-TBD - created by syncing change `rust-unified-session`. Update Purpose after archive. Scope: the Rust `Session` trait as the single definition of the plant surface, with `DirectSession` and `GatewaySession`.
-
+The Rust `Session` trait as the single definition of the plant surface, implemented by `DirectSession` and `GatewaySession`, with declared RPC kinds, gate parity and identical outcomes and events in both modes.
 ## Requirements
-
 ### Requirement: Single Rust definition of the plant surface
 The system SHALL define every plant operation the adapter uses (ticker and book subscribe/unsubscribe, front month and reference data, tick and time-bar history, time-bar subscribe/unsubscribe, PnL, order updates, bracket updates, order place/cancel/modify, bracket place/adjust, cancel-all, working-order load, RMS loads, account resolution, ticker-plant reset, plant ensure/disconnect, event polling) as methods of one Rust `Session` trait, and SHALL provide exactly two implementations: `DirectSession` and `GatewaySession`.
 
@@ -50,11 +48,15 @@ The system SHALL fail a test if any request variant in `session.proto` is absent
 - **THEN** the RPC-table test SHALL fail until the table, trait, and server dispatch cover it
 
 ### Requirement: Trading gate parity
-The system SHALL deny trading RPCs (place, cancel, modify, bracket place/adjust, order and bracket subscribe, working-order load, RMS loads) when trading is disabled, in both modes. In gateway mode the gate SHALL be owned by the parent and a client SHALL NOT be able to elevate it. Plant-wide cancel-all SHALL be governed by its own independent gate (`RITHMIC_GATEWAY_CANCEL_ALL`) that does not require trading to be enabled.
+The system SHALL deny trading RPCs (place, cancel, modify, bracket place/adjust, order and bracket subscribe, working-order load, RMS loads) when trading is disabled, in both modes, and the denial SHALL be enforced inside the Rust session so that no caller can bypass it. In gateway mode the gate SHALL be owned by the parent and a client SHALL NOT be able to elevate it. Plant-wide cancel-all SHALL be governed by its own independent gate (`RITHMIC_GATEWAY_CANCEL_ALL`) that does not require trading to be enabled.
 
 #### Scenario: Place with trading disabled
 - **WHEN** `place_order` is called with trading disabled in either mode
 - **THEN** the call SHALL fail with a trading-disabled error and no order SHALL be sent to the venue
+
+#### Scenario: Direct mode without the Python client
+- **WHEN** a direct-mode Rust session with trading disabled receives `place_order` directly, bypassing the Python exec client
+- **THEN** the call SHALL fail with a trading-disabled error
 
 #### Scenario: Cancel-all without its flag
 - **WHEN** `cancel_all_orders` is called and the cancel-all gate is off
@@ -65,7 +67,7 @@ The system SHALL deny trading RPCs (place, cancel, modify, bracket place/adjust,
 - **THEN** cancel-all SHALL be permitted and place SHALL still be denied
 
 ### Requirement: Outcome classes preserved across modes
-The system SHALL treat a failure before send as a local deny and a failure after send (transport loss, timeout, channel error) as an unknown in-flight outcome, in both modes. State-changing place, cancel, and modify RPCs SHALL NOT be retried automatically.
+The system SHALL classify every failed state-changing call as exactly one of: a local deny or not-sent failure (nothing reached the venue), a venue rejection (the venue answered with a definitive reject), or an unknown in-flight outcome (the call may have reached the venue). The class SHALL be assigned where the error originates and SHALL be preserved across the trait, the gateway wire and the Python boundary, in both modes. State-changing place, cancel, and modify RPCs SHALL NOT be retried automatically.
 
 #### Scenario: Socket drops after place was written
 - **WHEN** the gateway connection is lost after a place RPC was written and before a reply was read
@@ -74,6 +76,14 @@ The system SHALL treat a failure before send as a local deny and a failure after
 #### Scenario: Gate denial before send
 - **WHEN** a place RPC is denied by the trading gate
 - **THEN** the error SHALL be classed as a local deny, not as a venue rejection
+
+#### Scenario: Definitive venue reject
+- **WHEN** the venue answers a place with a synchronous reject
+- **THEN** the error SHALL be classed as a venue rejection, not as unknown, and the Python client SHALL emit a rejection rather than latch the plant
+
+#### Scenario: Pre-send failure after submit intent
+- **WHEN** the order plant cannot be ensured or the session is disconnecting before anything is written
+- **THEN** the error SHALL be classed as not-sent, in both modes
 
 ### Requirement: Identical event records from both modes
 The system SHALL emit the same event record shape and field values for the same plant event regardless of backend, produced by a single `PlantEvent` → record conversion.
@@ -107,3 +117,37 @@ The system SHALL expose fill-history and order-history queries (`load_fill_histo
 #### Scenario: A history RPC is added without a table row
 - **WHEN** a history RPC is added to the gateway proto or the `Session` trait without a row in the RPC table
 - **THEN** `tests/rpc_table.rs` SHALL fail
+
+### Requirement: Event streams are awaitable and owned by the consumer
+The `Session` trait SHALL provide the consumer with owned, awaitable receivers for the ticker, history, PnL and order streams, obtained under a short lock and consumed without holding any session lock. A consumer SHALL re-obtain its receivers after a reconnect, identified by a stream epoch.
+
+#### Scenario: Consumer awaits without a lock
+- **WHEN** the gateway pump waits for the next event
+- **THEN** it SHALL hold no session gate and no session mutex while waiting
+
+#### Scenario: Receivers after reconnect
+- **WHEN** the plants reconnect and the stream epoch advances
+- **THEN** the consumer SHALL obtain fresh receivers before subscriptions are restored, so no restored event is missed
+
+### Requirement: No lock is held across venue I/O
+No session-wide gate or mutex SHALL be held while a place, cancel, modify, history load, subscribe or connect round trip is in flight. Such calls SHALL use a cloned plant handle obtained under a short lock, and connect and history SHALL have an explicit deadline.
+
+#### Scenario: Cancel during a history load
+- **WHEN** a history load is in flight and `cancel_order` is called
+- **THEN** the cancel SHALL be sent without waiting for the history load
+
+#### Scenario: Poll during connect retry
+- **WHEN** one plant is retrying its connection
+- **THEN** event retrieval from the other plants SHALL continue
+
+#### Scenario: Connect deadline
+- **WHEN** a plant cannot connect within its deadline
+- **THEN** the connect SHALL fail with a typed error instead of retrying forever
+
+### Requirement: A lag is a typed gap event in both modes
+A skipped-message condition on a plant channel SHALL be represented as a typed gap event carrying the stream and the skipped count, delivered through the same event path as data in both modes.
+
+#### Scenario: Lag becomes a gap
+- **WHEN** a plant broadcast receiver reports `Lagged(n)`
+- **THEN** the session SHALL surface a gap event with `skipped = n` and SHALL NOT log and discard it
+

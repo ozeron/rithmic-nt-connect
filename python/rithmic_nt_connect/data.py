@@ -62,6 +62,10 @@ from rithmic_nt_connect.providers import RithmicInstrumentProvider
 from rithmic_nt_connect.recovery_bridge import TransportRecoveryBridge
 from rithmic_nt_connect.session import WireSession
 
+# Plant events taken per wake, and how long one wait blocks inside the extension.
+_POLL_BATCH = 256
+_POLL_WAIT_MS = 50
+
 # RequestBars failure reason per request id (``hydrate_blocked_live_md`` = RC2.3
 # capability_denied after the bounded wait, ``history_error`` otherwise). Keyed so
 # concurrent lookbacks (several strategies hydrating at once) never read each
@@ -431,16 +435,23 @@ async def resync_ticker_session(
     subscriptions: set[tuple[str, str]],
     book_subscriptions: set[tuple[str, str]],
     bar_subscriptions: set[tuple[str, str, int, int]] | None = None,
+    *,
+    reset: bool = True,
 ) -> None:
-    """Reset the wire, then replay ticker + book + EXTERNAL bar intent.
+    """Reset the ticker plant (direct only), then replay ticker/book/bar intent.
 
     ``session.reset_ticker`` is refcount-blind: a channel-error resync must
     actually recreate the ticker plant even when the session is shared with
     the exec client, where ``disconnect`` alone is a holder-refcounted no-op.
-    Direct mode recreates only the ticker plant (PnL/order untouched); the
-    gateway detaches + re-dials this client only (parent plants untouched).
+    Only a direct session resets: it owns its plants, and the reset touches the
+    ticker plant alone (PnL/order untouched). A gateway client never does, since
+    the parent plant is shared by every attached client and the parent restores
+    its own intents when it reconnects; a client-side reset would re-subscribe
+    for everyone. ``reset=False`` is the gap path: the stream dropped events for
+    this consumer but the plant is healthy, so only the intent is replayed.
     """
-    await asyncio.to_thread(session.reset_ticker)
+    if reset and getattr(session, "is_direct", True):
+        await asyncio.to_thread(session.reset_ticker)
     await replay_subscription_intent(
         session, subscriptions, book_subscriptions, bar_subscriptions
     )
@@ -675,6 +686,7 @@ class RithmicDataClient(LiveMarketDataClient):
         self._history_poll_task: asyncio.Task | None = None
         self._resync_lock = asyncio.Lock()
         self._resync_generation = 0
+        self._reset_generation = 0
         self._recovery = self._build_recovery()
         # One-sided BestBidOffer merge state, keyed by symbol[:exchange].
         self._bbo_state: dict[str, dict[str, Any]] = {}
@@ -790,10 +802,16 @@ class RithmicDataClient(LiveMarketDataClient):
                 setattr(self, attr, None)
         await asyncio.to_thread(self._session.disconnect)
 
-    async def _resync_ticker_subscription(self) -> None:
+    async def _resync_ticker_subscription(self, *, reset: bool = True) -> None:
         start_gen = self._resync_generation
+        start_resets = getattr(self, "_reset_generation", 0)
         async with self._resync_lock:
-            if self._resync_generation != start_gen:
+            # Another resync finished while this waited: skip, unless this one needs a
+            # plant reset and that one did not (a gap resync must not stand in for a
+            # channel-error reset).
+            if self._resync_generation != start_gen and (
+                not reset or getattr(self, "_reset_generation", 0) != start_resets
+            ):
                 return
             # Drop one-sided BBO accumulators: after a plant reset the venue
             # re-sends fresh bid/ask sides, and merging them with pre-reset
@@ -810,59 +828,75 @@ class RithmicDataClient(LiveMarketDataClient):
                 ticker_keys,
                 set(self._book_subscriptions),
                 bar_resync_subscriptions(self._bar_types),
+                reset=reset,
             )
             self._resync_generation += 1
+            if reset:
+                self._reset_generation = getattr(self, "_reset_generation", 0) + 1
 
     async def _poll_channel_loop(
         self,
         *,
         label: str,
-        poll,
+        stream: str,
         idle_sleep: float,
         should_poll=None,
     ) -> None:
+        """Deliver one plant stream: wait in Rust for events, then handle a batch.
+
+        ``next_events`` blocks inside the extension (GIL released) until an event
+        arrives or the wait elapses, so there is no idle sleep and a tick is handled
+        the moment it lands. A ``gap`` event (the stream dropped events for a slow
+        consumer) is handled exactly like a channel error: resync the subscription.
+        """
         backoff = 0.05
         while True:
             if should_poll is not None and not should_poll():
                 await asyncio.sleep(idle_sleep)
                 continue
             try:
-                event = await asyncio.to_thread(poll)
+                events = await asyncio.to_thread(
+                    self._session.next_events, stream, _POLL_BATCH, _POLL_WAIT_MS
+                )
             except Exception as exc:
                 if not _reconnectable_poll_error(exc):
                     self._log.exception(f"{label} poll transient error", exc)
                     await asyncio.sleep(0.1)
                     continue
                 self._log.warning(f"{label} poll reconnect: {exc}")
-                try:
-                    await self._resync_ticker_subscription()
-                    self._log.warning(
-                        f"{label} subscription resynced after channel error"
-                    )
-                    backoff = 0.05
-                except Exception as resync_exc:
-                    self._log.warning(
-                        f"{label} subscription resync failed: {resync_exc}"
-                    )
-                    backoff = min(backoff * 2, 2.0)
-                await asyncio.sleep(backoff)
+                backoff = await self._resync_channel(label, backoff)
                 continue
-            if event is None:
-                await asyncio.sleep(idle_sleep)
-                continue
-            self._dispatch_event(event)
+            for event in events:
+                if event.get("type") == "gap":
+                    self._log.warning(
+                        f"{label} stream dropped {event.get('skipped')} events; "
+                        "resyncing"
+                    )
+                    backoff = await self._resync_channel(label, backoff, reset=False)
+                    continue
+                self._dispatch_event(event)
+
+    async def _resync_channel(
+        self, label: str, backoff: float, *, reset: bool = True
+    ) -> float:
+        """Resubscribe after a channel error or a gap; returns the next backoff."""
+        try:
+            await self._resync_ticker_subscription(reset=reset)
+            self._log.warning(f"{label} subscription resynced after channel error")
+            backoff = 0.05
+        except Exception as resync_exc:
+            self._log.warning(f"{label} subscription resync failed: {resync_exc}")
+            backoff = min(backoff * 2, 2.0)
+        await asyncio.sleep(backoff)
+        return backoff
 
     async def _poll_loop(self) -> None:
-        await self._poll_channel_loop(
-            label="ticker",
-            poll=self._session.poll_event,
-            idle_sleep=0.01,
-        )
+        await self._poll_channel_loop(label="ticker", stream="ticker", idle_sleep=0.01)
 
     async def _history_poll_loop(self) -> None:
         await self._poll_channel_loop(
             label="history",
-            poll=self._session.poll_history_event,
+            stream="history",
             idle_sleep=0.05,
             should_poll=lambda: bool(self._bar_types),
         )

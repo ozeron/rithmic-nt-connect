@@ -13,7 +13,8 @@
 //! Every method takes `&self` (implementations use interior mutability) so a
 //! blocking `poll_*` on one thread never serializes behind an RPC issued on
 //! another. `poll_*` take an explicit timeout: `Duration::ZERO` is the
-//! non-blocking drain direct mode has always done.
+//! non-blocking drain direct mode has always done. `next_events` is the
+//! event-driven batch form the gateway pump uses.
 
 use std::time::Duration;
 
@@ -25,6 +26,7 @@ use crate::dto::{
 };
 use crate::error::Result;
 use crate::plants::PlantSet;
+use crate::streams::Stream;
 
 /// Resolved account triple after override or discovery.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,4 +190,17 @@ pub trait Session: Send + Sync {
     async fn poll_history_event(&self, timeout: Duration) -> Result<Option<PlantEvent>>;
     async fn poll_pnl_event(&self, timeout: Duration) -> Result<Option<PlantEvent>>;
     async fn poll_order_event(&self, timeout: Duration) -> Result<Option<PlantEvent>>;
+
+    // --- event-driven delivery ---------------------------------------------
+    /// Wait up to `timeout` for the stream's first event (without any session
+    /// lock), then return up to `max` already-queued events at once. A lag is
+    /// returned in order as `PlantEvent::Gap`; a closed or failed plant is an
+    /// error once the events ahead of it are drained. Returns an empty batch on
+    /// timeout, and also while the plant is not attached.
+    async fn next_events(
+        &self,
+        stream: Stream,
+        max: usize,
+        timeout: Duration,
+    ) -> Result<Vec<PlantEvent>>;
 }

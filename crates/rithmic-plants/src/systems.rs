@@ -4,6 +4,8 @@
 //! open a WebSocket, send template 16 (`RequestRithmicSystemInfo`),
 //! read template 17 (`ResponseRithmicSystemInfo.system_name`).
 
+use std::time::Duration;
+
 use rithmic_rs::rti::messages::RithmicMessage;
 use rithmic_rs::{ConnectStrategy, RithmicConfig, RithmicEnv, RithmicTickerPlant};
 
@@ -22,8 +24,24 @@ pub fn normalize_gateway_url(raw: &str) -> String {
     format!("wss://{trimmed}")
 }
 
-/// List system names advertised by a Rithmic gateway. Does not log in.
+/// How long [`list_systems`] may take: the probe retries its connection, so an
+/// unreachable gateway must fail with a typed error instead of waiting forever.
+pub const LIST_SYSTEMS_DEADLINE: Duration = Duration::from_secs(30);
+
+/// List system names advertised by a Rithmic gateway. Does not log in. Fails
+/// with a timeout error after [`LIST_SYSTEMS_DEADLINE`].
 pub async fn list_systems(url: &str) -> Result<Vec<String>> {
+    tokio::time::timeout(LIST_SYSTEMS_DEADLINE, probe_systems(url))
+        .await
+        .map_err(|_| {
+            Error::Session(format!(
+                "listing systems timed out after {}s",
+                LIST_SYSTEMS_DEADLINE.as_secs()
+            ))
+        })?
+}
+
+async fn probe_systems(url: &str) -> Result<Vec<String>> {
     let url = normalize_gateway_url(url);
     // rithmic-rs requires login fields on config even though this probe never
     // sends RequestLogin. Dummy values stay off the wire.

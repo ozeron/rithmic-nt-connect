@@ -315,7 +315,9 @@ async fn one_socket_serves_every_facade_in_the_process() {
     first.subscribe(NQ, CME).await.unwrap();
     second.subscribe(NQ, CME).await.unwrap();
 
-    // Each facade has its own queues: all receive the pushed event.
+    // Each facade has its own queues: all receive the pushed event. A queue is
+    // filled once its facade has subscribed or polled the channel; `third` polls.
+    assert!(third.poll_event(Duration::ZERO).await.unwrap().is_none());
     mock.push_last_trade(NQ, 10.0);
     for session in [&first, &second, &third] {
         let event = session
@@ -344,6 +346,8 @@ async fn a_consumer_that_lags_past_capacity_gets_channel_lagged_not_silent_loss(
     let path = dir.path().join("gw.sock");
     let (mock, session) = connected(&path, |_, _| Action::Ack, |_| {}).await;
 
+    // Polling the channel arms its queue (a real consumer subscribes first).
+    assert!(session.poll_event(Duration::ZERO).await.unwrap().is_none());
     let total = EVENT_QUEUE_CAP + 904;
     for i in 0..total {
         mock.push_last_trade(NQ, i as f64);
@@ -412,6 +416,7 @@ async fn polling_a_dropped_transport_drains_queued_events_then_reports_the_close
         |cfg| cfg.recovery_attempts = 0,
     )
     .await;
+    assert!(session.poll_event(Duration::ZERO).await.unwrap().is_none());
     mock.push_last_trade(NQ, 1.0);
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(session.ensure_pnl_plant().await.is_err());
@@ -727,4 +732,42 @@ async fn automatic_recovery_can_be_disabled() {
     );
     assert_eq!(mock.connections.load(Ordering::SeqCst), 1);
     assert_eq!(session.ensure_transport_live().await.unwrap(), 2);
+}
+
+#[tokio::test]
+async fn a_channel_nobody_subscribed_or_polled_queues_nothing() {
+    let dir = short_dir();
+    let path = dir.path().join("gw.sock");
+    let mock = MockParent::spawn(&path, mock_ready(true, true), 0, |_, _| Action::Ack).await;
+    let cfg = mock_config(&path);
+    let reader = GatewaySession::new(cfg.clone());
+    reader.connect().await.unwrap();
+    reader.subscribe(NQ, CME).await.unwrap();
+    let idle = GatewaySession::new(cfg);
+    idle.connect().await.unwrap();
+
+    mock.push_last_trade(NQ, 1.0);
+    // The subscribing facade has it; the idle facade (never subscribed, never
+    // polled) was not handed a copy, and its first poll finds nothing from before.
+    assert!(matches!(
+        reader.poll_event(Duration::from_secs(5)).await.unwrap(),
+        Some(PlantEvent::LastTrade(_))
+    ));
+    assert!(idle.poll_event(Duration::ZERO).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn subscribing_arms_the_channel_before_the_first_event() {
+    let dir = short_dir();
+    let path = dir.path().join("gw.sock");
+    let (mock, session) = connected(&path, |_, _| Action::Ack, |_| {}).await;
+    // No poll yet: the subscribe itself arms the queue, so an event that arrives
+    // before the first poll is kept.
+    session.subscribe(NQ, CME).await.unwrap();
+    mock.push_last_trade(NQ, 1.0);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(matches!(
+        session.poll_event(Duration::from_secs(2)).await.unwrap(),
+        Some(PlantEvent::LastTrade(_))
+    ));
 }

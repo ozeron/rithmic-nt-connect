@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import time
 from collections.abc import Callable, Iterator
 from decimal import Decimal
@@ -86,6 +87,7 @@ from rithmic_nt_connect.commission import CommissionRegistry
 from rithmic_nt_connect.config import (
     RithmicExecClientConfig,
     RithmicLiveExecClientConfig,
+    env_truthy,
 )
 from rithmic_nt_connect.constants import ADAPTER_NAME, DEFAULT_ACCOUNT_CURRENCY, VENUE
 from rithmic_nt_connect.errors import (
@@ -124,7 +126,36 @@ _POSITION_SIDE = {
 
 _TRADING_DISABLED_REASON = "Rithmic trading disabled (enable_trading=False)"
 
+# Failure classes assigned where an error arises (Rust, both modes) and carried by
+# the error's ``code``: a venue reject, a request that was never sent, or an
+# outcome that may be live.
+_REJECTED_CODES = frozenset({"venue_rejected"})
+# ``not_ready``: a parent that refuses requests while it rebuilds its plants (older
+# parents say ``not_ready``, current ones ``not_sent``); nothing reached the venue.
+_NOT_SENT_CODES = frozenset(
+    {"not_sent", "not_ready", "trading_disabled", "cancel_all_denied"}
+)
+
+
+def _failure_class(exc: BaseException) -> str:
+    """``rejected`` | ``not_sent`` | ``unknown`` for a failed order command."""
+    code = getattr(exc, "code", None)
+    if code in _REJECTED_CODES:
+        return "rejected"
+    if code in _NOT_SENT_CODES:
+        return "not_sent"
+    return "unknown"
+
+
+def _failure_reason(kind: str, exc: BaseException) -> str:
+    prefix = "not sent: " if kind == "not_sent" else "venue rejected: "
+    return f"{prefix}{exc}"
+
+
 ACCOUNT_CACHE_TIMEOUT_S = 10.0
+# Plant events taken per wake, and how long one wait blocks inside the extension.
+_POLL_BATCH = 256
+_POLL_WAIT_MS = 50
 
 # Recon windows are clamped to this many days so a units mistake (epoch seconds
 # passed where ns-epoch is expected) cannot build a decades-wide query window.
@@ -201,6 +232,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         )
         self._config_local = config
         self._session = session
+        self._open_direct_gates()
         self._poll_task: asyncio.Task | None = None
         self._order_poll_task: asyncio.Task | None = None
         self._positions: dict[str, dict[str, Any]] = {}
@@ -303,6 +335,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                 self._plant_poll_loop(
                     name="pnl",
                     poll_fn=self._session.poll_pnl_event,
+                    stream="pnl",
                     on_event=self._dispatch_pnl_event,
                     on_resync=self._resync_pnl_subscription,
                 ),
@@ -339,8 +372,10 @@ class RithmicExecutionClient(LiveExecutionClient):
                 self._plant_poll_loop(
                     name="order",
                     poll_fn=self._session.poll_order_event,
+                    stream="order",
                     on_event=self._dispatch_order_event,
                     on_resync=self._resync_order_subscription,
+                    on_gap=self._recover_order_gap,
                 ),
                 log_msg="rithmic_order_poll",
             )
@@ -477,7 +512,7 @@ class RithmicExecutionClient(LiveExecutionClient):
     ) -> None:
         """Transport is already LIVE; resubscribe plants + drain/PnL + rearm.
 
-        ``TransportRecovery`` owns dial; ``TransportRecoveryBridge`` owns retry
+        The Rust client runtime owns dial; ``TransportRecoveryBridge`` owns retry
         (each failed attempt re-latches). Mid-session plant resync never clears
         a latch — only ``begin_connect`` + ``rearm`` after fresh observation.
         """
@@ -496,10 +531,9 @@ class RithmicExecutionClient(LiveExecutionClient):
                     f"L3 PnL disconnect before resubscribe: {teardown_exc}"
                 )
             await asyncio.to_thread(self._session.subscribe_pnl)
-        try:
-            await asyncio.to_thread(self._session.disconnect_order_plant)
-        except Exception as teardown_exc:
-            self._log.warning(f"L3 order disconnect before resubscribe: {teardown_exc}")
+        # No order-plant disconnect first: the parent restored (or this client's
+        # re-dial dropped) the order intent already, and the subscribes below are
+        # idempotent. Tearing the shared venue plant down would be a second churn.
         await asyncio.to_thread(self._session.subscribe_order_updates)
         await asyncio.to_thread(self._session.subscribe_bracket_updates)
         if self._order_poll_task is None or self._order_poll_task.done():
@@ -507,8 +541,10 @@ class RithmicExecutionClient(LiveExecutionClient):
                 self._plant_poll_loop(
                     name="order",
                     poll_fn=self._session.poll_order_event,
+                    stream="order",
                     on_event=self._dispatch_order_event,
                     on_resync=self._resync_order_subscription,
+                    on_gap=self._recover_order_gap,
                 ),
                 log_msg="rithmic_order_poll",
             )
@@ -517,6 +553,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                 self._plant_poll_loop(
                     name="pnl",
                     poll_fn=self._session.poll_pnl_event,
+                    stream="pnl",
                     on_event=self._dispatch_pnl_event,
                     on_resync=self._resync_pnl_subscription,
                 ),
@@ -546,6 +583,22 @@ class RithmicExecutionClient(LiveExecutionClient):
         # The transient streak is loop-local (``_plant_poll_loop``): it resets
         # structurally when this successful resubscribe returns to the loop.
         self._order_plant.resync_complete()
+
+    async def _recover_order_gap(self) -> None:
+        """The order stream dropped events but its plant is healthy.
+
+        The lost notifications may hide a fill or a terminal state, so submits stay
+        blocked until venue state is re-read (the same barrier as a reconnect:
+        bounded working-order drain and the PnL gate). The plant is not torn down:
+        that would open a second window of lost events and, in gateway mode, would
+        drop the shared venue plant when this is the last holder.
+        """
+        self._order_plant.begin_connect()
+        await self._rearm_after_reconnect()
+        if not self._order_plant.rearm(poll_alive=True):
+            raise RuntimeError(
+                f"re-arm refused after a gap (state={self._order_plant.state.value})"
+            )
 
     async def _resync_pnl_subscription(self) -> None:
         # The stream failed: rows from before it are not proof of current exposure.
@@ -638,12 +691,23 @@ class RithmicExecutionClient(LiveExecutionClient):
         poll_fn: Callable[[], dict[str, Any] | None],
         on_event: Callable[[dict[str, Any]], None],
         on_resync: Callable[[], Any],
+        stream: str | None = None,
+        on_gap: Callable[[], Any] | None = None,
     ) -> None:
+        batch_fn = None
+        if stream is not None:
+            session = self._session
+
+            def batch_fn() -> list[dict[str, Any]]:
+                return session.next_events(stream, _POLL_BATCH, _POLL_WAIT_MS)
+
         poller = PlantPoller(
             name=name,
             poll_fn=poll_fn,
+            batch_fn=batch_fn,
             on_event=on_event,
             on_resync=on_resync,
+            on_gap=on_gap,
             max_transient=self._ORDER_POLL_MAX_TRANSIENT,
             on_latch=self._latch_order_plant,
             on_resync_start=(
@@ -945,6 +1009,43 @@ class RithmicExecutionClient(LiveExecutionClient):
         """
         self._order_plant.latch()
         self._log.error(f"{action}; order plant latched: {reason}")
+
+    def _open_direct_gates(self) -> None:
+        """Open the in-process session's gates per this client's config.
+
+        In direct mode the Rust session enforces the trading and cancel-all gates
+        itself (closed by default), so a strategy cannot bypass this client's
+        ``enable_trading``. The session is shared by every client in the process,
+        so a gate is only ever opened here, never closed. A gateway session's gates
+        belong to the parent and are left alone.
+        """
+        session: Any = self._session
+        if not getattr(session, "is_direct", False):
+            return
+        session.configure_gates(
+            trading_enabled=self.enable_trading,
+            cancel_all_enabled=env_truthy(os.environ.get("RITHMIC_GATEWAY_CANCEL_ALL")),
+        )
+
+    def _order_command_failed(
+        self,
+        action: str,
+        exc: BaseException,
+        *,
+        reject: Callable[[str], None],
+    ) -> None:
+        """Handle a command that raised after the client announced it.
+
+        A venue reject and a request that was never sent are definitive: the order
+        is not live, so it is rejected and the plant keeps trading. Only an outcome
+        that may have reached the venue latches the plant for a recon cycle.
+        """
+        kind = _failure_class(exc)
+        if kind == "unknown":
+            self._mark_order_plant_failed(action, exc)
+            return
+        self._log.error(f"{action} {kind}: {exc}")
+        reject(_failure_reason(kind, exc))
 
     def _mark_order_plant_failed(self, action: str, exc: BaseException) -> None:
         """Block further commands after an operation has an unknown venue outcome."""
@@ -1264,7 +1365,17 @@ class RithmicExecutionClient(LiveExecutionClient):
                 trail_by_price_id,
             )
         except Exception as exc:
-            self._mark_order_plant_failed("place_order", exc)
+            self._order_command_failed(
+                "place_order",
+                exc,
+                reject=lambda reason: self.generate_order_rejected(
+                    order.strategy_id,
+                    order.instrument_id,
+                    order.client_order_id,
+                    reason,
+                    self._clock.timestamp_ns(),
+                ),
+            )
 
     def _is_bracket_order_list(self, orders: list) -> bool:
         # Heuristic: bracket is 3 linked orders (entry + stop + target) with
@@ -1482,7 +1593,17 @@ class RithmicExecutionClient(LiveExecutionClient):
                     target_ticks,
                 )
             except Exception as exc:
-                self._mark_order_plant_failed("place_bracket_order", exc)
+                self._order_command_failed(
+                    "place_bracket_order",
+                    exc,
+                    reject=lambda reason: self.generate_order_rejected(
+                        entry.strategy_id,
+                        entry.instrument_id,
+                        entry.client_order_id,
+                        reason,
+                        self._clock.timestamp_ns(),
+                    ),
+                )
             return
         for order in orders:
             await self._submit_order(
@@ -1580,7 +1701,18 @@ class RithmicExecutionClient(LiveExecutionClient):
                 trail_by_ticks,
             )
         except Exception as exc:
-            self._mark_order_plant_failed("modify_order", exc)
+            self._order_command_failed(
+                "modify_order",
+                exc,
+                reject=lambda reason: self.generate_order_modify_rejected(
+                    command.strategy_id,
+                    command.instrument_id,
+                    command.client_order_id,
+                    command.venue_order_id or VenueOrderId("UNKNOWN"),
+                    reason,
+                    self._clock.timestamp_ns(),
+                ),
+            )
 
     async def _cancel_order(self, command: CancelOrder) -> None:
         if not self.enable_trading:
@@ -1624,7 +1756,18 @@ class RithmicExecutionClient(LiveExecutionClient):
         try:
             await asyncio.to_thread(self._session.cancel_order, venue_id)
         except Exception as exc:
-            self._mark_order_plant_failed("cancel_order", exc)
+            self._order_command_failed(
+                "cancel_order",
+                exc,
+                reject=lambda reason: self.generate_order_cancel_rejected(
+                    command.strategy_id,
+                    command.instrument_id,
+                    command.client_order_id,
+                    command.venue_order_id or VenueOrderId("UNKNOWN"),
+                    reason,
+                    self._clock.timestamp_ns(),
+                ),
+            )
 
     async def _cancel_all_orders(self, command: CancelAllOrders) -> None:
         """Cancel the open orders the command selects, one basket at a time.
@@ -2063,7 +2206,3 @@ class RithmicExecutionClient(LiveExecutionClient):
             lookback_start_ns=lookback_start_ns,
             reports_complete=reports_complete,
         )
-
-
-# Back-compat alias used by factories / tests.
-RithmicReadOnlyExecutionClient = RithmicExecutionClient

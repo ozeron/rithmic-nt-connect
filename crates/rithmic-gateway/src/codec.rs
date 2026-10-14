@@ -15,10 +15,21 @@ pub enum CodecError {
     Decode(#[from] prost::DecodeError),
 }
 
-/// Encode `msg` as protobuf, then wrap in a length-delimited frame.
+/// Encode `msg` as protobuf inside a length-delimited frame, with one
+/// allocation: the buffer is sized for prefix plus payload and the message is
+/// written straight after the length.
 pub fn encode<M: Message>(msg: &M) -> Result<Vec<u8>, CodecError> {
-    let payload = msg.encode_to_vec();
-    Ok(framing::encode_frame(&payload)?)
+    let len = msg.encoded_len();
+    let framed_len = u32::try_from(len).map_err(|_| FrameError::FrameTooLarge(u32::MAX))?;
+    if framed_len > framing::MAX_FRAME_LEN {
+        return Err(FrameError::FrameTooLarge(framed_len).into());
+    }
+    let mut out = Vec::with_capacity(4 + len);
+    out.extend_from_slice(&framed_len.to_be_bytes());
+    // The buffer was sized from `encoded_len`, so this cannot run out of room.
+    msg.encode(&mut out)
+        .map_err(|_| FrameError::FrameTooLarge(framed_len))?;
+    Ok(out)
 }
 
 /// Decode one length-delimited protobuf frame from the front of `buf`.

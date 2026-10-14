@@ -1,5 +1,5 @@
 //! History loads: ticks, time-bar windows (plant slices internally), and
-//! time-bar probes. All take the session lock for the duration of the load.
+//! time-bar probes. None holds the session gate during the load (they check the session out like the order loads), so a long load cannot hold up a plant rebuild.
 //!
 //! While continuous MD intents (ticker / book / live time bars) are live,
 //! `Load*` / probe RPCs are refused so the event pump is not starved
@@ -48,7 +48,7 @@ pub(super) async fn load_ticks(
     let Some(session) = &state.session else {
         return no_session_frame(request_id);
     };
-    let guard = session.lock().await;
+    let guard = session.checkout().await;
     match guard
         .load_ticks(
             &req.symbol,
@@ -122,7 +122,7 @@ async fn run_time_bar_op(state: &GatewayState, request_id: u64, op: TimeBarOp) -
         return err_to_frame(request_id, "invalid_bar_type", e);
     }
     let bar_type = op.raw_bar_type();
-    let guard = session.lock().await;
+    let guard = session.checkout().await;
     let outcome = match &op {
         TimeBarOp::Load(req) => guard
             .load_time_bars(

@@ -66,15 +66,16 @@ pub(super) fn plant_err_frame(
     failed_code: &str,
     e: rithmic_plants::Error,
 ) -> Frame {
-    let code = if matches!(
-        &e,
-        rithmic_plants::Error::Rithmic(_)
-            | rithmic_plants::Error::ChannelClosed { .. }
-            | rithmic_plants::Error::NotConnected { .. }
-    ) {
-        "venue_unknown"
-    } else {
-        failed_code
+    use rithmic_plants::Error as E;
+    // The class assigned where the error arose survives the wire: a venue reject,
+    // a request that was never sent, or an outcome that may be live.
+    let code = match &e {
+        E::Rejected(_) => "venue_rejected",
+        E::NotSent(_) => "not_sent",
+        E::OutcomeUnknown(_) | E::Rithmic(_) | E::ChannelClosed { .. } | E::NotConnected { .. } => {
+            "venue_unknown"
+        }
+        _ => failed_code,
     };
     err_to_frame(request_id, code, e)
 }
@@ -201,12 +202,6 @@ pub(super) async fn dispatch(
         Body::GetReferenceData(req) => info::get_reference_data(state, request_id, req).await,
         Body::ResolvedAccount(_) => info::resolved_account(state, request_id).await,
         Body::GetLiveMdState(_) => info::get_live_md_state(state, request_id).await,
-        Body::LoadOrders(_req) => orders::load_orders(state, request_id).await,
-        Body::LoadProductRmsInfo(_) => orders::load_product_rms_info(state, request_id).await,
-        Body::LoadAccountRmsInfo(_) => orders::load_account_rms_info(state, request_id).await,
-        Body::LoadFillHistory(req) => orders::load_fill_history(state, request_id, req).await,
-        Body::LoadOrderHistoryDates(_) => orders::load_order_history_dates(state, request_id).await,
-        Body::LoadOrderHistory(req) => orders::load_order_history(state, request_id, req).await,
         Body::EnsurePnl(_) => orders::ensure_pnl(state, request_id).await,
         Body::EnsureOrder(_) => orders::ensure_order(state, request_id).await,
         Body::PlaceOrder(req) => orders::place_order(state, request_id, req).await,
@@ -218,13 +213,38 @@ pub(super) async fn dispatch(
         Body::CancelOrder(req) => orders::cancel_order(state, request_id, req).await,
         Body::ModifyOrder(req) => orders::modify_order(state, request_id, req).await,
         Body::CancelAllOrders(_) => orders::cancel_all_orders(state, request_id).await,
-        Body::LoadTicks(req) => history::load_ticks(state, request_id, req).await,
-        Body::LoadTimeBars(req) => history::load_time_bars(state, request_id, req).await,
-        Body::ProbeTimeBars(req) => history::probe_time_bars(state, request_id, req).await,
         Body::Disconnect(_) => ack_frame(request_id),
+        // Slow reads normally run on the connection's slow lane through
+        // `dispatch_read`; reaching here (tests, the gate helper) serves them inline.
+        body @ (Body::LoadTicks(_)
+        | Body::LoadTimeBars(_)
+        | Body::ProbeTimeBars(_)
+        | Body::LoadOrders(_)
+        | Body::LoadProductRmsInfo(_)
+        | Body::LoadAccountRmsInfo(_)
+        | Body::LoadFillHistory(_)
+        | Body::LoadOrderHistoryDates(_)
+        | Body::LoadOrderHistory(_)) => dispatch_read(state, request_id, body).await,
         // Responses / events are gateway→client only; a client sending one
         // back is a protocol misuse, not a crash.
         _ => error_frame(request_id, "unsupported", "unsupported request body"),
+    }
+}
+
+/// Serve one slow read RPC (see `rpc_table::Lane::Slow`). These need only the
+/// shared state, never a connection's client context, so many can run at once.
+pub(super) async fn dispatch_read(state: &GatewayState, request_id: u64, body: Body) -> Frame {
+    match body {
+        Body::LoadOrders(_req) => orders::load_orders(state, request_id).await,
+        Body::LoadProductRmsInfo(_) => orders::load_product_rms_info(state, request_id).await,
+        Body::LoadAccountRmsInfo(_) => orders::load_account_rms_info(state, request_id).await,
+        Body::LoadFillHistory(req) => orders::load_fill_history(state, request_id, req).await,
+        Body::LoadOrderHistoryDates(_) => orders::load_order_history_dates(state, request_id).await,
+        Body::LoadOrderHistory(req) => orders::load_order_history(state, request_id, req).await,
+        Body::LoadTicks(req) => history::load_ticks(state, request_id, req).await,
+        Body::LoadTimeBars(req) => history::load_time_bars(state, request_id, req).await,
+        Body::ProbeTimeBars(req) => history::probe_time_bars(state, request_id, req).await,
+        _ => error_frame(request_id, "unsupported", "not a slow read request"),
     }
 }
 
@@ -255,6 +275,7 @@ pub(super) fn test_state(gates: ParentGates, hub: SharedFanout) -> GatewayState 
         },
         ready: AtomicBool::new(true),
         force_reconnect: AtomicBool::new(false),
+        reconnect_wake: tokio::sync::Notify::new(),
         expected_auth_token: "secret".into(),
         session: None,
         reconnect: Arc::new(ReconnectController::new(hub)),

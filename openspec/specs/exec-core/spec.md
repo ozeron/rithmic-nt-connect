@@ -1,7 +1,7 @@
 # exec-core Specification
 
 ## Purpose
-TBD - created by syncing change `rust-exec-core`. Update Purpose after archive. Scope: the Nautilus-independent execution rules (lifecycle policy, exposure, commission, kind mapping, fill identity, id codec, drain decisions, inventory) as one Rust crate.
+The Nautilus-independent execution rules (order-plant lifecycle, exposure, commission, notification-kind mapping, instrument-id codec, fill identity) as one Rust crate that the plant and the adapter both call.
 
 ## Requirements
 

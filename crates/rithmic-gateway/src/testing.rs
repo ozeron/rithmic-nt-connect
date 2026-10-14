@@ -128,11 +128,13 @@ pub fn order_notification(kind: &str, basket_id: &str, user_tag: &str, symbol: &
 ///
 /// One command per line; every reply ends with a line containing only `END`.
 /// Commands: `ping`, `calls`, `clear_calls`, `drop_plants`,
-/// `fail_next <method> <rithmic|closed|config> [message]`,
+/// `fail_next <method> <rithmic|closed|config|rejected|not_sent|unknown> [message]`,
 /// `push last_trade <sym> <exch> <price> <size>`,
 /// `push bbo <sym> <exch> <bid> <bid_size> <ask> <ask_size>`,
 /// `push time_bar <sym> <exch> <close>`, `push account_pnl <acct> <day_pnl>`,
 /// `push order <kind> <basket_id> <user_tag> <symbol>`,
+/// `push gap <ticker|history|pnl|order> <skipped>` (a scripted plant lag),
+/// `delay <method> <ms>` (a slow venue call: load_ticks, load_time_bars, load_fill_history),
 /// `set_account <account_id> <fcm_id> <ib_id>`.
 pub async fn serve_control(listener: UnixListener, fake: Arc<FakeSession>) {
     loop {
@@ -184,6 +186,9 @@ fn run_command(fake: &FakeSession, line: &str) -> String {
                 "rithmic" => FakeFailure::Rithmic(message),
                 "closed" => FakeFailure::ChannelClosed("ticker"),
                 "config" => FakeFailure::Config(message),
+                "rejected" => FakeFailure::Rejected(message),
+                "not_sent" => FakeFailure::NotSent(message),
+                "unknown" => FakeFailure::Unknown(message),
                 other => return format!("err unknown failure kind {other}\n"),
             };
             fake.fail_next(method, failure);
@@ -220,6 +225,28 @@ fn run_command(fake: &FakeSession, line: &str) -> String {
             Stream::Order,
             Some(order_notification(kind, basket, tag, sym)),
         ),
+        ["delay", method, ms] => match ms.parse::<u64>() {
+            Ok(ms) => {
+                fake.set_delay(method, Duration::from_millis(ms));
+                "ok\n".into()
+            }
+            Err(_) => "err bad delay\n".into(),
+        },
+        ["push", "gap", stream, skipped] => {
+            match (
+                rithmic_plants::Stream::from_plant(stream),
+                skipped.parse::<u64>(),
+            ) {
+                (Some(stream), Ok(skipped)) => {
+                    fake.push_event(
+                        stream,
+                        PlantEvent::Gap(rithmic_plants::GapDto { stream, skipped }),
+                    );
+                    "ok\n".into()
+                }
+                _ => "err bad gap\n".into(),
+            }
+        }
         ["set_account", account_id, fcm_id, ib_id] => {
             fake.set_account(AccountTriple {
                 account_id: (*account_id).into(),

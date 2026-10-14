@@ -7,8 +7,8 @@
 //! behavior.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use async_trait::async_trait;
 
@@ -19,28 +19,9 @@ use crate::dto::{
 };
 use crate::error::{Error, Result};
 use crate::plants::PlantSet;
+use crate::streams::{StreamHub, StreamTx};
 
-const POLL_INTERVAL: Duration = Duration::from_millis(5);
-
-/// One of the four plant event streams.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Stream {
-    Ticker,
-    History,
-    Pnl,
-    Order,
-}
-
-impl Stream {
-    fn plant(self) -> &'static str {
-        match self {
-            Self::Ticker => "ticker",
-            Self::History => "history",
-            Self::Pnl => "pnl",
-            Self::Order => "order",
-        }
-    }
-}
+pub use crate::streams::Stream;
 
 /// A failure to inject into the next call of a method.
 #[derive(Debug, Clone)]
@@ -51,6 +32,12 @@ pub enum FakeFailure {
     ChannelClosed(&'static str),
     /// A config / validation style error that is not a connection issue.
     Config(String),
+    /// The venue definitively refused the request (`Error::Rejected`).
+    Rejected(String),
+    /// The request failed before anything was written (`Error::NotSent`).
+    NotSent(String),
+    /// The request may have reached the venue (`Error::OutcomeUnknown`).
+    Unknown(String),
 }
 
 impl FakeFailure {
@@ -59,6 +46,9 @@ impl FakeFailure {
             Self::Rithmic(msg) => Error::Rithmic(msg.clone()),
             Self::ChannelClosed(plant) => Error::ChannelClosed { plant },
             Self::Config(msg) => Error::Config(msg.clone()),
+            Self::Rejected(msg) => Error::Rejected(msg.clone()),
+            Self::NotSent(msg) => Error::NotSent(msg.clone()),
+            Self::Unknown(msg) => Error::OutcomeUnknown(msg.clone()),
         }
     }
 }
@@ -70,16 +60,30 @@ struct State {
     order_plant: bool,
     /// Plants dropped by `drop_plants()`; polls fail until the next `connect`.
     dropped: bool,
-    events: HashMap<Stream, VecDeque<PlantEvent>>,
+    /// Feeding side of each attached lane.
+    txs: HashMap<Stream, StreamTx>,
+    /// Events pushed while their plant was not attached; delivered on attach.
+    pending: HashMap<Stream, VecDeque<PlantEvent>>,
     calls: Vec<String>,
     failures: HashMap<String, VecDeque<FakeFailure>>,
+    /// Per-method artificial latency applied by [`FakeSession::delay`].
+    delays: HashMap<String, Duration>,
     account: Option<AccountTriple>,
 }
 
 /// Scripted in-memory plant session.
-#[derive(Default)]
 pub struct FakeSession {
     state: Mutex<State>,
+    hub: Arc<StreamHub>,
+}
+
+impl Default for FakeSession {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(State::default()),
+            hub: StreamHub::new(),
+        }
+    }
 }
 
 impl FakeSession {
@@ -106,6 +110,18 @@ impl FakeSession {
         Ok(state)
     }
 
+    /// Record a call that implicitly brings up `stream`'s plant (any order or
+    /// PnL call does in the real session) and attach its lane.
+    fn enter_plant(&self, method: &str, detail: &str, stream: Stream) -> Result<()> {
+        let mut state = self.enter(method, detail)?;
+        match stream {
+            Stream::Pnl => state.pnl_plant = true,
+            _ => state.order_plant = true,
+        }
+        self.attach(&mut state, stream);
+        Ok(())
+    }
+
     /// Record a call that needs no state change.
     fn note(&self, method: &str, detail: &str) -> Result<()> {
         self.enter(method, detail).map(drop)
@@ -114,11 +130,31 @@ impl FakeSession {
     // --- scripting -------------------------------------------------------
 
     pub fn push_event(&self, stream: Stream, event: PlantEvent) {
-        self.lock()
-            .events
-            .entry(stream)
-            .or_default()
-            .push_back(event);
+        let mut state = self.lock();
+        match state.txs.get(&stream) {
+            Some(tx) => {
+                tx.try_event(event);
+            }
+            None => state.pending.entry(stream).or_default().push_back(event),
+        }
+    }
+
+    /// Attach a stream lane and deliver anything pushed before the plant existed.
+    fn attach(&self, state: &mut State, stream: Stream) {
+        if state.txs.contains_key(&stream) {
+            return;
+        }
+        let tx = self.hub.attach(stream);
+        for event in state.pending.remove(&stream).unwrap_or_default() {
+            tx.try_event(event);
+        }
+        state.txs.insert(stream, tx);
+    }
+
+    fn detach(&self, state: &mut State, stream: Stream) {
+        if let Some(tx) = state.txs.remove(&stream) {
+            self.hub.detach(stream, tx.generation());
+        }
     }
 
     /// Fail the next call to `method` (its name as recorded in [`Self::calls`]).
@@ -134,6 +170,21 @@ impl FakeSession {
     /// next `connect`, exactly what the parent's event pump reacts to.
     pub fn drop_plants(&self) {
         self.lock().dropped = true;
+        for stream in [Stream::Ticker, Stream::History, Stream::Order] {
+            self.hub.close(stream);
+        }
+    }
+
+    /// Make every call to `method` take at least `delay` (a slow venue).
+    pub fn set_delay(&self, method: &str, delay: Duration) {
+        self.lock().delays.insert(method.to_string(), delay);
+    }
+
+    async fn delay(&self, method: &str) {
+        let delay = self.lock().delays.get(method).copied();
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
     }
 
     pub fn set_account(&self, account: AccountTriple) {
@@ -160,42 +211,8 @@ impl FakeSession {
             .count()
     }
 
-    pub fn is_connected(&self) -> bool {
-        self.lock().connected
-    }
-
     async fn poll(&self, stream: Stream, timeout: Duration) -> Result<Option<PlantEvent>> {
-        let deadline = Instant::now() + timeout;
-        loop {
-            {
-                let mut state = self.lock();
-                match stream {
-                    Stream::Ticker | Stream::History if !state.connected => {
-                        return Err(Error::NotConnected {
-                            plant: stream.plant(),
-                        });
-                    }
-                    Stream::Pnl if !state.pnl_plant => return Ok(None),
-                    Stream::Order if !state.order_plant => {
-                        return Err(Error::NotConnected { plant: "order" });
-                    }
-                    _ => {}
-                }
-                if state.dropped && stream != Stream::Pnl {
-                    return Err(Error::ChannelClosed {
-                        plant: stream.plant(),
-                    });
-                }
-                if let Some(event) = state.events.entry(stream).or_default().pop_front() {
-                    return Ok(Some(event));
-                }
-            }
-            let now = Instant::now();
-            if now >= deadline {
-                return Ok(None);
-            }
-            tokio::time::sleep(POLL_INTERVAL.min(deadline - now)).await;
-        }
+        self.hub.poll(stream, timeout).await
     }
 }
 
@@ -205,6 +222,8 @@ impl Session for FakeSession {
         let mut state = self.enter("connect", "")?;
         state.connected = true;
         state.dropped = false;
+        self.attach(&mut state, Stream::Ticker);
+        self.attach(&mut state, Stream::History);
         Ok(())
     }
 
@@ -213,6 +232,9 @@ impl Session for FakeSession {
         state.connected = false;
         state.pnl_plant = false;
         state.order_plant = false;
+        for stream in Stream::ALL {
+            self.detach(&mut state, stream);
+        }
         Ok(())
     }
 
@@ -222,22 +244,30 @@ impl Session for FakeSession {
     }
 
     async fn ensure_order_plant(&self) -> Result<()> {
-        self.enter("ensure_order_plant", "")?.order_plant = true;
+        let mut state = self.enter("ensure_order_plant", "")?;
+        state.order_plant = true;
+        self.attach(&mut state, Stream::Order);
         Ok(())
     }
 
     async fn ensure_pnl_plant(&self) -> Result<()> {
-        self.enter("ensure_pnl_plant", "")?.pnl_plant = true;
+        let mut state = self.enter("ensure_pnl_plant", "")?;
+        state.pnl_plant = true;
+        self.attach(&mut state, Stream::Pnl);
         Ok(())
     }
 
     async fn disconnect_order_plant(&self) -> Result<()> {
-        self.enter("disconnect_order_plant", "")?.order_plant = false;
+        let mut state = self.enter("disconnect_order_plant", "")?;
+        state.order_plant = false;
+        self.detach(&mut state, Stream::Order);
         Ok(())
     }
 
     async fn disconnect_pnl_plant(&self) -> Result<()> {
-        self.enter("disconnect_pnl_plant", "")?.pnl_plant = false;
+        let mut state = self.enter("disconnect_pnl_plant", "")?;
+        state.pnl_plant = false;
+        self.detach(&mut state, Stream::Pnl);
         Ok(())
     }
 
@@ -299,17 +329,17 @@ impl Session for FakeSession {
     }
 
     async fn subscribe_pnl(&self) -> Result<()> {
-        self.enter("subscribe_pnl", "")?.pnl_plant = true;
+        self.enter_plant("subscribe_pnl", "", Stream::Pnl)?;
         Ok(())
     }
 
     async fn subscribe_order_updates(&self) -> Result<()> {
-        self.enter("subscribe_order_updates", "")?.order_plant = true;
+        self.enter_plant("subscribe_order_updates", "", Stream::Order)?;
         Ok(())
     }
 
     async fn subscribe_bracket_updates(&self) -> Result<()> {
-        self.enter("subscribe_bracket_updates", "")?.order_plant = true;
+        self.enter_plant("subscribe_bracket_updates", "", Stream::Order)?;
         Ok(())
     }
 
@@ -356,6 +386,7 @@ impl Session for FakeSession {
             "load_ticks",
             &format!("{symbol} {exchange} {start_time_sec} {end_time_sec}"),
         )?;
+        self.delay("load_ticks").await;
         Ok(Vec::new())
     }
 
@@ -372,6 +403,7 @@ impl Session for FakeSession {
             "load_time_bars",
             &format!("{symbol} {exchange} {start_time_sec} {end_time_sec} {bar_type} {period}"),
         )?;
+        self.delay("load_time_bars").await;
         Ok(Vec::new())
     }
 
@@ -396,46 +428,46 @@ impl Session for FakeSession {
         _start_sec: i32,
         _end_sec: i32,
     ) -> Result<Vec<OrderNotificationDto>> {
-        self.enter("load_orders", "")?.order_plant = true;
+        self.enter_plant("load_orders", "", Stream::Order)?;
         Ok(Vec::new())
     }
 
     async fn load_product_rms_info(&self) -> Result<Vec<ProductRmsInfoDto>> {
-        self.enter("load_product_rms_info", "")?.order_plant = true;
+        self.enter_plant("load_product_rms_info", "", Stream::Order)?;
         Ok(Vec::new())
     }
 
     async fn load_account_rms_info(&self) -> Result<Vec<AccountRmsInfoDto>> {
-        self.enter("load_account_rms_info", "")?.order_plant = true;
+        self.enter_plant("load_account_rms_info", "", Stream::Order)?;
         Ok(Vec::new())
     }
 
     async fn load_fill_history(&self, start: i32, finish: i32) -> Result<Vec<FillHistoryDto>> {
-        self.enter("load_fill_history", &format!("{start} {finish}"))?
-            .order_plant = true;
+        self.enter_plant(
+            "load_fill_history",
+            &format!("{start} {finish}"),
+            Stream::Order,
+        )?;
+        self.delay("load_fill_history").await;
         Ok(Vec::new())
     }
 
     async fn load_order_history(&self, date: &str) -> Result<Vec<OrderNotificationDto>> {
-        self.enter("load_order_history", date)?.order_plant = true;
+        self.enter_plant("load_order_history", date, Stream::Order)?;
         Ok(Vec::new())
     }
 
     async fn load_order_history_dates(&self) -> Result<Vec<String>> {
-        self.enter("load_order_history_dates", "")?.order_plant = true;
+        self.enter_plant("load_order_history_dates", "", Stream::Order)?;
         Ok(Vec::new())
     }
 
     async fn place_order(&self, o: &PlaceOrder) -> Result<()> {
-        let mut state = self.enter("place_order", &o.user_tag)?;
-        state.order_plant = true;
-        Ok(())
+        self.enter_plant("place_order", &o.user_tag, Stream::Order)
     }
 
     async fn place_bracket_order(&self, o: &PlaceBracketOrder) -> Result<()> {
-        let mut state = self.enter("place_bracket_order", &o.localid)?;
-        state.order_plant = true;
-        Ok(())
+        self.enter_plant("place_bracket_order", &o.localid, Stream::Order)
     }
 
     async fn adjust_bracket_stop(
@@ -493,6 +525,15 @@ impl Session for FakeSession {
 
     async fn poll_order_event(&self, timeout: Duration) -> Result<Option<PlantEvent>> {
         self.poll(Stream::Order, timeout).await
+    }
+
+    async fn next_events(
+        &self,
+        stream: Stream,
+        max: usize,
+        timeout: Duration,
+    ) -> Result<Vec<PlantEvent>> {
+        self.hub.next_events(stream, max, timeout).await
     }
 }
 

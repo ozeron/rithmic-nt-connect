@@ -259,7 +259,7 @@ async fn cancel_all_has_its_own_gate_independent_of_trading() {
 // --- restore after plant drop -----------------------------------------------------
 
 #[tokio::test]
-async fn every_intent_is_reissued_after_a_plant_drop_then_the_client_reattaches() {
+async fn every_intent_is_restored_by_the_parent_and_clients_stay_attached() {
     let parent = FakeParent::start(Opts {
         trading: true,
         ..Opts::default()
@@ -293,11 +293,11 @@ async fn every_intent_is_reissued_after_a_plant_drop_then_the_client_reattaches(
         assert!(calls.contains(&expected), "{expected}: {calls:?}");
     }
 
-    // The parent then drops its clients (epoch bump); re-attach and replay.
-    let generation = s.ensure_transport_live().await.expect("recovered");
-    assert_eq!(generation, 2);
-    s.subscribe(NQ, CME).await.unwrap();
-    s.subscribe_order_updates().await.unwrap();
+    // The parent restored the subscriptions itself and told this client; the
+    // client stayed attached and keeps its intents, so there is nothing to replay.
+    assert!(wait_until(Duration::from_secs(10), || s.transport_generation() == 2).await);
+    assert!(s.transport_connected());
+    assert_eq!(s.ensure_transport_live().await.expect("live"), 2);
     parent.push_last_trades(NQ, 1).await;
     parent
         .command("push order accepted basket-9 tag-9 NQH6")
@@ -308,6 +308,26 @@ async fn every_intent_is_reissued_after_a_plant_drop_then_the_client_reattaches(
         &orders[0],
         PlantEvent::OrderNotification(n) if n.basket_id.as_deref() == Some("basket-9")
     ));
+    // The rebuild cost the venue exactly one join per intent: nothing was torn
+    // down and re-issued by a client replay.
+    let after = parent.calls().await;
+    for join in [
+        format!("subscribe {NQ} {CME}"),
+        format!("subscribe_book {NQ} {CME}"),
+        format!("subscribe_time_bars {NQ} {CME} 2 1"),
+        "subscribe_pnl".to_string(),
+        "subscribe_order_updates".to_string(),
+    ] {
+        assert_eq!(
+            after.iter().filter(|c| **c == join).count(),
+            1,
+            "{join} issued once: {after:?}"
+        );
+    }
+    assert!(
+        !after.iter().any(|c| c.starts_with("unsubscribe")),
+        "no venue unsubscribe from client teardown: {after:?}"
+    );
 }
 
 #[tokio::test]
@@ -418,13 +438,13 @@ async fn a_client_that_never_reads_is_dropped_without_hurting_its_peer() {
     let mut received = 0usize;
     let deadline = Instant::now() + Duration::from_secs(30);
     while received < 1_000 && Instant::now() < deadline {
-        if fast
-            .poll_event(Duration::from_millis(100))
-            .await
-            .unwrap()
-            .is_some()
-        {
-            received += 1;
+        match fast.poll_event(Duration::from_millis(100)).await {
+            Ok(Some(_)) => received += 1,
+            Ok(None) => {}
+            // A 20k burst can outrun this one-event-at-a-time consumer's own
+            // bounded queue; that is reported (never silent) and it keeps going.
+            Err(rithmic_plants::Error::ChannelLagged { .. }) => {}
+            Err(e) => panic!("healthy peer poll failed: {e}"),
         }
     }
     assert!(
@@ -558,4 +578,286 @@ async fn concurrent_polls_and_rpcs_make_progress_without_deadlock() {
     tokio::time::timeout(Duration::from_secs(20), all)
         .await
         .expect("no deadlock between blocking polls and RPCs");
+}
+
+// --- a plant lag is a typed gap, never silence ---------------------------------------
+
+/// The outcome of each poll, described so two backends can be compared.
+async fn describe_polls(
+    s: &dyn Session,
+    stream: rithmic_plants::Stream,
+    polls: usize,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while out.len() < polls && Instant::now() < deadline {
+        let polled = match stream {
+            rithmic_plants::Stream::Ticker => s.poll_event(Duration::from_millis(100)).await,
+            rithmic_plants::Stream::Order => s.poll_order_event(Duration::from_millis(100)).await,
+            other => panic!("not exercised: {other:?}"),
+        };
+        match polled {
+            Ok(Some(PlantEvent::LastTrade(_))) => out.push("trade".into()),
+            Ok(Some(PlantEvent::OrderNotification(_))) => out.push("order".into()),
+            Ok(Some(other)) => out.push(format!("other {other:?}")),
+            Ok(None) => {}
+            Err(Error::ChannelLagged { plant, skipped }) => {
+                out.push(format!("lagged {plant} {skipped}"))
+            }
+            Err(e) => out.push(format!("error {e}")),
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn a_plant_lag_reaches_the_client_in_order_as_channel_lagged() {
+    let parent = FakeParent::start(Opts::default()).await;
+    let s = session_for(&parent).await;
+    s.subscribe(NQ, CME).await.unwrap();
+    parent.push_last_trades(NQ, 1).await;
+    parent.command("push gap ticker 41").await;
+    parent.push_last_trades(NQ, 1).await;
+    assert_eq!(
+        describe_polls(&s, rithmic_plants::Stream::Ticker, 3).await,
+        ["trade", "lagged ticker 41", "trade"]
+    );
+}
+
+#[tokio::test]
+async fn the_next_events_batch_carries_the_gap_in_order() {
+    let parent = FakeParent::start(Opts::default()).await;
+    let s = session_for(&parent).await;
+    s.subscribe(NQ, CME).await.unwrap();
+    parent.push_last_trades(NQ, 1).await;
+    parent.command("push gap ticker 9").await;
+    parent.push_last_trades(NQ, 1).await;
+    let mut got = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while got.len() < 3 && Instant::now() < deadline {
+        got.extend(
+            s.next_events(
+                rithmic_plants::Stream::Ticker,
+                16,
+                Duration::from_millis(200),
+            )
+            .await
+            .unwrap(),
+        );
+    }
+    assert_eq!(got.len(), 3, "{got:?}");
+    assert!(matches!(got[0], PlantEvent::LastTrade(_)));
+    assert!(matches!(
+        got[1],
+        PlantEvent::Gap(rithmic_plants::GapDto {
+            stream: rithmic_plants::Stream::Ticker,
+            skipped: 9
+        })
+    ));
+    assert!(matches!(got[2], PlantEvent::LastTrade(_)));
+}
+
+#[tokio::test]
+async fn an_order_stream_gap_reaches_order_subscribers() {
+    let parent = FakeParent::start(Opts {
+        trading: true,
+        ..Opts::default()
+    })
+    .await;
+    let s = session_for(&parent).await;
+    s.subscribe_order_updates().await.unwrap();
+    parent.command("push gap order 7").await;
+    assert_eq!(
+        describe_polls(&s, rithmic_plants::Stream::Order, 1).await,
+        ["lagged order 7"]
+    );
+}
+
+/// Direct and gateway modes must read the same lag the same way: the fake
+/// session uses the same stream lanes as `DirectSession`, so running one script
+/// through it and through a gateway client proves the two agree.
+#[tokio::test]
+async fn the_same_lag_reads_identically_through_direct_and_gateway() {
+    let direct = rithmic_plants::fake::FakeSession::new();
+    direct.connect().await.unwrap();
+    direct.push_event(
+        rithmic_plants::Stream::Ticker,
+        scripted::last_trade(NQ, CME, 1.0, 1),
+    );
+    direct.push_event(
+        rithmic_plants::Stream::Ticker,
+        PlantEvent::Gap(rithmic_plants::GapDto {
+            stream: rithmic_plants::Stream::Ticker,
+            skipped: 41,
+        }),
+    );
+    direct.push_event(
+        rithmic_plants::Stream::Ticker,
+        scripted::last_trade(NQ, CME, 2.0, 1),
+    );
+    let via_direct = describe_polls(&direct, rithmic_plants::Stream::Ticker, 3).await;
+
+    let parent = FakeParent::start(Opts::default()).await;
+    let s = session_for(&parent).await;
+    s.subscribe(NQ, CME).await.unwrap();
+    parent.push_last_trades(NQ, 1).await;
+    parent.command("push gap ticker 41").await;
+    parent.push_last_trades(NQ, 1).await;
+    let via_gateway = describe_polls(&s, rithmic_plants::Stream::Ticker, 3).await;
+
+    assert_eq!(via_direct, ["trade", "lagged ticker 41", "trade"]);
+    assert_eq!(via_direct, via_gateway);
+}
+
+// --- failure classes are assigned at the source and survive both modes -----------------
+
+/// What a failed `place_order` reads as, class only.
+fn class_of(err: &Error) -> &'static str {
+    match err {
+        Error::Rejected(_) => "rejected",
+        Error::NotSent(_) => "not_sent",
+        Error::OutcomeUnknown(_) => "unknown",
+        Error::Gateway { code, .. } if code == "trading_disabled" => "denied",
+        _ => "other",
+    }
+}
+
+#[tokio::test]
+async fn the_same_failure_class_reads_identically_through_direct_and_gateway() {
+    for (kind, fail, want) in [
+        (
+            "rejected",
+            rithmic_plants::fake::FakeFailure::Rejected("price".into()),
+            "rejected",
+        ),
+        (
+            "not_sent",
+            rithmic_plants::fake::FakeFailure::NotSent("no route".into()),
+            "not_sent",
+        ),
+        (
+            "unknown",
+            rithmic_plants::fake::FakeFailure::Unknown("write failed".into()),
+            "unknown",
+        ),
+    ] {
+        // Direct: the fake session stands in for DirectSession's plant calls.
+        let direct = rithmic_plants::fake::FakeSession::new();
+        direct.connect().await.unwrap();
+        direct.fail_next("place_order", fail);
+        let via_direct = direct.place_order(&place("t")).await.unwrap_err();
+
+        // Gateway: the same failure scripted at the parent's plant.
+        let parent = FakeParent::start(Opts {
+            trading: true,
+            ..Opts::default()
+        })
+        .await;
+        let s = session_for(&parent).await;
+        parent
+            .command(&format!("fail_next place_order {kind} boom"))
+            .await;
+        let via_gateway = s.place_order(&place("t")).await.unwrap_err();
+
+        assert_eq!(class_of(&via_direct), want, "direct {kind}: {via_direct}");
+        assert_eq!(
+            class_of(&via_gateway),
+            want,
+            "gateway {kind}: {via_gateway}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_gateway_denial_is_a_denial_not_a_venue_class() {
+    let parent = FakeParent::start(Opts::default()).await; // trading off
+    let s = session_for(&parent).await;
+    let err = s.place_order(&place("t")).await.unwrap_err();
+    assert_eq!(class_of(&err), "denied", "{err}");
+}
+
+#[tokio::test]
+async fn the_adapter_is_told_with_the_same_down_and_up_events_a_redial_produces() {
+    let parent = FakeParent::start(Opts::default()).await;
+    let s = session_for(&parent).await;
+    s.subscribe(NQ, CME).await.unwrap();
+    let mut events = s.subscribe_transport();
+    parent.clear_calls().await;
+    parent.command("drop_plants").await;
+    let down = tokio::time::timeout(Duration::from_secs(10), events.recv())
+        .await
+        .expect("down in time")
+        .unwrap();
+    let up = tokio::time::timeout(Duration::from_secs(10), events.recv())
+        .await
+        .expect("up in time")
+        .unwrap();
+    assert!(
+        matches!(
+            down,
+            rithmic_gateway::client::TransportEvent::Down { generation: 1 }
+        ),
+        "{down:?}"
+    );
+    assert!(
+        matches!(
+            up,
+            rithmic_gateway::client::TransportEvent::Up { generation: 2 }
+        ),
+        "{up:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_market_data_join_that_cannot_be_restored_degrades_instead_of_wedging_the_gateway() {
+    let parent = FakeParent::start(Opts::default()).await;
+    let s = session_for(&parent).await;
+    s.subscribe(NQ, CME).await.unwrap();
+    parent.clear_calls().await;
+    // Every restore pass fails (three passes), so the join cannot be brought back.
+    for _ in 0..3 {
+        parent
+            .command("fail_next subscribe rithmic contract expired")
+            .await;
+    }
+    parent.command("drop_plants").await;
+
+    // The gateway still becomes ready and tells the client, rather than staying
+    // not-ready forever behind the stuck join.
+    assert!(wait_until(Duration::from_secs(15), || s.transport_generation() == 2).await);
+    assert_eq!(s.ensure_transport_live().await.unwrap(), 2);
+    let attempts = parent.count("subscribe NQH6").await;
+    assert_eq!(attempts, 3, "exactly the bounded passes, no more");
+
+    // The client's own subscribe (what its recovery replay does) retries the
+    // degraded join once and heals it.
+    s.subscribe(NQ, CME)
+        .await
+        .expect("the retry reaches the venue");
+    assert_eq!(parent.count("subscribe NQH6").await, attempts + 1);
+    parent.push_last_trades(NQ, 1).await;
+    assert_eq!(drain(&s, 1, market).await.len(), 1);
+    // Healed: a further subscribe is a plain no-op again.
+    s.subscribe(NQ, CME).await.unwrap();
+    assert_eq!(parent.count("subscribe NQH6").await, attempts + 1);
+}
+
+#[tokio::test]
+async fn a_failed_retry_of_a_degraded_join_reports_the_venue_error_and_stays_degraded() {
+    let parent = FakeParent::start(Opts::default()).await;
+    let s = session_for(&parent).await;
+    s.subscribe(NQ, CME).await.unwrap();
+    for _ in 0..3 {
+        parent.command("fail_next subscribe rithmic expired").await;
+    }
+    parent.command("drop_plants").await;
+    assert!(wait_until(Duration::from_secs(15), || s.transport_generation() == 2).await);
+
+    parent
+        .command("fail_next subscribe rithmic still expired")
+        .await;
+    let err = s.subscribe(NQ, CME).await.unwrap_err();
+    assert!(err.to_string().contains("still expired"), "{err}");
+    // Still degraded: the next subscribe tries again, and now succeeds.
+    s.subscribe(NQ, CME).await.expect("healed on the next try");
 }

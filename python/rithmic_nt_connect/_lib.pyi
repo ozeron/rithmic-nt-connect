@@ -189,6 +189,10 @@ class GatewayError(RuntimeError):
 def list_systems(url: str | None = None) -> list[str]:
     """List Rithmic systems via the gateway (template 16); does not log in."""
 
+class TransportSubscription:
+    def cancel(self) -> None:
+        """Stop transport events and release the callback. Idempotent."""
+
 class Session:
     """Rust plant session (ticker + history, PnL, and lazy order plants)."""
 
@@ -217,16 +221,28 @@ class Session:
     # -- gateway-mode hooks (inert in direct mode) -------------------------
     @property
     def trading_enabled(self) -> bool | None:
-        """The parent's trading gate (gateway); ``None`` in direct mode."""
+        """The trading gate: the parent's (gateway) or this process's own
+        (direct, closed until ``configure_gates``). The Rust session enforces it
+        in both modes."""
     @property
     def cancel_all_enabled(self) -> bool | None:
-        """The parent's cancel-all gate (gateway); ``None`` in direct mode."""
+        """The plant-wide cancel-all gate, independent of trading (same split)."""
+    @property
+    def is_direct(self) -> bool:
+        """``True`` for an in-process session, ``False`` for a gateway client."""
+    def configure_gates(
+        self, trading_enabled: bool = False, cancel_all_enabled: bool = False
+    ) -> None:
+        """Direct mode: open the trading and/or cancel-all gate (never closes one).
+        Raises ``RuntimeError`` for a gateway client, whose gates the parent owns."""
     def transport_generation(self) -> int: ...
     def transport_connected(self) -> bool: ...
     def ensure_transport_live(self) -> int: ...
-    def subscribe_transport_events(self, callback: Any) -> None:
+    def subscribe_transport_events(self, callback: Any) -> TransportSubscription | None:
         """``callback(kind, generation, attempts, cause)``; ``kind`` is
-        ``"down"``, ``"up"`` or ``"recovery_failed"``.
+        ``"down"``, ``"up"`` or ``"recovery_failed"``. Returns a handle whose
+        ``cancel()`` stops delivery and releases the callback (``None`` in direct
+        mode, which has no transport).
         """
 
     # -- lifecycle ---------------------------------------------------------
@@ -243,6 +259,9 @@ class Session:
     def get_front_month(self, symbol: str, exchange: str) -> Any: ...
     def get_reference_data(self, symbol: str, exchange: str) -> Any: ...
     def poll_event(self, timeout_ms: int = 0) -> dict[str, Any] | None: ...
+    def next_events(
+        self, stream: str, max_events: int = 256, timeout_ms: int = 100
+    ) -> list[dict[str, Any]]: ...
     def load_ticks(
         self, symbol: str, exchange: str, start_time_sec: int, end_time_sec: int
     ) -> list[dict[str, Any]]: ...

@@ -91,6 +91,7 @@ impl FakeParent {
                 format!("unix://{}", self.listen.display()),
             )
             .env("RITHMIC_FAKE_CONTROL", &self.control)
+            .env("RITHMIC_GATEWAY_RESTORE_BACKOFF_MS", "50")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -292,7 +293,7 @@ impl MockParent {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let connections = Arc::new(AtomicUsize::new(0));
         let handshakes = Arc::new(Mutex::new(Vec::new()));
-        let (events_tx, _) = tokio::sync::broadcast::channel::<Body>(16_384);
+        let (events_tx, _) = tokio::sync::broadcast::channel::<Body>(65_536);
         let handler: Arc<Handler> = Arc::new(handler);
         let (reqs, conns, hs, events) = (
             requests.clone(),

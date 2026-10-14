@@ -1,4 +1,4 @@
-"""Length-delimited protobuf framing over one unix socket (shared by client and mux)."""
+"""Length-delimited protobuf framing over one unix socket (used by the client)."""
 
 from __future__ import annotations
 

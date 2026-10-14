@@ -466,3 +466,27 @@ def test_pnl_live_matches_the_reference() -> None:
         assert _lib.pnl_live(first, until, unreadable, 3.0) == reference(
             first, until, unreadable, 3.0
         )
+
+
+def test_event_time_is_a_field_read_when_the_extension_already_computed_it() -> None:
+    """Market-data dicts carry the effective event time; only a dict with just
+    ssboe takes the shared Rust rule. Both give the Python oracle's answer."""
+    from rithmic_nt_connect._convert import _ts_ns
+
+    def oracle(ts, ssboe, usecs):
+        if ts is not None:
+            return ts
+        return None if ssboe is None else ssboe * 1_000_000_000 + (usecs or 0) * 1_000
+
+    cases = [
+        {"ts_event_ns": 1_700_000_000_123_456_789},
+        {"ts_event_ns": 5, "ssboe": 9, "usecs": 9},
+        {"ssboe": 1_700_000_000, "usecs": 250},
+        {"ssboe": 1_700_000_000},
+        {"usecs": 7},
+        {},
+    ]
+    for d in cases:
+        assert _ts_ns(d) == oracle(
+            d.get("ts_event_ns"), d.get("ssboe"), d.get("usecs")
+        ), d

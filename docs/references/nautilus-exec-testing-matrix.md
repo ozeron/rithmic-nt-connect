@@ -24,10 +24,11 @@ login session only — never run while MotiveWave / R|Trader is open. `cancel_al
 is plant-wide; never use it to clean up a single smoke order.
 
 Last run: **2026-08-18** — CAN-set live on `Rithmic Test` (E01..E04, E06, E10..E16,
-E19, E20..E23, E40, E42, E44, E84). `TC-E41` (plant-wide cancel on stop) is **not**
-live-testable: it would cancel unrelated orders at the plant, so it stays
-collection-skipped with a documented reason. Scaffolds (Groups 4/6/7/8/9) and
-unsupported (`E05,E17,E18,E24..E27,E41,E43`) remain.
+E19, E20..E23, E40, E42, E44, E84). `TC-E41` / `TC-E43` (cancel-all / batch cancel on
+stop) are unit-tested per basket from the cache but not live-run: the live suite keeps
+them collection-skipped because the wire `cancel_all_orders` is plant-wide and would
+cancel unrelated orders. Scaffolds (Groups 4/6/7/8/9) and unsupported
+(`E05,E17,E18,E24..E27`) remain.
 
 ## Incident Replay Coverage
 
@@ -88,7 +89,7 @@ fail closed.
 | TC-E14 | Limit IOC no fill | [x] | `OrderCanceled`, not `Expired`; live-proven |
 | TC-E15 | Limit FOK fill | [x] | live-proven |
 | TC-E16 | Limit FOK no fill | [x] | live-proven |
-| TC-E17 | Limit GTD | [ ] | no GTD in `_RITHMIC_DURATION_TO_TIF` (1/2/3/4 only) |
+| TC-E17 | Limit GTD | [ ] | no GTD in `RITHMIC_DURATION_TO_TIF` (`_orders.py`; 1/2/3/4 only) |
 | TC-E18 | Limit GTD expiry | [ ] | no GTD |
 | TC-E19 | Limit DAY | [x] | duration 1; live-proven |
 
@@ -122,25 +123,24 @@ fail closed.
 | TC | Name | Status | Where verified / gap |
 |---|---|---|---|
 | TC-E40 | Cancel single limit | [x] | live-proven |
-| TC-E41 | Cancel all on stop | [ ] | plant-wide — live-testing would cancel unrelated orders; collection-skipped (`tests/e2e/test_exec_client_live.py`), no safe unit boundary yet |
+| TC-E41 | Cancel all on stop | [~] | NT `CancelAllOrders` is handled by `_cancel_all_orders`: cancels per basket from the cache, scoped by instrument / strategy / side and this venue; never the plant-wide wire `cancel_all_orders` (`test_cancel_all_is_scoped_and_never_plant_wide`, unit). Live unproven: collection-skipped in `tests/e2e/test_exec_client_live.py`. Cache-scoped, so untracked / in-flight orders are not reached |
 | TC-E42 | Individual cancels on stop | [x] | `test_tc_e42_individual_cancels_on_stop` — two resting orders individually canceled by `OrderDriver.on_stop`; live-proven |
-| TC-E43 | Batch cancel on stop | [ ] | no batch-cancel API |
+| TC-E43 | Batch cancel on stop | [~] | Rithmic has no batch-cancel RPC; NT `BatchCancelOrders` is handled by `_batch_cancel_orders`, a per-order `_cancel_order` loop (`test_batch_cancel_cancels_each_order`, unit). Live unproven: collection-skipped in `tests/e2e/test_exec_client_live.py` |
 | TC-E44 | Cancel already-canceled | [x] | `test_tc_e44_cancel_already_canceled` — second cancel of a CANCELED order is refused locally (no venue command, no events); live-proven |
 
 ## Group 6: Bracket orders
 
 | TC | Name | Status | Where verified / gap |
 |---|---|---|---|
-| TC-E50 | Bracket BUY | [~] | wire on direct+gateway (`execution.py:920`); Lucid accept/survival unproven |
+| TC-E50 | Bracket BUY | [~] | wire on direct+gateway (`_submit_order_list` in `execution.py`); Lucid accept/survival unproven |
 | TC-E51 | Bracket SELL | [~] | |
 | TC-E52 | Bracket entry activates TP/SL | [~] | unproven on Lucid |
 | TC-E53 | Bracket post-only entry | [~] | |
 
-Live bracket spike: `scripts/spike_bracket_order.py` (`RITHMIC_BRACKETS=1` +
-`RITHMIC_ENABLE_TRADING=1`; spike-only flag, not enforced in plants/gateway).
-Default entry is a far LIMIT derived from live BBO (`BUY = bid − N×tick`,
-`--far-ticks`, default 20); optional `--limit-price` must still clear that
-rule. Explicit `--market-entry` only — never implicit MARKET for P2 proof.
+The live bracket spike harness was removed; Test accept and survival were
+proven in both modes on 2026-08-24 (see `docs/STATUS.md`, Brackets / OCO). Any
+new live bracket proof belongs in `tests/e2e` with a far LIMIT entry derived from
+live BBO, never an implicit MARKET.
 
 ## Group 7: Order flags
 
@@ -162,8 +162,8 @@ rule. Explicit `--market-entry` only — never implicit MARKET for P2 proof.
 | TC-E74 | Ambiguous submit fail | MOCK | `test_resync_blocks_submit_allows_cancel`, `test_order_plant_policy_matrix` (unit) |
 | TC-E75 | Ambiguous cancel fail | MOCK | no `OrderCancelRejected` on transport fail |
 | TC-E76 | Ambiguous modify fail | MOCK | |
-| TC-E77 | Ambiguous batch fail | [ ] | no batch |
-| TC-E78 | Per-order batch reject | [ ] | no batch |
+| TC-E77 | Ambiguous batch fail | [ ] | batch cancel is a per-order loop (`_batch_cancel_orders`); no test covers an ambiguous failure partway through a batch |
+| TC-E78 | Per-order batch reject | [ ] | same: per-order cancel rules apply, but no batch-level test asserts per-order rejects |
 
 ## Group 9: Lifecycle & reconciliation
 
@@ -203,28 +203,29 @@ Drain-by-identity live proof: TC-E88 on Rithmic Test 2026-08-24.
 | 2. Limit | 10 | 8 | 0 | 2 | 0 | 0 |
 | 3. Stop/cond | 8 | 4 | 0 | 4 | 0 | 0 |
 | 4. Modify | 7 | 0 | 5 | 2 | 0 | 0 |
-| 5. Cancel | 5 | 3 | 0 | 2 | 0 | 0 |
+| 5. Cancel | 5 | 3 | 2 | 0 | 0 | 0 |
 | 6. Brackets | 4 | 0 | 4 | 0 | 0 | 0 |
 | 7. Flags | 4 | 0 | 1 | 3 | 0 | 0 |
 | 8. Rejection | 9 | 1 | 2 | 3 | 3 | 0 |
 | 9. Lifecycle/Recon | 10 | 1 | 9 | 0 | 0 | 0 |
 | 10. Options | 12 | 0 | 0 | 0 | 0 | 12 |
-| **Total** | **75** | **22** | **21** | **17** | **3** | **12** |
+| **Total** | **75** | **22** | **23** | **15** | **3** | **12** |
 
 **Baseline-compliant (groups 1–5) achieved** — the CAN-set (`TC-E01..E04,E06,E10..E16,
 E19,E20..E23,E40,E42,E44`) is `[x]` live-proven on `Rithmic Test` (2026-08-18), and
 `TC-E84` (reconcile open orders, incl. the stop trigger_type report regression) is
 live-proven through `LiveExecutionEngine._check_orders_consistency` (the open-order
 consistency path) with a unit twin (`test_generate_order_status_reports_preserves_stop_trigger_type`)
-that proves the same code path in CI. `TC-E41` (plant-wide cancel on stop) is **not**
-claimed live-proven: exercising it would cancel unrelated orders, so it is
-collection-skipped in the live suite. Remaining groups (4/6/7/8/9) are scaffolded and
-await native modify / bracket / reduce-only / remaining reconciliation confirmation,
-or are unsupported (`E05,E17,E18,E24..E27,E41,E43`) per this matrix.
+that proves the same code path in CI. `TC-E41` / `TC-E43` (cancel-all /
+batch cancel on stop) are `[~]`: unit-tested (`tests/test_cancel_scope.py`), not claimed
+live-proven, and collection-skipped in the live suite. Remaining groups (4/6/7/8/9) are
+scaffolded and await native modify / bracket / reduce-only / remaining reconciliation
+confirmation, or are unsupported (`E05,E17,E18,E24..E27`) per this matrix.
 
 **Open gaps (venue/futures capability, not adapter code):**
-- E05 quote qty, E17/E18 GTD, E24–E27 MIT/LIT, E43/E77/E78 batch, E62 iceberg, E63
-  custom, Group 10 options — all N/A or unsupported by Rithmic futures plant.
+- E05 quote qty, E17/E18 GTD, E24–E27 MIT/LIT, E62 iceberg, E63 custom, Group 10
+  options — all N/A or unsupported by Rithmic futures plant. E43/E77/E78: Rithmic has
+  no batch-cancel RPC; batch cancel is a per-order loop (E43 `[~]`, E77/E78 untested).
 - E34/E36/E61/E70/E71 — depend on confirming native modify / reduce-only / post-only
   support; until then mark `[ ]` and skip.
 - Reconciliation (E84–E87) is best-effort; the exec fixture pins `open_check_open_only=True`

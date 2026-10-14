@@ -12,7 +12,6 @@ from nautilus_trader.model.identifiers import InstrumentId, Symbol
 from nautilus_trader.model.instruments import FuturesContract
 from nautilus_trader.model.objects import Currency, Price, Quantity
 
-from rithmic_nt_connect.constants import VENUE
 from rithmic_nt_connect.session import WireSession
 
 
@@ -128,12 +127,6 @@ def future_from_reference(
             "rithmic_is_tradable": ref.get("is_tradable"),
         },
     )
-
-
-def nautilus_venue():
-    from nautilus_trader.model.identifiers import Venue
-
-    return Venue(VENUE)
 
 
 class RithmicInstrumentProvider(InstrumentProvider):

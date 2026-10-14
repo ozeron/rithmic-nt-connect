@@ -1,7 +1,7 @@
 # gateway-parent-lifecycle Specification
 
 ## Purpose
-TBD - created by syncing change `simplify-gateway-modes`. Update Purpose after archive.
+Who starts, owns and stops the gateway parent: clients attach only and never spawn it or hold the Rithmic password, the parent is launched explicitly, and only the parent controls its own lifetime.
 
 ## Requirements
 

@@ -108,7 +108,7 @@ class TransportRecoveryBridge:
             self._on_failed(event)
 
     def schedule(self, generation: int) -> None:
-        """Thread-safe: transport events fire on the mux/recovery thread."""
+        """Thread-safe: transport events fire on the Rust runtime thread."""
         loop = self._get_loop()
         if loop is None:
             self._log().error(f"{self._label} not scheduled: client loop missing")

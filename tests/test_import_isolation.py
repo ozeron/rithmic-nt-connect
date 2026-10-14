@@ -82,7 +82,6 @@ def test_the_adapter_config_reads_gateway_env_without_the_lake() -> None:
             {
                 "RITHMIC_USER": "u",
                 "RITHMIC_CONNECT_MODE": "gateway",
-                "RITHMIC_GATEWAY_CLIENT_MODE": "mux",
             }
         )
         assert cfg.password is None

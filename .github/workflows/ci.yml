@@ -31,6 +31,8 @@ jobs:
         run: cargo test -p rithmic-plants -p rithmic-gateway -p rithmic-exec -p rithmic-nt-connect
       - name: Cargo clippy (lint, -D warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Gateway load smoke (loss without a gap, order isolation, stalled peer)
+        run: cargo run --release -p rithmic-loadtest -- smoke
       - name: Ruff lint
         run: uv run ruff check .
       - name: Ruff format check

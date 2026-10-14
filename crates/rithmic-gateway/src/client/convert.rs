@@ -290,6 +290,16 @@ impl Channel {
     pub const ALL: [Self; 4] = [Self::Market, Self::History, Self::Pnl, Self::Order];
 
     /// Plant name used in typed channel errors.
+    pub fn stream(self) -> rithmic_plants::Stream {
+        use rithmic_plants::Stream;
+        match self {
+            Self::Market => Stream::Ticker,
+            Self::History => Stream::History,
+            Self::Pnl => Stream::Pnl,
+            Self::Order => Stream::Order,
+        }
+    }
+
     pub fn plant(self) -> &'static str {
         match self {
             Self::Market => "ticker",
@@ -299,9 +309,20 @@ impl Channel {
         }
     }
 
+    pub fn of_stream(stream: rithmic_plants::Stream) -> Self {
+        use rithmic_plants::Stream;
+        match stream {
+            Stream::Ticker => Self::Market,
+            Stream::History => Self::History,
+            Stream::Pnl => Self::Pnl,
+            Stream::Order => Self::Order,
+        }
+    }
+
     pub fn of(event: &PlantEvent) -> Self {
         match event {
             PlantEvent::TimeBar(_) => Self::History,
+            PlantEvent::Gap(g) => Self::of_stream(g.stream),
             PlantEvent::AccountPnl(_) | PlantEvent::InstrumentPnl(_) => Self::Pnl,
             PlantEvent::OrderNotification(_) => Self::Order,
             PlantEvent::LastTrade(_)
@@ -323,6 +344,12 @@ pub fn plant_event_from_pb(event: pb::Event) -> Option<PlantEvent> {
         Body::InstrumentPnl(i) => PlantEvent::InstrumentPnl(instrument_pnl_from_pb(i)),
         Body::OrderNotification(n) => PlantEvent::OrderNotification(order_notification_from_pb(n)),
         Body::TimeBar(b) => PlantEvent::TimeBar(history_bar_from_pb(b)),
+        // Connection-level, not a plant event: the runtime handles it before this.
+        Body::TransportResumed(_) => return None,
+        Body::Gap(g) => PlantEvent::Gap(rithmic_plants::GapDto {
+            stream: rithmic_plants::Stream::from_plant(&g.stream)?,
+            skipped: g.skipped,
+        }),
         Body::Other(o) => PlantEvent::Other {
             type_name: o.type_name,
             source: o.source,

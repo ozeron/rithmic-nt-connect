@@ -17,6 +17,7 @@ pub mod fake;
 pub mod history;
 pub mod plants;
 pub mod session;
+pub mod streams;
 pub mod systems;
 
 pub use account::{pick_account, rows_from_account_list, AccountRow};
@@ -27,13 +28,14 @@ pub use config::{
 };
 pub use direct::DirectSession;
 pub use dto::{
-    AccountPnlDto, BboDto, FillHistoryDto, FrontMonthDto, HistoryBarDto, HistoryTickDto,
+    AccountPnlDto, BboDto, FillHistoryDto, FrontMonthDto, GapDto, HistoryBarDto, HistoryTickDto,
     InstrumentPnlDto, LastTradeDto, OrderBookDto, OrderNotificationDto, PlantEvent,
     ReferenceDataDto, TimeBarProbeRow,
 };
 pub use error::{Error, Result};
 pub use plants::PlantSet;
-pub use session::RithmicSession;
+pub use session::{Handles, RithmicSession};
+pub use streams::{Stream, StreamHub};
 pub use systems::{list_systems, normalize_gateway_url};
 
 /// Re-export venue env enum so gateway/bin callers need not depend on `rithmic-rs` directly.

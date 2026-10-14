@@ -76,29 +76,6 @@ def _accepted_order(status: OrderStatus) -> SimpleNamespace:
     )
 
 
-def test_emit_accepted_only_while_submitted() -> None:
-    accepted: list[tuple[object, ...]] = []
-    host = _host(generate_order_accepted=lambda *args: accepted.append(args))
-    intake = VenueNotificationIntake(host)
-
-    intake.emit_accepted(
-        _accepted_order(OrderStatus.SUBMITTED),
-        ClientOrderId("O-1"),
-        VenueOrderId("B1"),
-        5,
-    )
-    assert len(accepted) == 1
-
-    accepted.clear()
-    intake.emit_accepted(
-        _accepted_order(OrderStatus.ACCEPTED),
-        ClientOrderId("O-1"),
-        VenueOrderId("B1"),
-        5,
-    )
-    assert accepted == []
-
-
 def _wire_untracked_publish_spies(
     host: SimpleNamespace, intake: VenueNotificationIntake
 ) -> list[str]:

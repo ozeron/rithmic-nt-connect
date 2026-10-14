@@ -45,20 +45,27 @@ def _wire_error(code: str, message: str) -> GatewayError:
     return GatewayError(_normalize_error_code(code), message)
 
 
+def _gap_stream(evt: dict[str, Any]) -> str | None:
+    """The stream a ``gap`` event refers to: ticker, history, pnl or order."""
+    return str(evt.get("stream")) if evt.get("type") == "gap" else None
+
+
 def _is_md_event(evt: dict[str, Any]) -> bool:
+    if evt.get("type") == "gap":
+        return _gap_stream(evt) == "ticker"
     return evt.get("type") not in _NON_MD_EVENT_TYPES
 
 
 def _is_history_event(evt: dict[str, Any]) -> bool:
-    return evt.get("type") in _HISTORY_EVENT_TYPES
+    return evt.get("type") in _HISTORY_EVENT_TYPES or _gap_stream(evt) == "history"
 
 
 def _is_pnl_event(evt: dict[str, Any]) -> bool:
-    return evt.get("type") in _PNL_EVENT_TYPES
+    return evt.get("type") in _PNL_EVENT_TYPES or _gap_stream(evt) == "pnl"
 
 
 def _is_order_event(evt: dict[str, Any]) -> bool:
-    return evt.get("type") in _ORDER_EVENT_TYPES
+    return evt.get("type") in _ORDER_EVENT_TYPES or _gap_stream(evt) == "order"
 
 
 def _dial_with_attach(config: GatewayConfig, dial: Callable[[str], None]) -> None:
@@ -462,17 +469,13 @@ class GatewayClient(FramedConnection):
         period: int = 1,
         *,
         rpc_timeout_sec: float | None = None,
-        max_workers: int = 1,
     ) -> list[dict[str, Any]]:
         """Load a wide window via client-side calendar chunks + merge.
 
-        Slice lengths match Rust ``bar_slice_secs``. Default ``max_workers=1``
-        (sequential): the parent holds a session mutex for each history RPC, so
-        extra dials do not overlap plant work. ``max_workers`` > 1 remains for
-        experiments once the plant allows concurrent history.
+        Slice lengths match Rust ``bar_slice_secs``. Slices are fetched
+        sequentially over this connection: the parent holds a session mutex for
+        each history RPC, so extra sockets would not overlap plant work.
         """
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
         from rithmic_gateway.history_window import (
             bar_slice_secs,
             dedupe_bars_by_marker,
@@ -485,39 +488,12 @@ class GatewayClient(FramedConnection):
             if rpc_timeout_sec is None
             else float(rpc_timeout_sec)
         )
-        slices = window_slices(int(start_ssboe), int(end_ssboe), step)
-        if not slices:
-            return []
-        if len(slices) == 1 or max_workers <= 1:
-            merged: list[dict[str, Any]] = []
-            for slice_start, slice_end in slices:
-                merged.extend(
-                    self.load_time_bars(
-                        symbol,
-                        exchange,
-                        slice_start,
-                        slice_end,
-                        bar_type=bar_type,
-                        period=period,
-                        rpc_timeout_sec=timeout,
-                    )
-                )
-            return dedupe_bars_by_marker(merged)
-
-        # Ensure the parent is reachable on this client first (attach or fail).
-        self.connect()
-
-        def _fetch_slice(window: tuple[int, int]) -> list[dict[str, Any]]:
-            slice_start, slice_end = window
-            from rithmic_gateway.runtime import create_gateway_client
-
-            peer = create_gateway_client(
-                self._config,
-                rpc_timeout_sec=self._rpc_timeout_sec,
-            )
-            peer.connect()
-            try:
-                return peer.load_time_bars(
+        merged: list[dict[str, Any]] = []
+        for slice_start, slice_end in window_slices(
+            int(start_ssboe), int(end_ssboe), step
+        ):
+            merged.extend(
+                self.load_time_bars(
                     symbol,
                     exchange,
                     slice_start,
@@ -526,21 +502,8 @@ class GatewayClient(FramedConnection):
                     period=period,
                     rpc_timeout_sec=timeout,
                 )
-            finally:
-                with contextlib.suppress(Exception):
-                    peer.disconnect()
-
-        merged_map: dict[tuple[int, int], list[dict[str, Any]]] = {}
-        workers = min(max_workers, len(slices))
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futs = {pool.submit(_fetch_slice, window): window for window in slices}
-            for fut in as_completed(futs):
-                window = futs[fut]
-                merged_map[window] = fut.result()
-        ordered: list[dict[str, Any]] = []
-        for window in slices:
-            ordered.extend(merged_map[window])
-        return dedupe_bars_by_marker(ordered)
+            )
+        return dedupe_bars_by_marker(merged)
 
     async def load_time_bars_range_async(
         self,
@@ -552,7 +515,6 @@ class GatewayClient(FramedConnection):
         period: int = 1,
         *,
         rpc_timeout_sec: float | None = None,
-        max_workers: int = 1,
     ) -> list[dict[str, Any]]:
         """Async wrapper around :meth:`load_time_bars_range` (thread offload)."""
         import asyncio
@@ -566,7 +528,6 @@ class GatewayClient(FramedConnection):
             bar_type,
             period,
             rpc_timeout_sec=rpc_timeout_sec,
-            max_workers=max_workers,
         )
 
     def probe_time_bars(
@@ -760,7 +721,14 @@ class GatewayClient(FramedConnection):
         self._rpc(pb.Frame(cancel_all_orders=pb.CancelAllOrdersRequest()))
 
     def poll_event(self, timeout_ms: int = 0) -> dict[str, Any] | None:
-        """Next MD event (last_trade / bbo / order_book / other), or None."""
+        """Next MD event (last_trade / bbo / order_book / other / gap), or None.
+
+        A ``{"type": "gap", "stream": "ticker", "skipped": N}`` event means the
+        parent dropped ``N`` events for a lagging consumer; resynchronize. A
+        ``{"type": "transport_resumed", ...}`` event means the parent rebuilt its
+        plants and already restored this connection's subscriptions: keep
+        reading, there is nothing to re-subscribe.
+        """
         return self._poll_filtered(timeout_ms, _is_md_event)
 
     def poll_history_event(self, timeout_ms: int = 0) -> dict[str, Any] | None:

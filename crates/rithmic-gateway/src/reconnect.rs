@@ -1,6 +1,6 @@
 //! Parent Rithmic reconnect + typed subscription intent restore.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
@@ -14,6 +14,15 @@ pub struct TimeBarIntent {
     pub exchange: String,
     pub bar_type: i32,
     pub period: i32,
+}
+
+/// A market-data join, as a hashable key (what a restore re-issues and what can
+/// be left degraded).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum MdIntent {
+    Ticker(SubKey),
+    Book(SubKey),
+    TimeBars(TimeBarIntent),
 }
 
 /// Venue joins that must be re-issued after plants reconnect.
@@ -36,6 +45,11 @@ pub struct IntentStore {
     pnl: usize,
     order: usize,
     brackets: usize,
+    /// Market-data joins the venue lost in a plant rebuild and a restore could not
+    /// re-establish (for example an expired contract). The intent stays noted for
+    /// every client that holds it; the next subscribe from one of them retries the
+    /// venue join and clears this on success.
+    degraded: HashSet<MdIntent>,
 }
 
 fn bump(map: &mut HashMap<SubKey, usize>, key: SubKey) -> bool {
@@ -93,7 +107,11 @@ impl IntentStore {
     }
 
     pub fn forget_ticker(&mut self, key: &SubKey) -> bool {
-        drop_count(&mut self.ticker, key)
+        let last = drop_count(&mut self.ticker, key);
+        if last {
+            self.degraded.remove(&MdIntent::Ticker(key.clone()));
+        }
+        last
     }
 
     pub fn note_book(&mut self, key: SubKey) -> bool {
@@ -101,7 +119,11 @@ impl IntentStore {
     }
 
     pub fn forget_book(&mut self, key: &SubKey) -> bool {
-        drop_count(&mut self.book, key)
+        let last = drop_count(&mut self.book, key);
+        if last {
+            self.degraded.remove(&MdIntent::Book(key.clone()));
+        }
+        last
     }
 
     pub fn note_time_bar(&mut self, intent: TimeBarIntent) -> bool {
@@ -109,7 +131,11 @@ impl IntentStore {
     }
 
     pub fn forget_time_bar(&mut self, intent: &TimeBarIntent) -> bool {
-        drop_tb(&mut self.time_bars, intent)
+        let last = drop_tb(&mut self.time_bars, intent);
+        if last {
+            self.degraded.remove(&MdIntent::TimeBars(intent.clone()));
+        }
+        last
     }
 
     pub fn note_pnl(&mut self) -> bool {
@@ -145,6 +171,32 @@ impl IntentStore {
             order: self.order > 0,
             brackets: self.brackets > 0,
         }
+    }
+
+    /// Mark a join degraded. A no-op when no client holds the intent any more (the
+    /// last holder left while the restore was retrying): a stale flag would make a
+    /// later, unrelated subscribe do a spurious second venue join.
+    pub fn mark_degraded(&mut self, intent: MdIntent) {
+        let held = match &intent {
+            MdIntent::Ticker(k) => self.ticker.contains_key(k),
+            MdIntent::Book(k) => self.book.contains_key(k),
+            MdIntent::TimeBars(t) => self.time_bars.contains_key(t),
+        };
+        if held {
+            self.degraded.insert(intent);
+        }
+    }
+
+    pub fn clear_degraded(&mut self, intent: &MdIntent) -> bool {
+        self.degraded.remove(intent)
+    }
+
+    pub fn is_degraded(&self, intent: &MdIntent) -> bool {
+        self.degraded.contains(intent)
+    }
+
+    pub fn degraded_count(&self) -> usize {
+        self.degraded.len()
     }
 
     pub fn remembered_count(&self) -> usize {
@@ -236,17 +288,29 @@ impl ReconnectController {
         self.intent.lock().await.forget_brackets()
     }
 
+    pub async fn mark_degraded(&self, intent: MdIntent) {
+        self.intent.lock().await.mark_degraded(intent);
+    }
+
+    pub async fn clear_degraded(&self, intent: &MdIntent) -> bool {
+        self.intent.lock().await.clear_degraded(intent)
+    }
+
+    pub async fn is_degraded(&self, intent: &MdIntent) -> bool {
+        self.intent.lock().await.is_degraded(intent)
+    }
+
+    /// Market-data joins currently left degraded after a rebuild.
+    pub async fn degraded_count(&self) -> usize {
+        self.intent.lock().await.degraded_count()
+    }
+
     /// After plants are back, return every typed venue join to re-issue.
     ///
     /// Does **not** touch hub refcounts: live clients keep fan-out interest
     /// across a plant drop.
     pub async fn restore_plan(&self) -> RestorePlan {
         self.intent.lock().await.restore_plan()
-    }
-
-    /// Keys that need a ticker venue re-subscribe (compat helper for tests).
-    pub async fn restore_after_reconnect(&self) -> Vec<SubKey> {
-        self.restore_plan().await.ticker
     }
 
     pub async fn remembered_count(&self) -> usize {
@@ -266,20 +330,6 @@ impl ReconnectController {
             g.book.len() as u32,
             g.time_bars.len() as u32,
         )
-    }
-
-    /// Test/helper: hub + ticker intent in one call (0→1 hub when first).
-    pub async fn on_subscribe(&self, key: SubKey) -> bool {
-        let first_ticker = self.note_ticker(key.clone()).await;
-        let _ = self.add_hub_interest(key).await;
-        first_ticker
-    }
-
-    /// Test/helper: hub + ticker intent drop.
-    pub async fn on_unsubscribe(&self, key: &SubKey) -> bool {
-        let last_ticker = self.forget_ticker(key).await;
-        let last_hub = self.remove_hub_interest(key).await;
-        last_ticker || last_hub
     }
 }
 
@@ -307,6 +357,25 @@ mod tests {
         assert!(!hub.add_interest(key.clone()).await);
         assert!(!hub.remove_interest(&key).await);
         assert!(hub.remove_interest(&key).await);
+    }
+
+    #[tokio::test]
+    async fn degraded_marks_only_apply_to_held_intents() {
+        let ctl = ReconnectController::new(Arc::new(FanoutHub::new(16)));
+        let key = SubKey {
+            symbol: "NQ".into(),
+            exchange: "CME".into(),
+        };
+        let intent = MdIntent::Ticker(key.clone());
+        // Everyone left while the restore was retrying: the late mark is dropped.
+        ctl.mark_degraded(intent.clone()).await;
+        assert!(!ctl.is_degraded(&intent).await);
+
+        ctl.note_ticker(key.clone()).await;
+        ctl.mark_degraded(intent.clone()).await;
+        assert!(ctl.is_degraded(&intent).await);
+        ctl.forget_ticker(&key).await;
+        assert!(!ctl.is_degraded(&intent).await);
     }
 
     #[tokio::test]

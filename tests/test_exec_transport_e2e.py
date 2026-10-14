@@ -702,7 +702,7 @@ def test_reconnect_ream_requires_successful_drain(
 def test_transport_generation_bump_schedules_l3_rearm(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """TRANSPORT_UP must restore plants (TransportRecovery owns dial)."""
+    """TRANSPORT_UP must restore plants (the Rust client runtime owns dial)."""
     session = _ConnectSession(fail_load_orders=False)
     client = _connect_client(session, monkeypatch)
     client._order_plant = OrderPlantPolicy(OrderPlantState.LIVE)
@@ -740,6 +740,31 @@ def test_transport_generation_bump_schedules_l3_rearm(
     asyncio.run(_run())
     assert "subscribe_order_updates" in session.calls
     assert "load_orders" in session.calls
+    # The parent restored the order intent: the shared venue plant is not torn down.
+    assert "disconnect_order_plant" not in session.calls
+
+
+def test_order_gap_rereads_venue_state_without_tearing_the_plant_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A gap hides fills: submits stay blocked until the drain re-reads venue state,
+    and the order plant is never disconnected (the stream itself is healthy)."""
+    session = _ConnectSession(fail_load_orders=False)
+    client = _connect_client(session, monkeypatch)
+    client._order_plant = OrderPlantPolicy(OrderPlantState.LIVE)
+    client._pnl_connected = False
+
+    async def _run() -> None:
+        client._order_poll_task = asyncio.ensure_future(asyncio.sleep(10))
+        try:
+            await client._recover_order_gap()
+        finally:
+            client._order_poll_task.cancel()
+
+    asyncio.run(_run())
+    assert "load_orders" in session.calls
+    assert "disconnect_order_plant" not in session.calls
+    assert client._order_plant.state is OrderPlantState.LIVE
 
 
 class _FailingSubscribeSession(_ConnectSession):

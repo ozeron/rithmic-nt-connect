@@ -539,6 +539,23 @@ message OtherEvent {
   string source = 2;
 }
 
+// A plant stream dropped events because its consumer lagged (never silent).
+// `stream` is one of "ticker", "history", "pnl", "order". Additive: older
+// clients that do not know this body ignore it.
+message Gap {
+  string stream = 1;
+  uint64 skipped = 2;
+}
+
+// The parent rebuilt its plants and restored every client's subscriptions: this
+// client stays attached and keeps its intents, but events were missed while the
+// plants were down and the venue state is fresh. `generation` is the new
+// transport generation (it increases on every rebuild). Additive: an older client
+// that does not know this body ignores it.
+message TransportResumed {
+  uint64 generation = 1;
+}
+
 // Discriminated event envelope pushed from gateway to client.
 message Event {
   oneof body {
@@ -550,6 +567,8 @@ message Event {
     OrderNotification order_notification = 6;
     HistoryBar time_bar = 7;
     OtherEvent other = 8;
+    Gap gap = 9;
+    TransportResumed transport_resumed = 10;
   }
 }
 

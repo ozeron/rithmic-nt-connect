@@ -5,14 +5,14 @@
 //! peer leaves (see [`crate::idle_exit`]).
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{broadcast, mpsc, watch, Mutex as TokioMutex};
+use tokio::sync::{broadcast, mpsc, watch, Mutex as TokioMutex, RwLock};
 use tokio::task::JoinHandle;
 
 use rithmic_plants::Session;
@@ -21,7 +21,7 @@ use crate::codec;
 use crate::idle_exit::{IdleExit, IdleExitPolicy};
 use crate::pb::{self, frame::Body, Frame, Handshake, Ready};
 use crate::reconnect::{ReconnectController, TimeBarIntent};
-use crate::subscriptions::{ClientId, FanoutHub, ParentGates, SharedFanout, SubKey};
+use crate::subscriptions::{ClientId, Fan, FanoutHub, Kind, ParentGates, SharedFanout, SubKey};
 
 mod dispatch;
 pub mod pump;
@@ -48,20 +48,22 @@ pub fn boot_gateway_metadata() -> (u64, AtomicU64, watch::Sender<u64>) {
 
 /// The parent's plant session behind the [`Session`] trait, guarded by one gate.
 ///
-/// `lock()` serializes compound operations (event-pump polls, reconnect, intent
-/// restore) exactly as the old `Mutex<RithmicSession>` did. Long reads that must
-/// not stall the pump take [`SessionHandle::checkout`] instead: wait for the gate
-/// once (so they queue behind a reconnect), then run on the shared session
-/// without holding it.
+/// The gate only separates *using* the plants from *rebuilding* them. RPCs take it
+/// shared ([`SessionHandle::lock`]) and run concurrently, so no call waits behind
+/// another; reconnect and shutdown take it exclusively
+/// ([`SessionHandle::lock_exclusive`]), which waits for in-flight calls and keeps
+/// new ones out. Waiting for events needs no gate at all: the pump uses
+/// [`SessionHandle::checkout`] once and then runs on the shared session.
 #[derive(Clone)]
 pub struct SessionHandle {
-    gate: Arc<TokioMutex<()>>,
+    gate: Arc<RwLock<()>>,
     session: Arc<dyn Session>,
 }
 
-/// Guard returned by [`SessionHandle::lock`]; derefs to the session.
+/// Shared guard returned by [`SessionHandle::lock`]; derefs to the session. Any
+/// number of RPCs hold it at once, so a slow call never queues the others.
 pub struct SessionGuard<'a> {
-    _gate: tokio::sync::MutexGuard<'a, ()>,
+    _gate: tokio::sync::RwLockReadGuard<'a, ()>,
     session: &'a Arc<dyn Session>,
 }
 
@@ -73,24 +75,49 @@ impl std::ops::Deref for SessionGuard<'_> {
     }
 }
 
+/// Exclusive guard for rebuilding the plants (reconnect, shutdown): it waits for
+/// in-flight RPCs to finish and keeps new ones out while it is held.
+pub struct ExclusiveSessionGuard<'a> {
+    _gate: tokio::sync::RwLockWriteGuard<'a, ()>,
+    session: &'a Arc<dyn Session>,
+}
+
+impl std::ops::Deref for ExclusiveSessionGuard<'_> {
+    type Target = dyn Session;
+
+    fn deref(&self) -> &Self::Target {
+        &**self.session
+    }
+}
+
 impl SessionHandle {
     pub fn new(session: Arc<dyn Session>) -> Self {
         Self {
-            gate: Arc::new(TokioMutex::new(())),
+            gate: Arc::new(RwLock::new(())),
             session,
         }
     }
 
+    /// Shared access: RPCs run concurrently and only wait while plants are being
+    /// rebuilt.
     pub async fn lock(&self) -> SessionGuard<'_> {
         SessionGuard {
-            _gate: self.gate.lock().await,
+            _gate: self.gate.read().await,
             session: &self.session,
         }
     }
 
-    /// Wait for the gate, then return the session without holding it.
+    /// Exclusive access, for disconnect / connect / restore.
+    pub async fn lock_exclusive(&self) -> ExclusiveSessionGuard<'_> {
+        ExclusiveSessionGuard {
+            _gate: self.gate.write().await,
+            session: &self.session,
+        }
+    }
+
+    /// Wait out any rebuild, then return the session without holding the gate.
     pub async fn checkout(&self) -> Arc<dyn Session> {
-        drop(self.gate.lock().await);
+        drop(self.gate.read().await);
         Arc::clone(&self.session)
     }
 }
@@ -105,6 +132,9 @@ pub struct GatewayState {
     /// Set when a plant must be rebuilt outside the poll path (e.g. failed
     /// order-plant reseat). Event pump treats this like a connection issue.
     pub force_reconnect: AtomicBool,
+    /// Wakes the event pump when `force_reconnect` is set (a stored permit, so
+    /// a wake raised while the pump is busy is not lost).
+    pub reconnect_wake: tokio::sync::Notify,
     /// Parent secret for non-empty Handshake `auth_token` (from
     /// `RITHMIC_GATEWAY_AUTH_TOKEN`). Empty means only same-UID empty-token
     /// peers are accepted.
@@ -137,6 +167,14 @@ pub struct GatewayState {
     /// Notifies connected clients when [`Self::transport_generation`] bumps so
     /// they drop and re-handshake (otherwise they keep a stale Ready frame).
     pub transport_epoch: watch::Sender<u64>,
+}
+
+impl GatewayState {
+    /// Ask the event pump to rebuild the plants (outside the poll path).
+    pub fn request_reconnect(&self) {
+        self.force_reconnect.store(true, Ordering::SeqCst);
+        self.reconnect_wake.notify_one();
+    }
 }
 
 /// Credential fingerprint advertised/checked at Handshake (consistency
@@ -267,6 +305,7 @@ pub async fn run_gateway(params: GatewayParams) -> Result<(), String> {
         // Ready only after plants are up (KTD5): the caller connected already.
         ready: AtomicBool::new(true),
         force_reconnect: AtomicBool::new(false),
+        reconnect_wake: tokio::sync::Notify::new(),
         expected_auth_token,
         session: Some(session.clone()),
         reconnect: reconnect.clone(),
@@ -290,7 +329,7 @@ pub async fn run_gateway(params: GatewayParams) -> Result<(), String> {
     pump.abort();
     let _ = pump.await;
     {
-        let guard = session.lock().await;
+        let guard = session.lock_exclusive().await;
         let _ = guard.disconnect().await;
     }
     let _ = std::fs::remove_file(&path);
@@ -329,7 +368,9 @@ pub async fn serve(listener: UnixListener, state: Arc<GatewayState>) -> std::io:
     }
 }
 
-async fn read_frame_bytes(stream: &mut UnixStream) -> std::io::Result<Option<Vec<u8>>> {
+async fn read_frame_bytes<R: tokio::io::AsyncRead + Unpin>(
+    stream: &mut R,
+) -> std::io::Result<Option<Vec<u8>>> {
     // Idle wait for the next frame length has no short timeout (clients may
     // pause between RPCs). Once a length is known, bound the payload read so a
     // peer cannot allocate MAX_FRAME_LEN and stall forever.
@@ -381,14 +422,11 @@ fn same_uid_peer(stream: &UnixStream) -> bool {
 
 pub(super) enum OutMsg {
     Frame(Bytes),
-    Overflow,
 }
 
 /// Per-connection fan-out bookkeeping: which topics this client forwards,
 /// typed venue joins this client asked for, and forwarder tasks.
 pub(super) struct ClientCtx {
-    #[allow(dead_code)]
-    id: ClientId,
     subscribed: HashSet<SubKey>,
     ticker: HashSet<SubKey>,
     book: HashSet<SubKey>,
@@ -397,13 +435,15 @@ pub(super) struct ClientCtx {
     order: bool,
     brackets: bool,
     forwarders: HashMap<SubKey, JoinHandle<()>>,
+    /// Per forwarded topic: which frame kinds this client asked for (bit mask of
+    /// [`Kind::bit`]). A forwarder drops frames of other kinds.
+    kinds: HashMap<SubKey, Arc<AtomicU8>>,
     out_tx: mpsc::Sender<OutMsg>,
 }
 
 impl ClientCtx {
     fn new(out_tx: mpsc::Sender<OutMsg>) -> Self {
         Self {
-            id: ClientId::new(),
             subscribed: HashSet::new(),
             ticker: HashSet::new(),
             book: HashSet::new(),
@@ -412,8 +452,37 @@ impl ClientCtx {
             order: false,
             brackets: false,
             forwarders: HashMap::new(),
+            kinds: HashMap::new(),
             out_tx,
         }
+    }
+
+    /// Recompute and publish the frame kinds this client wants on `key`'s topic,
+    /// after one of its ticker / book / time-bar intents changed.
+    pub(super) fn sync_kinds(&mut self, key: &SubKey) {
+        let mut mask = 0u8;
+        if self.ticker.contains(key) {
+            mask |= Kind::Ticker.bit();
+        }
+        if self.book.contains(key) {
+            mask |= Kind::Book.bit();
+        }
+        if self
+            .time_bars
+            .iter()
+            .any(|tb| tb.symbol == key.symbol && tb.exchange == key.exchange)
+        {
+            mask |= Kind::Bars.bit();
+        }
+        if mask == 0 && !self.forwarders.contains_key(key) {
+            // Nothing forwarded and nothing wanted: keep no empty entry around.
+            self.kinds.remove(key);
+            return;
+        }
+        self.kinds
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(AtomicU8::new(0)))
+            .store(mask, Ordering::SeqCst);
     }
 
     fn wants_md(&self, key: &SubKey) -> bool {
@@ -432,7 +501,12 @@ impl ClientCtx {
             return;
         }
         if let Some(rx) = hub.subscribe_receiver(key).await {
-            let handle = spawn_forwarder(rx, self.out_tx.clone());
+            let kinds = Arc::clone(
+                self.kinds
+                    .entry(key.clone())
+                    .or_insert_with(|| Arc::new(AtomicU8::new(0))),
+            );
+            let handle = spawn_forwarder(rx, self.out_tx.clone(), stream_of_topic(key), kinds);
             self.forwarders.insert(key.clone(), handle);
             self.subscribed.insert(key.clone());
         }
@@ -442,6 +516,7 @@ impl ClientCtx {
         if let Some(handle) = self.forwarders.remove(key) {
             handle.abort();
         }
+        self.kinds.remove(key);
         self.subscribed.remove(key);
     }
 
@@ -493,6 +568,8 @@ impl ClientCtx {
             return;
         }
         self.pnl = false;
+        let lock = dispatch::topic_lock(state, &crate::convert::pnl_key()).await;
+        let _guard = lock.lock().await;
         if state.reconnect.forget_pnl().await {
             if let Some(session) = &state.session {
                 let guard = session.lock().await;
@@ -528,7 +605,7 @@ impl ClientCtx {
                 if let Err(e) = dispatch::reseat_order_plant_without_brackets(state).await {
                     eprintln!("rithmic-gateway: teardown reseat failed: {e}");
                     state.ready.store(false, Ordering::SeqCst);
-                    state.force_reconnect.store(true, Ordering::SeqCst);
+                    state.request_reconnect();
                 }
             }
         } else {
@@ -543,19 +620,55 @@ impl ClientCtx {
     }
 }
 
-fn spawn_forwarder(rx: broadcast::Receiver<Bytes>, out_tx: mpsc::Sender<OutMsg>) -> JoinHandle<()> {
+/// Which plant stream a topic's events come from, for a gap frame.
+fn stream_of_topic(key: &SubKey) -> rithmic_plants::Stream {
+    match key.symbol.as_str() {
+        "__pnl__" => rithmic_plants::Stream::Pnl,
+        "__order__" => rithmic_plants::Stream::Order,
+        _ => rithmic_plants::Stream::Ticker,
+    }
+}
+
+/// Forward one topic to one client. A receiver that falls behind the topic's
+/// ring is not disconnected: it is told exactly how many frames it missed (a
+/// `Gap` in order with the rest) and keeps going. A client that stops reading
+/// altogether is cut by the writer's timeout.
+fn spawn_forwarder(
+    rx: broadcast::Receiver<Fan>,
+    out_tx: mpsc::Sender<OutMsg>,
+    stream: rithmic_plants::Stream,
+    kinds: Arc<AtomicU8>,
+) -> JoinHandle<()> {
     let mut queue = crate::subscriptions::ClientQueue::from_receiver(ClientId::new(), rx);
     tokio::spawn(async move {
         loop {
             match queue.recv().await {
-                Ok(bytes) => {
-                    if out_tx.send(OutMsg::Frame(bytes)).await.is_err() {
+                Ok(fan) => {
+                    // A frame of a kind this client never asked for (a book
+                    // update for a ticker-only client) is dropped here, before
+                    // it costs a socket write or a decode on the far side.
+                    let wanted = fan.kind == Kind::Any
+                        || kinds.load(Ordering::Relaxed) & fan.kind.bit() != 0;
+                    if wanted && out_tx.send(OutMsg::Frame(fan.bytes)).await.is_err() {
                         return;
                     }
                 }
-                Err(crate::subscriptions::ClientQueueError::Overflow) => {
-                    let _ = out_tx.send(OutMsg::Overflow).await;
-                    return;
+                Err(crate::subscriptions::ClientQueueError::Overflow { skipped }) => {
+                    let gap = Frame {
+                        request_id: 0,
+                        body: Some(Body::Event(pb::Event {
+                            body: Some(pb::event::Body::Gap(pb::Gap {
+                                stream: stream.plant().into(),
+                                skipped,
+                            })),
+                        })),
+                    };
+                    let Ok(wire) = codec::encode(&gap) else {
+                        return;
+                    };
+                    if out_tx.send(OutMsg::Frame(Bytes::from(wire))).await.is_err() {
+                        return;
+                    }
                 }
                 Err(crate::subscriptions::ClientQueueError::Closed) => return,
             }
@@ -563,17 +676,29 @@ fn spawn_forwarder(rx: broadcast::Receiver<Bytes>, out_tx: mpsc::Sender<OutMsg>)
     })
 }
 
-/// Encode a plant event as a wire frame and publish it to `key`'s topic.
-pub async fn publish_event(hub: &FanoutHub, key: &SubKey, event: pb::Event) -> usize {
+/// Encode one event as a wire frame (a single allocation) ready to fan out.
+fn encode_event(event: pb::Event, kind: Kind) -> Option<Fan> {
     let frame = Frame {
         request_id: 0,
         body: Some(Body::Event(event)),
     };
-    let wire = match codec::encode(&frame) {
-        Ok(w) => w,
-        Err(_) => return 0,
+    let wire = codec::encode(&frame).ok()?;
+    Some(Fan {
+        kind,
+        bytes: Bytes::from(wire),
+    })
+}
+
+/// Encode a wire event and publish it to `key`'s topic (a gap on the ticker or
+/// history stream goes to every symbol topic).
+pub async fn publish_event(hub: &FanoutHub, key: &SubKey, event: pb::Event) -> usize {
+    let Some(fan) = encode_event(event, Kind::Any) else {
+        return 0;
     };
-    hub.publish(key, Bytes::from(wire)).await
+    if key.symbol == crate::convert::GAP_BROADCAST {
+        return hub.publish_symbols(fan).await;
+    }
+    hub.publish(key, fan).await
 }
 
 async fn handle_client(mut stream: UnixStream, state: Arc<GatewayState>) -> Result<(), String> {
@@ -604,6 +729,12 @@ async fn handle_client(mut stream: UnixStream, state: Arc<GatewayState>) -> Resu
         return Err(format!("{code}: {msg}"));
     }
 
+    // Subscribe before the generation goes into Ready, so a rebuild that finishes
+    // in between is still reported (Ready carries the older generation) instead of
+    // being missed. Only later bumps are reacted to.
+    let mut epoch_rx = state.transport_epoch.subscribe();
+    epoch_rx.borrow_and_update();
+
     write_frame(
         &mut stream,
         &Frame {
@@ -628,78 +759,275 @@ async fn handle_client(mut stream: UnixStream, state: Arc<GatewayState>) -> Resu
         return Err("shutting_down".into());
     }
 
-    let (out_tx, mut out_rx) = mpsc::channel::<OutMsg>(crate::subscriptions::DEFAULT_QUEUE_CAP);
-    let mut client = ClientCtx::new(out_tx);
-    let mut epoch_rx = state.transport_epoch.subscribe();
-    // Ignore the current value; only react to subsequent generation bumps.
-    epoch_rx.borrow_and_update();
+    let (out_tx, out_rx) = mpsc::channel::<OutMsg>(crate::subscriptions::DEFAULT_QUEUE_CAP);
+    let client = ClientCtx::new(out_tx);
+    // One connection is four tasks so no request can hold up another:
+    //   reader   owns the read half, decodes frames and hands each to a lane;
+    //   commands runs state-changing / subscription requests in arrival order;
+    //   slow     runs read RPCs (history loads) a few at a time, off that lane;
+    //   writer   owns the write half; replies go out ahead of fan-out events.
+    let (reply_tx, reply_rx) = mpsc::channel::<Frame>(COMMAND_QUEUE + SLOW_QUEUE);
+    let (cmd_tx, cmd_rx) = mpsc::channel::<Request>(COMMAND_QUEUE);
+    let (slow_tx, slow_rx) = mpsc::channel::<Request>(SLOW_QUEUE);
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let (read_half, write_half) = stream.into_split();
 
-    let loop_result: Result<(), String> = loop {
+    let mut reader = tokio::spawn(read_requests(read_half, cmd_tx, slow_tx, reply_tx.clone()));
+    let slow = tokio::spawn(run_slow_lane(Arc::clone(&state), slow_rx, reply_tx.clone()));
+    // Kept to tell this client when the plants were rebuilt; dropped before the
+    // writer is awaited so the reply channel can close.
+    let resume_tx = reply_tx.clone();
+    let mut commands = tokio::spawn(run_commands(
+        Arc::clone(&state),
+        client,
+        cmd_rx,
+        reply_tx,
+        stop_rx,
+    ));
+    let mut writer = tokio::spawn(write_replies(write_half, reply_rx, out_rx));
+
+    let mut result: Result<(), String> = Ok(());
+    let mut reader_done = false;
+    let mut writer_done = false;
+    let client = loop {
         tokio::select! {
-            biased;
-            _ = epoch_rx.changed() => {
-                // Plants rebuilt — force re-handshake so Ready carries the new
-                // transport_generation (Macroscope).
-                break Ok(());
-            }
-            frame = read_frame_bytes(&mut stream) => {
-                match frame {
-                    Ok(Some(payload)) => {
-                        let mut framed = (payload.len() as u32).to_be_bytes().to_vec();
-                        framed.extend_from_slice(&payload);
-                        let req = match codec::decode::<Frame>(&framed) {
-                            Ok((f, _)) => f,
-                            Err(e) => break Err(format!("proto: {e}")),
-                        };
-                        let request_id = req.request_id;
-                        let Some(body) = req.body else { continue };
-                        let close_after = matches!(body, Body::Disconnect(_));
-                        // During plant reconnect, refuse new RPCs (except
-                        // detach) so callers do not observe Ack against a
-                        // half-rebuilt venue session.
-                        let resp = if !close_after && !state.ready.load(Ordering::SeqCst) {
-                            dispatch::error_frame(
-                                request_id,
-                                "not_ready",
-                                "gateway not Ready (plants reconnecting)",
-                            )
-                        } else {
-                            dispatch::dispatch(&state, &mut client, request_id, body).await
-                        };
-                        if write_frame(&mut stream, &resp).await.is_err() {
-                            break Ok(());
-                        }
-                        if close_after {
-                            break Ok(());
-                        }
-                    }
-                    Ok(None) => break Ok(()),
-                    Err(e) => break Err(format!("read: {e}")),
+            // The peer closed or the stream broke: let the command lane finish
+            // what was already queued, then it ends on its own.
+            r = &mut reader, if !reader_done => {
+                reader_done = true;
+                if let Ok(Err(e)) = r {
+                    result = Err(e);
                 }
             }
-            msg = out_rx.recv() => {
-                match msg {
-                    Some(OutMsg::Frame(bytes)) => {
-                        match tokio::time::timeout(Duration::from_secs(5), stream.write_all(&bytes))
-                            .await
-                        {
-                            Ok(Ok(())) => {}
-                            _ => break Ok(()), // slow / dead client
-                        }
-                    }
-                    Some(OutMsg::Overflow) => {
-                        eprintln!("gateway: client overflowed its outbound queue; disconnecting");
-                        break Ok(());
-                    }
-                    None => {}
+            // The command lane ended: a Disconnect, or the connection is done.
+            done = &mut commands => break done.ok(),
+            // The client stopped draining its socket (or it died).
+            _ = &mut writer => {
+                writer_done = true;
+                let _ = stop_tx.send(true);
+                break (&mut commands).await.ok();
+            }
+            // The plants were rebuilt and every client's subscriptions restored.
+            // The client stays attached and keeps its intents; it is told so it can
+            // resynchronize (events were missed while the plants were down).
+            _ = epoch_rx.changed() => {
+                let generation = *epoch_rx.borrow_and_update();
+                let resumed = Frame {
+                    request_id: 0,
+                    body: Some(Body::Event(pb::Event {
+                        body: Some(pb::event::Body::TransportResumed(pb::TransportResumed {
+                            generation,
+                        })),
+                    })),
+                };
+                if resume_tx.send(resumed).await.is_err() {
+                    // The writer is gone: the connection is done.
+                    let _ = stop_tx.send(true);
+                    break (&mut commands).await.ok();
                 }
             }
         }
     };
 
-    client.teardown(&state).await;
+    drop(resume_tx);
+    reader.abort();
+    slow.abort();
+    if let Some(mut client) = client {
+        client.teardown(&state).await;
+    }
+    // With every sender gone the writer flushes what is queued (a Disconnect
+    // ack) and ends; bound the wait so a dead peer cannot hold the teardown.
+    if !writer_done {
+        let _ = tokio::time::timeout(Duration::from_secs(2), &mut writer).await;
+        writer.abort();
+    }
     state.idle.peer_detached().await;
-    loop_result
+    result
+}
+
+/// Requests a connection may have queued for each lane before the reader waits
+/// (command) or answers `busy` (slow).
+const COMMAND_QUEUE: usize = 256;
+const SLOW_QUEUE: usize = 64;
+/// Slow read RPCs one connection runs at once.
+const SLOW_CONCURRENCY: usize = 4;
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+struct Request {
+    id: u64,
+    body: Body,
+}
+
+/// Read and decode frames on their own task: nothing selects over this read, so
+/// a partly received frame is never abandoned, and a frame is decoded straight
+/// from its payload with no intermediate copy.
+async fn read_requests(
+    mut read: tokio::net::unix::OwnedReadHalf,
+    commands: mpsc::Sender<Request>,
+    slow: mpsc::Sender<Request>,
+    replies: mpsc::Sender<Frame>,
+) -> Result<(), String> {
+    use prost::Message;
+    loop {
+        match read_frame_bytes(&mut read).await {
+            Ok(Some(payload)) => {
+                let frame = Frame::decode(payload.as_slice()).map_err(|e| format!("proto: {e}"))?;
+                let Some(body) = frame.body else { continue };
+                let req = Request {
+                    id: frame.request_id,
+                    body,
+                };
+                match crate::rpc_table::lane_of(&req.body) {
+                    crate::rpc_table::Lane::Command => {
+                        if commands.send(req).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                    crate::rpc_table::Lane::Slow => match slow.try_send(req) {
+                        Ok(()) => {}
+                        Err(mpsc::error::TrySendError::Full(req)) => {
+                            let busy = dispatch::error_frame(
+                                req.id,
+                                "busy",
+                                "too many slow requests in flight on this connection",
+                            );
+                            if replies.send(busy).await.is_err() {
+                                return Ok(());
+                            }
+                        }
+                        Err(mpsc::error::TrySendError::Closed(_)) => return Ok(()),
+                    },
+                }
+            }
+            Ok(None) => return Ok(()),
+            Err(e) => return Err(format!("read: {e}")),
+        }
+    }
+}
+
+/// Serve state-changing and subscription requests one at a time, in the order
+/// they arrived. A dispatch in progress is never cancelled (a half-applied
+/// subscription would leak intent); a stop is noticed between requests. Returns
+/// the client context for teardown.
+async fn run_commands(
+    state: Arc<GatewayState>,
+    mut client: ClientCtx,
+    mut requests: mpsc::Receiver<Request>,
+    replies: mpsc::Sender<Frame>,
+    mut stop: watch::Receiver<bool>,
+) -> ClientCtx {
+    loop {
+        let req = tokio::select! {
+            biased;
+            _ = stop.changed() => break,
+            r = requests.recv() => match r {
+                Some(r) => r,
+                None => break,
+            },
+        };
+        let close_after = matches!(req.body, Body::Disconnect(_));
+        // During plant reconnect, refuse new RPCs (except detach) so callers do
+        // not observe Ack against a half-rebuilt venue session.
+        let resp = if !close_after && !state.ready.load(Ordering::SeqCst) {
+            not_ready_frame(req.id)
+        } else {
+            dispatch::dispatch(&state, &mut client, req.id, req.body).await
+        };
+        if replies.send(resp).await.is_err() || close_after {
+            break;
+        }
+    }
+    client
+}
+
+/// A request refused while the plants rebuild never reached the venue, so it is
+/// answered with the `not_sent` class: the caller may deny it (and a command is
+/// not an unknown outcome that would latch the order plant).
+fn not_ready_frame(request_id: u64) -> Frame {
+    dispatch::error_frame(
+        request_id,
+        "not_sent",
+        "gateway not ready (plants reconnecting); request not sent",
+    )
+}
+
+/// Serve slow read RPCs concurrently (bounded), replying as each finishes.
+async fn run_slow_lane(
+    state: Arc<GatewayState>,
+    mut requests: mpsc::Receiver<Request>,
+    replies: mpsc::Sender<Frame>,
+) {
+    let permits = Arc::new(tokio::sync::Semaphore::new(SLOW_CONCURRENCY));
+    let mut running = tokio::task::JoinSet::new();
+    while let Some(req) = requests.recv().await {
+        let Ok(permit) = Arc::clone(&permits).acquire_owned().await else {
+            return;
+        };
+        let (state, replies) = (Arc::clone(&state), replies.clone());
+        running.spawn(async move {
+            let _permit = permit;
+            let resp = if !state.ready.load(Ordering::SeqCst) {
+                not_ready_frame(req.id)
+            } else {
+                dispatch::dispatch_read(&state, req.id, req.body).await
+            };
+            let _ = replies.send(resp).await;
+        });
+        while running.try_join_next().is_some() {}
+    }
+    while running.join_next().await.is_some() {}
+}
+
+/// Own the write half. Replies are written ahead of fan-out events; a write that
+/// takes longer than [`WRITE_TIMEOUT`] means the client stopped draining, and
+/// the connection ends. The task ends once every reply sender is gone and the
+/// queue is flushed.
+async fn write_replies(
+    mut write: tokio::net::unix::OwnedWriteHalf,
+    mut replies: mpsc::Receiver<Frame>,
+    mut events: mpsc::Receiver<OutMsg>,
+) {
+    let mut events_open = true;
+    // Ends when the reply channel has closed and drained (that flushes a final
+    // ack); fan-out events are best effort and never keep the socket open.
+    let mut replies_open = true;
+    while replies_open {
+        let wire: Option<Bytes> = tokio::select! {
+            biased;
+            frame = replies.recv(), if replies_open => match frame {
+                Some(frame) => match codec::encode(&frame) {
+                    Ok(wire) => Some(Bytes::from(wire)),
+                    // A reply that cannot be framed (a history window over the frame
+                    // limit) must still answer its request, or the caller waits for
+                    // its own timeout.
+                    Err(e) => codec::encode(&dispatch::error_frame(
+                        frame.request_id,
+                        "response_too_large",
+                        &e.to_string(),
+                    ))
+                    .ok()
+                    .map(Bytes::from),
+                },
+                None => {
+                    replies_open = false;
+                    None
+                }
+            },
+            msg = events.recv(), if events_open => match msg {
+                Some(OutMsg::Frame(bytes)) => Some(bytes),
+                None => {
+                    events_open = false;
+                    None
+                }
+            },
+        };
+        if let Some(wire) = wire {
+            match tokio::time::timeout(WRITE_TIMEOUT, write.write_all(&wire)).await {
+                Ok(Ok(())) => {}
+                _ => return, // slow / dead client
+            }
+        }
+    }
 }
 
 /// Rebroadcast a plant event to all interested fan-out subscribers, keyed by
@@ -707,8 +1035,34 @@ async fn handle_client(mut stream: UnixStream, state: Arc<GatewayState>) -> Resu
 /// [`ReconnectController`]-visible hub so late subscribers still see the
 /// venue-declared topic.
 pub async fn publish_plant_event(hub: &FanoutHub, event: rithmic_plants::dto::PlantEvent) {
-    let (key, wire_event) = crate::convert::plant_event_to_routed(event);
-    publish_event(hub, &key, wire_event).await;
+    use crate::convert::{plant_event_to_pb, route_of, Route};
+
+    match route_of(&event) {
+        // A symbol event: look the topic up from borrowed strings and, when nobody
+        // is attached to it, drop the event before converting or encoding it.
+        Route::Topic {
+            symbol,
+            exchange,
+            kind,
+        } => {
+            let Some(tx) = hub.live_sender(symbol, exchange).await else {
+                return;
+            };
+            if let Some(fan) = encode_event(plant_event_to_pb(event), kind) {
+                let _ = tx.send(fan);
+            }
+        }
+        Route::Gap(rithmic_plants::Stream::Ticker | rithmic_plants::Stream::History) => {
+            if let Some(fan) = encode_event(plant_event_to_pb(event), Kind::Any) {
+                hub.publish_symbols(fan).await;
+            }
+        }
+        // Account-level events and order/PnL gaps ride their sentinel topics.
+        Route::Pnl | Route::Order | Route::Other | Route::Gap(_) => {
+            let (key, wire_event) = crate::convert::plant_event_to_routed(event);
+            publish_event(hub, &key, wire_event).await;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -852,5 +1206,15 @@ mod auth_tests {
             authorize_handshake(&state, &empty, true).unwrap_err().0,
             "not_ready"
         );
+    }
+
+    #[test]
+    fn a_request_refused_while_plants_rebuild_is_not_sent() {
+        let frame = not_ready_frame(7);
+        assert_eq!(frame.request_id, 7);
+        let Some(Body::Error(e)) = frame.body else {
+            panic!("expected an error frame");
+        };
+        assert_eq!(e.code, "not_sent");
     }
 }

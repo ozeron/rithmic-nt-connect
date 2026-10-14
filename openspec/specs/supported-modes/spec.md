@@ -1,10 +1,8 @@
 # supported-modes Specification
 
 ## Purpose
-TBD - created by syncing change `simplify-gateway-modes`. Update Purpose after archive.
-
+The supported connect modes and their guardrails: explicit `direct` or `gateway` selection, one shared socket per process, unix-only transport, fail-fast retired knobs, venue-environment separation, independent trading and cancel-all gates, and explicit bar source.
 ## Requirements
-
 ### Requirement: Connect mode is explicit and limited to direct or gateway
 The adapter SHALL accept exactly two connect modes, `direct` and `gateway`, from `connect_mode` or `RITHMIC_CONNECT_MODE`, and SHALL NOT apply a default when neither is set.
 
@@ -15,21 +13,6 @@ The adapter SHALL accept exactly two connect modes, `direct` and `gateway`, from
 #### Scenario: Unknown connect mode
 - **WHEN** `RITHMIC_CONNECT_MODE` is any value other than `direct` or `gateway`
 - **THEN** configuration SHALL fail and SHALL NOT fall back to either mode
-
-### Requirement: Gateway client topology is mux only
-In gateway mode, all gateway sessions in one process for the same credential fingerprint SHALL share a single client socket to the parent. A second per-factory topology (`dual`) SHALL NOT exist.
-
-#### Scenario: Data and exec share one socket
-- **WHEN** the data factory and the exec factory both create gateway sessions in one process
-- **THEN** exactly one socket to the parent SHALL be used
-
-#### Scenario: Dual requested
-- **WHEN** `RITHMIC_GATEWAY_CLIENT_MODE` is `dual`
-- **THEN** configuration SHALL fail with an error stating that dual was removed and mux is the only mode
-
-#### Scenario: Mux requested explicitly
-- **WHEN** `RITHMIC_GATEWAY_CLIENT_MODE` is `mux` or unset
-- **THEN** configuration SHALL succeed and behavior SHALL be identical
 
 ### Requirement: Gateway transport is unix only
 The gateway SHALL listen on and clients SHALL dial `unix://` endpoints only. `tcp://` and `tls://` listen URLs SHALL be rejected with an error that states remote transport is not implemented.
@@ -43,19 +26,23 @@ The gateway SHALL listen on and clients SHALL dial `unix://` endpoints only. `tc
 - **THEN** it SHALL resolve to an absolute path before bind or dial
 
 ### Requirement: Retired gateway client knobs fail fast
-Removed client behavior SHALL NOT be silently ignored. A retired variable whose value requests removed behavior SHALL raise a configuration error naming the removal; a value that equals the sole remaining behavior SHALL be accepted as a no-op.
+Removed client behavior SHALL NOT be silently ignored. A retired variable that is set to any non-empty value SHALL raise a configuration error naming the removal, including values that equal the sole remaining behavior. Unset SHALL be the only accepted state.
 
 #### Scenario: Spawn requested
 - **WHEN** `RITHMIC_GATEWAY_SPAWN_POLICY` is `if_missing`, `auto`, or `default`, or `RITHMIC_GATEWAY_AUTO_SPAWN` is truthy
 - **THEN** configuration SHALL fail with an error stating client spawn was removed and the parent must be started explicitly
 
-#### Scenario: Attach-only requested
+#### Scenario: Attach-only value set explicitly
 - **WHEN** `RITHMIC_GATEWAY_SPAWN_POLICY` is `never` or `RITHMIC_GATEWAY_AUTO_SPAWN` is `0`, `false`, `no`, or `off`
-- **THEN** configuration SHALL succeed and behavior SHALL be unchanged from unset
+- **THEN** configuration SHALL fail with an error stating the variable was removed and must be unset, and SHALL NOT emit a deprecation warning instead
 
-#### Scenario: Invalid spawn policy value
+#### Scenario: Unrecognized value
 - **WHEN** `RITHMIC_GATEWAY_SPAWN_POLICY` is an unrecognized value
-- **THEN** configuration SHALL fail with an invalid-value error
+- **THEN** configuration SHALL fail with an error naming the removal
+
+#### Scenario: Both client configs agree
+- **WHEN** the same retired variable is set and the adapter config or the `rithmic_gateway` config is built
+- **THEN** both SHALL fail, each with its own error type and the same removal message
 
 ### Requirement: Venue environment cannot be mixed
 The system SHALL resolve the venue environment (Live, Demo, Test) from the system name unless `RITHMIC_ENV` overrides it, and SHALL refuse a Test or Demo system that has no explicit URL.
@@ -89,3 +76,15 @@ The data client SHALL distinguish INTERNAL (aggregated from ticks) and EXTERNAL 
 #### Scenario: One-minute venue bars
 - **WHEN** a 1-minute EXTERNAL bar subscription is requested
 - **THEN** it SHALL be served from the venue time-bar stream
+
+### Requirement: Gateway sessions share one socket per process
+In gateway mode, all gateway sessions in one process for the same credential fingerprint SHALL share a single client socket to the parent. No alternative topology (`dual`) and no topology selector SHALL exist.
+
+#### Scenario: Data and exec share one socket
+- **WHEN** the data factory and the exec factory both create gateway sessions in one process
+- **THEN** exactly one socket to the parent SHALL be used
+
+#### Scenario: Topology selector set
+- **WHEN** `RITHMIC_GATEWAY_CLIENT_MODE` is set to any value, including `dual` and `mux`
+- **THEN** configuration SHALL fail with an error stating that the variable was removed and must be unset
+

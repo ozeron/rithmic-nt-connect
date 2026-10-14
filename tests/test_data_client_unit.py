@@ -235,6 +235,8 @@ def test_resync_ticker_session_replays_intent() -> None:
     calls: list[tuple[Any, ...]] = []
 
     class Sess(WireSessionStub):
+        is_direct = True
+
         def reset_ticker(self) -> None:
             calls.append(("reset_ticker",))
 
@@ -263,6 +265,137 @@ def test_resync_ticker_session_replays_intent() -> None:
     assert ("bars", "NQU6", "CME", 2, 15) in calls
 
 
+def test_resync_replays_intent_without_reset_for_gateway_and_gap() -> None:
+    """Only a direct session resets the ticker plant, and never on a gap.
+
+    A gateway client must not reset the shared parent plant (the parent restores
+    its own intents), and a gap means this consumer lost events while the plant
+    stayed healthy: replay the intent, keep the plant.
+    """
+    import asyncio
+
+    from rithmic_nt_connect.data import resync_ticker_session
+
+    def run(*, direct: bool, reset: bool) -> list[tuple[Any, ...]]:
+        calls: list[tuple[Any, ...]] = []
+
+        class Sess(WireSessionStub):
+            is_direct = direct
+
+            def reset_ticker(self) -> None:
+                calls.append(("reset_ticker",))
+
+            def subscribe(self, symbol: str, exchange: str) -> None:
+                calls.append(("subscribe", symbol, exchange))
+
+        asyncio.run(
+            resync_ticker_session(Sess(), {("NQU6", "CME")}, set(), None, reset=reset)
+        )
+        return calls
+
+    assert run(direct=True, reset=True) == [
+        ("reset_ticker",),
+        ("subscribe", "NQU6", "CME"),
+    ]
+    assert run(direct=True, reset=False) == [("subscribe", "NQU6", "CME")]
+    assert run(direct=False, reset=True) == [("subscribe", "NQU6", "CME")]
+    assert run(direct=False, reset=False) == [("subscribe", "NQU6", "CME")]
+
+
+def test_poll_loop_gap_resyncs_without_reset_and_error_with_reset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``gap`` event replays intent only; a channel error resets as well."""
+    import asyncio
+    import contextlib
+
+    import rithmic_nt_connect.data as data_mod
+    from rithmic_nt_connect.data import RithmicDataClient
+
+    class Log:
+        def warning(self, *_a: Any) -> None: ...
+        def exception(self, *_a: Any) -> None: ...
+
+    resyncs: list[bool] = []
+
+    class Client(RithmicDataClient):
+        _log = Log()  # the Cython base exposes a read-only ``_log``
+
+        async def _resync_ticker_subscription(self, *, reset: bool = True) -> None:
+            resyncs.append(reset)
+
+    batches: list[Any] = [
+        [{"type": "gap", "stream": "ticker", "skipped": 7}],
+        RuntimeError("channel closed"),
+    ]
+
+    class Sess(WireSessionStub):
+        def next_events(
+            self, stream: str, max_events: int = 256, timeout_ms: int = 100
+        ) -> list[Any]:
+            if not batches:
+                raise asyncio.CancelledError
+            batch = batches.pop(0)
+            if isinstance(batch, Exception):
+                raise batch
+            return batch
+
+    client: Any = Client.__new__(Client)
+    client._session = Sess()
+    monkeypatch.setattr(data_mod, "_reconnectable_poll_error", lambda _exc: True)
+
+    async def run() -> None:
+        with contextlib.suppress(asyncio.CancelledError):
+            await client._poll_channel_loop(
+                label="ticker", stream="ticker", idle_sleep=0
+            )
+
+    asyncio.run(run())
+    assert resyncs == [False, True]
+
+
+def test_gap_resync_does_not_stand_in_for_a_queued_plant_reset() -> None:
+    """A channel-error resync that waited behind a gap resync still resets."""
+    import asyncio
+
+    from rithmic_nt_connect.data import RithmicDataClient
+
+    resets: list[bool] = []
+
+    class Client(RithmicDataClient):
+        pass
+
+    async def scenario() -> None:
+        client: Any = Client.__new__(Client)
+        client._bbo_state = {}
+        client._subscriptions = set()
+        client._book_subscriptions = set()
+        client._bar_types = {}
+        client._resync_generation = 0
+        client._reset_generation = 0
+        client._resync_lock = asyncio.Lock()
+
+        class Sess(WireSessionStub):
+            is_direct = True
+
+            def reset_ticker(self) -> None:
+                resets.append(True)
+
+            def ensure_transport_live(self) -> int:
+                return 0
+
+        client._session = Sess()
+        await client._resync_lock.acquire()  # a resync is in flight
+        gap = asyncio.create_task(client._resync_ticker_subscription(reset=False))
+        error = asyncio.create_task(client._resync_ticker_subscription(reset=True))
+        await asyncio.sleep(0)
+        client._resync_lock.release()
+        await asyncio.gather(gap, error)
+
+    asyncio.run(scenario())
+    assert resets == [True]
+
+
 def test_resync_tolerates_venue_duplicate_subscribe() -> None:
     """History-plant bars often survive reset_ticker; ``[8]`` must not abort."""
     import asyncio
@@ -272,6 +405,8 @@ def test_resync_tolerates_venue_duplicate_subscribe() -> None:
     calls: list[str] = []
 
     class Sess(WireSessionStub):
+        is_direct = True
+
         def reset_ticker(self) -> None:
             calls.append("reset")
 
@@ -304,6 +439,8 @@ def test_resync_reraises_non_duplicate_subscribe_errors() -> None:
     from rithmic_nt_connect.data import resync_ticker_session
 
     class Sess(WireSessionStub):
+        is_direct = True
+
         def reset_ticker(self) -> None:
             pass
 
@@ -350,6 +487,8 @@ def test_bbo_state_cleared_on_quote_unsubscribe_and_resync() -> None:
     client._instrument_routes = {"NQU6-CME.RITHMIC": ("NQU6", "CME")}
 
     class Sess(WireSessionStub):
+        is_direct = True
+
         def reset_ticker(self) -> None:
             pass  # Stub: not exercised on the unsubscribe path.
 

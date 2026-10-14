@@ -1,7 +1,7 @@
 # adapter-wire-facade Specification
 
 ## Purpose
-TBD - created by syncing change `rust-unified-session`. Update Purpose after archive. Scope: the PyO3/Python boundary: one `Session` class for both modes, no protobuf in the adapter.
+The PyO3/Python boundary of the adapter: one `Session` class serves both connect modes, records cross as plain dicts, blocking stays inside the extension, and the adapter carries no protobuf and no secrets.
 
 ## Requirements
 

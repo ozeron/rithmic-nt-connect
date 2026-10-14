@@ -30,9 +30,10 @@ When you add or change a plant RPC (place / cancel / modify / brackets / ensure 
 5. Do not ship “direct-only” for a new live capability unless STATUS marks gateway as deferred **and** book/runners refuse that mode.
 
 Structure now enforces the first half of this: declare the RPC on `WireSession` in `session.py` and
-`tests/test_wire_session_parity.py` fails until every adapter (direct facade, gateway facade over
-`GatewayClient`, `WireSessionStub`, and the compiled extension via `_lib.pyi`, which is itself checked
-against the built extension) exposes it with a compatible signature. `tests/test_gateway_proto_parity.py`
+`tests/test_wire_session_parity.py` fails until every adapter exposes it with a compatible signature: `_FlockedDirectSession` (direct),
+`_RustGatewaySession` (gateway; both in `python/rithmic_nt_connect/session.py`), the test double
+`WireSessionStub` (`tests/_stubs.py`), and the compiled extension via the hand-written `_lib.pyi` (itself
+checked against the built extension). `tests/test_gateway_proto_parity.py`
 fails when `session_pb2.py` was not regenerated after editing `session.proto`. Proto framing and gateway
 dispatch/gate tests (`crates/rithmic-gateway/tests`) are still yours to extend.
 
@@ -44,6 +45,10 @@ Gateway plant RPCs are **not** all the same shape. Shipping a new stream as a ba
 | --- | --- | --- |
 | **One-shot command** | `place_*`, `adjust_*`, `cancel_*`, `modify_*` | Trading gate → plant call → map error. No fanout / `note_*` / restore. Client side: never retried after the request was written (`OutcomeUnknown`). |
 | **Subscription intent** | ticker, book, time bars, PnL, **order updates**, **bracket updates** | Gate → attach hub fanout → `note_*` refcount → plant only on 0→1 → rollback on fail → **`restore_intents` re-issues after plant reconnect**. |
+
+Every RPC also declares a **lane** in the table. A connection reads requests on its own task and serves them on two lanes: the **command** lane (subscriptions and every state-changing request) runs one request at a time in arrival order; the **slow** lane (history, order-history and fill-history loads) runs a few at a time and replies as each finishes, so a slow read can never hold up a place or cancel on the same socket. New RPCs default to the command lane; a read that can take seconds must be added to `rpc_table::lane_of` **and** marked `slow(...)` in its table row (`tests/lanes.rs` fails if the two disagree). Never put a request that mutates the connection's `ClientCtx` on the slow lane.
+
+**Recovery.** After a plant reconnect the parent re-issues every intent itself and keeps clients attached, sending each a `TransportResumed` event; clients must not re-subscribe or reset the shared plant. A gateway client never calls `reset_ticker` (only a direct session does); a stream `gap` is a resync of that consumer's intent with no reset. A new subscription intent needs its `RestorePlan` / `restore_intents` entry, and a market-data one a degraded-set path (`MdIntent`).
 
 Bracket notifications ride the **order-plant** stream. Use `subscribe_order_plant_stream` in `server/dispatch/subscriptions.rs` (order and/or brackets flags) — never a one-shot plant call. Extend `RestorePlan` + `restore_intents` and the table row; `intent_rows_cover_exactly_the_restore_plan_fields` and `every_subscription_intent_is_reissued_by_restore_intents` fail otherwise. Proto string greps alone are not enough.
 
@@ -87,7 +92,7 @@ After a change that emits Nautilus data or execution events, check the rows that
 - [ ] Live / Demo / Test endpoints cannot mix accidentally
 - [ ] Distinct venue instruments never share an `InstrumentId`
 - [ ] `connect_mode` / `RITHMIC_CONNECT_MODE` is explicit (`ConnectMode.DIRECT` \| `GATEWAY`; no silent default)
-- [ ] Gateway-mode clients hold no Rithmic password and never spawn the parent (attach-only, mux-only; the parent is started explicitly)
+- [ ] Gateway-mode clients hold no Rithmic password and never spawn the parent (attach-only, one shared socket per process; the parent is started explicitly)
 
 ### Data
 
@@ -123,7 +128,7 @@ After a change that emits Nautilus data or execution events, check the rows that
 
 - One Rithmic login session — do not run against LucidTrading while MotiveWave / R|Trader is open.
 - Trading is off unless `enable_trading=True` / `RITHMIC_ENABLE_TRADING=1`.
-- Only the gateway **parent** holds `RITHMIC_PASSWORD`; gateway-mode clients (`SessionConfig`, `GatewayConfig`) never read, hold, log, or send it, and the client library never spawns a parent. Start the parent explicitly (`python -m rithmic_gateway`, a service manager, or the harness helper `scripts/_gateway_parent.py` for smokes/live e2e). Retired knobs (`RITHMIC_GATEWAY_CLIENT_MODE=dual`, `SPAWN_POLICY=if_missing|auto|default`, `AUTO_SPAWN=1`) raise a config error (`ConfigError` from `SessionConfig`, `GatewayConfigError` from the `rithmic_gateway` library).
+- Only the gateway **parent** holds `RITHMIC_PASSWORD`; gateway-mode clients (`SessionConfig`, `GatewayConfig`) never read, hold, log, or send it, and the client library never spawns a parent. Start the parent explicitly (`python -m rithmic_gateway`, a service manager, or the harness helper `scripts/_gateway_parent.py` for smokes/live e2e). Retired knobs (`RITHMIC_GATEWAY_CLIENT_MODE`, `SPAWN_POLICY`, `AUTO_SPAWN`) raise a config error for any set value; unset is the only valid state (`ConfigError` from `SessionConfig`, `GatewayConfigError` from the `rithmic_gateway` library).
 - Do **not** run `scripts/verify_order_dry_run.py --live-place` unless `RITHMIC_ENABLE_TRADING=1` is set and an explicit far `--price` is passed (BUY below / SELL above market). Test-plant order routing with `DEFAULT_APP_NAME` is confirmed authorized (proven 2026-08-17: order routed to exchange); production `Rithmic 01` / LucidTrading place still needs a conformance `app_name`.
 - Do not commit secrets, certs, or gated `.proto` sources.
 - Do not commit one-off dev probe scripts; live checks belong in mechanism-only e2e tests (`tests/e2e/`) or documented runbook commands.
