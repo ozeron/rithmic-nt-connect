@@ -1033,6 +1033,12 @@ pub async fn cancel_all_orders_on(handle: &RithmicOrderPlantHandle) -> Result<()
 /// * a call that never left (invalid argument, no trade route): [`Error::NotSent`];
 /// * anything else (connection closed or write failed mid-call, an undecodable
 ///   answer): [`Error::OutcomeUnknown`], the order may or may not be live.
+///
+/// The reject boundary rests on rithmic-rs 3.0.0, which reports every non-zero
+/// `rp_code` (except `["7", "no data"]`) as `RequestRejected`. That type cannot
+/// be built outside the crate, so no unit test pins it; replay a captured venue
+/// reject through the client when a fixture exists, and revisit this arm on a
+/// rithmic-rs upgrade.
 fn order_failure(e: rithmic_rs::RithmicError) -> Error {
     use rithmic_rs::RithmicError as E;
     match &e {

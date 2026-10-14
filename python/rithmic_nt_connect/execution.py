@@ -130,7 +130,11 @@ _TRADING_DISABLED_REASON = "Rithmic trading disabled (enable_trading=False)"
 # the error's ``code``: a venue reject, a request that was never sent, or an
 # outcome that may be live.
 _REJECTED_CODES = frozenset({"venue_rejected"})
-_NOT_SENT_CODES = frozenset({"not_sent", "trading_disabled", "cancel_all_denied"})
+# ``not_ready``: a parent that refuses requests while it rebuilds its plants (older
+# parents say ``not_ready``, current ones ``not_sent``); nothing reached the venue.
+_NOT_SENT_CODES = frozenset(
+    {"not_sent", "not_ready", "trading_disabled", "cancel_all_denied"}
+)
 
 
 def _failure_class(exc: BaseException) -> str:

@@ -940,11 +940,14 @@ async fn run_commands(
     client
 }
 
+/// A request refused while the plants rebuild never reached the venue, so it is
+/// answered with the `not_sent` class: the caller may deny it (and a command is
+/// not an unknown outcome that would latch the order plant).
 fn not_ready_frame(request_id: u64) -> Frame {
     dispatch::error_frame(
         request_id,
-        "not_ready",
-        "gateway not Ready (plants reconnecting)",
+        "not_sent",
+        "gateway not ready (plants reconnecting); request not sent",
     )
 }
 
@@ -1203,5 +1206,15 @@ mod auth_tests {
             authorize_handshake(&state, &empty, true).unwrap_err().0,
             "not_ready"
         );
+    }
+
+    #[test]
+    fn a_request_refused_while_plants_rebuild_is_not_sent() {
+        let frame = not_ready_frame(7);
+        assert_eq!(frame.request_id, 7);
+        let Some(Body::Error(e)) = frame.body else {
+            panic!("expected an error frame");
+        };
+        assert_eq!(e.code, "not_sent");
     }
 }

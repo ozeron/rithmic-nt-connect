@@ -30,6 +30,7 @@ def _error(code: str | None, message: str = "boom") -> Exception:
         ("not_sent", "not_sent"),
         ("trading_disabled", "not_sent"),
         ("cancel_all_denied", "not_sent"),
+        ("not_ready", "not_sent"),
         ("outcome_unknown", "unknown"),
         ("venue_unknown", "unknown"),
         ("transport_reset", "unknown"),
