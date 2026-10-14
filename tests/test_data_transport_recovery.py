@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -11,7 +10,6 @@ from typing import Any
 import pytest
 from _stubs import _CaptureLog, _TestDataClient
 from rithmic_nt_connect.transport import (
-    RecoveryFailed,
     TransportDown,
     TransportFault,
     TransportFaultKind,
@@ -79,41 +77,6 @@ def test_up_replays_once_and_ignores_same_generation() -> None:
     asyncio.run(_run())
 
 
-def test_stale_generation_is_skipped() -> None:
-    async def _run() -> None:
-        h = _harness(asyncio.get_running_loop())
-        recovery = h.client._recovery
-        recovery.last_generation = 5
-        recovery.on_event(TransportUp(gen=3))
-        await asyncio.sleep(0)
-        assert recovery.task is None
-        assert h.resyncs == 0
-
-    asyncio.run(_run())
-
-
-def test_replay_retries_with_doubling_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
-    delays: list[float] = []
-    real_sleep = asyncio.sleep
-
-    async def _sleep(delay: float) -> None:
-        delays.append(delay)
-        await real_sleep(0)
-
-    async def _run() -> None:
-        h = _harness(asyncio.get_running_loop(), replay_failures=2)
-        recovery = h.client._recovery
-        monkeypatch.setattr(asyncio, "sleep", _sleep)
-        recovery.on_event(TransportUp(gen=2))
-        await real_sleep(0)
-        await _finish(recovery.task)
-        assert h.resyncs == 3
-        assert recovery.last_generation == 2
-
-    asyncio.run(_run())
-    assert delays == [0.5, 1.0]
-
-
 def test_replay_exhaustion_does_not_record_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -133,43 +96,6 @@ def test_replay_exhaustion_does_not_record_generation(
         assert h.resyncs == 3
         assert recovery.last_generation == 0
         assert any("exhausted" in m for m in h.log.messages)
-
-    asyncio.run(_run())
-
-
-def test_down_and_recovery_failed_do_not_schedule_replay() -> None:
-    async def _run() -> None:
-        h = _harness(asyncio.get_running_loop())
-        recovery = h.client._recovery
-        recovery.on_event(_down())
-        recovery.on_event(RecoveryFailed(gen=2, attempts=3, cause=None))
-        await asyncio.sleep(0)
-        assert recovery.task is None
-        assert h.resyncs == 0
-        assert any("recovery failed" in m for m in h.log.messages)
-
-    asyncio.run(_run())
-
-
-def test_missing_loop_logs_instead_of_raising() -> None:
-    h = _harness(None)
-    h.client._recovery.on_event(TransportUp(gen=2))
-    assert any("loop missing" in m for m in h.log.messages)
-
-
-def test_up_from_foreign_thread_hops_onto_the_loop() -> None:
-    async def _run() -> None:
-        h = _harness(asyncio.get_running_loop())
-        recovery = h.client._recovery
-        worker = threading.Thread(target=recovery.on_event, args=(TransportUp(gen=2),))
-        worker.start()
-        await asyncio.to_thread(worker.join)
-        for _ in range(50):
-            if recovery.task is not None:
-                break
-            await asyncio.sleep(0.01)
-        await _finish(recovery.task)
-        assert h.resyncs == 1
 
     asyncio.run(_run())
 

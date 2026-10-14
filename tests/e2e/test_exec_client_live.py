@@ -688,11 +688,11 @@ UNSUPPORTED_TCS = [
     (
         "TC-E41",
         (
-            "plant-wide cancel_all — live-testing would cancel unrelated orders; "
-            "unit/fake-plant boundary only"
+            "cancel-all is cache-scoped (tests/test_cancel_scope.py); not live-run "
+            "so a smoke cannot touch unrelated orders"
         ),
     ),
-    ("TC-E43", "Rithmic has no batch-cancel API"),
+    ("TC-E43", "batch cancel is per-order (_batch_cancel_orders); not live-proven"),
 ]
 
 

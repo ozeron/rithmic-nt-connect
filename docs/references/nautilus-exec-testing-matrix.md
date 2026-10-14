@@ -137,11 +137,10 @@ fail closed.
 | TC-E52 | Bracket entry activates TP/SL | [~] | unproven on Lucid |
 | TC-E53 | Bracket post-only entry | [~] | |
 
-Live bracket spike: `scripts/spike_bracket_order.py` (`RITHMIC_BRACKETS=1` +
-`RITHMIC_ENABLE_TRADING=1`; spike-only flag, not enforced in plants/gateway).
-Default entry is a far LIMIT derived from live BBO (`BUY = bid − N×tick`,
-`--far-ticks`, default 20); optional `--limit-price` must still clear that
-rule. Explicit `--market-entry` only — never implicit MARKET for P2 proof.
+The live bracket spike harness was removed; Test accept and survival were
+proven in both modes on 2026-08-24 (see `docs/STATUS.md`, Brackets / OCO). Any
+new live bracket proof belongs in `tests/e2e` with a far LIMIT entry derived from
+live BBO, never an implicit MARKET.
 
 ## Group 7: Order flags
 

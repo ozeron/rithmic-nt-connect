@@ -9,7 +9,6 @@ Run from the repo root. Live scripts read credentials from `.env`; exit code `2`
 | `smoke_lucid_nq.py` | LucidTrading acceptance smoke: connect, resolve the front month, subscribe, and require market-data events (plus PnL subscribe when an account is configured) | Never places orders; exit `0` ok, `2` no creds, `1` failure |
 | `verify_live_vs_history.py` | Resolve the front month, record live trades, compare them to history, write a verify JSON (`--out`) | Market data |
 | `verify_order_dry_run.py` | Order-plant connect + order-update subscribe, then exit | Dry-run by default; places only with `--live-place` **and** `RITHMIC_ENABLE_TRADING=1` and an explicit far `--price` / trigger; cancels only its own basket, never `cancel_all` |
-| `spike_bracket_order.py` | Plant-bracket spike harness: far LIMIT bracket from BBO, survival check, identity cancel | Spike (probe-like), not a test; no place unless `--place`, which needs `RITHMIC_BRACKETS=1` and `RITHMIC_ENABLE_TRADING=1` |
 | `smoke_gateway_shared_ticks.py` | Two tick consumers (NQ + MNQ) share one `rithmic-gateway` parent; both must report the same `gateway_pid` | Starts the parent through `_gateway_parent.py`; builds the debug binary if missing |
 | `gateway_tick_consumer.py` | Single-symbol tick consumer attached to an already-running gateway parent | Normally launched by `smoke_gateway_shared_ticks.py`; never spawns a parent, holds no password |
 
