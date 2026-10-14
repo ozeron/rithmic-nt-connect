@@ -10,7 +10,7 @@ from nautilus_trader.model.identifiers import AccountId, Venue
 from nautilus_trader.model.objects import AccountBalance, Currency, Money
 from rithmic_nt_connect._convert import account_pnl_to_fields
 from rithmic_nt_connect.constants import VENUE
-from rithmic_nt_connect.execution import RithmicExecutionClient, wait_account_in_cache
+from rithmic_nt_connect.execution import wait_account_in_cache
 
 
 def test_account_pnl_fields_build_balance():
@@ -38,12 +38,6 @@ def test_readonly_mode_tracks_rejects():
     for action in ("submit_order", "cancel_order", "modify_order"):
         reject(action)
     assert order_calls == ["submit_order", "cancel_order", "modify_order"]
-
-
-def test_execution_client_alias_preserved():
-    from rithmic_nt_connect.execution import RithmicReadOnlyExecutionClient
-
-    assert RithmicReadOnlyExecutionClient is RithmicExecutionClient
 
 
 def test_order_plant_and_errors_import_smoke():

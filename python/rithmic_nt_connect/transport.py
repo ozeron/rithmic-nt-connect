@@ -14,10 +14,6 @@ from enum import Enum
 
 class TransportFaultKind(Enum):
     UNIX_EOF = "unix_eof"
-    UNIX_DESYNC = "unix_desync"
-    UNIX_NOT_CONNECTED = "unix_not_connected"
-    UNIX_FRAME = "unix_frame"
-    UNIX_DRAIN_FAILED = "unix_drain_failed"
 
 
 @dataclass(frozen=True)

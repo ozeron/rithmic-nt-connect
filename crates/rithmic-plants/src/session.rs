@@ -887,22 +887,6 @@ impl RithmicSession {
         map_broadcast_poll("order", now_or_never(handle.subscription_receiver.recv()))
     }
 
-    /// Blocking receive of the next ticker message (async).
-    pub async fn recv_event(&mut self) -> Result<PlantEvent> {
-        let handle = self.ticker_handle_mut()?;
-        let resp = handle
-            .subscription_receiver
-            .recv()
-            .await
-            .map_err(|_| Error::ChannelClosed { plant: "ticker" })?;
-        if let Some(err) = &resp.error {
-            if err.is_connection_issue() {
-                return Err(Error::Rithmic(err.to_string()));
-            }
-        }
-        Ok(PlantEvent::from(&resp))
-    }
-
     fn ticker_handle(&self) -> Result<&RithmicTickerPlantHandle> {
         self.ticker
             .as_ref()

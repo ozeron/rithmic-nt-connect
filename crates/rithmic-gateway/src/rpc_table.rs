@@ -400,8 +400,3 @@ pub const RPC_TABLE: &[Rpc] = &[
 pub fn by_body(body: &str) -> Option<&'static Rpc> {
     RPC_TABLE.iter().find(|r| r.body == Some(body))
 }
-
-/// Row for a `Session` trait method name.
-pub fn by_method(method: &str) -> Option<&'static Rpc> {
-    RPC_TABLE.iter().find(|r| r.method == Some(method))
-}

@@ -387,8 +387,6 @@ pub(super) enum OutMsg {
 /// Per-connection fan-out bookkeeping: which topics this client forwards,
 /// typed venue joins this client asked for, and forwarder tasks.
 pub(super) struct ClientCtx {
-    #[allow(dead_code)]
-    id: ClientId,
     subscribed: HashSet<SubKey>,
     ticker: HashSet<SubKey>,
     book: HashSet<SubKey>,
@@ -403,7 +401,6 @@ pub(super) struct ClientCtx {
 impl ClientCtx {
     fn new(out_tx: mpsc::Sender<OutMsg>) -> Self {
         Self {
-            id: ClientId::new(),
             subscribed: HashSet::new(),
             ticker: HashSet::new(),
             book: HashSet::new(),

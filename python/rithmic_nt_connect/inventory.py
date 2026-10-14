@@ -228,10 +228,6 @@ class Inventory:
             net_qty=cast(int, change),  # non-zero net
         )
 
-    def adopt_positions(self, other: Inventory) -> None:
-        """Start from ``other``'s positions; later PnL rows overwrite them."""
-        self._positions = dict(other._positions)
-
     def working(self) -> list[WorkingOrder]:
         return [self._orders[k] for k in sorted(self._orders)]
 

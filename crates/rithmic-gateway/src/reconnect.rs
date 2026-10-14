@@ -244,11 +244,6 @@ impl ReconnectController {
         self.intent.lock().await.restore_plan()
     }
 
-    /// Keys that need a ticker venue re-subscribe (compat helper for tests).
-    pub async fn restore_after_reconnect(&self) -> Vec<SubKey> {
-        self.restore_plan().await.ticker
-    }
-
     pub async fn remembered_count(&self) -> usize {
         self.intent.lock().await.remembered_count()
     }
@@ -266,20 +261,6 @@ impl ReconnectController {
             g.book.len() as u32,
             g.time_bars.len() as u32,
         )
-    }
-
-    /// Test/helper: hub + ticker intent in one call (0→1 hub when first).
-    pub async fn on_subscribe(&self, key: SubKey) -> bool {
-        let first_ticker = self.note_ticker(key.clone()).await;
-        let _ = self.add_hub_interest(key).await;
-        first_ticker
-    }
-
-    /// Test/helper: hub + ticker intent drop.
-    pub async fn on_unsubscribe(&self, key: &SubKey) -> bool {
-        let last_ticker = self.forget_ticker(key).await;
-        let last_hub = self.remove_hub_interest(key).await;
-        last_ticker || last_hub
     }
 }
 

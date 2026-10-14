@@ -172,21 +172,6 @@ def test_order_book_fixture_to_fields() -> None:
     assert fields["ts_event"] == 1_700_000_000 * 1_000_000_000 + 300000 * 1_000
 
 
-def test_order_book_empty_levels_raises() -> None:
-    # Empty snapshot is venue-valid (off-hours) → levels=[] and Clear snapshot.
-    fields = order_book_to_fields(
-        {
-            "symbol": "NQU6",
-            "bid_price": [],
-            "ask_price": [],
-            "ssboe": 1,
-        }
-    )
-    assert fields["type"] == "order_book"
-    assert fields["levels"] == []
-    assert fields["instrument_id"] == f"NQU6.{VENUE}"
-
-
 def test_instrument_id_round_trip_with_exchange() -> None:
     encoded = instrument_id_from_symbol("NQU6", "cme")
     assert encoded == f"NQU6-CME.{VENUE}"

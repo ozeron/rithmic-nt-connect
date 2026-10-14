@@ -30,3 +30,18 @@
 - [ ] 5.1 `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test -p rithmic-plants -p rithmic-gateway -p rithmic-nt-connect`
 - [ ] 5.2 `uv run ruff check .`, `uv run ruff format --check .`, `uv run ty check python/rithmic_nt_connect tests`, `uv run pytest -q`
 - [ ] 5.3 Live tick and reconnect verification remains open (needs a market-data account); do not claim it
+
+## 6. Dead code and duplicate tests (audit 2026-10-14)
+
+- [x] 6.1 Delete verified-unused Python helpers: `flock.read_lock_pid`, `framing.decode_frame`, `providers.nautilus_venue`, `Inventory.adopt_positions`, `_orders.TRUSTWORTHY_*`, the `RithmicReadOnlyExecutionClient` alias, four never-produced `TransportFaultKind` members, the `RITHMIC_GATEWAY_CLIENT` ignored-selector test
+- [x] 6.2 Delete verified-unused Rust items: `RithmicSession::recv_event`, `FakeSession::is_connected`, `AccountRow::into_account`, `SubKey::is_internal`, `restore_after_reconnect` / `on_subscribe` / `on_unsubscribe`, `rpc_table::by_method`, `ClientCtx.id`, the `rithmic-nt-connect` `thiserror` dependency and the `pub use rithmic_plants::*` re-export
+- [x] 6.3 Delete one-off probes `crates/rithmic-nt-connect/examples/probe_daily_bars.rs` and `scripts/probe_hydrate_under_live_md.py` (AGENTS.md: no one-off probes)
+- [x] 6.4 Delete duplicate tests `test_order_book_empty_levels_raises`, `test_emit_accepted_only_while_submitted` (tests/test_notification_intake.py)
+- [ ] 6.5 Delete the six duplicated tests in `tests/test_data_transport_recovery.py` that `tests/test_recovery_bridge.py` already covers
+- [ ] 6.6 Stale docs: rewrite README, crates/README, scripts/README, AGENTS facade line, STATUS/runbook/exec-matrix facts; delete `docs/plans`, ADR 0001, dated reference notes (in progress)
+- [ ] 6.7 Decide: `request_bars_error` registry, Python `GatewayClient` order/PnL methods, `scripts/spike_bracket_order.py` + test (need owner decision)
+- [ ] 6.8 Verify then delete the unused `RithmicSession` place/cancel/modify/load wrappers in `session.rs` (~170 lines; only two tests call them)
+
+## 7. Deferred to a separate change (architecture review 2026-10-14)
+
+Not part of this change: gateway pump drains one event per 10 ms (H1), per-connection serial dispatch and non-cancel-safe frame read (H2), session gate / `DirectSession` mutex held across network I/O (H3), direct-mode Rust trading gate (M1), error taxonomy `Rejected`/`NotSent`/`Unknown` (M2), epoch-bump vs `restore_intents` (M3). Tasks 3.1 to 3.4 stay here because they are narrow; H1 and H3 widen 3.4 and should move to the new change.

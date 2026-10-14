@@ -27,8 +27,6 @@ RITHMIC_DURATION_TO_TIF: dict[int, TimeInForce] = {
     3: TimeInForce.IOC,
     4: TimeInForce.FOK,
 }
-TRUSTWORTHY_PRICE_TYPES = frozenset(RITHMIC_PRICE_TYPE_TO_ORDER_TYPE)
-TRUSTWORTHY_DURATIONS = frozenset(RITHMIC_DURATION_TO_TIF)
 
 OrderActionKind = Literal[
     "accepted",

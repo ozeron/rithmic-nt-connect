@@ -34,13 +34,6 @@ pub struct SubKey {
     pub exchange: String,
 }
 
-impl SubKey {
-    /// Internal sentinel topics (`__pnl__`, `__order__`, …) are not venue symbols.
-    pub fn is_internal(&self) -> bool {
-        self.symbol.starts_with("__")
-    }
-}
-
 /// Fan-out hub: one broadcast channel per sub key + per-client receivers.
 pub struct FanoutHub {
     capacity: usize,

@@ -33,23 +33,6 @@ def session_flock_held(
     return False
 
 
-def read_lock_pid(
-    user: str, system_name: str, url: str, env: str = "Live"
-) -> int | None:
-    """PID written into the credential lock file, if present and parseable."""
-    path = lock_path(user, system_name, url, env)
-    try:
-        text = path.read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-    if not text:
-        return None
-    try:
-        return int(text.split()[0])
-    except ValueError:
-        return None
-
-
 class SessionLock:
     """Exclusive ``fcntl`` flock released when this object is closed / GC'd."""
 

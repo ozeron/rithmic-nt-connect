@@ -2063,7 +2063,3 @@ class RithmicExecutionClient(LiveExecutionClient):
             lookback_start_ns=lookback_start_ns,
             reports_complete=reports_complete,
         )
-
-
-# Back-compat alias used by factories / tests.
-RithmicReadOnlyExecutionClient = RithmicExecutionClient

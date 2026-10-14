@@ -160,10 +160,6 @@ impl FakeSession {
             .count()
     }
 
-    pub fn is_connected(&self) -> bool {
-        self.lock().connected
-    }
-
     async fn poll(&self, stream: Stream, timeout: Duration) -> Result<Option<PlantEvent>> {
         let deadline = Instant::now() + timeout;
         loop {

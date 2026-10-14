@@ -44,14 +44,6 @@ def test_gateway_mode_is_always_the_rust_client() -> None:
     assert isinstance(create_session(_gateway_cfg()), _RustGatewaySession)
 
 
-def test_a_retired_client_selector_is_ignored(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # RITHMIC_GATEWAY_CLIENT=python selected the removed Python client during rollout.
-    monkeypatch.setenv("RITHMIC_GATEWAY_CLIENT", "python")
-    assert isinstance(create_session(_gateway_cfg()), _RustGatewaySession)
-
-
 def test_each_gateway_session_is_a_fresh_facade() -> None:
     cfg = _gateway_cfg()
     assert create_session(cfg) is not create_session(cfg)

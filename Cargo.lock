@@ -685,7 +685,6 @@ dependencies = [
  "rithmic-gateway",
  "rithmic-plants",
  "rithmic-rs",
- "thiserror",
  "tokio",
 ]
 

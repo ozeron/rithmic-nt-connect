@@ -14,12 +14,6 @@ pub struct AccountRow {
     pub ib_id: String,
 }
 
-impl AccountRow {
-    pub fn into_account(self) -> RithmicAccount {
-        RithmicAccount::new(self.fcm_id, self.ib_id, self.account_id)
-    }
-}
-
 /// Parse account-list responses into rows (skips empty / terminal-only frames).
 pub fn rows_from_account_list(responses: &[RithmicResponse]) -> Vec<AccountRow> {
     let mut rows = Vec::new();
