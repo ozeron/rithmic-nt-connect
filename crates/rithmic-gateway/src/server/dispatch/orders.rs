@@ -1,9 +1,10 @@
 //! Trading one-shot commands (place / cancel / modify / brackets / ensure /
-//! cancel-all) and order-handle loads (recon + RMS). One-shots keep their
-//! inline gate → session call → error-map shape: each has a distinct gate and
-//! error code, and the post-send `plant_err_frame` unknown-vs-failed mapping
-//! is the honesty boundary.
+//! cancel-all) and order-handle loads (recon + RMS). One-shots share one shape
+//! ([`one_shot`]): gate → session call → the command error class
+//! (`plant_err_frame`), which is the honesty boundary.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use rithmic_plants::{ModifyOrder, PlaceBracketOrder, PlaceOrder, Session};
@@ -251,21 +252,53 @@ pub(super) async fn ensure_order(state: &GatewayState, request_id: u64) -> Frame
     ack_frame(request_id)
 }
 
+/// The answer to a trading one-shot that its gate refused.
+fn denied(request_id: u64, what: &str, code: &str, gate: &str) -> Frame {
+    error_frame(
+        request_id,
+        code,
+        &format!("{what} denied: parent {gate} disabled"),
+    )
+}
+
+/// A trading one-shot (place, cancel, modify, bracket, cancel-all): its gate,
+/// then the plant call under the session gate (a plant rebuild cannot start
+/// underneath it), then the command error class. Never retried, no fan-out, no
+/// intent bookkeeping (AGENTS.md "gateway RPC kinds").
+async fn one_shot<F>(
+    state: &GatewayState,
+    request_id: u64,
+    refused: Option<Frame>,
+    call: F,
+) -> Frame
+where
+    F: for<'a> FnOnce(
+        &'a dyn Session,
+    ) -> Pin<Box<dyn Future<Output = rithmic_plants::Result<()>> + Send + 'a>>,
+{
+    if let Some(refused) = refused {
+        return refused;
+    }
+    let Some(session) = &state.session else {
+        return no_session_frame(request_id);
+    };
+    let guard = session.lock().await;
+    match call(&*guard).await {
+        Ok(()) => ack_frame(request_id),
+        Err(e) => plant_err_frame(request_id, e),
+    }
+}
+
+/// The place / cancel / modify gate (`RITHMIC_ENABLE_TRADING`): the refusal, if any.
+fn trading_gate(state: &GatewayState, request_id: u64, what: &str) -> Option<Frame> {
+    (!state.gates.allow_place()).then(|| denied(request_id, what, "trading_disabled", "trading"))
+}
+
 pub(super) async fn place_order(
     state: &GatewayState,
     request_id: u64,
     req: pb::PlaceOrderRequest,
 ) -> Frame {
-    if !state.gates.allow_place() {
-        return error_frame(
-            request_id,
-            "trading_disabled",
-            "place_order denied: parent trading disabled",
-        );
-    }
-    let Some(session) = &state.session else {
-        return no_session_frame(request_id);
-    };
     let order = PlaceOrder {
         symbol: req.symbol,
         exchange: req.exchange,
@@ -279,11 +312,11 @@ pub(super) async fn place_order(
         trail_by_ticks: req.trail_by_ticks,
         trail_by_price_id: req.trail_by_price_id,
     };
-    let guard = session.lock().await;
-    match guard.place_order(&order).await {
-        Ok(()) => ack_frame(request_id),
-        Err(e) => plant_err_frame(request_id, e),
-    }
+    let gate = trading_gate(state, request_id, "place_order");
+    one_shot(state, request_id, gate, |s| {
+        Box::pin(async move { s.place_order(&order).await })
+    })
+    .await
 }
 
 pub(super) async fn place_bracket_order(
@@ -291,16 +324,6 @@ pub(super) async fn place_bracket_order(
     request_id: u64,
     req: pb::PlaceBracketOrderRequest,
 ) -> Frame {
-    if !state.gates.allow_place() {
-        return error_frame(
-            request_id,
-            "trading_disabled",
-            "place_bracket_order denied: parent trading disabled",
-        );
-    }
-    let Some(session) = &state.session else {
-        return no_session_frame(request_id);
-    };
     let order = PlaceBracketOrder {
         symbol: req.symbol,
         exchange: req.exchange,
@@ -314,11 +337,11 @@ pub(super) async fn place_bracket_order(
         stop_ticks: req.stop_ticks,
         target_ticks: req.target_ticks,
     };
-    let guard = session.lock().await;
-    match guard.place_bracket_order(&order).await {
-        Ok(()) => ack_frame(request_id),
-        Err(e) => plant_err_frame(request_id, e),
-    }
+    let gate = trading_gate(state, request_id, "place_bracket_order");
+    one_shot(state, request_id, gate, |s| {
+        Box::pin(async move { s.place_bracket_order(&order).await })
+    })
+    .await
 }
 
 pub(super) async fn adjust_bracket_stop(
@@ -326,24 +349,14 @@ pub(super) async fn adjust_bracket_stop(
     request_id: u64,
     req: pb::AdjustBracketStopRequest,
 ) -> Frame {
-    if !state.gates.allow_place() {
-        return error_frame(
-            request_id,
-            "trading_disabled",
-            "adjust_bracket_stop denied: parent trading disabled",
-        );
-    }
-    let Some(session) = &state.session else {
-        return no_session_frame(request_id);
-    };
-    let guard = session.lock().await;
-    match guard
-        .adjust_bracket_stop(&req.basket_id, req.ticks, req.level)
-        .await
-    {
-        Ok(()) => ack_frame(request_id),
-        Err(e) => plant_err_frame(request_id, e),
-    }
+    let gate = trading_gate(state, request_id, "adjust_bracket_stop");
+    one_shot(state, request_id, gate, |s| {
+        Box::pin(async move {
+            s.adjust_bracket_stop(&req.basket_id, req.ticks, req.level)
+                .await
+        })
+    })
+    .await
 }
 
 pub(super) async fn adjust_bracket_target(
@@ -351,24 +364,14 @@ pub(super) async fn adjust_bracket_target(
     request_id: u64,
     req: pb::AdjustBracketTargetRequest,
 ) -> Frame {
-    if !state.gates.allow_place() {
-        return error_frame(
-            request_id,
-            "trading_disabled",
-            "adjust_bracket_target denied: parent trading disabled",
-        );
-    }
-    let Some(session) = &state.session else {
-        return no_session_frame(request_id);
-    };
-    let guard = session.lock().await;
-    match guard
-        .adjust_bracket_target(&req.basket_id, req.ticks, req.level)
-        .await
-    {
-        Ok(()) => ack_frame(request_id),
-        Err(e) => plant_err_frame(request_id, e),
-    }
+    let gate = trading_gate(state, request_id, "adjust_bracket_target");
+    one_shot(state, request_id, gate, |s| {
+        Box::pin(async move {
+            s.adjust_bracket_target(&req.basket_id, req.ticks, req.level)
+                .await
+        })
+    })
+    .await
 }
 
 pub(super) async fn cancel_order(
@@ -376,21 +379,11 @@ pub(super) async fn cancel_order(
     request_id: u64,
     req: pb::CancelOrderRequest,
 ) -> Frame {
-    if !state.gates.allow_place() {
-        return error_frame(
-            request_id,
-            "trading_disabled",
-            "cancel_order denied: parent trading disabled",
-        );
-    }
-    let Some(session) = &state.session else {
-        return no_session_frame(request_id);
-    };
-    let guard = session.lock().await;
-    match guard.cancel_order(&req.basket_id).await {
-        Ok(()) => ack_frame(request_id),
-        Err(e) => plant_err_frame(request_id, e),
-    }
+    let gate = trading_gate(state, request_id, "cancel_order");
+    one_shot(state, request_id, gate, |s| {
+        Box::pin(async move { s.cancel_order(&req.basket_id).await })
+    })
+    .await
 }
 
 pub(super) async fn modify_order(
@@ -398,16 +391,6 @@ pub(super) async fn modify_order(
     request_id: u64,
     req: pb::ModifyOrderRequest,
 ) -> Frame {
-    if !state.gates.allow_place() {
-        return error_frame(
-            request_id,
-            "trading_disabled",
-            "modify_order denied: parent trading disabled",
-        );
-    }
-    let Some(session) = &state.session else {
-        return no_session_frame(request_id);
-    };
     let order = ModifyOrder {
         basket_id: req.basket_id,
         symbol: req.symbol,
@@ -418,27 +401,22 @@ pub(super) async fn modify_order(
         trigger_price: req.trigger_price,
         trail_by_ticks: req.trail_by_ticks,
     };
-    let guard = session.lock().await;
-    match guard.modify_order(&order).await {
-        Ok(()) => ack_frame(request_id),
-        Err(e) => plant_err_frame(request_id, e),
-    }
+    let gate = trading_gate(state, request_id, "modify_order");
+    one_shot(state, request_id, gate, |s| {
+        Box::pin(async move { s.modify_order(&order).await })
+    })
+    .await
 }
 
 pub(super) async fn cancel_all_orders(state: &GatewayState, request_id: u64) -> Frame {
-    if !state.gates.allow_cancel_all() {
-        return error_frame(
+    // Independent of trading: the parent's panic button.
+    let gate = (!state.gates.allow_cancel_all()).then(|| {
+        denied(
             request_id,
+            "cancel_all_orders",
             "cancel_all_denied",
-            "cancel_all_orders denied: parent cancel_all disabled",
-        );
-    }
-    let Some(session) = &state.session else {
-        return no_session_frame(request_id);
-    };
-    let guard = session.lock().await;
-    match guard.cancel_all_orders().await {
-        Ok(()) => ack_frame(request_id),
-        Err(e) => plant_err_frame(request_id, e),
-    }
+            "cancel_all",
+        )
+    });
+    one_shot(state, request_id, gate, |s| Box::pin(s.cancel_all_orders())).await
 }

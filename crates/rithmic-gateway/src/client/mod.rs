@@ -36,6 +36,17 @@ pub use self::runtime::{ReadyInfo, RecoveryFailed, TransportEvent, EVENT_QUEUE_C
 use crate::listen::{default_unix_path, ListenEndpoint};
 use crate::pb::{self, frame::Body, Frame};
 
+/// The typed body of `$frame` (`Body::$variant`), mapped by `$map`; any other
+/// body is a protocol error naming the variant expected.
+macro_rules! reply {
+    ($frame:expr, $variant:ident, |$r:pat_param| $map:expr) => {
+        match $frame.body {
+            Some(Body::$variant($r)) => Ok($map),
+            other => Err(unexpected(stringify!($variant), other)),
+        }
+    };
+}
+
 const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(30);
 /// One plant history slice can exceed the normal dial timeout.
 const DEFAULT_HISTORY_RPC_TIMEOUT: Duration = Duration::from_secs(300);
@@ -271,10 +282,7 @@ impl GatewaySession {
     }
 
     async fn ack(&self, body: Body, mode: Mode) -> Result<()> {
-        match self.call(body, mode, false).await?.body {
-            Some(Body::Ack(_)) => Ok(()),
-            other => Err(unexpected("ack", other)),
-        }
+        reply!(self.call(body, mode, false).await?, Ack, |_| ())
     }
 
     fn facade(&self) -> u64 {
@@ -451,14 +459,15 @@ impl GatewaySession {
         // One call: the read retry in `call` and the parent's own slice retries
         // are the budget. Retrying here as well multiplied every timeout, and
         // each abandoned attempt kept a slow-lane slot busy on the parent.
-        match self.call(body, Mode::Read, true).await?.body {
-            Some(Body::LoadTimeBarsResponse(r)) => Ok(r
+        reply!(
+            self.call(body, Mode::Read, true).await?,
+            LoadTimeBarsResponse,
+            |r| r
                 .bars
                 .into_iter()
                 .map(convert::history_bar_from_pb)
-                .collect()),
-            other => Err(unexpected("load_time_bars_response", other)),
-        }
+                .collect()
+        )
     }
 }
 
@@ -715,10 +724,11 @@ impl Session for GatewaySession {
             symbol: symbol.into(),
             exchange: exchange.into(),
         });
-        match self.call(body, Mode::Read, false).await?.body {
-            Some(Body::FrontMonthResponse(r)) => Ok(convert::front_month_from_pb(r)),
-            other => Err(unexpected("front_month_response", other)),
-        }
+        reply!(
+            self.call(body, Mode::Read, false).await?,
+            FrontMonthResponse,
+            |r| convert::front_month_from_pb(r)
+        )
     }
 
     async fn get_reference_data(&self, symbol: &str, exchange: &str) -> Result<ReferenceDataDto> {
@@ -726,10 +736,11 @@ impl Session for GatewaySession {
             symbol: symbol.into(),
             exchange: exchange.into(),
         });
-        match self.call(body, Mode::Read, false).await?.body {
-            Some(Body::ReferenceDataResponse(r)) => Ok(convert::reference_data_from_pb(r)),
-            other => Err(unexpected("reference_data_response", other)),
-        }
+        reply!(
+            self.call(body, Mode::Read, false).await?,
+            ReferenceDataResponse,
+            |r| convert::reference_data_from_pb(r)
+        )
     }
 
     async fn load_ticks(
@@ -745,14 +756,15 @@ impl Session for GatewaySession {
             start_time_sec,
             end_time_sec,
         });
-        match self.call(body, Mode::Read, true).await?.body {
-            Some(Body::LoadTicksResponse(r)) => Ok(r
+        reply!(
+            self.call(body, Mode::Read, true).await?,
+            LoadTicksResponse,
+            |r| r
                 .ticks
                 .into_iter()
                 .map(convert::history_tick_from_pb)
-                .collect()),
-            other => Err(unexpected("load_ticks_response", other)),
-        }
+                .collect()
+        )
     }
 
     /// Wide windows are split into calendar slices (the same lengths the direct
@@ -800,14 +812,15 @@ impl Session for GatewaySession {
             start_time_sec,
             end_time_sec,
         });
-        match self.call(body, Mode::Read, true).await?.body {
-            Some(Body::ProbeTimeBarsResponse(r)) => Ok(r
+        reply!(
+            self.call(body, Mode::Read, true).await?,
+            ProbeTimeBarsResponse,
+            |r| r
                 .rows
                 .into_iter()
                 .map(convert::time_bar_probe_row_from_pb)
-                .collect()),
-            other => Err(unexpected("probe_time_bars_response", other)),
-        }
+                .collect()
+        )
     }
 
     async fn load_orders(&self, start_sec: i32, end_sec: i32) -> Result<Vec<OrderNotificationDto>> {
@@ -815,38 +828,41 @@ impl Session for GatewaySession {
             start_time_sec: start_sec,
             end_time_sec: end_sec,
         });
-        match self.call(body, Mode::Read, false).await?.body {
-            Some(Body::LoadOrdersResponse(r)) => Ok(r
+        reply!(
+            self.call(body, Mode::Read, false).await?,
+            LoadOrdersResponse,
+            |r| r
                 .events
                 .into_iter()
                 .map(convert::order_notification_from_pb)
-                .collect()),
-            other => Err(unexpected("load_orders_response", other)),
-        }
+                .collect()
+        )
     }
 
     async fn load_product_rms_info(&self) -> Result<Vec<ProductRmsInfoDto>> {
         let body = Body::LoadProductRmsInfo(pb::LoadProductRmsInfoRequest {});
-        match self.call(body, Mode::Read, false).await?.body {
-            Some(Body::LoadProductRmsInfoResponse(r)) => Ok(r
+        reply!(
+            self.call(body, Mode::Read, false).await?,
+            LoadProductRmsInfoResponse,
+            |r| r
                 .rows
                 .into_iter()
                 .map(convert::product_rms_info_from_pb)
-                .collect()),
-            other => Err(unexpected("load_product_rms_info_response", other)),
-        }
+                .collect()
+        )
     }
 
     async fn load_account_rms_info(&self) -> Result<Vec<AccountRmsInfoDto>> {
         let body = Body::LoadAccountRmsInfo(pb::LoadAccountRmsInfoRequest {});
-        match self.call(body, Mode::Read, false).await?.body {
-            Some(Body::LoadAccountRmsInfoResponse(r)) => Ok(r
+        reply!(
+            self.call(body, Mode::Read, false).await?,
+            LoadAccountRmsInfoResponse,
+            |r| r
                 .rows
                 .into_iter()
                 .map(convert::account_rms_info_from_pb)
-                .collect()),
-            other => Err(unexpected("load_account_rms_info_response", other)),
-        }
+                .collect()
+        )
     }
 
     async fn load_fill_history(&self, start: i32, finish: i32) -> Result<Vec<FillHistoryDto>> {
@@ -854,36 +870,39 @@ impl Session for GatewaySession {
             start_date: start,
             finish_date: finish,
         });
-        match self.call(body, Mode::Read, false).await?.body {
-            Some(Body::LoadFillHistoryResponse(r)) => Ok(r
+        reply!(
+            self.call(body, Mode::Read, false).await?,
+            LoadFillHistoryResponse,
+            |r| r
                 .rows
                 .into_iter()
                 .map(convert::fill_history_from_pb)
-                .collect()),
-            other => Err(unexpected("load_fill_history_response", other)),
-        }
+                .collect()
+        )
     }
 
     async fn load_order_history(&self, date: &str) -> Result<Vec<OrderNotificationDto>> {
         let body = Body::LoadOrderHistory(pb::LoadOrderHistoryRequest {
             date: date.to_string(),
         });
-        match self.call(body, Mode::Read, false).await?.body {
-            Some(Body::LoadOrderHistoryResponse(r)) => Ok(r
+        reply!(
+            self.call(body, Mode::Read, false).await?,
+            LoadOrderHistoryResponse,
+            |r| r
                 .events
                 .into_iter()
                 .map(convert::order_notification_from_pb)
-                .collect()),
-            other => Err(unexpected("load_order_history_response", other)),
-        }
+                .collect()
+        )
     }
 
     async fn load_order_history_dates(&self) -> Result<Vec<String>> {
         let body = Body::LoadOrderHistoryDates(pb::LoadOrderHistoryDatesRequest {});
-        match self.call(body, Mode::Read, false).await?.body {
-            Some(Body::LoadOrderHistoryDatesResponse(r)) => Ok(r.dates),
-            other => Err(unexpected("load_order_history_dates_response", other)),
-        }
+        reply!(
+            self.call(body, Mode::Read, false).await?,
+            LoadOrderHistoryDatesResponse,
+            |r| r.dates
+        )
     }
 
     async fn place_order(&self, o: &PlaceOrder) -> Result<()> {

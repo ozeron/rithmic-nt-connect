@@ -25,7 +25,7 @@ use super::{ClientCtx, Fingerprint, GatewayState, OutMsg};
 use crate::idle_exit::{IdleExit, IdleExitPolicy};
 
 pub(in crate::server) use subscriptions::TopicIntent;
-pub(super) use subscriptions::{clear_client_brackets, reseat_order_plant_without_brackets};
+pub(super) use subscriptions::{leave_order, leave_pnl};
 
 pub(super) async fn topic_lock(state: &GatewayState, key: &SubKey) -> Arc<TokioMutex<()>> {
     let mut map = state.topic_locks.lock().await;

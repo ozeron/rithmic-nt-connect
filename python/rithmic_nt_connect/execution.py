@@ -2091,7 +2091,8 @@ class RithmicExecutionClient(LiveExecutionClient):
             )
             return reports
         live = self._pnl_live_since_ns
-        assert live is not None  # _positions_known
+        if live is None:  # _positions_known() implies a live stream
+            return reports
         for fields in self._rows_seen_since(live).values():
             symbol = str(fields.get("symbol") or "").strip()
             if symbol and symbol in self._unreadable_position_symbols:

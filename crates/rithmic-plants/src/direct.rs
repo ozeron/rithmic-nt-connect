@@ -23,10 +23,10 @@ use crate::error::{Error, Result};
 use crate::history::parse_time_bar_type;
 use crate::plants::PlantSet;
 use crate::session::{
-    adjust_bracket_stop_on, adjust_bracket_target_on, cancel_all_orders_on, cancel_order_on,
-    load_account_rms_info_on, load_fill_history_on, load_order_history_dates_on,
-    load_order_history_on, load_orders_on, load_product_rms_info_on, modify_order_on,
-    place_bracket_order_on, place_order_on, Handles, RithmicSession,
+    adjust_bracket_on, cancel_all_orders_on, cancel_order_on, load_account_rms_info_on,
+    load_fill_history_on, load_order_history_dates_on, load_order_history_on, load_orders_on,
+    load_product_rms_info_on, modify_order_on, place_bracket_order_on, place_order_on, BracketLeg,
+    Handles, RithmicSession,
 };
 use crate::streams::{Stream, StreamHub};
 
@@ -567,7 +567,7 @@ impl Session for DirectSession {
         self.require_trading("adjust_bracket_stop")?;
         let _op = self.begin_order_op().await?;
         let handle = self.command_handle().await?;
-        adjust_bracket_stop_on(&handle, basket_id, ticks, level).await
+        adjust_bracket_on(&handle, BracketLeg::Stop, basket_id, ticks, level).await
     }
 
     async fn adjust_bracket_target(
@@ -579,7 +579,7 @@ impl Session for DirectSession {
         self.require_trading("adjust_bracket_target")?;
         let _op = self.begin_order_op().await?;
         let handle = self.command_handle().await?;
-        adjust_bracket_target_on(&handle, basket_id, ticks, level).await
+        adjust_bracket_on(&handle, BracketLeg::Target, basket_id, ticks, level).await
     }
 
     async fn cancel_order(&self, basket_id: &str) -> Result<()> {

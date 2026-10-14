@@ -1,6 +1,7 @@
 //! Parent Rithmic reconnect + typed subscription intent restore.
 
 use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
@@ -52,31 +53,15 @@ pub struct IntentStore {
     degraded: HashSet<MdIntent>,
 }
 
-fn bump(map: &mut HashMap<SubKey, usize>, key: SubKey) -> bool {
+/// Count one more holder of `key`; `true` on the first (0→1).
+fn bump<K: Hash + Eq>(map: &mut HashMap<K, usize>, key: K) -> bool {
     let e = map.entry(key).or_insert(0);
     *e += 1;
     *e == 1
 }
 
-fn drop_count(map: &mut HashMap<SubKey, usize>, key: &SubKey) -> bool {
-    let Some(e) = map.get_mut(key) else {
-        return false;
-    };
-    *e = e.saturating_sub(1);
-    if *e == 0 {
-        map.remove(key);
-        return true;
-    }
-    false
-}
-
-fn bump_tb(map: &mut HashMap<TimeBarIntent, usize>, key: TimeBarIntent) -> bool {
-    let e = map.entry(key).or_insert(0);
-    *e += 1;
-    *e == 1
-}
-
-fn drop_tb(map: &mut HashMap<TimeBarIntent, usize>, key: &TimeBarIntent) -> bool {
+/// Count one holder of `key` less; `true` when it was the last (1→0).
+fn drop_count<K: Hash + Eq>(map: &mut HashMap<K, usize>, key: &K) -> bool {
     let Some(e) = map.get_mut(key) else {
         return false;
     };
@@ -127,11 +112,11 @@ impl IntentStore {
     }
 
     pub fn note_time_bar(&mut self, intent: TimeBarIntent) -> bool {
-        bump_tb(&mut self.time_bars, intent)
+        bump(&mut self.time_bars, intent)
     }
 
     pub fn forget_time_bar(&mut self, intent: &TimeBarIntent) -> bool {
-        let last = drop_tb(&mut self.time_bars, intent);
+        let last = drop_count(&mut self.time_bars, intent);
         if last {
             self.degraded.remove(&MdIntent::TimeBars(intent.clone()));
         }
@@ -216,6 +201,18 @@ impl IntentStore {
     }
 }
 
+/// `IntentStore` methods, each taken under the controller's lock.
+macro_rules! locked {
+    ($($(#[$doc:meta])* fn $name:ident($($arg:ident: $ty:ty),*) -> $ret:ty;)*) => {
+        $(
+            $(#[$doc])*
+            pub async fn $name(&self, $($arg: $ty),*) -> $ret {
+                self.intent.lock().await.$name($($arg),*)
+            }
+        )*
+    };
+}
+
 /// Reconnect controller — typed intent + hub fan-out bookkeeping.
 pub struct ReconnectController {
     intent: Mutex<IntentStore>,
@@ -240,69 +237,27 @@ impl ReconnectController {
         self.hub.remove_interest(key).await
     }
 
-    pub async fn note_ticker(&self, key: SubKey) -> bool {
-        self.intent.lock().await.note_ticker(key)
-    }
-
-    pub async fn forget_ticker(&self, key: &SubKey) -> bool {
-        self.intent.lock().await.forget_ticker(key)
-    }
-
-    pub async fn note_book(&self, key: SubKey) -> bool {
-        self.intent.lock().await.note_book(key)
-    }
-
-    pub async fn forget_book(&self, key: &SubKey) -> bool {
-        self.intent.lock().await.forget_book(key)
-    }
-
-    pub async fn note_time_bar(&self, intent: TimeBarIntent) -> bool {
-        self.intent.lock().await.note_time_bar(intent)
-    }
-
-    pub async fn forget_time_bar(&self, intent: &TimeBarIntent) -> bool {
-        self.intent.lock().await.forget_time_bar(intent)
-    }
-
-    pub async fn note_pnl(&self) -> bool {
-        self.intent.lock().await.note_pnl()
-    }
-
-    pub async fn forget_pnl(&self) -> bool {
-        self.intent.lock().await.forget_pnl()
-    }
-
-    pub async fn note_order(&self) -> bool {
-        self.intent.lock().await.note_order()
-    }
-
-    pub async fn forget_order(&self) -> bool {
-        self.intent.lock().await.forget_order()
-    }
-
-    pub async fn note_brackets(&self) -> bool {
-        self.intent.lock().await.note_brackets()
-    }
-
-    pub async fn forget_brackets(&self) -> bool {
-        self.intent.lock().await.forget_brackets()
-    }
-
-    pub async fn mark_degraded(&self, intent: MdIntent) {
-        self.intent.lock().await.mark_degraded(intent);
-    }
-
-    pub async fn clear_degraded(&self, intent: &MdIntent) -> bool {
-        self.intent.lock().await.clear_degraded(intent)
-    }
-
-    pub async fn is_degraded(&self, intent: &MdIntent) -> bool {
-        self.intent.lock().await.is_degraded(intent)
-    }
-
-    /// Market-data joins currently left degraded after a rebuild.
-    pub async fn degraded_count(&self) -> usize {
-        self.intent.lock().await.degraded_count()
+    locked! {
+        fn note_ticker(key: SubKey) -> bool;
+        fn forget_ticker(key: &SubKey) -> bool;
+        fn note_book(key: SubKey) -> bool;
+        fn forget_book(key: &SubKey) -> bool;
+        fn note_time_bar(intent: TimeBarIntent) -> bool;
+        fn forget_time_bar(intent: &TimeBarIntent) -> bool;
+        fn note_pnl() -> bool;
+        fn forget_pnl() -> bool;
+        fn note_order() -> bool;
+        fn forget_order() -> bool;
+        fn note_brackets() -> bool;
+        fn forget_brackets() -> bool;
+        fn mark_degraded(intent: MdIntent) -> ();
+        fn clear_degraded(intent: &MdIntent) -> bool;
+        fn is_degraded(intent: &MdIntent) -> bool;
+        /// Market-data joins currently left degraded after a rebuild.
+        fn degraded_count() -> usize;
+        fn remembered_count() -> usize;
+        /// True when ticker, book, or live time-bar intents are present.
+        fn has_live_md_intents() -> bool;
     }
 
     /// After plants are back, return every typed venue join to re-issue.
@@ -311,15 +266,6 @@ impl ReconnectController {
     /// across a plant drop.
     pub async fn restore_plan(&self) -> RestorePlan {
         self.intent.lock().await.restore_plan()
-    }
-
-    pub async fn remembered_count(&self) -> usize {
-        self.intent.lock().await.remembered_count()
-    }
-
-    /// True when ticker, book, or live time-bar intents are present.
-    pub async fn has_live_md_intents(&self) -> bool {
-        self.intent.lock().await.has_live_md_intents()
     }
 
     /// Intent counts for GetLiveMdState (ticker, book, time_bars).

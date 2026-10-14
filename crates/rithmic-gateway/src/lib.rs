@@ -12,6 +12,7 @@ pub mod env_keys;
 pub mod framing;
 pub mod idle_exit;
 pub mod listen;
+mod mirror;
 pub mod reconnect;
 pub mod rpc_table;
 pub mod runtime_dir;

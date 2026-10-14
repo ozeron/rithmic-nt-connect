@@ -687,31 +687,7 @@ impl RithmicSession {
         }
         let account = self.resolve_account().await?;
         let rc = self.config.to_rithmic_config()?;
-        let order_plant = connect_within_deadline(
-            "order",
-            RithmicOrderPlant::connect(&rc, ConnectStrategy::Retry),
-        )
-        .await?;
-        let order_handle = order_plant.get_handle(&account);
-        let result = login_result(order_handle.login().await, "order login");
-        after_failed_login(
-            async {
-                let _ = order_handle.disconnect().await;
-            },
-            result,
-        )
-        .await?;
-        let stream = forward(
-            &self.streams,
-            Stream::Order,
-            order_handle.subscription_receiver.resubscribe(),
-            map_connection_response,
-        );
-        self.order = Some(OrderPlant {
-            _plant: order_plant,
-            handle: order_handle,
-            _stream: stream,
-        });
+        self.order = Some(connect_order(&rc, &account, &self.streams).await?);
         Ok(())
     }
 
@@ -761,29 +737,7 @@ impl RithmicSession {
         }
         let account = self.resolve_account().await?;
         let rc = self.config.to_rithmic_config()?;
-        let pnl_plant =
-            connect_within_deadline("pnl", RithmicPnlPlant::connect(&rc, ConnectStrategy::Retry))
-                .await?;
-        let pnl_handle = pnl_plant.get_handle(&account);
-        let result = login_result(pnl_handle.login().await, "pnl login");
-        after_failed_login(
-            async {
-                let _ = pnl_handle.disconnect().await;
-            },
-            result,
-        )
-        .await?;
-        let stream = forward(
-            &self.streams,
-            Stream::Pnl,
-            pnl_handle.subscription_receiver.resubscribe(),
-            map_connection_response,
-        );
-        self.pnl = Some(PnlPlant {
-            _plant: pnl_plant,
-            handle: pnl_handle,
-            _stream: stream,
-        });
+        self.pnl = Some(connect_pnl(&rc, &account, &self.streams).await?);
         Ok(())
     }
 
@@ -910,6 +864,29 @@ impl RithmicSession {
     }
 }
 
+/// Side, price type and duration from their venue names. A bad value is caught
+/// before anything is sent (`NotSent`); an empty duration is a day order.
+fn parse_order_terms(
+    side: &str,
+    price_type: &str,
+    duration: &str,
+) -> Result<(OrderSide, OrderType, TimeInForce)> {
+    let side: OrderSide = side
+        .parse()
+        .map_err(|e| Error::NotSent(format!("invalid order side: {e}")))?;
+    let price_type: OrderType = price_type
+        .parse()
+        .map_err(|e| Error::NotSent(format!("invalid price type: {e}")))?;
+    let duration: TimeInForce = if duration.is_empty() {
+        TimeInForce::Day
+    } else {
+        duration
+            .parse()
+            .map_err(|e| Error::NotSent(format!("invalid duration: {e}")))?
+    };
+    Ok((side, price_type, duration))
+}
+
 /// Place an order on an already-connected order-plant handle (no session lock).
 #[allow(clippy::too_many_arguments)]
 pub async fn place_order_on(
@@ -926,19 +903,7 @@ pub async fn place_order_on(
     trail_by_ticks: Option<i32>,
     trail_by_price_id: Option<i32>,
 ) -> Result<()> {
-    let side: OrderSide = side
-        .parse()
-        .map_err(|e| Error::NotSent(format!("invalid order side: {e}")))?;
-    let price_type: OrderType = price_type
-        .parse()
-        .map_err(|e| Error::NotSent(format!("invalid price type: {e}")))?;
-    let duration: TimeInForce = if duration.is_empty() {
-        TimeInForce::Day
-    } else {
-        duration
-            .parse()
-            .map_err(|e| Error::NotSent(format!("invalid duration: {e}")))?
-    };
+    let (side, price_type, duration) = parse_order_terms(side, price_type, duration)?;
 
     let mut builder = RithmicOrder::new()
         .symbol(symbol)
@@ -996,19 +961,7 @@ pub async fn place_bracket_order_on(
             "place_bracket_order requires stop_ticks and/or target_ticks".into(),
         ));
     }
-    let side: OrderSide = side
-        .parse()
-        .map_err(|e| Error::NotSent(format!("invalid order side: {e}")))?;
-    let price_type: OrderType = price_type
-        .parse()
-        .map_err(|e| Error::NotSent(format!("invalid price type: {e}")))?;
-    let duration: TimeInForce = if duration.is_empty() {
-        TimeInForce::Day
-    } else {
-        duration
-            .parse()
-            .map_err(|e| Error::NotSent(format!("invalid duration: {e}")))?
-    };
+    let (side, price_type, duration) = parse_order_terms(side, price_type, duration)?;
 
     let mut builder = RithmicBracketOrder::new()
         .symbol(symbol)
@@ -1038,26 +991,17 @@ pub async fn place_bracket_order_on(
     )
 }
 
-/// Adjust bracket stop ticks on an already-connected handle.
-pub async fn adjust_bracket_stop_on(
-    handle: &RithmicOrderPlantHandle,
-    basket_id: &str,
-    ticks: i32,
-    level: Option<i32>,
-) -> Result<()> {
-    let mut builder = RithmicBracketLevelAdjustment::new()
-        .id(basket_id)
-        .ticks(ticks);
-    if let Some(lvl) = level {
-        builder = builder.level(lvl);
-    }
-    let adj = builder.build().map_err(|e| Error::NotSent(e.to_string()))?;
-    order_result_one(handle.adjust_stop(adj).await, "adjust_bracket_stop")
+/// Which leg of a plant bracket an adjustment moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BracketLeg {
+    Stop,
+    Target,
 }
 
-/// Adjust bracket target ticks on an already-connected handle.
-pub async fn adjust_bracket_target_on(
+/// Move a bracket leg to `ticks` from the fill, on an already-connected handle.
+pub async fn adjust_bracket_on(
     handle: &RithmicOrderPlantHandle,
+    leg: BracketLeg,
     basket_id: &str,
     ticks: i32,
     level: Option<i32>,
@@ -1069,7 +1013,12 @@ pub async fn adjust_bracket_target_on(
         builder = builder.level(lvl);
     }
     let adj = builder.build().map_err(|e| Error::NotSent(e.to_string()))?;
-    order_result_one(handle.adjust_target(adj).await, "adjust_bracket_target")
+    match leg {
+        BracketLeg::Stop => order_result_one(handle.adjust_stop(adj).await, "adjust_bracket_stop"),
+        BracketLeg::Target => {
+            order_result_one(handle.adjust_target(adj).await, "adjust_bracket_target")
+        }
+    }
 }
 
 /// Modify an order on an already-connected handle (no session lock).
@@ -1141,11 +1090,14 @@ fn order_failure(e: rithmic_rs::RithmicError) -> Error {
 }
 
 fn order_response_failure(resp: &rithmic_rs::RithmicResponse, ctx: &str) -> Option<Error> {
-    resp.error.as_ref().map(|e| match order_failure(e.clone()) {
-        Error::Rejected(m) => Error::Rejected(format!("{ctx}: {m}")),
-        Error::NotSent(m) => Error::NotSent(format!("{ctx}: {m}")),
-        Error::OutcomeUnknown(m) => Error::OutcomeUnknown(format!("{ctx}: {m}")),
-        other => other,
+    resp.error.as_ref().map(|e| {
+        let class = order_failure(e.clone());
+        let message = format!("{ctx}: {e}");
+        match class {
+            Error::Rejected(_) => Error::Rejected(message),
+            Error::NotSent(_) => Error::NotSent(message),
+            _ => Error::OutcomeUnknown(message),
+        }
     })
 }
 
@@ -1174,18 +1126,6 @@ fn order_result_one(
     }
 }
 
-/// Drain current working orders on an already-connected handle (no session lock).
-///
-/// `show_orders` triggers a replay of the current working orders, which arrive
-/// on the order-updates subscription channel with no completion marker. This
-/// drains that channel until `ORDER_DRAIN_SETTLE_MS` of silence (or the hard
-/// cap) and returns every order notification seen in arrival order.
-///
-/// **Best-effort, not provably complete.** Replays silently cap at 10,000
-/// records and a quiet channel cannot distinguish "venue has no orders" from
-/// "rows were lost". Callers that need a hard guarantee must treat the result
-/// as advisory (see `death_policy=trust_stop`) rather than as an authoritative
-/// venue snapshot.
 /// A pull source the order-drain reads `PlantEvent`s from.
 ///
 /// Implemented for `SubscriptionFilter` (production, over the order-plant
@@ -1223,13 +1163,7 @@ impl OrderDrainSource for SubscriptionFilter {
 /// `ORDER_DRAIN_SETTLE_MS` of silence (or the `ORDER_DRAIN_MAX_MS` hard cap)
 /// and returns them in arrival order. A `Closed` / `Lagged` source aborts the
 /// drain with the corresponding error (so a dropped order-plant connection
-/// surfaces as `ChannelClosed`).
-///
-/// **Best-effort, not provably complete.** Replays silently cap at 10,000
-/// records and a quiet channel cannot distinguish "venue has no orders" from
-/// "rows were lost". Callers that need a hard guarantee must treat the result
-/// as advisory (see `death_policy=trust_stop`) rather than as an authoritative
-/// venue snapshot.
+/// surfaces as `ChannelClosed`). Best-effort: see [`load_orders_on`].
 pub(crate) async fn drain_order_notifications<S>(mut src: S) -> Result<Vec<OrderNotificationDto>>
 where
     S: OrderDrainSource,
@@ -1245,15 +1179,6 @@ where
         match tokio::time::timeout(settle.min(remaining), src.recv_order()).await {
             Ok(Ok(PlantEvent::OrderNotification(dto))) => out.push(dto),
             Ok(Ok(_)) => {} // non-order events (PnL, brackets, …) are ignored
-            Ok(Err(Error::ChannelLagged { skipped, .. })) => {
-                return Err(Error::ChannelLagged {
-                    plant: "order",
-                    skipped,
-                });
-            }
-            Ok(Err(Error::ChannelClosed { .. })) => {
-                return Err(Error::ChannelClosed { plant: "order" });
-            }
             Ok(Err(err)) => return Err(err),
             Err(_elapsed) => break, // silence window elapsed -> drain complete
         }
@@ -1443,60 +1368,57 @@ fn login_result(
     }
 }
 
+/// Bring one plant up: connect within the deadline, log in (logging out again
+/// on a failed login, so no half session lingers), then attach its event lane.
+macro_rules! connect_plant {
+    ($label:literal, $plant:ident, $stream:expr, $rc:expr, $hub:expr, $out:ident, |$p:ident| $handle:expr) => {{
+        let $p =
+            connect_within_deadline($label, $plant::connect($rc, ConnectStrategy::Retry)).await?;
+        let handle = $handle;
+        let result = login_result(handle.login().await, concat!($label, " login"));
+        after_failed_login(
+            async {
+                let _ = handle.disconnect().await;
+            },
+            result,
+        )
+        .await?;
+        let stream = forward(
+            $hub,
+            $stream,
+            handle.subscription_receiver.resubscribe(),
+            map_connection_response,
+        );
+        $out {
+            _plant: $p,
+            handle,
+            _stream: stream,
+        }
+    }};
+}
+
 async fn connect_ticker(rc: &RithmicConfig, hub: &Arc<StreamHub>) -> Result<TickerPlant> {
-    let plant = connect_within_deadline(
+    Ok(connect_plant!(
         "ticker",
-        RithmicTickerPlant::connect(rc, ConnectStrategy::Retry),
-    )
-    .await?;
-    let handle = plant.get_handle();
-    let result = login_result(handle.login().await, "ticker login");
-    after_failed_login(
-        async {
-            let _ = handle.disconnect().await;
-        },
-        result,
-    )
-    .await?;
-    let stream = forward(
-        hub,
+        RithmicTickerPlant,
         Stream::Ticker,
-        handle.subscription_receiver.resubscribe(),
-        map_connection_response,
-    );
-    Ok(TickerPlant {
-        _plant: plant,
-        handle,
-        _stream: stream,
-    })
+        rc,
+        hub,
+        TickerPlant,
+        |plant| { plant.get_handle() }
+    ))
 }
 
 async fn connect_history(rc: &RithmicConfig, hub: &Arc<StreamHub>) -> Result<HistoryPlant> {
-    let plant = connect_within_deadline(
+    Ok(connect_plant!(
         "history",
-        RithmicHistoryPlant::connect(rc, ConnectStrategy::Retry),
-    )
-    .await?;
-    let handle = plant.get_handle();
-    let result = login_result(handle.login().await, "history login");
-    after_failed_login(
-        async {
-            let _ = handle.disconnect().await;
-        },
-        result,
-    )
-    .await?;
-    let stream = forward(
-        hub,
+        RithmicHistoryPlant,
         Stream::History,
-        handle.subscription_receiver.resubscribe(),
-        map_connection_response,
-    );
-    Ok(HistoryPlant {
-        _plant: plant,
-        handle,
-        _stream: stream,
-    })
+        rc,
+        hub,
+        HistoryPlant,
+        |plant| { plant.get_handle() }
+    ))
 }
 
 async fn connect_pnl(
@@ -1504,29 +1426,31 @@ async fn connect_pnl(
     account: &RithmicAccount,
     hub: &Arc<StreamHub>,
 ) -> Result<PnlPlant> {
-    let plant =
-        connect_within_deadline("pnl", RithmicPnlPlant::connect(rc, ConnectStrategy::Retry))
-            .await?;
-    let handle = plant.get_handle(account);
-    let result = login_result(handle.login().await, "pnl login");
-    after_failed_login(
-        async {
-            let _ = handle.disconnect().await;
-        },
-        result,
-    )
-    .await?;
-    let stream = forward(
-        hub,
+    Ok(connect_plant!(
+        "pnl",
+        RithmicPnlPlant,
         Stream::Pnl,
-        handle.subscription_receiver.resubscribe(),
-        map_connection_response,
-    );
-    Ok(PnlPlant {
-        _plant: plant,
-        handle,
-        _stream: stream,
-    })
+        rc,
+        hub,
+        PnlPlant,
+        |plant| { plant.get_handle(account) }
+    ))
+}
+
+async fn connect_order(
+    rc: &RithmicConfig,
+    account: &RithmicAccount,
+    hub: &Arc<StreamHub>,
+) -> Result<OrderPlant> {
+    Ok(connect_plant!(
+        "order",
+        RithmicOrderPlant,
+        Stream::Order,
+        rc,
+        hub,
+        OrderPlant,
+        |plant| { plant.get_handle(account) }
+    ))
 }
 
 async fn load_tick_slice(

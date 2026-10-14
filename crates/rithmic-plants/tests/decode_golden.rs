@@ -228,3 +228,43 @@ async fn bracket_update_is_typed() {
         other => panic!("{other:?}"),
     }
 }
+
+fn bar_row(open: Option<f64>) -> rti::ResponseTimeBarReplay {
+    let mut m = rti::ResponseTimeBarReplay::default();
+    m.template_id = template::TIME_BAR_REPLAY + 1;
+    m.symbol = Some("ESZ6".into());
+    m.exchange = Some("CME".into());
+    m.r#type = Some(2);
+    m.period = Some("1".into());
+    m.marker = Some(T + 60);
+    m.open_price = open;
+    m.high_price = Some(5001.0);
+    m.low_price = Some(4999.0);
+    m.close_price = Some(5000.5);
+    m.volume = Some(10);
+    m
+}
+
+#[tokio::test]
+async fn a_probe_row_is_parsed_exactly_when_the_load_keeps_the_bar() {
+    let (venue, s) = session().await;
+    let rows = [bar_row(Some(5000.0)), bar_row(None)];
+    let reply = rithmic_plants::fake_venue::Reply::rows(template::TIME_BAR_REPLAY + 1, &rows);
+    venue.script(template::TIME_BAR_REPLAY, reply.clone());
+    venue.script(template::TIME_BAR_REPLAY, reply);
+    let probe = s
+        .probe_time_bars("ESZ6", "CME", T, T + 120, 2, 1)
+        .await
+        .unwrap();
+    let bars = s
+        .load_time_bars("ESZ6", "CME", T, T + 120, 2, 1)
+        .await
+        .unwrap();
+    assert_eq!(bars.len(), 1);
+    assert!(probe[0].parsed);
+    assert!(!probe[1].parsed);
+    assert_eq!(
+        probe[1].skip_reason.as_deref(),
+        Some("missing open/high/low")
+    );
+}

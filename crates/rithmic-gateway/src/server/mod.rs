@@ -587,58 +587,15 @@ impl ClientCtx {
     }
 
     async fn teardown_pnl(&mut self, state: &GatewayState) {
-        if !self.pnl {
-            return;
-        }
-        self.pnl = false;
-        let lock = dispatch::topic_lock(state, &crate::convert::pnl_key()).await;
-        let _guard = lock.lock().await;
-        if state.reconnect.forget_pnl().await {
-            if let Some(session) = &state.session {
-                let guard = session.lock().await;
-                let _ = guard.disconnect_pnl_plant().await;
-            }
+        // The client is gone: nothing to roll back to, nobody to tell.
+        if let Err((code, e)) = dispatch::leave_pnl(state, self, false).await {
+            eprintln!("rithmic-gateway: teardown {code}: {e}");
         }
     }
 
-    /// Order-plant teardown: brackets and order share one plant, so the last
-    /// peer of either drives the disconnect; when only brackets peers leave,
-    /// re-seat order-only to drop venue brackets (no brackets unsubscribe API).
     async fn teardown_order_plants(&mut self, state: &GatewayState) {
-        if !self.brackets && !self.order {
-            return;
-        }
-        if self.brackets {
-            let key = crate::convert::order_key();
-            let lock = dispatch::topic_lock(state, &key).await;
-            let _guard = lock.lock().await;
-            let last_brackets = dispatch::clear_client_brackets(state, self).await;
-            let last_order = if self.order {
-                self.order = false;
-                state.reconnect.forget_order().await
-            } else {
-                false
-            };
-            if last_order {
-                if let Some(session) = &state.session {
-                    let guard = session.lock().await;
-                    let _ = guard.disconnect_order_plant().await;
-                }
-            } else if last_brackets && state.reconnect.restore_plan().await.order {
-                if let Err(e) = dispatch::reseat_order_plant_without_brackets(state).await {
-                    eprintln!("rithmic-gateway: teardown reseat failed: {e}");
-                    state.ready.store(false, Ordering::SeqCst);
-                    state.request_reconnect();
-                }
-            }
-        } else {
-            self.order = false;
-            if state.reconnect.forget_order().await {
-                if let Some(session) = &state.session {
-                    let guard = session.lock().await;
-                    let _ = guard.disconnect_order_plant().await;
-                }
-            }
+        if let Err((code, e)) = dispatch::leave_order(state, self, false).await {
+            eprintln!("rithmic-gateway: teardown {code}: {e}");
         }
     }
 }

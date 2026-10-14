@@ -255,20 +255,10 @@ pub fn history_ready_probe_root() -> (String, String) {
     (symbol, exchange)
 }
 
-/// True when `symbol` looks like a listed futures contract (e.g. `ESU6`) rather
-/// than a product root (e.g. `ES`, `MNQ`, `6E`).
-///
-/// Roots may contain digits (`6E`); month-code + year-digit suffix is the
-/// contract heuristic used elsewhere in the adapter stack.
+/// Whether `symbol` is a listed contract (not a root to resolve): the one rule
+/// in `rithmic_exec::is_listed_contract`.
 pub fn looks_like_listed_contract(symbol: &str) -> bool {
-    const MONTH_CODES: &[u8] = b"FGHJKMNQUVXZ";
-    let bytes = symbol.as_bytes();
-    if bytes.len() < 3 {
-        return false;
-    }
-    let year = bytes[bytes.len() - 1];
-    let month = bytes[bytes.len() - 2];
-    year.is_ascii_digit() && MONTH_CODES.contains(&month)
+    rithmic_exec::is_listed_contract(symbol)
 }
 
 pub(crate) async fn load_sliced<T, K, F, Fut>(
@@ -465,6 +455,9 @@ mod tests {
         assert!(!looks_like_listed_contract("MNQ"));
         assert!(!looks_like_listed_contract("6E"));
         assert!(looks_like_listed_contract("6EU6"));
+        // Two-digit years and lower case are contracts too (one rule with exposure).
+        assert!(looks_like_listed_contract("ESZ26"));
+        assert!(looks_like_listed_contract("esu6"));
     }
 
     #[tokio::test]

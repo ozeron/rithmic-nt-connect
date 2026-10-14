@@ -60,16 +60,16 @@
 
 ## 6. Duplication
 
-- [ ] 6.1 `mirror_conv!` macro generates the 14 DTO↔proto mappings both ways; `python/mod.rs` order notification reuses the field list; `client_convert.rs` round-trip test over every pair
-- [ ] 6.2 `one_shot` helper for the gated command handlers and the three gated loads in `dispatch/orders.rs`
+- [x] 6.1 `mirror!` macro (`rithmic-gateway/src/mirror.rs`) generates the 14 plain DTO↔proto mappings both ways; reference data and resolved account stay hand-written (they convert values); the PyO3 dicts stay explicit (they coerce per field for Python); `client_convert.rs` round-trip test covers every pair
+- [x] 6.2 `one_shot` helper for the gated command handlers and the three gated loads in `dispatch/orders.rs`
 - [x] 6.3 Lane derived from the RPC table rows; delete the hand lists in `dispatch/mod.rs`
-- [ ] 6.4 One `leave_order_plant` / `leave_pnl_plant` used by teardown and by explicit disconnect (rollback flag)
-- [ ] 6.5 `reset_ticker_plant` reuses the market-data restore pass and clears degraded flags
-- [ ] 6.6 `reconnect.rs`: generic `bump<K>` / `drop_count`; trim the pass-through methods
-- [ ] 6.7 `call_expect!` macro in `client/mod.rs`
-- [ ] 6.8 `session.rs`: generic `connect_plant`; `ensure_pnl_plant` uses `connect_pnl`; shared `parse_order_terms`; one `adjust_bracket_on`; simplified error helpers; misplaced doc comments removed
-- [ ] 6.9 `dto.rs`: one order-notification builder for both arms; `TimeBarProbeRow` built on `HistoryBarDto` parsing
-- [ ] 6.10 `history.rs` uses `rithmic_exec::product_root` for the listed-contract check; test for `ESZ26` and lowercase input
+- [x] 6.4 One `leave_order_plant` / `leave_pnl_plant` used by teardown and by explicit disconnect (rollback flag)
+- [x] 6.5 `reset_ticker_plant` reuses the market-data restore pass and clears degraded flags
+- [x] 6.6 `reconnect.rs`: generic `bump<K>` / `drop_count`; trim the pass-through methods
+- [x] 6.7 `call_expect!` macro in `client/mod.rs`
+- [x] 6.8 `session.rs`: generic `connect_plant`; `ensure_pnl_plant` uses `connect_pnl`; shared `parse_order_terms`; one `adjust_bracket_on`; simplified error helpers; misplaced doc comments removed
+- [x] 6.9 `dto.rs`: one order-notification builder for both arms; `TimeBarProbeRow` built on `HistoryBarDto` parsing
+- [x] 6.10 `history.rs` uses `rithmic_exec::product_root` for the listed-contract check; test for `ESZ26` and lowercase input
 - [ ] 6.11 `execution.py`: `_deny` / `_deny_all` with one ordered gate list; `_make_poll_task`; modify/cancel rejects use the resolved venue id
 - [ ] 6.12 Move `notification_action`, `sentinel_none`, `enum_int` into `rithmic-exec` with Rust tests and PyO3 bindings; Python originals kept as oracles in `test_exec_rules_parity.py`
 - [ ] 6.13 RMS types defined once in `rithmic_gateway.types` (fields reconciled); `wire_types.py` re-exports
