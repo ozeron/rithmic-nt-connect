@@ -1,7 +1,7 @@
 # gateway-client Specification
 
 ## Purpose
-TBD - created by syncing change `rust-unified-session`. Update Purpose after archive. Scope: the Rust gateway client: attach-only, mux, transport recovery, outcome classes, chunked history.
+The Rust gateway client: attach to an explicitly started parent, share one socket per process with typed event routing, recover the transport with a generation counter, classify outcomes, and load history in chunks.
 
 ## Requirements
 

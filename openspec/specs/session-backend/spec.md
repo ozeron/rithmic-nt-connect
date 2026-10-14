@@ -1,7 +1,7 @@
 # session-backend Specification
 
 ## Purpose
-TBD - created by syncing change `rust-unified-session`. Update Purpose after archive. Scope: the Rust `Session` trait as the single definition of the plant surface, with `DirectSession` and `GatewaySession`.
+The Rust `Session` trait as the single definition of the plant surface, implemented by `DirectSession` and `GatewaySession`, with declared RPC kinds, gate parity and identical outcomes and events in both modes.
 
 ## Requirements
 

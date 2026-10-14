@@ -1,9 +1,9 @@
-"""Retired gateway client knobs fail fast; values equal to the sole remaining
-behavior are accepted as no-ops (openspec: simplify-gateway-modes)."""
+"""Retired gateway client knobs fail fast for any set value; unset is the only
+valid state (openspec: retire-python-mux-and-noop-knobs)."""
 
 from __future__ import annotations
 
-import logging
+import dataclasses
 
 import pytest
 from rithmic_gateway import config as gw_config
@@ -32,70 +32,53 @@ def _session(**extra: str) -> SessionConfig:
     return SessionConfig.from_env({**_SESSION_ENV, **extra})
 
 
-@pytest.fixture(autouse=True)
-def _reset_deprecation_state() -> None:
-    gw_config._DEPRECATION_WARNED.clear()
-    nt_config._DEPRECATION_WARNED.clear()
-
-
 def test_the_adapter_and_the_lake_reject_the_same_knobs() -> None:
     """Each package keeps its own table (neither may import the other)."""
     assert nt_config._RETIRED_KNOBS == gw_config._RETIRED_KNOBS
 
 
-# -- removed behavior: fail fast ------------------------------------------------
+# Values that asked for removed behavior and values that used to be accepted as
+# deprecated no-ops both raise now.
+_RETIRED_VALUES = [
+    ("RITHMIC_GATEWAY_CLIENT_MODE", "dual", "one topology"),
+    ("RITHMIC_GATEWAY_CLIENT_MODE", "DUAL", "one topology"),
+    ("RITHMIC_GATEWAY_CLIENT_MODE", "mux", "one topology"),
+    ("RITHMIC_GATEWAY_CLIENT_MODE", "pooled", "one topology"),
+    ("RITHMIC_GATEWAY_SPAWN_POLICY", "if_missing", "no longer spawns"),
+    ("RITHMIC_GATEWAY_SPAWN_POLICY", "auto", "no longer spawns"),
+    ("RITHMIC_GATEWAY_SPAWN_POLICY", "default", "no longer spawns"),
+    ("RITHMIC_GATEWAY_SPAWN_POLICY", "never", "no longer spawns"),
+    ("RITHMIC_GATEWAY_SPAWN_POLICY", "nevver", "no longer spawns"),
+    ("RITHMIC_GATEWAY_AUTO_SPAWN", "1", "no longer spawns"),
+    ("RITHMIC_GATEWAY_AUTO_SPAWN", "true", "no longer spawns"),
+    ("RITHMIC_GATEWAY_AUTO_SPAWN", "0", "no longer spawns"),
+    ("RITHMIC_GATEWAY_AUTO_SPAWN", "false", "no longer spawns"),
+    ("RITHMIC_GATEWAY_AUTO_SPAWN", "off", "no longer spawns"),
+    ("RITHMIC_GATEWAY_AUTO_SPAWN", "maybe", "no longer spawns"),
+]
 
 
-@pytest.mark.parametrize(
-    ("name", "value", "needle"),
-    [
-        ("RITHMIC_GATEWAY_CLIENT_MODE", "dual", "dual"),
-        ("RITHMIC_GATEWAY_CLIENT_MODE", "DUAL", "dual"),
-        ("RITHMIC_GATEWAY_SPAWN_POLICY", "if_missing", "spawn"),
-        ("RITHMIC_GATEWAY_SPAWN_POLICY", "auto", "spawn"),
-        ("RITHMIC_GATEWAY_SPAWN_POLICY", "default", "spawn"),
-        ("RITHMIC_GATEWAY_AUTO_SPAWN", "1", "spawn"),
-        ("RITHMIC_GATEWAY_AUTO_SPAWN", "true", "spawn"),
-        ("RITHMIC_GATEWAY_AUTO_SPAWN", "yes", "spawn"),
-        ("RITHMIC_GATEWAY_AUTO_SPAWN", "on", "spawn"),
-    ],
-)
-def test_removed_behavior_raises_config_error(
+@pytest.mark.parametrize(("name", "value", "needle"), _RETIRED_VALUES)
+def test_any_set_value_raises_on_both_configs(
     name: str, value: str, needle: str
 ) -> None:
-    with pytest.raises(GatewayConfigError, match=needle):
+    with pytest.raises(GatewayConfigError, match=needle) as gw:
         _gateway(**{name: value})
-    with pytest.raises(ConfigError, match=needle):
+    with pytest.raises(ConfigError, match=needle) as nt:
         _session(**{name: value})
+    assert name in str(gw.value)
+    assert str(gw.value) == str(nt.value)
 
 
 def test_spawn_error_tells_operator_to_start_the_parent() -> None:
-    with pytest.raises(GatewayConfigError, match="start the parent"):
+    with pytest.raises(GatewayConfigError, match="python -m rithmic_gateway"):
         _gateway(RITHMIC_GATEWAY_AUTO_SPAWN="1")
 
 
-def test_dual_error_says_mux_is_the_only_mode() -> None:
-    with pytest.raises(GatewayConfigError, match="mux"):
-        _gateway(RITHMIC_GATEWAY_CLIENT_MODE="dual")
-
-
-# -- sole remaining behavior: accepted no-op ------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("name", "value"),
-    [
-        ("RITHMIC_GATEWAY_CLIENT_MODE", "mux"),
-        ("RITHMIC_GATEWAY_SPAWN_POLICY", "never"),
-        ("RITHMIC_GATEWAY_AUTO_SPAWN", "0"),
-        ("RITHMIC_GATEWAY_AUTO_SPAWN", "false"),
-        ("RITHMIC_GATEWAY_AUTO_SPAWN", "no"),
-        ("RITHMIC_GATEWAY_AUTO_SPAWN", "off"),
-    ],
-)
-def test_sole_behavior_values_are_accepted(name: str, value: str) -> None:
-    assert _gateway(**{name: value}).user == "u"
-    assert _session(**{name: value}).user == "u"
+@pytest.mark.parametrize("name", sorted(gw_config._RETIRED_KNOBS))
+def test_empty_value_counts_as_unset(name: str) -> None:
+    assert _gateway(**{name: ""}).user == "u"
+    assert _session(**{name: "  "}).user == "u"
 
 
 def test_unset_knobs_are_accepted() -> None:
@@ -103,48 +86,10 @@ def test_unset_knobs_are_accepted() -> None:
     assert _session().user == "u"
 
 
-# -- invalid values ------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("name", "value"),
-    [
-        ("RITHMIC_GATEWAY_CLIENT_MODE", "pooled"),
-        ("RITHMIC_GATEWAY_SPAWN_POLICY", "nevver"),
-        ("RITHMIC_GATEWAY_AUTO_SPAWN", "maybe"),
-    ],
-)
-def test_unrecognized_value_is_invalid(name: str, value: str) -> None:
-    with pytest.raises(GatewayConfigError, match=f"invalid {name}"):
-        _gateway(**{name: value})
-
-
-# -- one-time deprecation warning for accepted no-ops --------------------------
-
-
-def test_accepted_noop_logs_one_deprecation_warning(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    caplog.set_level(logging.WARNING, logger="rithmic_gateway.config")
-    _gateway(RITHMIC_GATEWAY_CLIENT_MODE="mux")
-    _gateway(RITHMIC_GATEWAY_CLIENT_MODE="mux")
-    records = [r for r in caplog.records if "RITHMIC_GATEWAY_CLIENT_MODE" in r.message]
-    assert len(records) == 1
-    assert "deprecated" in records[0].message
-
-
-def test_unset_knobs_do_not_warn(caplog: pytest.LogCaptureFixture) -> None:
-    caplog.set_level(logging.WARNING, logger="rithmic_gateway.config")
-    _gateway()
-    assert not [r for r in caplog.records if "deprecated" in r.message]
-
-
 # -- library surface -----------------------------------------------------------
 
 
 def test_gateway_config_has_no_spawn_fields() -> None:
-    import dataclasses
-
     names = {f.name for f in dataclasses.fields(GatewayConfig)}
     assert not {n for n in names if "spawn" in n or "environ" in n}
     assert "attach_timeout_sec" in names
@@ -152,8 +97,6 @@ def test_gateway_config_has_no_spawn_fields() -> None:
 
 
 def test_session_config_has_no_spawn_or_dual_fields() -> None:
-    import dataclasses
-
     names = {f.name for f in dataclasses.fields(SessionConfig)}
     assert not {n for n in names if "spawn" in n or "client_mode" in n}
     assert "gateway_bin" not in names

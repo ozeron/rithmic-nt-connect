@@ -1,7 +1,7 @@
 # supported-modes Specification
 
 ## Purpose
-TBD - created by syncing change `simplify-gateway-modes`. Update Purpose after archive.
+The supported connect modes and their guardrails: explicit `direct` or `gateway` selection, one shared socket per process, unix-only transport, fail-fast retired knobs, venue-environment separation, independent trading and cancel-all gates, and explicit bar source.
 
 ## Requirements
 

@@ -119,11 +119,11 @@ RITHMIC_GATEWAY_BIN=$PWD/target/release/rithmic-gateway python -m rithmic_gatewa
 #   file is one login — the binary used to read only RITHMIC_URL and sent a
 #   RITHMIC_GATEWAY test login to production.
 # Listen socket:        RITHMIC_GATEWAY_LISTEN=unix://…  (never use as WSS URL)
-# Clients are attach-only and mux-only: one socket per process and credential
-# fingerprint, shared by the data and exec factories. Retired client knobs fail fast:
-#   RITHMIC_GATEWAY_CLIENT_MODE=dual, RITHMIC_GATEWAY_SPAWN_POLICY=if_missing|auto|default
-#   and RITHMIC_GATEWAY_AUTO_SPAWN=1 raise ConfigError (start the parent explicitly).
-#   mux / never / AUTO_SPAWN=0 are accepted as deprecated no-ops (one warning); delete them.
+# Clients are attach-only: one socket per process and credential fingerprint,
+# shared by the data and exec factories. Retired client knobs fail fast: setting
+#   RITHMIC_GATEWAY_CLIENT_MODE, RITHMIC_GATEWAY_SPAWN_POLICY or
+#   RITHMIC_GATEWAY_AUTO_SPAWN to any value raises ConfigError; unset them
+#   (start the parent explicitly).
 # Adapter gateway mode always uses the Rust client; the rollout selector
 #   RITHMIC_GATEWAY_CLIENT=rust|python no longer exists and is ignored.
 # Trading / cancel_all are parent-gated (independent toggles):

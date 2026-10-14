@@ -7,7 +7,6 @@ production R|Protocol URL. Passwords are never included in ``repr`` or error tex
 
 from __future__ import annotations
 
-import logging
 import os
 import sys
 from collections.abc import Mapping, MutableMapping
@@ -73,63 +72,32 @@ def env_truthy(value: str | None, *, default: bool = False) -> bool:
     return value.strip().lower() in _ENV_TRUTHY
 
 
-# The gateway client is attach-only and mux-only. A value asking for removed
-# behavior (``dual`` client mode, client-side spawn) raises; a value equal to the
-# sole remaining behavior (``mux``, ``never``, ``AUTO_SPAWN=0``) is accepted as a
-# deprecated no-op. The pure-Python ``rithmic_gateway`` library keeps its own copy
-# (it must not import the adapter); ``tests/test_gateway_retired_knobs.py`` fails
-# if the two tables drift.
-_LOG = logging.getLogger(__name__)
-_DEPRECATION_WARNED: set[str] = set()
-
+# The gateway client is attach-only with one shared socket per process. Retired
+# variables raise for any non-empty value (unset is the only valid state). The
+# pure-Python ``rithmic_gateway`` library keeps its own copy (it must not import the
+# adapter); ``tests/test_gateway_retired_knobs.py`` fails if the two tables drift.
 _SPAWN_REMOVED = (
-    "the gateway client no longer spawns the parent; start the parent explicitly "
-    "with `python -m rithmic_gateway` (or a service manager) and remove {name}"
+    "{name} was removed: the gateway client no longer spawns the parent; start the "
+    "parent explicitly with `python -m rithmic_gateway` (or a service manager) and "
+    "unset {name}"
 )
-_DUAL_REMOVED = "dual was removed; mux is the only gateway client mode, remove {name}"
+_TOPOLOGY_REMOVED = (
+    "{name} was removed: the gateway client has one topology (one shared socket per "
+    "process); unset {name}"
+)
 
-# name -> (values requesting removed behavior, why, values equal to the sole
-# remaining behavior).
-_RETIRED_KNOBS: dict[str, tuple[frozenset[str], str, frozenset[str]]] = {
-    "RITHMIC_GATEWAY_CLIENT_MODE": (
-        frozenset({"dual"}),
-        _DUAL_REMOVED,
-        frozenset({"mux"}),
-    ),
-    "RITHMIC_GATEWAY_SPAWN_POLICY": (
-        frozenset({"if_missing", "auto", "default"}),
-        _SPAWN_REMOVED,
-        frozenset({"never"}),
-    ),
-    "RITHMIC_GATEWAY_AUTO_SPAWN": (
-        frozenset({"1", "true", "yes", "on"}),
-        _SPAWN_REMOVED,
-        frozenset({"0", "false", "no", "off"}),
-    ),
+_RETIRED_KNOBS: dict[str, str] = {
+    "RITHMIC_GATEWAY_CLIENT_MODE": _TOPOLOGY_REMOVED,
+    "RITHMIC_GATEWAY_SPAWN_POLICY": _SPAWN_REMOVED,
+    "RITHMIC_GATEWAY_AUTO_SPAWN": _SPAWN_REMOVED,
 }
 
 
 def _reject_retired_client_knobs(env: Mapping[str, str]) -> None:
-    for name, (removed, why, accepted) in _RETIRED_KNOBS.items():
+    for name, why in _RETIRED_KNOBS.items():
         raw = _env_first(env, name)
-        if raw is None:
-            continue
-        key = raw.lower()
-        if key in removed:
+        if raw is not None:
             raise ConfigError(f"{name}={raw}: " + why.format(name=name))
-        if key not in accepted:
-            raise ConfigError(
-                f"invalid {name} {raw!r}; retired knob, only "
-                f"{'/'.join(sorted(accepted))} is accepted"
-            )
-        if name not in _DEPRECATION_WARNED:
-            _DEPRECATION_WARNED.add(name)
-            _LOG.warning(
-                "%s=%s is deprecated and has no effect (attach-only, mux-only "
-                "gateway client); remove it from your environment",
-                name,
-                key,
-            )
 
 
 def _connect_mode_fields(env: Mapping[str, str]) -> dict[str, Any]:
