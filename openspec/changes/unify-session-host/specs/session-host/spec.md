@@ -171,11 +171,11 @@ The host SHALL take a history policy at start: `Allow`, or `RefuseUnderLiveMd`. 
 - **THEN** `rithmic_nt_connect._lib.Session` SHALL have no `fake` attribute
 
 ### Requirement: Direct mode keeps its throughput
-A `LocalSession` SHALL deliver events to Python at no lower a rate than the pre-change direct path, measured by the FFI throughput benchmark with a baseline recorded before the change.
+Delivery through a `LocalSession` SHALL NOT reduce direct-mode event throughput into Python by more than 10% compared with reading the venue stream directly. The comparison SHALL use interleaved runs of the `direct_hop_venue` / `direct_hop_host` scenarios, plus the per-event cost of the Python boundary measured by the FFI throughput benchmark, and the numbers SHALL be recorded in `docs/perf/`.
 
-#### Scenario: Benchmark after switch-over
-- **WHEN** `RITHMIC_PERF=1` runs the FFI throughput benchmark in direct mode after group 5
-- **THEN** events per second SHALL be no lower than the recorded baseline
+#### Scenario: Host hop within budget
+- **WHEN** `direct_hop_venue` and `direct_hop_host` run interleaved for 5 rounds each on a quiet machine
+- **THEN** the host path's added per-event cost, relative to the per-event cost of crossing into Python, SHALL be at most 10%
 
 ### Requirement: A session joining a live intent receives a snapshot
 When a session joins a PnL or book intent the host already holds for other sessions, or re-joins one after a gap or a socket re-attach, the host SHALL cause a fresh snapshot to be delivered to that session without the session resetting any plant. For PnL the host SHALL request a venue PnL position snapshot. For a book the host SHALL refresh that key at the venue so that every session holding it receives a clear followed by a snapshot. Other sessions SHALL tolerate the extra snapshot.

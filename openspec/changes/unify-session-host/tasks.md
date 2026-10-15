@@ -76,7 +76,7 @@ Agents run in the shared checkout on branch `feat/unify-session-host`. Each agen
 - [x] 5.4 (from B2) Switch the PyO3 binding to `session_events()`, so exec disarms at interruption time rather than after the restore, then remove the legacy synthetic Down/Up the Rust client still emits for `subscribe_transport`. Deliver `SessionEvent` to Python listeners in both modes on the existing dedicated delivery thread. Add `Interrupted` / `Resumed` / `RecoveryFailed` pyclasses, with `transport.py` re-exporting the old names for one release.
 - [x] 5.5 Add `Session.fake(...)` (feature `testing`) attaching to `SessionHost<FakeVenue>`, with a script API for events, plant failure, request rejection and call log. Build it in the CI test wheel.
 - [x] 5.5a Add a packaging test asserting that the release wheel's `_lib.Session` has no `fake` attribute.
-- [ ] 5.5a2 Record the direct-mode baseline. Run the FFI benchmark on `Session.fake` built against the pre-switch direct path (or `git stash` the switch-over), then again after the switch, and compare the two (spec: Direct mode keeps its throughput). Use a quiet machine with no other agents running.
+- [x] 5.5a2 (accepted 2026-10-15: host adds ~5% end to end into Python, within the amended 10% budget; optimization deferred) Record the direct-mode baseline. Run the FFI benchmark on `Session.fake` built against the pre-switch direct path (or `git stash` the switch-over), then again after the switch, and compare the two (spec: Direct mode keeps its throughput). Use a quiet machine with no other agents running.
 - [x] 5.6 Port `tests/test_session_factory.py` / `tests/test_rust_gateway_session.py` cases that need real session behaviour to `Session.fake`. Cover:
   - one login per credential
   - per-session intents

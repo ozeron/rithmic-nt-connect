@@ -212,7 +212,7 @@ These come from a review of the plan against the code. Each one is now part of t
 6. **A repeat subscribe must not double-count.** The server keeps per-client intent sets (`client_has` / `client_insert`). → The specs say intents are a set per session: a repeated subscribe is idempotent and re-joins a degraded intent.
 7. **`connect` must stay idempotent across sessions.** → On `LocalSession`, `connect` means "ensure the host is connected". It succeeds if the host is already up and runs one plant connect for concurrent callers.
 8. **The `testing` feature must stay out of release wheels.** → A packaging test asserts that `Session.fake` is absent from the release wheel.
-9. **Throughput budgets are gateway-only.** → Add a direct-mode budget: a `LocalSession` must not be slower than today's direct path in `test_perf_ffi_throughput.py`. Record the baseline before group 2.
+9. **Throughput budgets are gateway-only.** *(Amended 2026-10-15 after measurement; the user accepted a bounded overhead, with further optimization deferred.)* → Add a direct-mode budget: a `LocalSession` must not be slower than today's direct path in `test_perf_ffi_throughput.py`. Record the baseline before group 2.
 
 10. **A joining session gets no snapshot (found in wave 3).** The venue sends a book snapshot (`update_type` 3) or a PnL position snapshot only on its own subscribe. Under refcounting, a session that joins an intent the host already holds gets neither. This covers:
     - a second consumer
@@ -322,3 +322,7 @@ class SessionEventSubscription:
 ```
 
 Listeners run on the extension's dedicated delivery thread, as transport listeners do today. During host recovery, `next_events` returns empty batches (D8.4).
+
+### Direct-mode throughput (measured 2026-10-15)
+
+`direct_hop` (Rust only, 200k events, interleaved, after the hop optimization `39d3dcf`): host 4.70M events/s against venue 5.77M events/s, about 0.04 µs added per event. The FFI benchmark puts the Python boundary at about 0.76 µs per event (1.31M events/s), so the host adds about 5% end to end. That is within the amended 10% budget. Further optimization (profiling the residual gap, plus the mixed-flood p99 tail) is deferred to a follow-up.
