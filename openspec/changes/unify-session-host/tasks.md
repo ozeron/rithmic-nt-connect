@@ -33,26 +33,31 @@ Agents run in the shared checkout on branch `feat/unify-session-host`. Each agen
 
 ## 2. Move hub logic into `SessionHost` / `LocalSession` (gateway behaviour unchanged)
 
-- [ ] 2.1 Move `FanoutHub` and per-client queues (`subscriptions.rs`) and `ParentGates` into `rithmic-host` (`fanout.rs`, `gates.rs`). Rename client ids to `SessionId`.
-- [ ] 2.2 Move `IntentStore`, `RestorePlan`, `MdIntent` and `ReconnectController` (`reconnect.rs`) into `intents.rs`.
-- [ ] 2.3 Move the event pump, reconnect loop, `restore_pass` and `restore_intents` (`server/pump.rs`) into `pump.rs`, generic over `V: Venue`, keeping `PumpTiming` as `Timing`.
-- [ ] 2.4 Add `SessionHost<V>` (with `HistoryPolicy` from 0.4, set by the roots) (`start`, `attach`, `request_plants`, generation) and `LocalSession<V>`. Implement the consumer `Session` trait on `LocalSession` by moving the logic of `server/dispatch/{subscriptions,orders,history,info}.rs` (gates, intent notes, rollback, `recon_lock`, `history_load_lock`, refuse-under-live-market-data, error mapping).
-- [ ] 2.5 Shrink the gateway server so each connection attaches one `LocalSession` and dispatch only decodes → calls → encodes. Lanes read the host's `RPC_TABLE`. Handshake, auth, idle exit and singleton are unchanged.
-- [ ] 2.6a Make intents a set per session (idempotent repeat subscribe), make `connect` ensure the host (idempotent), and make `disconnect_order_plant` per session (D8.5–D8.7).
-- [ ] 2.6 Port the host-semantics tests (refcount, rollback, gates, restore coverage, degraded intents, slow consumer, detach and drop) to `rithmic-host/tests` on `SessionHost<FakeVenue>`.
-- [ ] 2.7 Run the gateway suites unchanged (`client_scenarios.rs`, dispatch/gate, lanes), `tests/test_gateway_scenarios.py`, the lake client tests, and a `rithmic-loadtest` run against the pre-change budget.
+- [x] 2.1 Move `FanoutHub` and per-client queues (`subscriptions.rs`) and `ParentGates` into `rithmic-host` (`fanout.rs`, `gates.rs`). Rename client ids to `SessionId`.
+- [x] 2.2 Move `IntentStore`, `RestorePlan`, `MdIntent` and `ReconnectController` (`reconnect.rs`) into `intents.rs`.
+- [x] 2.3 Move the event pump, reconnect loop, `restore_pass` and `restore_intents` (`server/pump.rs`) into `pump.rs`, generic over `V: Venue`, keeping `PumpTiming` as `Timing`.
+- [x] 2.4 Add `SessionHost<V>` (with `HistoryPolicy` from 0.4, set by the roots) (`start`, `attach`, `request_plants`, generation) and `LocalSession<V>`. Implement the consumer `Session` trait on `LocalSession` by moving the logic of `server/dispatch/{subscriptions,orders,history,info}.rs` (gates, intent notes, rollback, `recon_lock`, `history_load_lock`, refuse-under-live-market-data, error mapping).
+- [x] 2.5 Shrink the gateway server so each connection attaches one `LocalSession` and dispatch only decodes → calls → encodes. Lanes read the host's `RPC_TABLE`. Handshake, auth, idle exit and singleton are unchanged.
+- [x] 2.6a Make intents a set per session (idempotent repeat subscribe), make `connect` ensure the host (idempotent), and make `disconnect_order_plant` per session (D8.5–D8.7).
+- [x] 2.6 Port the host-semantics tests (refcount, rollback, gates, restore coverage, degraded intents, slow consumer, detach and drop) to `rithmic-host/tests` on `SessionHost<FakeVenue>`.
+- [x] 2.7 Run the gateway suites unchanged (`client_scenarios.rs`, dispatch/gate, lanes), `tests/test_gateway_scenarios.py`, the lake client tests, and a `rithmic-loadtest` run against the pre-change budget.
 
 ## 3. Stream-generic transport; `RemoteSession`
 
-- [ ] 3.1 Make `serve` take any `AsyncRead + AsyncWrite + Unpin` stream, and move unix listen/dial to the gateway binary and the PyO3 root.
-- [ ] 3.2 Rename `GatewaySession` → `RemoteSession` and add `RemoteSession::over(stream)`.
+- [x] 3.1 Make `serve` take any `AsyncRead + AsyncWrite + Unpin` stream, and move unix listen/dial to the gateway binary and the PyO3 root.
+- [x] 3.2 Rename `GatewaySession` → `RemoteSession` and add `RemoteSession::over(stream)`.
 - [ ] 3.3 Make the shared scenario list run against `LocalSession` and against `RemoteSession` over `tokio::io::duplex()` to a server on `SessionHost<FakeVenue>`.
-- [ ] 3.4 Move the gateway transport tests off socket files where they don't test unix specifics.
+- [x] 3.4 Move the gateway transport tests off socket files where they don't test unix specifics.
 
 ## 4. Host-owned per-plant recovery and session events
 
 - [x] 4.1 Characterise today's parent behaviour on a ticker-only failure (done in 0.2: all plants rebuilt; see D3).
 - [ ] 4.2 Implement smallest-unit recovery in the host: ticker/history recreate only that plant (carrying today's `reset_ticker` semantics), PnL re-subscribe, order-plant re-seat, login-level full reconnect. Then restore the intents those plants carry.
+- [ ] 4.2b Snapshot on join (D8.10):
+  - add `Venue::pnl_snapshot()` (wrapping `get_pnl_position_snapshot`) and `Venue::refresh_book(key)`
+  - the host calls them when a session joins or re-joins an already-live PnL or book intent
+  - `FakeVenue` records the calls
+  - live check in `tests/e2e` (test account, user-run): does a repeat `subscribe_order_book_summary` resend a snapshot? Pick the `refresh_book` strategy from the result.
 - [ ] 4.3 Add `SessionEvent::{Interrupted, Resumed { generation }, RecoveryFailed}` delivered to every attached session. Map them to the `TransportInterrupted` (from 0.3) and `TransportResumed` wire events for remote clients. During recovery, `next_events` returns empty batches, not a stream error (D8.4).
 - [ ] 4.4 Update `ticker_failure_characterization.rs` to the new sequence (ticker only; PnL and order untouched; `TransportInterrupted` before `TransportResumed`), and add tests for:
   - a ticker failure leaves PnL and order plants untouched
@@ -82,7 +87,7 @@ Agents run in the shared checkout on branch `feat/unify-session-host`. Each agen
 ## 6. `RemoteSession` re-joins intents; simplify the Python adapter
 
 - [ ] 6.1 After a socket re-attach, `RemoteSession` re-issues its recorded intents before emitting `Resumed`. Commands in flight stay unknown. Add a duplex test for the drop → re-dial → re-join flow.
-- [ ] 6.2 `data.py` (move to `Session.fake` once 5.5 lands; develop against `WireSessionStub` from 0.6 until then):
+- [ ] 6.2 *(code-complete on `ush/d-python` @ `cf570df`; merges after 5.4)* `data.py` (move to `Session.fake` once 5.5 lands; develop against `WireSessionStub` from 0.6 until then):
   - remove the `reset_ticker` call and the `is_direct` check from `resync_ticker_session`
   - make transport recovery reconcile-only (no market-data replay)
   - remove the channel-error → `_resync_channel(reset=True)` path; a stream error now means `RecoveryFailed` or a closed session

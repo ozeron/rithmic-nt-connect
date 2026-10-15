@@ -176,3 +176,18 @@ A `LocalSession` SHALL deliver events to Python at no lower a rate than the pre-
 #### Scenario: Benchmark after switch-over
 - **WHEN** `RITHMIC_PERF=1` runs the FFI throughput benchmark in direct mode after group 5
 - **THEN** events per second SHALL be no lower than the recorded baseline
+
+### Requirement: A session joining a live intent receives a snapshot
+When a session joins a PnL or book intent the host already holds for other sessions, or re-joins one after a gap or a socket re-attach, the host SHALL cause a fresh snapshot to be delivered to that session without the session resetting any plant. For PnL the host SHALL request a venue PnL position snapshot. For a book the host SHALL refresh that key at the venue so that every session holding it receives a clear followed by a snapshot. Other sessions SHALL tolerate the extra snapshot.
+
+#### Scenario: Second consumer joins a live book
+- **WHEN** session A holds the NQ book intent and session B subscribes to the NQ book
+- **THEN** B SHALL receive a book snapshot ending `F_SNAPSHOT | F_LAST` before incremental updates, and A's book SHALL stay correct
+
+#### Scenario: Exec re-arm after a socket re-attach
+- **WHEN** a gateway exec client re-attaches while another client still holds the parent's PnL intent
+- **THEN** the exec client SHALL receive fresh account and instrument PnL rows, and its re-arm barrier SHALL complete
+
+#### Scenario: Gap on a book stream
+- **WHEN** a session's book stream reports a gap and the session re-subscribes the key
+- **THEN** that session SHALL receive a fresh book snapshot

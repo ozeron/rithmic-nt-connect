@@ -195,6 +195,13 @@ pub trait Session: Send + Sync {
         max: usize,
         timeout: Duration,
     ) -> Result<Vec<PlantEvent>>;
+
+    // --- lifecycle events ------------------------------------------------------
+    /// This session's `Interrupted` / `Resumed` / `RecoveryFailed` events.
+    /// `LocalSession` and `RemoteSession` report recovery; a bare venue never does.
+    fn session_events(&self) -> tokio::sync::broadcast::Receiver<crate::events::SessionEvent> {
+        crate::events::no_session_events()
+    }
 }
 
 #[async_trait]

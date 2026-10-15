@@ -214,6 +214,17 @@ These come from a review of the plan against the code. Each one is now part of t
 8. **The `testing` feature must stay out of release wheels.** → A packaging test asserts that `Session.fake` is absent from the release wheel.
 9. **Throughput budgets are gateway-only.** → Add a direct-mode budget: a `LocalSession` must not be slower than today's direct path in `test_perf_ffi_throughput.py`. Record the baseline before group 2.
 
+10. **A joining session gets no snapshot (found in wave 3).** The venue sends a book snapshot (`update_type` 3) or a PnL position snapshot only on its own subscribe. Under refcounting, a session that joins an intent the host already holds gets neither. This covers:
+    - a second consumer
+    - a gap re-sync (today direct mode re-subscribes at the venue, so the gap path does get a fresh snapshot)
+    - a `RemoteSession` re-joining after a socket drop
+    - the exec re-arm barrier waiting for fresh PnL
+
+    Today's gateway has the same latent bug, because the parent no-ops a repeat subscribe. → **Snapshot on join:**
+    - When a session joins, or re-joins after a gap, an already-live **PnL** intent, the host calls the venue's `get_pnl_position_snapshot` (rithmic-rs `RithmicPnlPlantHandle`; `Venue::pnl_snapshot`). The snapshot rows reach every PnL session; duplicate rows are harmless.
+    - For an already-live **book** intent there is no L2 snapshot request, so the host refreshes the key at the venue with `Venue::refresh_book(key)`. Task 4.2b verifies live whether a repeat `subscribe_order_book_summary` resends a snapshot: if it does, `refresh_book` is that repeat; otherwise it is unsubscribe + subscribe. Either way every book session receives CLEAR plus a snapshot, which is a valid state.
+    - Ticker, bars and order intents need no snapshot. A ticker or bar consumer that lost events has a gap; exec drains working orders with `load_orders`.
+
 Also renamed in the task list: `rithmic-loadtest/src/rig.rs` (uses the old type names).
 
 ## Risks / Trade-offs

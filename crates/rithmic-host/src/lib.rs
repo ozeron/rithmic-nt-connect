@@ -3,6 +3,7 @@ pub mod backend;
 pub mod dto;
 mod env;
 pub mod error;
+pub mod events;
 #[cfg(feature = "testing")]
 pub mod fake;
 pub mod history;
@@ -14,6 +15,7 @@ pub use backend::{AccountTriple, ModifyOrder, PlaceBracketOrder, PlaceOrder, Ses
 pub use dto::*;
 pub use env::{Env, ParseEnvError};
 pub use error::{Error, Result};
+pub use events::{SessionEvent, SESSION_EVENT_CAPACITY};
 pub use plants::PlantSet;
 pub use streams::{Stream, StreamHub};
 
