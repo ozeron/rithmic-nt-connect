@@ -46,7 +46,11 @@ The system SHALL deny trading RPCs (place, cancel, modify, bracket place/adjust,
 - **THEN** cancel-all SHALL be permitted and place SHALL still be denied
 
 ### Requirement: Identical event records from both modes
-The system SHALL emit the same event record shape and field values for the same plant event in both modes. The records SHALL be produced by the same host fan-out and a single record conversion.
+The system SHALL emit the same event record shape and field values for the same plant event in both modes. The records SHALL be produced by the same host fan-out and a single record conversion. Error values SHALL be equal in both modes, including their payload text. Gap records are the one exception: the `skipped` count depends on queue depth, which differs between an in-process session and a socket. In both modes the gaps SHALL appear at the same points in the sequence, and delivered plus skipped SHALL equal the events sent.
+
+#### Scenario: Slow consumer in both modes
+- **WHEN** the same burst is sent to a stalled consumer through a `LocalSession` and through a `RemoteSession`
+- **THEN** each SHALL deliver records in source order with typed gaps and no duplicates, and delivered plus skipped SHALL equal the burst size, though the skipped counts MAY differ
 
 #### Scenario: Same scripted stream through both attachments
 - **WHEN** one scripted sequence of ticker, history, PnL and order events from a `FakeVenue` is delivered through a `LocalSession` and through a `RemoteSession`

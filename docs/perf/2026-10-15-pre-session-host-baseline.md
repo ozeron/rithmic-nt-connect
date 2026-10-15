@@ -180,3 +180,14 @@ Track A reported loaded-order p99 0.94–1.02 ms against this baseline's 0.621 m
 | stalled_consumer `latency.p99_us` | 1257 | 518 | 0.41 |
 
 No regression from group 2. The earlier gap was machine noise between the two runs. Comparisons should always be interleaved runs.
+
+## Group 4 quieter-machine re-check (2026-10-15)
+
+A2's run reported `stalled_consumer` p99 at 3.71× base, with a wide spread (476–8,167 µs) because other agents were building at the time. It was re-run with no agents active (load average 3.2–5.0), 5 interleaved rounds, base = `c2e0260`, candidate = `f118c15`:
+
+| Scenario | base p99 (µs) | group 4 p99 (µs) | ratio |
+|---|---|---|---:|
+| stalled_consumer | 427, 418, 574, 453, 487 (med 453) | 387, 402, 426, 434, 441 (med 426) | 0.94 |
+| flood_10k_4conn_1session | 352, 415, 382, 373, 337 (med 373) | 353, 365, 363, 369, 344 (med 363) | 0.97 |
+
+No regression from group 4.

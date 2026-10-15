@@ -46,34 +46,34 @@ Agents run in the shared checkout on branch `feat/unify-session-host`. Each agen
 
 - [x] 3.1 Make `serve` take any `AsyncRead + AsyncWrite + Unpin` stream, and move unix listen/dial to the gateway binary and the PyO3 root.
 - [x] 3.2 Rename `GatewaySession` → `RemoteSession` and add `RemoteSession::over(stream)`.
-- [ ] 3.3 Make the shared scenario list run against `LocalSession` and against `RemoteSession` over `tokio::io::duplex()` to a server on `SessionHost<FakeVenue>`.
+- [x] 3.3 Make the shared scenario list run against `LocalSession` and against `RemoteSession` over `tokio::io::duplex()` to a server on `SessionHost<FakeVenue>`.
 - [x] 3.4 Move the gateway transport tests off socket files where they don't test unix specifics.
 
 ## 4. Host-owned per-plant recovery and session events
 
 - [x] 4.1 Characterise today's parent behaviour on a ticker-only failure (done in 0.2: all plants rebuilt; see D3).
-- [ ] 4.2 Implement smallest-unit recovery in the host: ticker/history recreate only that plant (carrying today's `reset_ticker` semantics), PnL re-subscribe, order-plant re-seat, login-level full reconnect. Then restore the intents those plants carry.
-- [ ] 4.2b Snapshot on join (D8.10):
+- [x] 4.2 Implement smallest-unit recovery in the host: ticker/history recreate only that plant (carrying today's `reset_ticker` semantics), PnL re-subscribe, order-plant re-seat, login-level full reconnect. Then restore the intents those plants carry.
+- [x] 4.2b Snapshot on join (D8.10), code part (the live repeat-subscribe check is split out as 4.2c):
   - add `Venue::pnl_snapshot()` (wrapping `get_pnl_position_snapshot`) and `Venue::refresh_book(key)`
   - the host calls them when a session joins or re-joins an already-live PnL or book intent
   - `FakeVenue` records the calls
-  - live check in `tests/e2e` (test account, user-run): does a repeat `subscribe_order_book_summary` resend a snapshot? Pick the `refresh_book` strategy from the result.
-- [ ] 4.3 Add `SessionEvent::{Interrupted, Resumed { generation }, RecoveryFailed}` delivered to every attached session. Map them to the `TransportInterrupted` (from 0.3) and `TransportResumed` wire events for remote clients. During recovery, `next_events` returns empty batches, not a stream error (D8.4).
-- [ ] 4.4 Update `ticker_failure_characterization.rs` to the new sequence (ticker only; PnL and order untouched; `TransportInterrupted` before `TransportResumed`), and add tests for:
+- [ ] 4.2c Live check in `tests/e2e` (test account, user-run): does a repeat `subscribe_order_book_summary` resend a snapshot? If yes, switch `refresh_book` from unsubscribe + subscribe to a repeat subscribe.
+- [x] 4.3 Add `SessionEvent::{Interrupted, Resumed { generation }, RecoveryFailed}` delivered to every attached session. Map them to the `TransportInterrupted` (from 0.3) and `TransportResumed` wire events for remote clients. During recovery, `next_events` returns empty batches, not a stream error (D8.4).
+- [x] 4.4 Update `ticker_failure_characterization.rs` to the new sequence (ticker only; PnL and order untouched; `TransportInterrupted` before `TransportResumed`), and add tests for:
   - a ticker failure leaves PnL and order plants untouched
   - each intent is re-issued once
   - degraded market-data intent and later retry
   - account intent escalation
   - the event order per session
   - a command in flight during the break → unknown outcome, not retried
-- [ ] 4.5 Re-run the throughput and latency budgets (`gateway-throughput` spec) and `rithmic-loadtest`.
+- [x] 4.5 Re-run the throughput and latency budgets (`gateway-throughput` spec) and `rithmic-loadtest`.
 
 ## 5. Direct mode on the host; gates; fake session for Python
 
-- [ ] 5.1 Add `HostRegistry`. In the **same PR**, delete `_SESSION_CACHE`, the Python `SessionLock` acquire and the holder count in `session.py`, so the flock is taken once (D8.3); the forwarding wrapper may remain until `collapse-session-surface`. The registry maps fingerprint → `Weak<SessionHost>`, with flock-before-login, a `lock_dir` parameter, last-detach shutdown, and non-blocking drop. The gateway binary uses it for its single host.
+- [ ] 5.1 Add `HostRegistry`. (From A2: a host whose recovery is exhausted is terminal, so the registry must replace a terminal host on the next `get_or_start` rather than return it.) In the **same PR**, delete `_SESSION_CACHE`, the Python `SessionLock` acquire and the holder count in `session.py`, so the flock is taken once (D8.3); the forwarding wrapper may remain until `collapse-session-surface`. The registry maps fingerprint → `Weak<SessionHost>`, with flock-before-login, a `lock_dir` parameter, last-detach shutdown, and non-blocking drop. The gateway binary uses it for its single host.
 - [ ] 5.2 `_lib.Session` holds `Arc<dyn Session>`: direct → `HostRegistry::get_or_start(..RithmicVenue..).attach()`, gateway → `RemoteSession`. `request_plants` stays a separate call.
 - [ ] 5.3 Add `Session.open_gates(trading, cancel_all) -> Gates` (design D4) and remove `configure_gates` and `is_direct` from the extension and `_lib.pyi`.
-- [ ] 5.4 Deliver `SessionEvent` to Python listeners in both modes on the existing dedicated delivery thread. Add `Interrupted` / `Resumed` / `RecoveryFailed` pyclasses, with `transport.py` re-exporting the old names for one release.
+- [ ] 5.4 (from B2) Switch the PyO3 binding to `session_events()`, so exec disarms at interruption time rather than after the restore, then remove the legacy synthetic Down/Up the Rust client still emits for `subscribe_transport`. Deliver `SessionEvent` to Python listeners in both modes on the existing dedicated delivery thread. Add `Interrupted` / `Resumed` / `RecoveryFailed` pyclasses, with `transport.py` re-exporting the old names for one release.
 - [ ] 5.5 Add `Session.fake(...)` (feature `testing`) attaching to `SessionHost<FakeVenue>`, with a script API for events, plant failure, request rejection and call log. Build it in the CI test wheel.
 - [ ] 5.5a Add a packaging test asserting that the release wheel's `_lib.Session` has no `fake` attribute.
 - [ ] 5.5a2 Record the direct-mode baseline. Run the FFI benchmark on `Session.fake` built against the pre-switch direct path (or `git stash` the switch-over), then again after the switch, and compare the two (spec: Direct mode keeps its throughput). Use a quiet machine with no other agents running.
@@ -86,7 +86,7 @@ Agents run in the shared checkout on branch `feat/unify-session-host`. Each agen
 
 ## 6. `RemoteSession` re-joins intents; simplify the Python adapter
 
-- [ ] 6.1 After a socket re-attach, `RemoteSession` re-issues its recorded intents before emitting `Resumed`. Commands in flight stay unknown. Add a duplex test for the drop → re-dial → re-join flow.
+- [x] 6.1 After a socket re-attach, `RemoteSession` re-issues its recorded intents before emitting `Resumed`. Commands in flight stay unknown. Add a duplex test for the drop → re-dial → re-join flow.
 - [ ] 6.2 *(code-complete on `ush/d-python` @ `cf570df`; merges after 5.4)* `data.py` (move to `Session.fake` once 5.5 lands; develop against `WireSessionStub` from 0.6 until then):
   - remove the `reset_ticker` call and the `is_direct` check from `resync_ticker_session`
   - make transport recovery reconcile-only (no market-data replay)
