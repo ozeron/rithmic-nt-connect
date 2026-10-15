@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use prost::Message;
 use rithmic_host::dto::PlantEvent;
+use rithmic_host::events::{SessionEvent, SESSION_EVENT_CAPACITY};
 use rithmic_host::{Error, Result};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
@@ -171,7 +172,7 @@ impl Queues {
         }
     }
 
-    fn wake_all(&self) {
+    pub(super) fn wake_all(&self) {
         for channel in Channel::ALL {
             self.get(channel).notify.notify_waiters();
         }
@@ -186,6 +187,9 @@ pub(super) struct Connection {
     pending: StdMutex<HashMap<u64, oneshot::Sender<Frame>>>,
     next_id: AtomicU64,
     closed: AtomicBool,
+    joined: AtomicBool,
+    loss_reported: AtomicBool,
+    runtime: Weak<Runtime>,
     /// Set when we close on purpose, so the reader does not report a loss.
     intentional: AtomicBool,
     pub(super) ready: ReadyInfo,
@@ -205,11 +209,21 @@ impl Connection {
 
     /// A write failed or timed out part-way, so the stream may hold a truncated
     /// frame: no later frame may follow it. Fail every call, refuse new ones, and
-    /// close the write half so the parent drops the connection and the reader's
-    /// end-of-stream reports the loss (the normal re-dial path).
+    /// report loss immediately, then close the write half so the parent detaches.
     async fn break_connection(&self, writer: &mut WriteHalf<Stream>) {
         self.fail_all();
+        self.report_loss();
         let _ = tokio::time::timeout(DISCONNECT_GRACE, writer.shutdown()).await;
+    }
+
+    fn report_loss(&self) {
+        if !self.intentional.load(Ordering::SeqCst)
+            && !self.loss_reported.swap(true, Ordering::SeqCst)
+        {
+            if let Some(runtime) = self.runtime.upgrade() {
+                runtime.on_connection_lost(self.id);
+            }
+        }
     }
 
     /// Send one request and await its reply.
@@ -330,14 +344,18 @@ async fn reader_loop(conn: Arc<Connection>, mut read: ReadHalf<Stream>, runtime:
             continue;
         }
         if let Some(Body::Event(event)) = frame.body {
-            // The parent rebuilt its plants and restored this client's
-            // subscriptions: the socket stays up, the adapter is told as it would
-            // be after a re-dial.
-            if let Some(pb::event::Body::TransportResumed(_)) = &event.body {
-                if let Some(rt) = runtime.upgrade() {
-                    rt.on_resumed();
+            if let Some(rt) = runtime.upgrade() {
+                match &event.body {
+                    Some(pb::event::Body::TransportInterrupted(_)) => {
+                        rt.on_parent_interrupted();
+                        continue;
+                    }
+                    Some(pb::event::Body::TransportResumed(_)) => {
+                        rt.on_parent_resumed();
+                        continue;
+                    }
+                    _ => {}
                 }
-                continue;
             }
             if let (Some(rt), Some(event)) = (runtime.upgrade(), plant_event_from_pb(event)) {
                 rt.deliver(event);
@@ -345,11 +363,7 @@ async fn reader_loop(conn: Arc<Connection>, mut read: ReadHalf<Stream>, runtime:
         }
     }
     conn.fail_all();
-    if !conn.intentional.load(Ordering::SeqCst) {
-        if let Some(rt) = runtime.upgrade() {
-            rt.on_connection_lost(conn.id);
-        }
-    }
+    conn.report_loss();
 }
 
 // --- handshake ----------------------------------------------------------------
@@ -421,7 +435,7 @@ async fn handshake(
 /// A subscription intent. The parent counts intents per *socket*, and every
 /// facade in the process shares that socket, so the facades' holdings are
 /// counted here: only the last holder's release reaches the parent.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(super) enum IntentKey {
     Ticker(String, String),
     Book(String, String),
@@ -525,6 +539,32 @@ impl IntentKey {
         }
     }
 
+    /// Stable recovery order: ticker, book, bars, PnL, orders, brackets;
+    /// keys within a family sort by their venue parameters.
+    fn subscribe_body(&self) -> Body {
+        match self {
+            Self::Ticker(symbol, exchange) => Body::Subscribe(pb::SubscribeRequest {
+                symbol: symbol.clone(),
+                exchange: exchange.clone(),
+            }),
+            Self::Book(symbol, exchange) => Body::SubscribeBook(pb::SubscribeBookRequest {
+                symbol: symbol.clone(),
+                exchange: exchange.clone(),
+            }),
+            Self::TimeBars(symbol, exchange, bar_type, period) => {
+                Body::SubscribeTimeBars(pb::SubscribeTimeBarsRequest {
+                    symbol: symbol.clone(),
+                    exchange: exchange.clone(),
+                    bar_type: *bar_type,
+                    period: *period,
+                })
+            }
+            Self::Pnl => Body::SubscribePnl(pb::SubscribePnlRequest {}),
+            Self::Order => Body::SubscribeOrderUpdates(pb::SubscribeOrderUpdatesRequest {}),
+            Self::Brackets => Body::SubscribeBracketUpdates(pb::SubscribeBracketUpdatesRequest {}),
+        }
+    }
+
     /// The request that releases this intent on the parent.
     pub(super) fn release_body(&self) -> Body {
         match self {
@@ -576,6 +616,10 @@ pub(super) struct Runtime {
     intent_locks: StdMutex<HashMap<IntentKey, Arc<TokioMutex<()>>>>,
     transport_tx: broadcast::Sender<TransportEvent>,
     failed_tx: broadcast::Sender<RecoveryFailed>,
+    session_tx: broadcast::Sender<SessionEvent>,
+    /// Terminal until an explicit connect; RPCs must not start new flights.
+    failed: StdMutex<Option<String>>,
+    changed: Notify,
     /// Set while the last facade is detaching: no recovery after a deliberate close.
     stopping: AtomicBool,
     /// A recovery flight is running (at most one).
@@ -630,6 +674,9 @@ impl Runtime {
             intent_locks: StdMutex::new(HashMap::new()),
             transport_tx: broadcast::channel(16).0,
             failed_tx: broadcast::channel(4).0,
+            session_tx: broadcast::channel(SESSION_EVENT_CAPACITY).0,
+            failed: StdMutex::new(None),
+            changed: Notify::new(),
             stopping: AtomicBool::new(false),
             recovering: AtomicBool::new(false),
             self_weak: weak.clone(),
@@ -665,6 +712,9 @@ impl Runtime {
     /// every intent on the socket when the last facade closes it.
     pub(super) async fn send_releases(&self, freed: Vec<IntentKey>) {
         for key in freed {
+            let Ok((_barrier, conn)) = self.intent_connection().await else {
+                return;
+            };
             let _ordered = self.intent_lock(&key).await;
             let still_free = {
                 let intents = self.intents();
@@ -676,9 +726,7 @@ impl Runtime {
             if !still_free {
                 continue;
             }
-            if let Ok(conn) = self.ensure_live().await {
-                let _ = conn.call(key.release_body(), self.cfg.rpc_timeout).await;
-            }
+            let _ = conn.call(key.release_body(), self.cfg.rpc_timeout).await;
         }
     }
 
@@ -712,6 +760,7 @@ impl Runtime {
         for queues in self.facades.lock().expect("facades").values() {
             queues.wake_all();
         }
+        self.changed.notify_waiters();
     }
 
     pub(super) fn live(&self) -> Option<Arc<Connection>> {
@@ -719,7 +768,7 @@ impl Runtime {
             .lock()
             .expect("conn")
             .as_ref()
-            .filter(|c| !c.is_closed())
+            .filter(|c| !c.is_closed() && c.joined.load(Ordering::SeqCst))
             .cloned()
     }
 
@@ -743,22 +792,59 @@ impl Runtime {
         self.failed_tx.subscribe()
     }
 
-    pub(super) fn allow_recovery(&self) {
-        self.stopping.store(false, Ordering::SeqCst);
+    pub(super) fn session_events(&self) -> broadcast::Receiver<SessionEvent> {
+        self.session_tx.subscribe()
     }
 
-    /// The parent rebuilt its plants without dropping this connection. Surface it
-    /// as the same Down / Up pair a re-dial produces, with a new generation, so the
-    /// adapter's recovery (re-arm exec, replay market data) runs unchanged.
-    fn on_resumed(&self) {
-        let previous = self.generation.fetch_add(1, Ordering::SeqCst);
-        let _ = self.transport_tx.send(TransportEvent::Down {
-            generation: previous,
-        });
-        let _ = self.transport_tx.send(TransportEvent::Up {
-            generation: previous + 1,
+    pub(super) fn stream_closed(&self) -> bool {
+        let failed = self.failed.lock().expect("failed").is_some();
+        self.stopping.load(Ordering::SeqCst)
+            || failed
+            // A reader can mark the connection closed just before it starts
+            // recovery. That detection window must not become a stream error.
+            || (self.cfg.recovery_attempts == 0 && self.is_down())
+    }
+
+    pub(super) fn allow_recovery(&self) {
+        self.stopping.store(false, Ordering::SeqCst);
+        *self.failed.lock().expect("failed") = None;
+    }
+
+    fn interrupted(&self, cause: &str) {
+        let generation = self.generation();
+        let _ = self.session_tx.send(SessionEvent::Interrupted {
+            generation,
+            cause: Some(cause.into()),
         });
         self.wake_all();
+    }
+
+    fn on_parent_interrupted(&self) {
+        // The new session channel closes the disarm gap immediately. Keep the
+        // legacy transport channel unchanged until PyO3 migrates in task 5.4.
+        self.interrupted("parent plant interrupted");
+    }
+
+    fn resumed(&self) {
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let _ = self.session_tx.send(SessionEvent::Resumed { generation });
+        let _ = self.transport_tx.send(TransportEvent::Up { generation });
+        self.wake_all();
+    }
+
+    fn on_parent_resumed(&self) {
+        // A socket re-join has its own completion barrier. A parent's restore
+        // while that join runs cannot announce that our intents are live yet.
+        if self.recovering.load(Ordering::SeqCst) {
+            return;
+        }
+        // PyO3's existing bridge still depends on Down to latch exec before Up
+        // starts reconciliation. Preserve its synthetic pair until task 5.4;
+        // session_events has already delivered the real interruption above.
+        let _ = self.transport_tx.send(TransportEvent::Down {
+            generation: self.generation(),
+        });
+        self.resumed();
     }
 
     fn on_connection_lost(&self, conn_id: u64) {
@@ -768,85 +854,218 @@ impl Runtime {
             .expect("conn")
             .as_ref()
             .is_some_and(|c| c.id == conn_id);
-        if is_current {
-            let _ = self.transport_tx.send(TransportEvent::Down {
-                generation: self.generation(),
-            });
-            self.wake_all();
-            self.start_recovery();
+        if is_current && !self.stopping.load(Ordering::SeqCst) {
+            // Mark recovery before waking stream consumers or RPC waiters.
+            let already_recovering = self.recovering.swap(true, Ordering::SeqCst);
+            if !already_recovering {
+                self.interrupted("socket lost");
+                let _ = self.transport_tx.send(TransportEvent::Down {
+                    generation: self.generation(),
+                });
+                self.start_recovery();
+            }
         }
     }
 
-    /// One background flight: re-dial with exponential backoff until the
-    /// transport is live again or the attempt budget is spent. Shares the
-    /// single-flight re-dial with any RPC that recovers at the same time.
+    /// The only automatic flight. RPCs wait for it rather than spending their
+    /// own dial budgets. One deadline bounds dialing, backoff and all joins.
     fn start_recovery(&self) {
-        let cfg = &self.cfg;
-        if cfg.recovery_attempts == 0 || self.stopping.load(Ordering::SeqCst) {
-            return;
-        }
-        if self.recovering.swap(true, Ordering::SeqCst) {
+        if self.cfg.recovery_attempts == 0 {
+            self.recovering.store(false, Ordering::SeqCst);
+            self.wake_all();
             return;
         }
         let Some(runtime) = self.self_weak.upgrade() else {
-            self.recovering.store(false, Ordering::SeqCst);
             return;
         };
         tokio::spawn(async move {
+            let _redial = runtime.redial.lock().await;
             let cfg = &runtime.cfg;
             let mut backoff = cfg.recovery_initial_backoff;
-            let mut attempts = 0u32;
-            let mut last: Option<Error> = None;
-            while attempts < cfg.recovery_attempts {
+            let mut attempts = 0;
+            let mut cause = String::new();
+            let deadline = Instant::now() + cfg.attach_timeout;
+            while attempts < cfg.recovery_attempts && Instant::now() < deadline {
                 if runtime.stopping.load(Ordering::SeqCst) {
-                    runtime.recovering.store(false, Ordering::SeqCst);
-                    return;
+                    break;
                 }
                 attempts += 1;
-                match runtime.ensure_live().await {
-                    Ok(_) => {
-                        runtime.recovering.store(false, Ordering::SeqCst);
-                        return;
+                match runtime.attach_and_rejoin(Some(deadline)).await {
+                    Ok(conn) => {
+                        if runtime.stopping.load(Ordering::SeqCst) {
+                            conn.shutdown().await;
+                            break;
+                        }
+                        match runtime.finish_attach(&conn) {
+                            Ok(()) => return,
+                            Err(err) => {
+                                cause = err.to_string();
+                                conn.shutdown().await;
+                            }
+                        }
                     }
-                    Err(err) => {
-                        last = Some(err);
-                        tokio::time::sleep(backoff).await;
-                        backoff = (backoff * 2).min(cfg.recovery_max_backoff);
-                    }
+                    Err(err) => cause = err.to_string(),
+                }
+                if attempts < cfg.recovery_attempts {
+                    tokio::time::sleep(
+                        backoff.min(deadline.saturating_duration_since(Instant::now())),
+                    )
+                    .await;
+                    backoff = (backoff * 2).min(cfg.recovery_max_backoff);
                 }
             }
-            runtime.recovering.store(false, Ordering::SeqCst);
             if !runtime.stopping.load(Ordering::SeqCst) {
-                let _ = runtime.failed_tx.send(RecoveryFailed {
-                    generation: runtime.generation(),
+                *runtime.failed.lock().expect("failed") = Some(cause.clone());
+                let generation = runtime.generation();
+                let _ = runtime.session_tx.send(SessionEvent::RecoveryFailed {
+                    generation,
                     attempts,
-                    cause: last.map(|e| e.to_string()).unwrap_or_default(),
+                    cause: Some(cause.clone()),
+                });
+                let _ = runtime.failed_tx.send(RecoveryFailed {
+                    generation,
+                    attempts,
+                    cause,
                 });
             }
+            runtime.recovering.store(false, Ordering::SeqCst);
+            runtime.wake_all();
         });
     }
 
-    /// A live connection, (re)dialing it if needed. Single-flight: concurrent
-    /// callers during a drop share one re-dial and one generation bump.
+    fn terminal_error(&self) -> Option<Error> {
+        if self.stopping.load(Ordering::SeqCst) {
+            Some(transport("session disconnected"))
+        } else {
+            self.failed
+                .lock()
+                .expect("failed")
+                .as_ref()
+                .map(|cause| transport(format!("recovery failed: {cause}")))
+        }
+    }
+
+    /// A usable connection, only published after all recorded intents re-join.
     pub(super) async fn ensure_live(&self) -> Result<Arc<Connection>> {
-        if let Some(conn) = self.live() {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if let Some(err) = self.terminal_error() {
+                return Err(err);
+            }
+            if let Some(conn) = self.live() {
+                return Ok(conn);
+            }
+            let old = self.conn.lock().expect("conn").clone();
+            if let Some(conn) = old.filter(|c| c.is_closed()) {
+                conn.report_loss();
+            }
+            if self.recovering.load(Ordering::SeqCst) {
+                changed.await;
+                continue;
+            }
+            let _redial = self.redial.lock().await;
+            if let Some(err) = self.terminal_error() {
+                return Err(err);
+            }
+            if let Some(conn) = self.live() {
+                return Ok(conn);
+            }
+            if self.recovering.load(Ordering::SeqCst) {
+                continue;
+            }
+            let conn = self.attach_and_rejoin(None).await?;
+            self.finish_attach(&conn)?;
             return Ok(conn);
         }
-        let _redial = self.redial.lock().await;
-        if let Some(conn) = self.live() {
-            return Ok(conn);
+    }
+
+    fn finish_attach(&self, conn: &Connection) -> Result<()> {
+        // Pair publication with loss detection: a drop at this boundary either
+        // fails this attempt or starts the next flight after Resumed, never
+        // disappears behind the current flight's recovering flag.
+        let _current = self.conn.lock().expect("conn");
+        if let Some(err) = self.terminal_error() {
+            return Err(err);
         }
-        let conn = self.dial().await?;
-        *self.ready.lock().expect("ready") = conn.ready.clone();
-        *self.conn.lock().expect("conn") = Some(Arc::clone(&conn));
-        let previous = self.generation.fetch_add(1, Ordering::SeqCst);
-        let generation = previous + 1;
-        // The first connect of a process is not a recovery: no Up event.
-        if previous > 0 {
-            let _ = self.transport_tx.send(TransportEvent::Up { generation });
+        if conn.is_closed() {
+            return Err(transport("socket lost during intent re-join"));
+        }
+        conn.joined.store(true, Ordering::SeqCst);
+        self.recovering.store(false, Ordering::SeqCst);
+        if self.generation() == 0 {
+            self.generation.store(1, Ordering::SeqCst);
+        } else {
+            self.resumed();
         }
         self.wake_all();
-        Ok(conn)
+        Ok(())
+    }
+
+    /// Intent mutations use the same barrier as re-join. Record an Ack before
+    /// recovery can snapshot holdings. Recovery sends directly on the candidate
+    /// connection and never waits for an intent operation that is awaiting it.
+    pub(super) async fn intent_connection(
+        &self,
+    ) -> Result<(tokio::sync::MutexGuard<'_, ()>, Arc<Connection>)> {
+        loop {
+            self.ensure_live().await?;
+            let guard = self.redial.lock().await;
+            if let Some(err) = self.terminal_error() {
+                return Err(err);
+            }
+            if let Some(conn) = self.live() {
+                return Ok((guard, conn));
+            }
+        }
+    }
+
+    async fn attach_and_rejoin(&self, deadline: Option<Instant>) -> Result<Arc<Connection>> {
+        let attempt = async {
+            let conn = self.dial().await?;
+            *self.ready.lock().expect("ready") = conn.ready.clone();
+            *self.conn.lock().expect("conn") = Some(conn.clone());
+            let mut keys: Vec<_> = self.intents().held.keys().cloned().collect();
+            keys.sort();
+            for key in keys {
+                // Drop/disconnect can remove a facade synchronously mid-join.
+                if !self.intents().is_held(&key) {
+                    continue;
+                }
+                let frame = conn
+                    .call(key.subscribe_body(), self.cfg.rpc_timeout)
+                    .await
+                    .map_err(|e| match e {
+                        CallError::NotSent(e) | CallError::Sent(e) => e,
+                    })?;
+                match super::map_reply(frame)?.body {
+                    Some(Body::Ack(_)) => {}
+                    other => return Err(super::unexpected("Ack", other)),
+                }
+            }
+            if conn.is_closed() {
+                return Err(transport("socket lost during intent re-join"));
+            }
+            Ok(conn)
+        };
+        // Initial attach retains its specific Unix attachment errors and the
+        // handshake budget after waiting for a parent to start. Recovery has a
+        // tighter end-to-end deadline, including every intent Ack.
+        let timeout = deadline.map_or_else(
+            || self.cfg.attach_timeout + self.cfg.rpc_timeout + HANDSHAKE_RETRY_PAUSE,
+            |deadline| deadline.saturating_duration_since(Instant::now()),
+        );
+        let result = tokio::time::timeout(timeout, attempt)
+            .await
+            .unwrap_or_else(|_| Err(transport("attach/intent re-join timed out")));
+        if result.is_err() {
+            let conn = self.conn.lock().expect("conn").take();
+            if let Some(conn) = conn {
+                conn.shutdown().await;
+            }
+        }
+        result
     }
 
     /// Attach, attest the parent holds the flock, and handshake.
@@ -876,6 +1095,9 @@ impl Runtime {
             pending: StdMutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             closed: AtomicBool::new(false),
+            joined: AtomicBool::new(false),
+            loss_reported: AtomicBool::new(false),
+            runtime: self.self_weak.clone(),
             intentional: AtomicBool::new(false),
             ready,
             reader: StdMutex::new(None),
@@ -888,6 +1110,8 @@ impl Runtime {
     /// Close the connection on purpose (the parent keeps running).
     pub(super) async fn close(&self) {
         self.stopping.store(true, Ordering::SeqCst);
+        self.wake_all();
+        let _redial = self.redial.lock().await;
         let conn = self.conn.lock().expect("conn").take();
         if let Some(conn) = conn {
             conn.shutdown().await;

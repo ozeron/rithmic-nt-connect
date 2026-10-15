@@ -14,6 +14,9 @@ pub mod convert;
 mod runtime;
 mod transport;
 
+#[cfg(test)]
+mod recovery_tests;
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -74,7 +77,7 @@ pub struct GatewayConfig {
     pub ib_id: String,
     auth_token: String,
     socket: PathBuf,
-    /// Bounded wait for an already-starting parent and for a silent parent's Ready.
+    /// Bounded initial attach wait and end-to-end socket recovery window.
     pub attach_timeout: Duration,
     pub rpc_timeout: Duration,
     pub history_rpc_timeout: Duration,
@@ -171,6 +174,7 @@ pub struct RemoteSession {
     queues: Arc<Queues>,
     facade_id: AtomicU64,
     connected: AtomicBool,
+    has_connected: AtomicBool,
     /// The runtime `connect` ran on; `Drop` (which may run outside any runtime,
     /// e.g. from Python) spawns the facade's last releases there.
     rt_handle: StdMutex<Option<tokio::runtime::Handle>>,
@@ -228,6 +232,7 @@ impl RemoteSession {
             queues: Arc::new(Queues::new()),
             facade_id: AtomicU64::new(0),
             connected: AtomicBool::new(false),
+            has_connected: AtomicBool::new(false),
             rt_handle: StdMutex::new(None),
         }
     }
@@ -336,6 +341,16 @@ impl RemoteSession {
         reply!(self.call(body, mode, false).await?, Ack, |_| ())
     }
 
+    async fn intent_ack(&self, conn: &runtime::Connection, body: Body) -> Result<()> {
+        let frame = conn
+            .call(body, self.runtime.cfg.rpc_timeout)
+            .await
+            .map_err(|e| match e {
+                CallError::NotSent(e) | CallError::Sent(e) => e,
+            })?;
+        reply!(map_reply(frame)?, Ack, |_| ())
+    }
+
     fn facade(&self) -> u64 {
         self.facade_id.load(Ordering::SeqCst)
     }
@@ -345,8 +360,11 @@ impl RemoteSession {
     /// a repeat subscribe is how a client retries a join a rebuild left degraded,
     /// and how it re-joins a parent that lost the connection's intents.
     async fn hold_intent(&self, key: IntentKey, body: Body) -> Result<()> {
+        self.require_connected()?;
+        let (_barrier, conn) = self.runtime.intent_connection().await?;
+        self.require_connected()?;
         let _ordered = self.runtime.intent_lock(&key).await;
-        self.ack(body, Mode::Intent).await?;
+        self.intent_ack(&conn, body).await?;
         self.runtime.intents().hold(self.facade(), key);
         Ok(())
     }
@@ -354,6 +372,9 @@ impl RemoteSession {
     /// Drop this facade's hold on an intent; the parent is told only when no
     /// other facade on the shared socket still holds it.
     async fn release_intent(&self, key: IntentKey, body: Body) -> Result<()> {
+        self.require_connected()?;
+        let (_barrier, conn) = self.runtime.intent_connection().await?;
+        self.require_connected()?;
         let _ordered = self.runtime.intent_lock(&key).await;
         let facade = self.facade();
         let held_here = {
@@ -364,7 +385,7 @@ impl RemoteSession {
             }
             held_here
         };
-        let sent = self.ack(body, Mode::Intent).await;
+        let sent = self.intent_ack(&conn, body).await;
         if sent.is_err() && held_here {
             self.runtime.intents().hold(facade, key);
         }
@@ -376,6 +397,9 @@ impl RemoteSession {
     /// holds either; otherwise the order plant, and any bracket subscription on
     /// it, stay for the others.
     async fn release_order(&self) -> Result<()> {
+        self.require_connected()?;
+        let (_barrier, conn) = self.runtime.intent_connection().await?;
+        self.require_connected()?;
         let _ordered = self.runtime.intent_lock(&IntentKey::Order).await;
         let facade = self.facade();
         let had = {
@@ -392,7 +416,7 @@ impl RemoteSession {
             had
         };
         let sent = self
-            .ack(IntentKey::Order.release_body(), Mode::Intent)
+            .intent_ack(&conn, IntentKey::Order.release_body())
             .await;
         if sent.is_err() {
             let mut intents = self.runtime.intents();
@@ -429,7 +453,9 @@ impl RemoteSession {
     /// Wait for the first event on `channel`; a gap (from the parent or from
     /// this client's own queue overflow) is returned as `PlantEvent::Gap`.
     async fn poll_raw(&self, channel: Channel, timeout: Duration) -> Result<Option<PlantEvent>> {
-        self.require_connected()?;
+        if !self.has_connected.load(Ordering::SeqCst) {
+            self.require_connected()?;
+        }
         self.queues.get(channel).arm();
         let queue = self.queues.get(channel);
         let deadline = Instant::now() + timeout;
@@ -449,7 +475,7 @@ impl RemoteSession {
                 }
                 Take::Empty => {}
             }
-            if self.runtime.is_down() {
+            if !self.connected.load(Ordering::SeqCst) || self.runtime.stream_closed() {
                 return Err(Error::ChannelClosed {
                     plant: channel.plant(),
                 });
@@ -550,6 +576,10 @@ fn map_reply(frame: Frame) -> Result<Frame> {
 
 #[async_trait]
 impl Session for RemoteSession {
+    fn session_events(&self) -> broadcast::Receiver<rithmic_host::events::SessionEvent> {
+        self.runtime.session_events()
+    }
+
     async fn connect(&self) -> Result<()> {
         if self.connected.load(Ordering::SeqCst) {
             return Err(Error::AlreadyConnected);
@@ -560,6 +590,7 @@ impl Session for RemoteSession {
         self.runtime.allow_recovery();
         match self.runtime.ensure_live().await {
             Ok(_) => {
+                self.has_connected.store(true, Ordering::SeqCst);
                 self.connected.store(true, Ordering::SeqCst);
                 Ok(())
             }
@@ -574,6 +605,7 @@ impl Session for RemoteSession {
 
     async fn disconnect(&self) -> Result<()> {
         self.connected.store(false, Ordering::SeqCst);
+        self.queues.wake_all();
         match self.leave() {
             // Last facade in the process: close the socket; the parent drops its
             // intents and stays up.

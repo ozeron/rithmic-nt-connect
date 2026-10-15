@@ -122,10 +122,7 @@ pub fn plant_event_from_pb(event: pb::Event) -> Option<PlantEvent> {
         Body::BracketUpdate(b) => PlantEvent::BracketUpdate(bracket_update_from_pb(b)),
         Body::TimeBar(b) => PlantEvent::TimeBar(history_bar_from_pb(b)),
         // Connection-level, not a plant event: the runtime handles it before this.
-        Body::TransportResumed(_) => return None,
-        // TODO(unify-session-host task 4.3): surface the parent's interruption
-        // as a transport event once host recovery emits it. For now, skip it.
-        Body::TransportInterrupted(_) => return None,
+        Body::TransportResumed(_) | Body::TransportInterrupted(_) => return None,
         Body::Gap(g) => PlantEvent::Gap(rithmic_host::GapDto {
             stream: rithmic_host::Stream::from_plant(&g.stream)?,
             skipped: g.skipped,
