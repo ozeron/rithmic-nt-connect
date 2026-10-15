@@ -1,4 +1,6 @@
 //! Host-owned plant recovery and intent restore, shared by both attachments.
+mod degraded;
+
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -60,9 +62,10 @@ impl Recovery {
         match self {
             Self::Plant(Stream::Ticker) => venue.reset_ticker().await,
             Self::Plant(Stream::History) => venue.reset_history().await,
-            // PnL reconnects its subscription on the existing handle. Account
-            // restore failure escalates to a login rebuild below.
-            Self::Plant(Stream::Pnl) => Ok(()),
+            Self::Plant(Stream::Pnl) => {
+                venue.disconnect_pnl_plant().await?;
+                venue.ensure_pnl_plant().await
+            }
             Self::Plant(Stream::Order) => {
                 venue.disconnect_order_plant().await?;
                 venue.ensure_order_plant().await
@@ -174,8 +177,12 @@ async fn serve_until_issue<V: Venue + ?Sized + 'static>(
             stopped.clone(),
         ));
     }
+    // This future shares the pump's lifetime and is dropped before a rebuild.
+    let retries = degraded::retry(state);
+    tokio::pin!(retries);
     let issue = loop {
         tokio::select! {
+            _ = &mut retries => unreachable!("degraded retry loop never exits"),
             result = streams.join_next() => match result {
                 Some(Ok(Some(issue))) => break issue,
                 Some(Err(_)) | None => break Issue { recovery: Recovery::Login, cause: "plant pump stopped unexpectedly".into() },

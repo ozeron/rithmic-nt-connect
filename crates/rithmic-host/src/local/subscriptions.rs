@@ -285,7 +285,7 @@ pub(super) async fn subscribe_topic<V: Venue + ?Sized + 'static>(
     // A later client joining an intent a rebuild left degraded retries the venue
     // join too: the other holders' join is dark, so this one would get nothing.
     let degraded = !is_first && state.reconnect.is_degraded(&intent.md_intent()).await;
-    let refresh = !is_first && !degraded && matches!(intent, TopicIntent::Book(_));
+    let refresh = !is_first && matches!(intent, TopicIntent::Book(_));
     if is_first || degraded || refresh {
         let Some(session) = &state.session else {
             intent.client_remove(client);
@@ -321,7 +321,7 @@ pub(super) async fn subscribe_topic<V: Venue + ?Sized + 'static>(
 /// Retry the venue join of an intent a rebuild left degraded, on behalf of a client
 /// that already holds it. Clears the degradation on success; on failure the client
 /// gets the venue's own error and the intent stays degraded for the next try.
-async fn rejoin_degraded<V: Venue + ?Sized + 'static>(
+pub(crate) async fn rejoin_degraded<V: Venue + ?Sized + 'static>(
     state: &HostState<V>,
     intent: TopicIntent,
 ) -> Result<()> {
@@ -337,7 +337,14 @@ async fn rejoin_degraded<V: Venue + ?Sized + 'static>(
         return Err(no_venue());
     };
     let session_guard = session.lock().await;
-    match intent.venue_join(&*session_guard).await {
+    state.check_ready()?;
+    // A failed snapshot refresh may have left the venue join live. Rithmic
+    // rejects bare repeat book subscribes, so use the snapshot-on-join path.
+    let joined = match &intent {
+        TopicIntent::Book(key) => session_guard.refresh_book(&key.symbol, &key.exchange).await,
+        _ => intent.venue_join(&*session_guard).await,
+    };
+    match joined {
         Ok(()) => {
             state.reconnect.clear_degraded(&intent.md_intent()).await;
             Ok(())

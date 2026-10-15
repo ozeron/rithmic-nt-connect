@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::sync::Arc;
 
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 use crate::fanout::{FanoutHub, SubKey};
 
@@ -48,8 +48,8 @@ pub struct IntentStore {
     brackets: usize,
     /// Market-data joins the venue lost in a plant rebuild and a restore could not
     /// re-establish (for example an expired contract). The intent stays noted for
-    /// every client that holds it; the next subscribe from one of them retries the
-    /// venue join and clears this on success.
+    /// every client that holds it; the host retries in the background and a
+    /// repeated subscribe may also heal it.
     degraded: HashSet<MdIntent>,
 }
 
@@ -167,13 +167,17 @@ impl IntentStore {
             MdIntent::Book(k) => self.book.contains_key(k),
             MdIntent::TimeBars(t) => self.time_bars.contains_key(t),
         };
-        if held {
-            self.degraded.insert(intent);
+        if held && self.degraded.insert(intent.clone()) {
+            eprintln!("rithmic-host: market-data intent degraded: {intent:?}; background retries scheduled");
         }
     }
 
     pub fn clear_degraded(&mut self, intent: &MdIntent) -> bool {
-        self.degraded.remove(intent)
+        let removed = self.degraded.remove(intent);
+        if removed {
+            eprintln!("rithmic-host: market-data intent recovered: {intent:?}");
+        }
+        removed
     }
 
     pub fn is_degraded(&self, intent: &MdIntent) -> bool {
@@ -182,6 +186,10 @@ impl IntentStore {
 
     pub fn degraded_count(&self) -> usize {
         self.degraded.len()
+    }
+
+    pub fn degraded_intents(&self) -> Vec<MdIntent> {
+        self.degraded.iter().cloned().collect()
     }
 
     pub fn remembered_count(&self) -> usize {
@@ -217,6 +225,7 @@ macro_rules! locked {
 pub struct ReconnectController {
     intent: Mutex<IntentStore>,
     hub: Arc<FanoutHub>,
+    pub(crate) degraded_changed: Notify,
 }
 
 impl ReconnectController {
@@ -224,6 +233,7 @@ impl ReconnectController {
         Self {
             intent: Mutex::new(IntentStore::default()),
             hub,
+            degraded_changed: Notify::new(),
         }
     }
 
@@ -250,14 +260,19 @@ impl ReconnectController {
         fn forget_order() -> bool;
         fn note_brackets() -> bool;
         fn forget_brackets() -> bool;
-        fn mark_degraded(intent: MdIntent) -> ();
         fn clear_degraded(intent: &MdIntent) -> bool;
         fn is_degraded(intent: &MdIntent) -> bool;
         /// Market-data joins currently left degraded after a rebuild.
         fn degraded_count() -> usize;
+        fn degraded_intents() -> Vec<MdIntent>;
         fn remembered_count() -> usize;
         /// True when ticker, book, or live time-bar intents are present.
         fn has_live_md_intents() -> bool;
+    }
+
+    pub async fn mark_degraded(&self, intent: MdIntent) {
+        self.intent.lock().await.mark_degraded(intent);
+        self.degraded_changed.notify_one();
     }
 
     /// After plants are back, return every typed venue join to re-issue.

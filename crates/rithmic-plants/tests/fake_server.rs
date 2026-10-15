@@ -701,3 +701,90 @@ async fn injected_ticker_abort_restores_host_intent_without_reconnecting_sibling
     }
     host.shutdown().await;
 }
+
+#[tokio::test]
+async fn account_plant_abort_restores_updates_without_reconnecting_siblings() {
+    use rithmic_host::{HistoryPolicy, ParentGates, Session, SessionEvent, SessionHost, Timing};
+
+    for (stream, plant) in [(Stream::Pnl, Plant::Pnl), (Stream::Order, Plant::Order)] {
+        let server = venue().await;
+        let host = SessionHost::start(
+            RithmicVenue::new(server.session_config(), PlantSet::EXECUTION).with_gates(true, false),
+            ParentGates {
+                trading_enabled: true,
+                cancel_all_enabled: false,
+            },
+            Timing {
+                error_backoff: Duration::from_millis(1),
+                connect_retry: Duration::from_millis(1),
+                restore_backoff: Duration::from_millis(1),
+            },
+            HistoryPolicy::Allow,
+        );
+        let session = host.attach();
+        session.connect().await.unwrap();
+        session.subscribe("ESZ6", "CME").await.unwrap();
+        session.subscribe_pnl().await.unwrap();
+        session.subscribe_bracket_updates().await.unwrap();
+        let mut events = session.session_events();
+        let before = server.received().len();
+        host.state
+            .session
+            .as_ref()
+            .unwrap()
+            .checkout()
+            .await
+            .fault_inject_drop_plant(stream)
+            .await
+            .unwrap();
+        assert!(matches!(
+            tokio::time::timeout(WAIT, events.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            SessionEvent::Interrupted { .. }
+        ));
+        assert_eq!(
+            tokio::time::timeout(WAIT, events.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            SessionEvent::Resumed { generation: 2 }
+        );
+        let requests = server.received();
+        let logins: Vec<_> = requests[before..]
+            .iter()
+            .filter(|r| r.template_id == template::LOGIN)
+            .map(|r| r.plant)
+            .collect();
+        assert_eq!(logins, [Some(plant)], "only the failed plant is recreated");
+        for sibling in [Plant::Ticker, Plant::History, Plant::Pnl, Plant::Order] {
+            assert_eq!(server.connections(sibling), 1);
+        }
+        let expected = if stream == Stream::Pnl {
+            server.push(Plant::Pnl, &frames::account_pnl("ACCOUNT", "42.5", false));
+            "pnl"
+        } else {
+            server.push(
+                Plant::Order,
+                &frames::rithmic_order("B2", "post-recovery", 13, "open"),
+            );
+            "order"
+        };
+        match session
+            .next_events(stream, 8, WAIT)
+            .await
+            .unwrap()
+            .as_slice()
+        {
+            [PlantEvent::AccountPnl(p)] if stream == Stream::Pnl => {
+                assert_eq!(p.day_pnl.as_deref(), Some("42.5"))
+            }
+            [PlantEvent::OrderNotification(n)] if stream == Stream::Order => {
+                assert_eq!(n.user_tag.as_deref(), Some("post-recovery"))
+            }
+            other => panic!("expected fresh {expected} update, got {other:?}"),
+        }
+        host.shutdown().await;
+    }
+}

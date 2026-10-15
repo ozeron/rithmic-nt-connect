@@ -11,12 +11,25 @@ The system SHALL run every Rithmic login through a `SessionHost`. A process SHAL
 - **WHEN** the shared scenario suite runs against a `LocalSession` and against a `RemoteSession` attached to the same kind of host
 - **THEN** every scenario SHALL produce the same results, events and errors in both
 
+#### Scenario: Recovery exhaustion releases the credential
+- **WHEN** bounded host recovery is exhausted while old facades remain alive
+- **THEN** `RecoveryFailed` SHALL be delivered and terminal teardown SHALL run outside the pump task, disconnecting all plants, releasing the flock and evicting the failed registry incarnation
+- **AND** old facades SHALL reject calls without waiting for teardown and SHALL remain terminal
+- **AND** another process SHALL be able to acquire the released flock, and a new facade SHALL obtain a fresh host
+- **AND** delayed cleanup of the old host SHALL NOT evict its replacement
+
 #### Scenario: Flock before login
 - **WHEN** a host is started while another process holds the credential flock
 - **THEN** starting SHALL fail with a session-lock error before any plant is opened
 
 ### Requirement: Sessions are independent attachments
 Each attached session SHALL have its own event queues and its own set of intents on the host. A repeated subscribe from the same session SHALL be idempotent, and SHALL re-join the intent if it is degraded. `connect` on a session SHALL ensure the host is connected: it SHALL succeed when the host is already up, and concurrent callers SHALL cause at most one plant connect. `disconnect_order_plant` SHALL release only this session's order and bracket intents. This session's order commands SHALL then fail as not-sent until it ensures or subscribes again, while other sessions keep trading. Detaching a session, by `disconnect` or by dropping it, SHALL release only that session's intents and queues. The host SHALL leave the venue for an intent only when no attached session still holds it. Dropping a session SHALL NOT block on venue I/O. When the last session detaches, the host SHALL disconnect the venue and release the flock.
+
+#### Scenario: Direct facade reconnects after explicit disconnect
+- **WHEN** a direct Python facade disconnects and later connects again
+- **THEN** it SHALL obtain a fresh attachment, reapply its requested plants and gates it opened, and receive events from new subscriptions
+- **AND** the released attachment SHALL remain released, a sibling's live login SHALL be shared, and the last holder's departure SHALL release the flock
+- **AND** a facade whose host exhausted recovery SHALL remain terminal even after explicit disconnect
 
 #### Scenario: Two sessions share a symbol
 - **WHEN** sessions A and B subscribe ES on one host and A unsubscribes
@@ -80,9 +93,10 @@ Trading and cancel-all gates SHALL be state of the host, closed by default and i
 The host SHALL detect a plant failure through its event pump and SHALL recover the smallest unit that restores service:
 - a ticker or history failure SHALL recreate that plant only, leaving sibling plants untouched
 - an order-plant failure SHALL re-seat the order plant
+- a PnL-plant failure SHALL disconnect its dead handle and recreate only that plant before restoring PnL intent
 - a login-level failure SHALL reconnect all plants
 
-The host SHALL then re-issue every intent the recovered plants carry. A market-data intent that fails a bounded number of restore passes SHALL be left degraded, and the next subscribe for it SHALL retry it. An account intent (PnL, orders, brackets) that cannot be restored SHALL escalate to a full reconnect. Consumers SHALL NOT reset plants or re-issue intents in response to a host recovery. During recovery, `next_events` SHALL return empty batches rather than a stream error. A consumer SHALL see a stream error only after `RecoveryFailed` or after its session is closed.
+The host SHALL then re-issue every intent the recovered plants carry. A market-data intent that fails a bounded number of restore passes SHALL be left degraded. While at least one session holds it, the host SHALL retry it in the background with independent bounded exponential backoff (initially 1 s, doubling to a 60 s cap, with 80–100% jitter on subsequent delays), without requiring a consumer subscribe. Successful retry SHALL clear degradation and restore delivery to all holders; a book retry SHALL request a fresh snapshot through `refresh_book`. Releasing the last holder SHALL stop retries. The host SHALL log each degrade/recover transition. A repeated subscribe SHALL still retry a degraded intent. An account intent (PnL, orders, brackets) that cannot be restored SHALL escalate to a full reconnect. Consumers SHALL NOT reset plants or re-issue intents in response to a host recovery. During recovery, `next_events` SHALL return empty batches rather than a stream error. A consumer SHALL see a stream error only after `RecoveryFailed` or after its session is closed.
 
 #### Scenario: Ticker plant fails while trading
 - **WHEN** the ticker plant fails while sessions hold ticker, book, PnL and order intents
@@ -96,12 +110,20 @@ The host SHALL then re-issue every intent the recovered plants carry. A market-d
 - **WHEN** a plant fails in direct mode
 - **THEN** the host SHALL restore it and its intents without any call from the Python adapter
 
+#### Scenario: Degraded intent recovers without a consumer re-subscribe
+- **WHEN** a held market-data intent is degraded after bounded restore failures and the venue later accepts it
+- **THEN** the host SHALL retry it with bounded exponential backoff, clear its degraded mark on success, log recovery, and deliver data to every holder without a consumer subscribe
+
+#### Scenario: Last holder releases a degraded intent
+- **WHEN** the last holder disconnects, drops, or unsubscribes before a scheduled retry
+- **THEN** the host SHALL stop retrying that intent and SHALL NOT resurrect its venue join
+
 #### Scenario: One market-data intent keeps failing
 - **WHEN** a market-data intent fails every restore pass
 - **THEN** the other intents SHALL be live, the failing one SHALL be degraded, and a later subscribe for it SHALL succeed once the venue accepts it
 
 ### Requirement: Sessions receive the same recovery events in both modes
-Every attached session SHALL receive `Interrupted` when the path from it to the venue breaks. It SHALL then receive either `Resumed { generation }`, once its intents are live again, or `RecoveryFailed`, after recovery gives up. The generation SHALL increase by one per completed recovery. A `RemoteSession` SHALL report socket loss and re-attach as the same three events, and SHALL re-issue its own recorded intents before emitting `Resumed`. A one-shot command in flight when the path broke SHALL return an unknown-outcome error and SHALL NOT be retried.
+Every attached session SHALL receive `Interrupted` when the path from it to the venue breaks. It SHALL then receive either `Resumed { generation }`, once account and non-degraded market-data intents are live again (degraded market-data intents continue background retries and are logged), or `RecoveryFailed`, after recovery gives up. The generation SHALL increase by one per completed recovery. A `RemoteSession` SHALL report socket loss and re-attach as the same three events, and SHALL re-issue its own recorded intents before emitting `Resumed`. A one-shot command in flight when the path broke SHALL return an unknown-outcome error and SHALL NOT be retried.
 
 #### Scenario: Plant reconnect seen by a remote session
 - **WHEN** the parent's host recovers a plant

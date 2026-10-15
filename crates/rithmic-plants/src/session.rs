@@ -525,18 +525,35 @@ impl Handles {
 // Retain the former public facade helpers unchanged during the contract move.
 #[allow(dead_code)]
 impl Plants {
-    /// Stop the real ticker actor with its event lane still attached, so the
+    /// Stop a real plant actor with its event lane still attached, so the
     /// ordinary ConnectionError reaches the host's failure detector.
     #[cfg(feature = "testing")]
     pub(crate) fn fault_inject_drop_plant(&self, plant: Stream) -> Result<()> {
-        if plant != Stream::Ticker {
-            return Err(Error::Config("fault injection supports only ticker".into()));
+        match plant {
+            Stream::Ticker => self
+                .ticker
+                .as_ref()
+                .ok_or(Error::NotConnected { plant: "ticker" })?
+                .handle
+                .abort(),
+            Stream::Pnl => self
+                .pnl
+                .as_ref()
+                .ok_or(Error::NotConnected { plant: "pnl" })?
+                .handle
+                .abort(),
+            Stream::Order => self
+                .order
+                .as_ref()
+                .ok_or(Error::NotConnected { plant: "order" })?
+                .handle
+                .abort(),
+            Stream::History => {
+                return Err(Error::Config(
+                    "fault injection supports ticker, pnl, or order".into(),
+                ));
+            }
         }
-        self.ticker
-            .as_ref()
-            .ok_or(Error::NotConnected { plant: "ticker" })?
-            .handle
-            .abort();
         Ok(())
     }
 

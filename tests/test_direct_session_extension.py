@@ -125,10 +125,11 @@ def test_fault_hook_reaches_the_direct_plant_and_rejects_gateway_sessions() -> N
     )
     # Construction never connects. A valid fault reaches the missing plant;
     # unsupported targets must not silently fault the ticker instead.
-    with pytest.raises(ValueError, match="only ticker"):
-        session._fault_drop_plant("order")
-    with pytest.raises(_lib.NotConnectedError):
-        session._fault_drop_plant("ticker")
+    with pytest.raises(ValueError, match="supports ticker, pnl, or order"):
+        session._fault_drop_plant("history")
+    for plant in ("ticker", "pnl", "order"):
+        with pytest.raises(_lib.NotConnectedError):
+            session._fault_drop_plant(plant)
     gateway = _lib.Session(user="offline-fault-test", connect_mode="gateway")
     with pytest.raises(ValueError, match="real direct session"):
         gateway._fault_drop_plant("ticker")

@@ -182,6 +182,8 @@ pub struct SessionHost<V: Venue + ?Sized + 'static = dyn Venue> {
     closing: AtomicBool,
     shutdown_done: AtomicBool,
     shutdown_gate: Mutex<()>,
+    requested_plants: std::sync::Mutex<Option<PlantSet>>,
+    on_shutdown: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl<V: Venue + 'static> SessionHost<V> {
@@ -251,11 +253,24 @@ impl<V: Venue + ?Sized + 'static> SessionHost<V> {
             closing: AtomicBool::new(false),
             shutdown_done: AtomicBool::new(false),
             shutdown_gate: Mutex::new(()),
+            requested_plants: std::sync::Mutex::new(None),
+            on_shutdown: std::sync::Mutex::new(None),
         });
         if host.state.session.is_some() {
             let state = host.state.clone();
-            *host.pump.lock().unwrap_or_else(|e| e.into_inner()) =
-                Some(tokio::spawn(crate::pump::run_event_pump(state)));
+            let weak = Arc::downgrade(&host);
+            *host.pump.lock().unwrap_or_else(|e| e.into_inner()) = Some(tokio::spawn(async move {
+                crate::pump::run_event_pump(state.clone()).await;
+                if state.failed.load(Ordering::SeqCst) {
+                    if let Some(host) = weak.upgrade() {
+                        // Shutdown aborts and joins the pump. Run it on a separate
+                        // task so terminal recovery never joins its own task.
+                        tokio::spawn(async move {
+                            host.shutdown().await;
+                        });
+                    }
+                }
+            }));
         }
         host
     }
@@ -293,8 +308,20 @@ impl<V: Venue + ?Sized + 'static> SessionHost<V> {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(lock);
     }
+    pub(crate) fn on_shutdown(&self, callback: impl FnOnce() + Send + 'static) {
+        *self.on_shutdown.lock().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(callback));
+    }
     pub fn is_terminal(&self) -> bool {
         self.closing.load(Ordering::SeqCst) || self.state.failed.load(Ordering::SeqCst)
+    }
+    fn check_open(&self) -> Result<()> {
+        if self.is_terminal() {
+            Err(Error::Session(
+                "host recovery failed; start a new host".into(),
+            ))
+        } else {
+            Ok(())
+        }
     }
     pub(crate) async fn detached(&self) {
         let last = {
@@ -328,32 +355,43 @@ impl<V: Venue + ?Sized + 'static> SessionHost<V> {
         crate::local::subscriptions::reset_ticker_plant(&self.state).await
     }
     pub async fn request_plants(&self, extra: PlantSet) -> Result<()> {
-        self.state
+        self.check_open()?;
+        let venue = self
+            .state
             .session
             .as_ref()
             .ok_or_else(crate::local::no_venue)?
             .lock()
-            .await
-            .request_plants(extra)
-            .await
+            .await;
+        self.check_open()?;
+        venue.request_plants(extra).await
+    }
+    /// Record constructor requests, including registry hits, without plant I/O.
+    /// The next attachment's `connect` applies their union even if already up.
+    pub fn request_plants_on_connect(&self, extra: PlantSet) {
+        let mut pending = self
+            .requested_plants
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let plants = pending.get_or_insert(extra);
+        plants.ticker |= extra.ticker;
+        plants.history |= extra.history;
+        plants.pnl |= extra.pnl;
     }
     pub async fn connect(&self) -> Result<()> {
+        // Terminal facades reject immediately while background teardown holds
+        // the venue gate; recheck under that gate below for concurrent failure.
+        self.check_open()?;
         let venue = self
             .state
             .session
             .as_ref()
             .ok_or_else(crate::local::no_venue)?;
         loop {
+            self.check_open()?;
             let mut generation = self.subscribe_generation();
             let guard = venue.lock_exclusive().await;
-            if self.is_terminal() {
-                return Err(Error::Session(
-                    "host recovery failed; start a new host".into(),
-                ));
-            }
-            if self.state.ready.load(Ordering::SeqCst) {
-                return Ok(());
-            }
+            self.check_open()?;
             // The reconnect loop owns connect + restore. A concurrent consumer
             // connect waits for its completed generation rather than exposing a
             // half-restored venue or starting a second login.
@@ -364,6 +402,20 @@ impl<V: Venue + ?Sized + 'static> SessionHost<V> {
                     .await
                     .map_err(|_| Error::Session("host closed during reconnect".into()))?;
                 continue;
+            }
+            let requested = self
+                .requested_plants
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take();
+            if let Some(plants) = requested {
+                if let Err(e) = guard.request_plants(plants).await {
+                    self.request_plants_on_connect(plants);
+                    return Err(e);
+                }
+            }
+            if self.state.ready.load(Ordering::SeqCst) {
+                return Ok(());
             }
             match guard.connect().await {
                 Ok(()) | Err(Error::AlreadyConnected) => {}
@@ -409,6 +461,14 @@ impl<V: Venue + ?Sized + 'static> SessionHost<V> {
             .unwrap_or_else(|e| e.into_inner())
             .take();
         self.shutdown_done.store(true, Ordering::SeqCst);
+        let callback = self
+            .on_shutdown
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(callback) = callback {
+            callback();
+        }
     }
 }
 impl<V: Venue + ?Sized + 'static> Drop for SessionHost<V> {

@@ -59,12 +59,12 @@ impl Default for HostOptions {
     }
 }
 pub struct HostRegistry<V: Venue + ?Sized + 'static = dyn Venue> {
-    hosts: Mutex<HashMap<HostFingerprint, Weak<SessionHost<V>>>>,
+    hosts: Arc<Mutex<HashMap<HostFingerprint, Weak<SessionHost<V>>>>>,
 }
 impl<V: Venue + ?Sized + 'static> Default for HostRegistry<V> {
     fn default() -> Self {
         Self {
-            hosts: Mutex::new(HashMap::new()),
+            hosts: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -98,7 +98,27 @@ impl<V: Venue + ?Sized + 'static> HostRegistry<V> {
             crate::fanout::DEFAULT_QUEUE_CAP,
         );
         host.hold_lock(lock);
+        let weak_host = Arc::downgrade(&host);
+        let weak_registry = Arc::downgrade(&self.hosts);
+        let evict_key = key.clone();
+        host.on_shutdown(move || {
+            if let Some(hosts) = weak_registry.upgrade() {
+                tokio::spawn(async move {
+                    let mut hosts = hosts.lock().await;
+                    // A replacement may already own this key when cleanup runs.
+                    if hosts
+                        .get(&evict_key)
+                        .is_some_and(|entry| entry.ptr_eq(&weak_host))
+                    {
+                        hosts.remove(&evict_key);
+                    }
+                });
+            }
+        });
         hosts.insert(key, Arc::downgrade(&host));
         Ok(host)
     }
 }
+
+#[cfg(all(test, feature = "testing"))]
+mod tests;
