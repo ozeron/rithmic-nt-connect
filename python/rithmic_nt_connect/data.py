@@ -1093,7 +1093,7 @@ class RithmicDataClient(LiveMarketDataClient):
                     fields_to_quote_tick(fields, ts_init, price_precision=prec)
                 )
             elif etype == "order_book":
-                fields = order_book_to_fields(event)
+                fields = order_book_to_fields(event, ts_init=ts_init)
                 prec = self._price_precision(
                     InstrumentId.from_str(fields["instrument_id"])
                 )

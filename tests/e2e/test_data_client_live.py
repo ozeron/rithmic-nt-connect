@@ -137,7 +137,8 @@ class TestOrderBook:
         while time.monotonic() < deadline and sum(seen.values()) < 200:
             ev = live_session.poll_event()
             if ev and ev.get("type") == "order_book":
-                order_book_to_fields(ev)  # rejects a value outside the set
+                # Snapshot images may omit venue time; use the receipt clock.
+                order_book_to_fields(ev, ts_init=time.time_ns())
                 seen[ev.get("update_type")] += 1
             elif ev is None:
                 time.sleep(0.05)
