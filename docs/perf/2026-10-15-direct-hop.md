@@ -494,3 +494,19 @@ pass. The full Python suite passes **874 tests**, with 64 live/optional cases
 skipped and two existing fake-server EOF-on-shutdown thread warnings. The first
 full run, before the six new Python cases, passed 868 tests with the same warning
 category.
+
+### Diagnostics for the next orchestrator live run
+
+The raw poll results from the failing live run are unavailable. The reconnect
+test now reports empty-poll counts, counts by event type, last-trade contract
+keys and timestamp range, and how many target events the instrument/freshness
+predicate rejected. It prints the required freshness cutoff before injecting
+the fault. Observation happens before filtering, so old trades remain visible
+in the failure report. Test acceptance, poll cadence and timeouts are unchanged.
+
+Three offline helper tests verify these diagnostics and successful fresh-record
+selection. They failed before the helper update (the old timeout had no counts;
+the old helper also lacked the explicit acceptance predicate), then passed.
+This red/green evidence applies only to the diagnostics, not to the unresolved
+runtime regression. The follow-up full check run passes 517 Rust and 877 Python
+tests, with 64 Python cases skipped and the same two shutdown warning instances.
