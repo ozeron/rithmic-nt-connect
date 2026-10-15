@@ -63,7 +63,7 @@ def _observe_snapshots(session: WireSession, symbol: str, exchange: str) -> int:
 
 def test_book_resubscribe_snapshot(venue_session: WireSession, request) -> None:
     """Record both outcomes; require an initial snapshot to make the probe valid."""
-    _, symbol, exchange = request.getfixturevalue("live_front_month")
+    symbol, exchange = request.getfixturevalue("live_contract")
     live_session = venue_session
     subscribed = False
     try:
@@ -83,7 +83,13 @@ def test_book_resubscribe_snapshot(venue_session: WireSession, request) -> None:
         )
 
         # Deliberately no unsubscribe here: this is the venue behavior in question.
-        live_session.subscribe_order_book_summary(symbol, exchange)
+        repeat_error = None
+        try:
+            live_session.subscribe_order_book_summary(symbol, exchange)
+        except RuntimeError as exc:
+            # Observed on Rithmic Test 2026-10-15: "[1029] update bit type
+            # already exists" — the venue rejects a repeat subscribe.
+            repeat_error = str(exc)
         repeated = _observe_snapshots(live_session, symbol, exchange)
 
         live_session.unsubscribe_order_book_summary(symbol, exchange)
@@ -91,7 +97,8 @@ def test_book_resubscribe_snapshot(venue_session: WireSession, request) -> None:
         resubscribed = _observe_snapshots(live_session, symbol, exchange)
 
         verdict = (
-            f"repeat subscribe resends snapshot: {'yes' if repeated else 'no'}; "
+            "repeat subscribe resends snapshot: "
+            f"{'rejected' if repeat_error else ('yes' if repeated else 'no')}; "
             f"unsub+sub resends: {'yes' if resubscribed else 'no'}"
         )
         print(verdict)
@@ -111,6 +118,7 @@ def test_book_resubscribe_snapshot(venue_session: WireSession, request) -> None:
                     "window_seconds": _SNAPSHOT_TIMEOUT_SEC,
                     "initial_snapshot_rows": initial,
                     "repeat_snapshot_rows": repeated,
+                    "repeat_subscribe_error": repeat_error,
                     "unsub_sub_snapshot_rows": resubscribed,
                     "repeat_subscribe_resends_snapshot": bool(repeated),
                     "unsub_sub_resends_snapshot": bool(resubscribed),

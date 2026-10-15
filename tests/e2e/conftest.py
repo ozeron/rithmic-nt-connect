@@ -173,6 +173,22 @@ def live_front_month(live_session):
     return inst, symbol, exchange
 
 
+@pytest.fixture
+def live_contract(request) -> tuple[str, str]:
+    """(symbol, exchange) for market-data-only live tests.
+
+    ``RITHMIC_E2E_CONTRACT`` (+ optional ``RITHMIC_E2E_EXCHANGE``, default CME)
+    names an exact listed contract and skips the front-month lookup, for Test
+    plants whose front-month reply has no trading symbol. Otherwise the NQ front
+    month is resolved as in ``live_front_month``.
+    """
+    contract = os.environ.get("RITHMIC_E2E_CONTRACT", "").strip()
+    if contract:
+        return contract, os.environ.get("RITHMIC_E2E_EXCHANGE", "CME").strip() or "CME"
+    _, symbol, exchange = request.getfixturevalue("live_front_month")
+    return symbol, exchange
+
+
 @pytest.fixture(scope="function")
 def exec_front_month_instrument(require_test_plant, trading_credentials_available):
     """Resolve the NQ front month after the exec safety gates hold.

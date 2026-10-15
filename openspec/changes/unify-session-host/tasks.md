@@ -57,7 +57,7 @@ Agents run in the shared checkout on branch `feat/unify-session-host`. Each agen
   - add `Venue::pnl_snapshot()` (wrapping `get_pnl_position_snapshot`) and `Venue::refresh_book(key)`
   - the host calls them when a session joins or re-joins an already-live PnL or book intent
   - `FakeVenue` records the calls
-- [ ] 4.2c Live check in `tests/e2e` (test account, user-run): does a repeat `subscribe_order_book_summary` resend a snapshot? If yes, switch `refresh_book` from unsubscribe + subscribe to a repeat subscribe.
+- [x] 4.2c Live check (2026-10-15, NQZ6 on Rithmic Test: repeat subscribe rejected `[1029]`, unsubscribe + subscribe resends the snapshot; `refresh_book` stays unsubscribe + subscribe) in `tests/e2e` (test account, user-run): does a repeat `subscribe_order_book_summary` resend a snapshot? If yes, switch `refresh_book` from unsubscribe + subscribe to a repeat subscribe.
 - [x] 4.3 Add `SessionEvent::{Interrupted, Resumed { generation }, RecoveryFailed}` delivered to every attached session. Map them to the `TransportInterrupted` (from 0.3) and `TransportResumed` wire events for remote clients. During recovery, `next_events` returns empty batches, not a stream error (D8.4).
 - [x] 4.4 Update `ticker_failure_characterization.rs` to the new sequence (ticker only; PnL and order untouched; `TransportInterrupted` before `TransportResumed`), and add tests for:
   - a ticker failure leaves PnL and order plants untouched

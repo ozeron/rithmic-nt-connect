@@ -222,7 +222,7 @@ These come from a review of the plan against the code. Each one is now part of t
 
     Today's gateway has the same latent bug, because the parent no-ops a repeat subscribe. → **Snapshot on join:**
     - When a session joins, or re-joins after a gap, an already-live **PnL** intent, the host calls the venue's `get_pnl_position_snapshot` (rithmic-rs `RithmicPnlPlantHandle`; `Venue::pnl_snapshot`). The snapshot rows reach every PnL session; duplicate rows are harmless.
-    - For an already-live **book** intent there is no L2 snapshot request, so the host refreshes the key at the venue with `Venue::refresh_book(key)`. Task 4.2b verifies live whether a repeat `subscribe_order_book_summary` resends a snapshot: if it does, `refresh_book` is that repeat; otherwise it is unsubscribe + subscribe. Either way every book session receives CLEAR plus a snapshot, which is a valid state.
+    - For an already-live **book** intent there is no L2 snapshot request, so the host refreshes the key at the venue with `Venue::refresh_book(key)`. **Verified live (task 4.2c, Rithmic Test, NQZ6, 2026-10-15):** the venue *rejects* a repeat `subscribe_order_book_summary` (`[1029] update bit type already exists`) and sends no snapshot, while unsubscribe + subscribe resends one. So `refresh_book` is unsubscribe + subscribe, and the host must never send a repeat book subscribe to the venue. Either way every book session receives CLEAR plus a snapshot, which is a valid state.
     - Ticker, bars and order intents need no snapshot. A ticker or bar consumer that lost events has a gap; exec drains working orders with `load_orders`.
 
 Also renamed in the task list: `rithmic-loadtest/src/rig.rs` (uses the old type names).
