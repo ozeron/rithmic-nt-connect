@@ -29,7 +29,7 @@ pub use backend::Venue;
 pub use fanout::SessionId;
 pub use gates::{Gates, ParentGates};
 pub use host::{HistoryPolicy, SessionHost, VenueHandle};
-pub use local::LocalSession;
+pub use local::{delivery::EventReceiver, LocalSession};
 pub use pump::Timing;
 
 pub mod flock;

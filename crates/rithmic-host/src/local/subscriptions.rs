@@ -194,28 +194,28 @@ impl TopicIntent {
 }
 
 /// Attach this client to a shared hub topic (refcount once per client per key).
-/// Returns whether this client already had a forwarder (no new hub bump).
+/// Returns whether this client already had delivery (no new hub bump).
 async fn attach_shared_topic<V: Venue + ?Sized + 'static>(
     state: &HostState<V>,
     client: &mut SessionCtx,
     key: &SubKey,
 ) -> bool {
-    let had_forwarder = client.subscribed.contains(key);
-    if !had_forwarder {
+    let had_delivery = client.subscribed.contains(key);
+    if !had_delivery {
         state.reconnect.add_hub_interest(key.clone()).await;
     }
-    client.ensure_forwarder(&state.hub, key).await;
-    had_forwarder
+    client.ensure_delivery(&state.hub, key).await;
+    had_delivery
 }
 
 async fn rollback_shared_topic<V: Venue + ?Sized + 'static>(
     state: &HostState<V>,
     client: &mut SessionCtx,
     key: &SubKey,
-    had_forwarder: bool,
+    had_delivery: bool,
 ) {
-    if !had_forwarder {
-        client.drop_forwarder(key);
+    if !had_delivery {
+        client.drop_delivery(key);
         state.reconnect.remove_hub_interest(key).await;
     }
 }
@@ -226,7 +226,7 @@ async fn release_md_if_unused<V: Venue + ?Sized + 'static>(
     key: &SubKey,
 ) {
     if !client.wants_md(key) {
-        client.drop_forwarder(key);
+        client.drop_delivery(key);
         if state.reconnect.remove_hub_interest(key).await {
             prune_topic_lock(state, key).await;
         }
@@ -275,7 +275,7 @@ pub(super) async fn subscribe_topic<V: Venue + ?Sized + 'static>(
     let _md_gate = state.md_history_gate.lock().await;
     let lock = topic_lock(state, &key).await;
     let _guard = lock.lock().await;
-    let had_forwarder = attach_shared_topic(state, client, &key).await;
+    let had_delivery = attach_shared_topic(state, client, &key).await;
     // Count first, then record on the connection. A failure between the two
     // leaks one count (the venue join outlives its holders until the parent's
     // next rebuild); the reverse order would let teardown release a count that
@@ -290,7 +290,7 @@ pub(super) async fn subscribe_topic<V: Venue + ?Sized + 'static>(
         let Some(session) = &state.session else {
             intent.client_remove(client);
             intent.forget(&state.reconnect).await;
-            rollback_shared_topic(state, client, &key, had_forwarder).await;
+            rollback_shared_topic(state, client, &key, had_delivery).await;
             return Err(no_venue());
         };
         // MD joins take `&self`; holding the guard only serializes against
@@ -308,7 +308,7 @@ pub(super) async fn subscribe_topic<V: Venue + ?Sized + 'static>(
             drop(session_guard);
             intent.client_remove(client);
             intent.forget(&state.reconnect).await;
-            rollback_shared_topic(state, client, &key, had_forwarder).await;
+            rollback_shared_topic(state, client, &key, had_delivery).await;
             return Err(coded_error(intent.subscribe_failed_code(), e));
         }
         if degraded {
@@ -399,7 +399,7 @@ pub(super) async fn subscribe_pnl<V: Venue + ?Sized + 'static>(
             .await
             .map_err(|e| coded_error("subscribe_pnl_failed", e));
     }
-    let had_forwarder = attach_shared_topic(state, client, &key).await;
+    let had_delivery = attach_shared_topic(state, client, &key).await;
     let first = state.reconnect.note_pnl().await;
     client.pnl = true;
     let joined = if first {
@@ -414,7 +414,7 @@ pub(super) async fn subscribe_pnl<V: Venue + ?Sized + 'static>(
         drop(guard);
         client.pnl = false;
         state.reconnect.forget_pnl().await;
-        rollback_shared_topic(state, client, &key, had_forwarder).await;
+        rollback_shared_topic(state, client, &key, had_delivery).await;
         return Err(coded_error("subscribe_pnl_failed", e));
     }
     Ok(())
@@ -464,7 +464,7 @@ pub(super) async fn disconnect_pnl<V: Venue + ?Sized + 'static>(
     }
     let key = pnl_key();
     if client.subscribed.contains(&key) {
-        client.drop_forwarder(&key);
+        client.drop_delivery(&key);
         state.reconnect.remove_hub_interest(&key).await;
     }
     Ok(())
@@ -477,7 +477,7 @@ async fn rollback_order_plant_stream_introductions<V: Venue + ?Sized + 'static>(
     state: &HostState<V>,
     client: &mut SessionCtx,
     key: &SubKey,
-    had_forwarder: bool,
+    had_delivery: bool,
     introduced_order: bool,
     introduced_brackets: bool,
 ) {
@@ -504,14 +504,14 @@ async fn rollback_order_plant_stream_introductions<V: Venue + ?Sized + 'static>(
             }
         }
     }
-    rollback_shared_topic(state, client, key, had_forwarder).await;
+    rollback_shared_topic(state, client, key, had_delivery).await;
 }
 
 async fn fail_order_plant_stream<V: Venue + ?Sized + 'static>(
     state: &HostState<V>,
     client: &mut SessionCtx,
     key: &SubKey,
-    had_forwarder: bool,
+    had_delivery: bool,
     introduced_order: bool,
     introduced_brackets: bool,
     outcome: Result<()>,
@@ -520,7 +520,7 @@ async fn fail_order_plant_stream<V: Venue + ?Sized + 'static>(
         state,
         client,
         key,
-        had_forwarder,
+        had_delivery,
         introduced_order,
         introduced_brackets,
     )
@@ -589,7 +589,7 @@ pub(super) async fn subscribe_order_plant_stream<V: Venue + ?Sized + 'static>(
     let key = order_key();
     let lock = topic_lock(state, &key).await;
     let _guard = lock.lock().await;
-    let had_forwarder = attach_shared_topic(state, client, &key).await;
+    let had_delivery = attach_shared_topic(state, client, &key).await;
 
     let first_order = if need_order {
         state.reconnect.note_order().await
@@ -615,7 +615,7 @@ pub(super) async fn subscribe_order_plant_stream<V: Venue + ?Sized + 'static>(
             state,
             client,
             &key,
-            had_forwarder,
+            had_delivery,
             need_order,
             need_brackets,
             Err(no_venue()),
@@ -634,7 +634,7 @@ pub(super) async fn subscribe_order_plant_stream<V: Venue + ?Sized + 'static>(
                 state,
                 client,
                 &key,
-                had_forwarder,
+                had_delivery,
                 need_order,
                 need_brackets,
                 Err(coded_error("subscribe_order_updates_failed", e)),
@@ -649,7 +649,7 @@ pub(super) async fn subscribe_order_plant_stream<V: Venue + ?Sized + 'static>(
                 state,
                 client,
                 &key,
-                had_forwarder,
+                had_delivery,
                 need_order,
                 need_brackets,
                 Err(coded_error("subscribe_bracket_updates_failed", e)),
@@ -720,7 +720,7 @@ pub(super) async fn disconnect_order<V: Venue + ?Sized + 'static>(
     }
     let key = order_key();
     if client.subscribed.contains(&key) {
-        client.drop_forwarder(&key);
+        client.drop_delivery(&key);
         state.reconnect.remove_hub_interest(&key).await;
     }
     Ok(())

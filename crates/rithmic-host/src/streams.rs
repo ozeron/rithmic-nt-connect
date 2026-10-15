@@ -238,7 +238,9 @@ impl StreamHub {
             if !up {
                 return Taken::Down;
             }
-            if let Some(text) = lane.fail.lock().expect("stream fail").take() {
+            // Release the failure mutex before the late drain can put it back.
+            let failure = lane.fail.lock().expect("stream fail").take();
+            if let Some(text) = failure {
                 // The forwarder queues an event before it records a failure, so
                 // an event can land between the drain above and this read. It is
                 // delivered first; the failure stays recorded for the next take.
@@ -255,6 +257,9 @@ impl StreamHub {
                     return Taken::Msgs(out);
                 }
                 return Taken::Closed;
+            }
+            if Instant::now() >= deadline {
+                return Taken::Timeout;
             }
             tokio::select! {
                 biased;
@@ -853,5 +858,80 @@ mod tests {
                 .len();
         }
         producer.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn zero_timeout_drains_records_and_failure_without_waiting_for_a_timer_tick() {
+        let hub = StreamHub::new();
+        let tx = hub.attach(Stream::Ticker);
+        let start = Instant::now();
+        assert!(hub
+            .next_events(Stream::Ticker, 8, Duration::ZERO)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            Instant::now(),
+            start,
+            "zero timeout must not advance the clock"
+        );
+        tx.event(tick(1)).await;
+        tx.fail("after record".into());
+        assert_eq!(
+            seq(&hub
+                .next_events(Stream::Ticker, 8, Duration::ZERO)
+                .await
+                .unwrap()[0]),
+            1
+        );
+        assert!(matches!(
+            hub.next_events(Stream::Ticker, 8, Duration::ZERO).await,
+            Err(Error::Rithmic(_))
+        ));
+        assert_eq!(Instant::now(), start);
+    }
+
+    #[tokio::test]
+    async fn a_record_arriving_during_the_failure_check_is_drained_without_relocking_failure() {
+        let hub = StreamHub::new();
+        let tx = hub.attach(Stream::Ticker);
+        let (done, result) = tokio::sync::oneshot::channel();
+        let reader;
+        {
+            // Stall the failure read after its initial empty queue drain. This
+            // makes the late-record path reproducible instead of a rare race.
+            let mut failure = hub.lane(Stream::Ticker).fail.lock().unwrap();
+            let receiver = hub.clone();
+            reader = std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let batch = runtime.block_on(receiver.next_events(
+                    Stream::Ticker,
+                    8,
+                    Duration::from_secs(3),
+                ));
+                let _ = done.send(batch);
+            });
+            let deadline = std::time::Instant::now() + Duration::from_secs(1);
+            while hub.lane(Stream::Ticker).consumer.try_lock().is_ok() {
+                assert!(std::time::Instant::now() < deadline, "reader did not start");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+            assert!(tx.try_event(tick(7)));
+            *failure = Some(Error::Rithmic("after late record".into()));
+        }
+        let batch = tokio::time::timeout(Duration::from_secs(1), result)
+            .await
+            .expect("late drain deadlocked on its own failure mutex")
+            .unwrap()
+            .unwrap();
+        reader.join().unwrap();
+        assert_eq!(batch.iter().map(seq).collect::<Vec<_>>(), [7]);
+        assert!(
+            matches!(hub.next_events(Stream::Ticker, 8, Duration::ZERO).await, Err(Error::Rithmic(text)) if text == "after late record")
+        );
     }
 }

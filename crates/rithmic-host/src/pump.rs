@@ -6,7 +6,7 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 
-use crate::fanout::{publish_plant_event, FanoutHub};
+use crate::fanout::{publish_plant_events, FanoutHub};
 use crate::host::{HostState, VenueHandle};
 use crate::intents::{MdIntent, ReconnectController, RestorePlan};
 use crate::local::subscriptions::TopicIntent;
@@ -87,19 +87,42 @@ async fn serve_stream<V: Venue + ?Sized + 'static>(
     timing: Timing,
     mut stop: watch::Receiver<bool>,
 ) -> Option<Issue> {
+    let mut pending_error = None;
     loop {
-        let batch = tokio::select! {
-            biased;
-            _ = stop.changed() => return None,
-            batch = venue.next_events(stream, BATCH, IDLE_WAIT) => batch,
+        let batch = if let Some(error) = pending_error.take() {
+            Err(error)
+        } else {
+            tokio::select! {
+                biased;
+                _ = stop.changed() => return None,
+                batch = venue.next_events(stream, BATCH, IDLE_WAIT) => batch,
+            }
         };
         match batch {
-            Ok(events) => {
+            Ok(mut events) => {
+                // Only native delivery moves whole batches. Gateway-only hosts
+                // encode records individually and can publish immediately.
+                let coalesce = hub.has_native_sessions();
+                while coalesce && !events.is_empty() && events.len() < BATCH {
+                    // Cooperatively drain the available burst, bounded by BATCH,
+                    // without a timer or waiting for more data. A failure observed by
+                    // this non-blocking take stays behind the records we own.
+                    tokio::task::yield_now().await;
+                    match venue
+                        .next_events(stream, BATCH - events.len(), Duration::ZERO)
+                        .await
+                    {
+                        Ok(more) if more.is_empty() => break,
+                        Ok(more) => events.extend(more),
+                        Err(error) => {
+                            pending_error = Some(error);
+                            break;
+                        }
+                    }
+                }
                 // Finish a taken batch even when another plant fails: aborting
                 // here would silently lose events already drained from the venue.
-                for event in events {
-                    publish_plant_event(&hub, event).await;
-                }
+                publish_plant_events(&hub, events).await;
             }
             Err(e) => {
                 let recovery = match &e {

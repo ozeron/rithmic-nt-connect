@@ -1,0 +1,3200 @@
+[
+  {
+    "scenario": "stalled_consumer",
+    "params": {
+      "drain_secs": 8.0,
+      "drop_plants_at": null,
+      "name": "stalled_consumer",
+      "orders": false,
+      "rate": 20000,
+      "raw": 3,
+      "sample_rss": false,
+      "secs": 8.0,
+      "sessions": 0,
+      "slow_rpc_secs": 0.0,
+      "stalled": 1,
+      "warmup_secs": 0.0,
+      "measurement": {
+        "round": 1,
+        "position": 1,
+        "variant": "base",
+        "attempt": 1,
+        "measurement_window": "coordinated-build-pause",
+        "utc_start": "2026-10-15T15:44:01.458453+00:00",
+        "utc_end": "2026-10-15T15:44:09.663800+00:00",
+        "base_revision": "0eb0b177203d0ab970909805f6df633c57c8a520",
+        "candidate_rust_source_sha256": "d65c25ec71fa3dd64a990051a4cc7e13e1cfa7c61c56658317eefdf1c71e8455",
+        "binary": {
+          "path": "/private/mnt/DATA/code/rithmic-connect-wt/b-transport/target/hop-opt/base/rithmic-load",
+          "sha256": "808b4ea336a5a47c5b72e8bb599730f28249ed90741ea12de4f65e93ef401909"
+        },
+        "load_before": [
+          3.96875,
+          5.72119140625,
+          6.64453125
+        ],
+        "load_after": [
+          3.97314453125,
+          5.6640625,
+          6.61328125
+        ],
+        "build_processes_before": [],
+        "build_processes_during": [],
+        "build_processes_after": [],
+        "build_monitor_interval_s": 0.2
+      }
+    },
+    "duration_s": 8.103303125,
+    "sent": 160000,
+    "conns": [
+      {
+        "kind": "raw",
+        "received": 160000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 160000,
+          "p50_us": 108,
+          "p99_us": 332,
+          "p999_us": 2163,
+          "max_us": 7455
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 160000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 160000,
+          "p50_us": 110,
+          "p99_us": 337,
+          "p999_us": 1089,
+          "max_us": 5367
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 160000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 160000,
+          "p50_us": 110,
+          "p99_us": 338,
+          "p999_us": 841,
+          "max_us": 3035
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 20000.0,
+    "latency": {
+      "count": 480000,
+      "p50_us": 109,
+      "p99_us": 336,
+      "p999_us": 1358,
+      "max_us": 7455
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 25936,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": null,
+    "alloc_bytes_per_event": null,
+    "notes": [
+      "1/1 stalled connections were dropped by the parent"
+    ]
+  },
+  {
+    "scenario": "stalled_consumer",
+    "params": {
+      "drain_secs": 8.0,
+      "drop_plants_at": null,
+      "name": "stalled_consumer",
+      "orders": false,
+      "rate": 20000,
+      "raw": 3,
+      "sample_rss": false,
+      "secs": 8.0,
+      "sessions": 0,
+      "slow_rpc_secs": 0.0,
+      "stalled": 1,
+      "warmup_secs": 0.0,
+      "measurement": {
+        "round": 1,
+        "position": 2,
+        "variant": "candidate",
+        "attempt": 1,
+        "measurement_window": "coordinated-build-pause",
+        "utc_start": "2026-10-15T15:44:09.717401+00:00",
+        "utc_end": "2026-10-15T15:44:17.906601+00:00",
+        "base_revision": "0eb0b177203d0ab970909805f6df633c57c8a520",
+        "candidate_rust_source_sha256": "d65c25ec71fa3dd64a990051a4cc7e13e1cfa7c61c56658317eefdf1c71e8455",
+        "binary": {
+          "path": "/private/mnt/DATA/code/rithmic-connect-wt/b-transport/target/release/rithmic-load",
+          "sha256": "2be72469aa5c19bb4b3b445a8ba474af85acb0838a4cceb42d1a9336670005a2"
+        },
+        "load_before": [
+          3.97314453125,
+          5.6640625,
+          6.61328125
+        ],
+        "load_after": [
+          3.81494140625,
+          5.60302734375,
+          6.5859375
+        ],
+        "build_processes_before": [],
+        "build_processes_during": [],
+        "build_processes_after": [],
+        "build_monitor_interval_s": 0.2
+      }
+    },
+    "duration_s": 8.102843417,
+    "sent": 160000,
+    "conns": [
+      {
+        "kind": "raw",
+        "received": 160000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 160000,
+          "p50_us": 109,
+          "p99_us": 330,
+          "p999_us": 521,
+          "max_us": 895
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 160000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 160000,
+          "p50_us": 110,
+          "p99_us": 351,
+          "p999_us": 532,
+          "max_us": 939
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 160000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 160000,
+          "p50_us": 101,
+          "p99_us": 318,
+          "p999_us": 552,
+          "max_us": 985
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 20000.0,
+    "latency": {
+      "count": 480000,
+      "p50_us": 107,
+      "p99_us": 337,
+      "p999_us": 530,
+      "max_us": 985
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 22784,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": null,
+    "alloc_bytes_per_event": null,
+    "notes": [
+      "1/1 stalled connections were dropped by the parent"
+    ]
+  },
+  {
+    "scenario": "flood_10k_4conn_1session",
+    "params": {
+      "drain_secs": 3.0,
+      "drop_plants_at": null,
+      "name": "flood_10k_4conn_1session",
+      "orders": false,
+      "rate": 10000,
+      "raw": 4,
+      "sample_rss": false,
+      "secs": 5.0,
+      "sessions": 1,
+      "slow_rpc_secs": 0.0,
+      "stalled": 0,
+      "warmup_secs": 0.0,
+      "measurement": {
+        "round": 1,
+        "position": 1,
+        "variant": "base",
+        "attempt": 1,
+        "measurement_window": "coordinated-build-pause",
+        "utc_start": "2026-10-15T15:44:17.968054+00:00",
+        "utc_end": "2026-10-15T15:44:23.134365+00:00",
+        "base_revision": "0eb0b177203d0ab970909805f6df633c57c8a520",
+        "candidate_rust_source_sha256": "d65c25ec71fa3dd64a990051a4cc7e13e1cfa7c61c56658317eefdf1c71e8455",
+        "binary": {
+          "path": "/private/mnt/DATA/code/rithmic-connect-wt/b-transport/target/hop-opt/base/rithmic-load",
+          "sha256": "808b4ea336a5a47c5b72e8bb599730f28249ed90741ea12de4f65e93ef401909"
+        },
+        "load_before": [
+          3.81494140625,
+          5.60302734375,
+          6.5859375
+        ],
+        "load_after": [
+          3.66943359375,
+          5.54296875,
+          6.55859375
+        ],
+        "build_processes_before": [],
+        "build_processes_during": [],
+        "build_processes_after": [],
+        "build_monitor_interval_s": 0.2
+      }
+    },
+    "duration_s": 5.102249167,
+    "sent": 50000,
+    "conns": [
+      {
+        "kind": "raw",
+        "received": 50000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 50000,
+          "p50_us": 90,
+          "p99_us": 242,
+          "p999_us": 364,
+          "max_us": 432
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 50000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 50000,
+          "p50_us": 91,
+          "p99_us": 240,
+          "p999_us": 347,
+          "max_us": 490
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 50000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 50000,
+          "p50_us": 90,
+          "p99_us": 237,
+          "p999_us": 351,
+          "max_us": 442
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 50000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 50000,
+          "p50_us": 91,
+          "p99_us": 235,
+          "p999_us": 349,
+          "max_us": 460
+        }
+      },
+      {
+        "kind": "session",
+        "received": 50000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 50000,
+          "p50_us": 115,
+          "p99_us": 278,
+          "p999_us": 445,
+          "max_us": 1814
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 10000.0,
+    "latency": {
+      "count": 250000,
+      "p50_us": 95,
+      "p99_us": 251,
+      "p999_us": 364,
+      "max_us": 1814
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 15808,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": null,
+    "alloc_bytes_per_event": null,
+    "notes": []
+  },
+  {
+    "scenario": "flood_10k_4conn_1session",
+    "params": {
+      "drain_secs": 3.0,
+      "drop_plants_at": null,
+      "name": "flood_10k_4conn_1session",
+      "orders": false,
+      "rate": 10000,
+      "raw": 4,
+      "sample_rss": false,
+      "secs": 5.0,
+      "sessions": 1,
+      "slow_rpc_secs": 0.0,
+      "stalled": 0,
+      "warmup_secs": 0.0,
+      "measurement": {
+        "round": 1,
+        "position": 2,
+        "variant": "candidate",
+        "attempt": 1,
+        "measurement_window": "coordinated-build-pause",
+        "utc_start": "2026-10-15T15:44:23.189890+00:00",
+        "utc_end": "2026-10-15T15:44:28.432717+00:00",
+        "base_revision": "0eb0b177203d0ab970909805f6df633c57c8a520",
+        "candidate_rust_source_sha256": "d65c25ec71fa3dd64a990051a4cc7e13e1cfa7c61c56658317eefdf1c71e8455",
+        "binary": {
+          "path": "/private/mnt/DATA/code/rithmic-connect-wt/b-transport/target/release/rithmic-load",
+          "sha256": "2be72469aa5c19bb4b3b445a8ba474af85acb0838a4cceb42d1a9336670005a2"
+        },
+        "load_before": [
+          3.66943359375,
+          5.54296875,
+          6.55859375
+        ],
+        "load_after": [
+          3.61572265625,
+          5.50048828125,
+          6.53759765625
+        ],
+        "build_processes_before": [],
+        "build_processes_during": [],
+        "build_processes_after": [],
+        "build_monitor_interval_s": 0.2
+      }
+    },
+    "duration_s": 5.103300042,
+    "sent": 50000,
+    "conns": [
+      {
+        "kind": "raw",
+        "received": 50000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 50000,
+          "p50_us": 88,
+          "p99_us": 253,
+          "p999_us": 818,
+          "max_us": 6087
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 50000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 50000,
+          "p50_us": 74,
+          "p99_us": 235,
+          "p999_us": 579,
+          "max_us": 6279
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 50000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 50000,
+          "p50_us": 89,
+          "p99_us": 262,
+          "p999_us": 1120,
+          "max_us": 7011
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 50000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 50000,
+          "p50_us": 87,
+          "p99_us": 248,
+          "p999_us": 475,
+          "max_us": 6091
+        }
+      },
+      {
+        "kind": "session",
+        "received": 50000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 50000,
+          "p50_us": 93,
+          "p99_us": 285,
+          "p999_us": 561,
+          "max_us": 6307
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 10000.0,
+    "latency": {
+      "count": 250000,
+      "p50_us": 86,
+      "p99_us": 260,
+      "p999_us": 1103,
+      "max_us": 7011
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 11248,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": null,
+    "alloc_bytes_per_event": null,
+    "notes": []
+  },
+  {
+    "scenario": "reconnect_during_flood",
+    "params": {
+      "drain_secs": 8.0,
+      "drop_plants_at": 3.0,
+      "name": "reconnect_during_flood",
+      "orders": false,
+      "rate": 10000,
+      "raw": 2,
+      "sample_rss": false,
+      "secs": 8.0,
+      "sessions": 0,
+      "slow_rpc_secs": 0.0,
+      "stalled": 0,
+      "warmup_secs": 0.0,
+      "measurement": {
+        "round": 1,
+        "position": 1,
+        "variant": "base",
+        "attempt": 1,
+        "measurement_window": "coordinated-build-pause",
+        "utc_start": "2026-10-15T15:44:28.491831+00:00",
+        "utc_end": "2026-10-15T15:44:44.606459+00:00",
+        "base_revision": "0eb0b177203d0ab970909805f6df633c57c8a520",
+        "candidate_rust_source_sha256": "d65c25ec71fa3dd64a990051a4cc7e13e1cfa7c61c56658317eefdf1c71e8455",
+        "binary": {
+          "path": "/private/mnt/DATA/code/rithmic-connect-wt/b-transport/target/hop-opt/base/rithmic-load",
+          "sha256": "808b4ea336a5a47c5b72e8bb599730f28249ed90741ea12de4f65e93ef401909"
+        },
+        "load_before": [
+          3.61572265625,
+          5.50048828125,
+          6.53759765625
+        ],
+        "load_after": [
+          4.31787109375,
+          5.53271484375,
+          6.5244140625
+        ],
+        "build_processes_before": [],
+        "build_processes_during": [],
+        "build_processes_after": [],
+        "build_monitor_interval_s": 0.2
+      }
+    },
+    "duration_s": 16.025272875,
+    "sent": 80000,
+    "conns": [
+      {
+        "kind": "raw",
+        "received": 79988,
+        "missing_in_stream": 12,
+        "reordered": 0,
+        "gap_events": 1,
+        "gap_skipped": 12,
+        "resumed": 1,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 79988,
+          "p50_us": 65,
+          "p99_us": 183,
+          "p999_us": 286,
+          "max_us": 2173
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 79988,
+        "missing_in_stream": 12,
+        "reordered": 0,
+        "gap_events": 1,
+        "gap_skipped": 12,
+        "resumed": 1,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 79988,
+          "p50_us": 66,
+          "p99_us": 187,
+          "p999_us": 308,
+          "max_us": 2243
+        }
+      }
+    ],
+    "min_delivered_ratio": 0.99985,
+    "min_throughput_eps": 9998.5,
+    "latency": {
+      "count": 159976,
+      "p50_us": 65,
+      "p99_us": 185,
+      "p999_us": 301,
+      "max_us": 2243
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 14304,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": null,
+    "alloc_bytes_per_event": null,
+    "notes": [
+      "venue calls after the drop: 1 connect, 1 disconnect, 1 subscribe, 0 unsubscribe"
+    ]
+  },
+  {
+    "scenario": "reconnect_during_flood",
+    "params": {
+      "drain_secs": 8.0,
+      "drop_plants_at": 3.0,
+      "name": "reconnect_during_flood",
+      "orders": false,
+      "rate": 10000,
+      "raw": 2,
+      "sample_rss": false,
+      "secs": 8.0,
+      "sessions": 0,
+      "slow_rpc_secs": 0.0,
+      "stalled": 0,
+      "warmup_secs": 0.0,
+      "measurement": {
+        "round": 1,
+        "position": 2,
+        "variant": "candidate",
+        "attempt": 1,
+        "measurement_window": "coordinated-build-pause",
+        "utc_start": "2026-10-15T15:44:44.670109+00:00",
+        "utc_end": "2026-10-15T15:45:00.803677+00:00",
+        "base_revision": "0eb0b177203d0ab970909805f6df633c57c8a520",
+        "candidate_rust_source_sha256": "d65c25ec71fa3dd64a990051a4cc7e13e1cfa7c61c56658317eefdf1c71e8455",
+        "binary": {
+          "path": "/private/mnt/DATA/code/rithmic-connect-wt/b-transport/target/release/rithmic-load",
+          "sha256": "2be72469aa5c19bb4b3b445a8ba474af85acb0838a4cceb42d1a9336670005a2"
+        },
+        "load_before": [
+          4.31787109375,
+          5.53271484375,
+          6.5244140625
+        ],
+        "load_after": [
+          4.10498046875,
+          5.42431640625,
+          6.46826171875
+        ],
+        "build_processes_before": [],
+        "build_processes_during": [],
+        "build_processes_after": [],
+        "build_monitor_interval_s": 0.2
+      }
+    },
+    "duration_s": 16.0272705,
+    "sent": 80000,
+    "conns": [
+      {
+        "kind": "raw",
+        "received": 79999,
+        "missing_in_stream": 1,
+        "reordered": 0,
+        "gap_events": 1,
+        "gap_skipped": 1,
+        "resumed": 1,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 79999,
+          "p50_us": 63,
+          "p99_us": 194,
+          "p999_us": 684,
+          "max_us": 2087
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 79999,
+        "missing_in_stream": 1,
+        "reordered": 0,
+        "gap_events": 1,
+        "gap_skipped": 1,
+        "resumed": 1,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 79999,
+          "p50_us": 65,
+          "p99_us": 190,
+          "p999_us": 640,
+          "max_us": 2171
+        }
+      }
+    ],
+    "min_delivered_ratio": 0.9999875,
+    "min_throughput_eps": 9999.875,
+    "latency": {
+      "count": 159998,
+      "p50_us": 64,
+      "p99_us": 192,
+      "p999_us": 681,
+      "max_us": 2171
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 9984,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": null,
+    "alloc_bytes_per_event": null,
+    "notes": [
+      "venue calls after the drop: 1 connect, 1 disconnect, 1 subscribe, 0 unsubscribe"
+    ]
+  },
+  {
+    "scenario": "orders_flood_slow_rpc",
+    "params": {
+      "drain_secs": 10.0,
+      "drop_plants_at": null,
+      "name": "orders_flood_slow_rpc",
+      "orders": true,
+      "rate": 50000,
+      "raw": 2,
+      "sample_rss": false,
+      "secs": 12.0,
+      "sessions": 1,
+      "slow_rpc_secs": 8.0,
+      "stalled": 0,
+      "warmup_secs": 2.0,
+      "measurement": {
+        "round": 1,
+        "position": 1,
+        "variant": "base",
+        "attempt": 1,
+        "measurement_window": "coordinated-build-pause",
+        "utc_start": "2026-10-15T15:45:00.859458+00:00",
+        "utc_end": "2026-10-15T15:45:15.053012+00:00",
+        "base_revision": "0eb0b177203d0ab970909805f6df633c57c8a520",
+        "candidate_rust_source_sha256": "d65c25ec71fa3dd64a990051a4cc7e13e1cfa7c61c56658317eefdf1c71e8455",
+        "binary": {
+          "path": "/private/mnt/DATA/code/rithmic-connect-wt/b-transport/target/hop-opt/base/rithmic-load",
+          "sha256": "808b4ea336a5a47c5b72e8bb599730f28249ed90741ea12de4f65e93ef401909"
+        },
+        "load_before": [
+          4.10498046875,
+          5.42431640625,
+          6.46826171875
+        ],
+        "load_after": [
+          4.8251953125,
+          5.51708984375,
+          6.48291015625
+        ],
+        "build_processes_before": [],
+        "build_processes_during": [],
+        "build_processes_after": [],
+        "build_monitor_interval_s": 0.2
+      }
+    },
+    "duration_s": 14.105059042,
+    "sent": 600000,
+    "conns": [
+      {
+        "kind": "raw",
+        "received": 600000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 600000,
+          "p50_us": 255,
+          "p99_us": 969,
+          "p999_us": 52447,
+          "max_us": 60927
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 600000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 600000,
+          "p50_us": 254,
+          "p99_us": 969,
+          "p999_us": 52351,
+          "max_us": 60863
+        }
+      },
+      {
+        "kind": "session",
+        "received": 600000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 600000,
+          "p50_us": 365,
+          "p99_us": 1008,
+          "p999_us": 1549,
+          "max_us": 3129
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 50000.0,
+    "latency": {
+      "count": 1800000,
+      "p50_us": 294,
+      "p99_us": 991,
+      "p999_us": 47519,
+      "max_us": 60927
+    },
+    "order_latency": {
+      "count": 1140,
+      "p50_us": 148,
+      "p99_us": 775,
+      "p999_us": 1245,
+      "max_us": 1904
+    },
+    "order_idle_latency": {
+      "count": 186,
+      "p50_us": 34,
+      "p99_us": 153,
+      "p999_us": 172,
+      "max_us": 172
+    },
+    "peak_rss_kb": 15856,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": null,
+    "alloc_bytes_per_event": null,
+    "notes": [
+      "slow RPC load_fill_history finished in 8.00s: ok (0 rows)"
+    ]
+  },
+  {
+    "scenario": "orders_flood_slow_rpc",
+    "params": {
+      "drain_secs": 10.0,
+      "drop_plants_at": null,
+      "name": "orders_flood_slow_rpc",
+      "orders": true,
+      "rate": 50000,
+      "raw": 2,
+      "sample_rss": false,
+      "secs": 12.0,
+      "sessions": 1,
+      "slow_rpc_secs": 8.0,
+      "stalled": 0,
+      "warmup_secs": 2.0,
+      "measurement": {
+        "round": 1,
+        "position": 2,
+        "variant": "candidate",
+        "attempt": 1,
+        "measurement_window": "coordinated-build-pause",
+        "utc_start": "2026-10-15T15:45:15.109407+00:00",
+        "utc_end": "2026-10-15T15:45:29.305206+00:00",
+        "base_revision": "0eb0b177203d0ab970909805f6df633c57c8a520",
+        "candidate_rust_source_sha256": "d65c25ec71fa3dd64a990051a4cc7e13e1cfa7c61c56658317eefdf1c71e8455",
+        "binary": {
+          "path": "/private/mnt/DATA/code/rithmic-connect-wt/b-transport/target/release/rithmic-load",
+          "sha256": "2be72469aa5c19bb4b3b445a8ba474af85acb0838a4cceb42d1a9336670005a2"
+        },
+        "load_before": [
+          4.8251953125,
+          5.51708984375,
+          6.48291015625
+        ],
+        "load_after": [
+          4.7841796875,
+          5.4833984375,
+          6.45947265625
+        ],
+        "build_processes_before": [],
+        "build_processes_during": [],
+        "build_processes_after": [],
+        "build_monitor_interval_s": 0.2
+      }
+    },
+    "duration_s": 14.105250209,
+    "sent": 600000,
+    "conns": [
+      {
+        "kind": "raw",
+        "received": 600000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 600000,
+          "p50_us": 242,
+          "p99_us": 1865,
+          "p999_us": 27567,
+          "max_us": 49407
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 600000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 600000,
+          "p50_us": 223,
+          "p99_us": 1791,
+          "p999_us": 28543,
+          "max_us": 37247
+        }
+      },
+      {
+        "kind": "session",
+        "received": 600000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 600000,
+          "p50_us": 384,
+          "p99_us": 1922,
+          "p999_us": 28271,
+          "max_us": 47327
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 50000.0,
+    "latency": {
+      "count": 1800000,
+      "p50_us": 288,
+      "p99_us": 1869,
+      "p999_us": 28191,
+      "max_us": 49407
+    },
+    "order_latency": {
+      "count": 1138,
+      "p50_us": 170,
+      "p99_us": 885,
+      "p999_us": 15695,
+      "max_us": 17007
+    },
+    "order_idle_latency": {
+      "count": 186,
+      "p50_us": 43,
+      "p99_us": 276,
+      "p999_us": 313,
+      "max_us": 313
+    },
+    "peak_rss_kb": 11504,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": null,
+    "alloc_bytes_per_event": null,
+    "notes": [
+      "slow RPC load_fill_history finished in 8.00s: ok (0 rows)"
+    ]
+  },
+  {
+    "scenario": "stalled_consumer",
+    "params": {
+      "drain_secs": 8.0,
+      "drop_plants_at": null,
+      "name": "stalled_consumer",
+      "orders": false,
+      "rate": 20000,
+      "raw": 3,
+      "sample_rss": false,
+      "secs": 8.0,
+      "sessions": 0,
+      "slow_rpc_secs": 0.0,
+      "stalled": 1,
+      "warmup_secs": 0.0,
+      "measurement": {
+        "round": 2,
+        "position": 1,
+        "variant": "candidate",
+        "attempt": 1,
+        "measurement_window": "coordinated-build-pause",
+        "utc_start": "2026-10-15T15:45:29.371747+00:00",
+        "utc_end": "2026-10-15T15:45:37.565979+00:00",
+        "base_revision": "0eb0b177203d0ab970909805f6df633c57c8a520",
+        "candidate_rust_source_sha256": "d65c25ec71fa3dd64a990051a4cc7e13e1cfa7c61c56658317eefdf1c71e8455",
+        "binary": {
+          "path": "/private/mnt/DATA/code/rithmic-connect-wt/b-transport/target/release/rithmic-load",
+          "sha256": "2be72469aa5c19bb4b3b445a8ba474af85acb0838a4cceb42d1a9336670005a2"
+        },
+        "load_before": [
+          4.7841796875,
+          5.4833984375,
+          6.45947265625
+        ],
+        "load_after": [
+          5.05078125,
+          5.5166015625,
+          6.45947265625
+        ],
+        "build_processes_before": [],
+        "build_processes_during": [],
+        "build_processes_after": [],
+        "build_monitor_interval_s": 0.2
+      }
+    },
+    "duration_s": 8.10153925,
+    "sent": 160000,
+    "conns": [
+      {
+        "kind": "raw",
+        "received": 160000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 160000,
+          "p50_us": 111,
+          "p99_us": 1583,
+          "p999_us": 13695,
+          "max_us": 20735
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 160000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 160000,
+          "p50_us": 111,
+          "p99_us": 1116,
+          "p999_us": 6059,
+          "max_us": 11367
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 160000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 160000,
+          "p50_us": 102,
+          "p99_us": 1201,
+          "p999_us": 7067,
+          "max_us": 11583
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 20000.0,
+    "latency": {
+      "count": 480000,
+      "p50_us": 108,
+      "p99_us": 1261,
+      "p999_us": 9103,
+      "max_us": 20735
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 23232,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": null,
+    "alloc_bytes_per_event": null,
+    "notes": [
+      "1/1 stalled connections were dropped by the parent"
+    ]
+  },
+  {
+    "scenario": "stalled_consumer",
+    "params": {
+      "drain_secs": 8.0,
+      "drop_plants_at": null,
+      "name": "stalled_consumer",
+      "orders": false,
+      "rate": 20000,
+      "raw": 3,
+      "sample_rss": false,
+      "secs": 8.0,
+      "sessions": 0,
+      "slow_rpc_secs": 0.0,
+      "stalled": 1,
+      "warmup_secs": 0.0,
+      "measurement": {
+        "round": 2,
+        "position": 2,
+        "variant": "base",
+        "attempt": 1,
+        "measurement_window": "coordinated-build-pause",
+        "utc_start": "2026-10-15T15:45:37.624405+00:00",
+        "utc_end": "2026-10-15T15:45:45.872551+00:00",
+        "base_revision": "0eb0b177203d0ab970909805f6df633c57c8a520",
+        "candidate_rust_source_sha256": "d65c25ec71fa3dd64a990051a4cc7e13e1cfa7c61c56658317eefdf1c71e8455",
+        "binary": {
+          "path": "/private/mnt/DATA/code/rithmic-connect-wt/b-transport/target/hop-opt/base/rithmic-load",
+          "sha256": "808b4ea336a5a47c5b72e8bb599730f28249ed90741ea12de4f65e93ef401909"
+        },
+        "load_before": [
+          5.05078125,
+          5.5166015625,
+          6.45947265625
+        ],
+        "load_after": [
+          6.099609375,
+          5.72900390625,
+          6.5234375
+        ],
+        "build_processes_before": [],
+        "build_processes_during": [],
+        "build_processes_after": [],
+        "build_monitor_interval_s": 0.2
+      }
+    },
+    "duration_s": 8.10379375,
+    "sent": 160000,
+    "conns": [
+      {
+        "kind": "raw",
+        "received": 160000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 160000,
+          "p50_us": 105,
+          "p99_us": 6719,
+          "p999_us": 70335,
+          "max_us": 72319
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 160000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 160000,
+          "p50_us": 106,
+          "p99_us": 6763,
+          "p999_us": 71359,
+          "max_us": 72703
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 160000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 160000,
+          "p50_us": 105,
+          "p99_us": 7843,
+          "p999_us": 70655,
+          "max_us": 71487
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 20000.0,
+    "latency": {
+      "count": 480000,
+      "p50_us": 105,
+      "p99_us": 7023,
+      "p999_us": 70783,
+      "max_us": 72703
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 26976,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": null,
+    "alloc_bytes_per_event": null,
+    "notes": [
+      "1/1 stalled connections were dropped by the parent"
+    ]
+  },
+  {
+    "scenario": "flood_10k_4conn_1session",
+    "params": {
+      "drain_secs": 3.0,
+      "drop_plants_at": null,
+      "name": "flood_10k_4conn_1session",
+      "orders": false,
+      "rate": 10000,
+      "raw": 4,
+      "sample_rss": false,
+      "secs": 5.0,
+      "sessions": 1,
+      "slow_rpc_secs": 0.0,
+      "stalled": 0,
+      "warmup_secs": 0.0,
+      "measurement": {
+        "round": 2,
+        "position": 1,
+        "variant": "candidate",
+        "attempt": 1,
+        "measurement_window": "coordinated-build-pause",
+        "utc_start": "2026-10-15T15:45:45.940967+00:00",
+        "utc_end": "2026-10-15T15:45:51.232423+00:00",
+        "base_revision": "0eb0b177203d0ab970909805f6df633c57c8a520",
+        "candidate_rust_source_sha256": "d65c25ec71fa3dd64a990051a4cc7e13e1cfa7c61c56658317eefdf1c71e8455",
+        "binary": {
+          "path": "/private/mnt/DATA/code/rithmic-connect-wt/b-transport/target/release/rithmic-load",
+          "sha256": "2be72469aa5c19bb4b3b445a8ba474af85acb0838a4cceb42d1a9336670005a2"
+        },
+        "load_before": [
+          6.099609375,
+          5.72900390625,
+          6.5234375
+        ],
+        "load_after": [
+          8.17333984375,
+          6.1650390625,
+          6.67236328125
+        ],
+        "build_processes_before": [],
+        "build_processes_during": [],
+        "build_processes_after": [],
+        "build_monitor_interval_s": 0.2
+      }
+    },
+    "duration_s": 5.194608209,
+    "sent": 50000,
+    "conns": [
+      {
+        "kind": "raw",
+        "received": 50000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 50000,
+          "p50_us": 86,
+          "p99_us": 1581,
+          "p999_us": 10335,
+          "max_us": 20271
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 50000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 50000,
+          "p50_us": 87,
+          "p99_us": 1365,
+          "p999_us": 10111,
+          "max_us": 20303
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 50000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 50000,
+          "p50_us": 85,
+          "p99_us": 2089,
+          "p999_us": 10215,
+          "max_us": 20239
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 50000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 50000,
+          "p50_us": 79,
+          "p99_us": 1568,
+          "p999_us": 10087,
+          "max_us": 20303
+        }
+      },
+      {
+        "kind": "session",
+        "received": 50000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 50000,
+          "p50_us": 96,
+          "p99_us": 1380,
+          "p999_us": 10151,
+          "max_us": 20255
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 10000.0,
+    "latency": {
+      "count": 250000,
+      "p50_us": 86,
+      "p99_us": 1532,
+      "p999_us": 10127,
+      "max_us": 20303
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 11136,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": null,
+    "alloc_bytes_per_event": null,
+    "notes": []
+  },
+  {
+    "scenario": "flood_10k_4conn_1session",
+    "params": {
+      "drain_secs": 3.0,
+      "drop_plants_at": null,
+      "name": "flood_10k_4conn_1session",
+      "orders": false,
+      "rate": 10000,
+      "raw": 4,
+      "sample_rss": false,
+      "secs": 5.0,
+      "sessions": 1,
+      "slow_rpc_secs": 0.0,
+      "stalled": 0,
+      "warmup_secs": 0.0,
+      "measurement": {
+        "round": 2,
+        "position": 2,
+        "variant": "base",
+        "attempt": 1,
+        "measurement_window": "coordinated-build-pause",
+        "utc_start": "2026-10-15T15:45:51.379139+00:00",
+        "utc_end": "2026-10-15T15:45:56.592975+00:00",
+        "base_revision": "0eb0b177203d0ab970909805f6df633c57c8a520",
+        "candidate_rust_source_sha256": "d65c25ec71fa3dd64a990051a4cc7e13e1cfa7c61c56658317eefdf1c71e8455",
+        "binary": {
+          "path": "/private/mnt/DATA/code/rithmic-connect-wt/b-transport/target/hop-opt/base/rithmic-load",
+          "sha256": "808b4ea336a5a47c5b72e8bb599730f28249ed90741ea12de4f65e93ef401909"
+        },
+        "load_before": [
+          8.17333984375,
+          6.1650390625,
+          6.67236328125
+        ],
+        "load_after": [
+          8.4794921875,
+          6.26171875,
+          6.703125
+        ],
+        "build_processes_before": [],
+        "build_processes_during": [],
+        "build_processes_after": [],
+        "build_monitor_interval_s": 0.2
+      }
+    },
+    "duration_s": 5.103222417,
+    "sent": 50000,
+    "conns": [
+      {
+        "kind": "raw",
+        "received": 50000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 50000,
+          "p50_us": 83,
+          "p99_us": 617,
+          "p999_us": 10023,
+          "max_us": 12463
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 50000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 50000,
+          "p50_us": 83,
+          "p99_us": 486,
+          "p999_us": 6951,
+          "max_us": 11367
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 50000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 50000,
+          "p50_us": 83,
+          "p99_us": 442,
+          "p999_us": 5411,
+          "max_us": 11407
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 50000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 50000,
+          "p50_us": 82,
+          "p99_us": 486,
+          "p999_us": 5319,
+          "max_us": 11327
+        }
+      },
+      {
+        "kind": "session",
+        "received": 50000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 50000,
+          "p50_us": 105,
+          "p99_us": 490,
+          "p999_us": 8399,
+          "max_us": 11719
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 10000.0,
+    "latency": {
+      "count": 250000,
+      "p50_us": 86,
+      "p99_us": 493,
+      "p999_us": 7535,
+      "max_us": 12463
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 15616,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": null,
+    "alloc_bytes_per_event": null,
+    "notes": []
+  },
+  {
+    "scenario": "reconnect_during_flood",
+    "params": {
+      "drain_secs": 8.0,
+      "drop_plants_at": 3.0,
+      "name": "reconnect_during_flood",
+      "orders": false,
+      "rate": 10000,
+      "raw": 2,
+      "sample_rss": false,
+      "secs": 8.0,
+      "sessions": 0,
+      "slow_rpc_secs": 0.0,
+      "stalled": 0,
+      "warmup_secs": 0.0,
+      "measurement": {
+        "round": 2,
+        "position": 1,
+        "variant": "candidate",
+        "attempt": 1,
+        "measurement_window": "coordinated-build-pause",
+        "utc_start": "2026-10-15T15:45:56.812812+00:00",
+        "utc_end": "2026-10-15T15:46:12.912316+00:00",
+        "base_revision": "0eb0b177203d0ab970909805f6df633c57c8a520",
+        "candidate_rust_source_sha256": "d65c25ec71fa3dd64a990051a4cc7e13e1cfa7c61c56658317eefdf1c71e8455",
+        "binary": {
+          "path": "/private/mnt/DATA/code/rithmic-connect-wt/b-transport/target/release/rithmic-load",
+          "sha256": "2be72469aa5c19bb4b3b445a8ba474af85acb0838a4cceb42d1a9336670005a2"
+        },
+        "load_before": [
+          8.4794921875,
+          6.26171875,
+          6.703125
+        ],
+        "load_after": [
+          7.3203125,
+          6.1171875,
+          6.64306640625
+        ],
+        "build_processes_before": [],
+        "build_processes_during": [],
+        "build_processes_after": [],
+        "build_monitor_interval_s": 0.2
+      }
+    },
+    "duration_s": 16.019233542,
+    "sent": 80000,
+    "conns": [
+      {
+        "kind": "raw",
+        "received": 79988,
+        "missing_in_stream": 12,
+        "reordered": 0,
+        "gap_events": 1,
+        "gap_skipped": 12,
+        "resumed": 1,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 79988,
+          "p50_us": 59,
+          "p99_us": 220,
+          "p999_us": 37951,
+          "max_us": 44639
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 79988,
+        "missing_in_stream": 12,
+        "reordered": 0,
+        "gap_events": 1,
+        "gap_skipped": 12,
+        "resumed": 1,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 79988,
+          "p50_us": 60,
+          "p99_us": 224,
+          "p999_us": 37919,
+          "max_us": 44639
+        }
+      }
+    ],
+    "min_delivered_ratio": 0.99985,
+    "min_throughput_eps": 9998.5,
+    "latency": {
+      "count": 159976,
+      "p50_us": 59,
+      "p99_us": 222,
+      "p999_us": 37919,
+      "max_us": 44639
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 9904,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": null,
+    "alloc_bytes_per_event": null,
+    "notes": [
+      "venue calls after the drop: 1 connect, 1 disconnect, 1 subscribe, 0 unsubscribe"
+    ]
+  },
+  {
+    "scenario": "reconnect_during_flood",
+    "params": {
+      "drain_secs": 8.0,
+      "drop_plants_at": 3.0,
+      "name": "reconnect_during_flood",
+      "orders": false,
+      "rate": 10000,
+      "raw": 2,
+      "sample_rss": false,
+      "secs": 8.0,
+      "sessions": 0,
+      "slow_rpc_secs": 0.0,
+      "stalled": 0,
+      "warmup_secs": 0.0,
+      "measurement": {
+        "round": 2,
+        "position": 2,
+        "variant": "base",
+        "attempt": 1,
+        "measurement_window": "coordinated-build-pause",
+        "utc_start": "2026-10-15T15:46:12.973754+00:00",
+        "utc_end": "2026-10-15T15:46:21.181936+00:00",
+        "base_revision": "0eb0b177203d0ab970909805f6df633c57c8a520",
+        "candidate_rust_source_sha256": "d65c25ec71fa3dd64a990051a4cc7e13e1cfa7c61c56658317eefdf1c71e8455",
+        "binary": {
+          "path": "/private/mnt/DATA/code/rithmic-connect-wt/b-transport/target/hop-opt/base/rithmic-load",
+          "sha256": "808b4ea336a5a47c5b72e8bb599730f28249ed90741ea12de4f65e93ef401909"
+        },
+        "load_before": [
+          7.3203125,
+          6.1171875,
+          6.64306640625
+        ],
+        "load_after": [
+          6.642578125,
+          6.013671875,
+          6.60009765625
+        ],
+        "build_processes_before": [],
+        "build_processes_during": [],
+        "build_processes_after": [],
+        "build_monitor_interval_s": 0.2
+      }
+    },
+    "duration_s": 8.124773375,
+    "sent": 80000,
+    "conns": [
+      {
+        "kind": "raw",
+        "received": 80000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 1,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 80000,
+          "p50_us": 60,
+          "p99_us": 190,
+          "p999_us": 502,
+          "max_us": 1114
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 80000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 1,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 80000,
+          "p50_us": 59,
+          "p99_us": 184,
+          "p999_us": 465,
+          "max_us": 1019
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 10000.0,
+    "latency": {
+      "count": 160000,
+      "p50_us": 60,
+      "p99_us": 188,
+      "p999_us": 480,
+      "max_us": 1114
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 14176,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": null,
+    "alloc_bytes_per_event": null,
+    "notes": [
+      "venue calls after the drop: 1 connect, 1 disconnect, 1 subscribe, 0 unsubscribe"
+    ]
+  },
+  {
+    "scenario": "orders_flood_slow_rpc",
+    "params": {
+      "drain_secs": 10.0,
+      "drop_plants_at": null,
+      "name": "orders_flood_slow_rpc",
+      "orders": true,
+      "rate": 50000,
+      "raw": 2,
+      "sample_rss": false,
+      "secs": 12.0,
+      "sessions": 1,
+      "slow_rpc_secs": 8.0,
+      "stalled": 0,
+      "warmup_secs": 2.0,
+      "measurement": {
+        "round": 2,
+        "position": 1,
+        "variant": "candidate",
+        "attempt": 1,
+        "measurement_window": "coordinated-build-pause",
+        "utc_start": "2026-10-15T15:46:21.239515+00:00",
+        "utc_end": "2026-10-15T15:46:35.419701+00:00",
+        "base_revision": "0eb0b177203d0ab970909805f6df633c57c8a520",
+        "candidate_rust_source_sha256": "d65c25ec71fa3dd64a990051a4cc7e13e1cfa7c61c56658317eefdf1c71e8455",
+        "binary": {
+          "path": "/private/mnt/DATA/code/rithmic-connect-wt/b-transport/target/release/rithmic-load",
+          "sha256": "2be72469aa5c19bb4b3b445a8ba474af85acb0838a4cceb42d1a9336670005a2"
+        },
+        "load_before": [
+          6.642578125,
+          6.013671875,
+          6.60009765625
+        ],
+        "load_after": [
+          6.044921875,
+          5.91357421875,
+          6.5537109375
+        ],
+        "build_processes_before": [],
+        "build_processes_during": [],
+        "build_processes_after": [],
+        "build_monitor_interval_s": 0.2
+      }
+    },
+    "duration_s": 14.105547083,
+    "sent": 600000,
+    "conns": [
+      {
+        "kind": "raw",
+        "received": 600000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 600000,
+          "p50_us": 222,
+          "p99_us": 844,
+          "p999_us": 1137,
+          "max_us": 5591
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 600000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 600000,
+          "p50_us": 246,
+          "p99_us": 868,
+          "p999_us": 1211,
+          "max_us": 7119
+        }
+      },
+      {
+        "kind": "session",
+        "received": 600000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 600000,
+          "p50_us": 411,
+          "p99_us": 1112,
+          "p999_us": 1564,
+          "max_us": 7303
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 50000.0,
+    "latency": {
+      "count": 1800000,
+      "p50_us": 297,
+      "p99_us": 970,
+      "p999_us": 1501,
+      "max_us": 7303
+    },
+    "order_latency": {
+      "count": 1140,
+      "p50_us": 177,
+      "p99_us": 819,
+      "p999_us": 1257,
+      "max_us": 1262
+    },
+    "order_idle_latency": {
+      "count": 184,
+      "p50_us": 35,
+      "p99_us": 206,
+      "p999_us": 210,
+      "max_us": 210
+    },
+    "peak_rss_kb": 11040,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": null,
+    "alloc_bytes_per_event": null,
+    "notes": [
+      "slow RPC load_fill_history finished in 8.00s: ok (0 rows)"
+    ]
+  },
+  {
+    "scenario": "orders_flood_slow_rpc",
+    "params": {
+      "drain_secs": 10.0,
+      "drop_plants_at": null,
+      "name": "orders_flood_slow_rpc",
+      "orders": true,
+      "rate": 50000,
+      "raw": 2,
+      "sample_rss": false,
+      "secs": 12.0,
+      "sessions": 1,
+      "slow_rpc_secs": 8.0,
+      "stalled": 0,
+      "warmup_secs": 2.0,
+      "measurement": {
+        "round": 2,
+        "position": 2,
+        "variant": "base",
+        "attempt": 1,
+        "measurement_window": "coordinated-build-pause",
+        "utc_start": "2026-10-15T15:46:35.484121+00:00",
+        "utc_end": "2026-10-15T15:46:49.717584+00:00",
+        "base_revision": "0eb0b177203d0ab970909805f6df633c57c8a520",
+        "candidate_rust_source_sha256": "d65c25ec71fa3dd64a990051a4cc7e13e1cfa7c61c56658317eefdf1c71e8455",
+        "binary": {
+          "path": "/private/mnt/DATA/code/rithmic-connect-wt/b-transport/target/hop-opt/base/rithmic-load",
+          "sha256": "808b4ea336a5a47c5b72e8bb599730f28249ed90741ea12de4f65e93ef401909"
+        },
+        "load_before": [
+          6.044921875,
+          5.91357421875,
+          6.5537109375
+        ],
+        "load_after": [
+          5.56689453125,
+          5.81787109375,
+          6.50830078125
+        ],
+        "build_processes_before": [],
+        "build_processes_during": [],
+        "build_processes_after": [],
+        "build_monitor_interval_s": 0.2
+      }
+    },
+    "duration_s": 14.103908125,
+    "sent": 600000,
+    "conns": [
+      {
+        "kind": "raw",
+        "received": 600000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 600000,
+          "p50_us": 251,
+          "p99_us": 910,
+          "p999_us": 3425,
+          "max_us": 10255
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 600000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 600000,
+          "p50_us": 251,
+          "p99_us": 902,
+          "p999_us": 4543,
+          "max_us": 10639
+        }
+      },
+      {
+        "kind": "session",
+        "received": 600000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 600000,
+          "p50_us": 361,
+          "p99_us": 1048,
+          "p999_us": 3613,
+          "max_us": 10575
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 50000.0,
+    "latency": {
+      "count": 1800000,
+      "p50_us": 290,
+      "p99_us": 965,
+      "p999_us": 3643,
+      "max_us": 10639
+    },
+    "order_latency": {
+      "count": 1140,
+      "p50_us": 135,
+      "p99_us": 732,
+      "p999_us": 1063,
+      "max_us": 1184
+    },
+    "order_idle_latency": {
+      "count": 186,
+      "p50_us": 39,
+      "p99_us": 178,
+      "p999_us": 237,
+      "max_us": 237
+    },
+    "peak_rss_kb": 15536,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": null,
+    "alloc_bytes_per_event": null,
+    "notes": [
+      "slow RPC load_fill_history finished in 8.00s: ok (0 rows)"
+    ]
+  },
+  {
+    "scenario": "stalled_consumer",
+    "params": {
+      "drain_secs": 8.0,
+      "drop_plants_at": null,
+      "name": "stalled_consumer",
+      "orders": false,
+      "rate": 20000,
+      "raw": 3,
+      "sample_rss": false,
+      "secs": 8.0,
+      "sessions": 0,
+      "slow_rpc_secs": 0.0,
+      "stalled": 1,
+      "warmup_secs": 0.0,
+      "measurement": {
+        "round": 3,
+        "position": 1,
+        "variant": "base",
+        "attempt": 1,
+        "measurement_window": "coordinated-build-pause",
+        "utc_start": "2026-10-15T15:46:49.835494+00:00",
+        "utc_end": "2026-10-15T15:46:58.002256+00:00",
+        "base_revision": "0eb0b177203d0ab970909805f6df633c57c8a520",
+        "candidate_rust_source_sha256": "d65c25ec71fa3dd64a990051a4cc7e13e1cfa7c61c56658317eefdf1c71e8455",
+        "binary": {
+          "path": "/private/mnt/DATA/code/rithmic-connect-wt/b-transport/target/hop-opt/base/rithmic-load",
+          "sha256": "808b4ea336a5a47c5b72e8bb599730f28249ed90741ea12de4f65e93ef401909"
+        },
+        "load_before": [
+          5.56689453125,
+          5.81787109375,
+          6.50830078125
+        ],
+        "load_after": [
+          5.201171875,
+          5.73779296875,
+          6.4755859375
+        ],
+        "build_processes_before": [],
+        "build_processes_during": [],
+        "build_processes_after": [],
+        "build_monitor_interval_s": 0.2
+      }
+    },
+    "duration_s": 8.103701541,
+    "sent": 160000,
+    "conns": [
+      {
+        "kind": "raw",
+        "received": 160000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 160000,
+          "p50_us": 110,
+          "p99_us": 352,
+          "p999_us": 1014,
+          "max_us": 4403
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 160000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 160000,
+          "p50_us": 109,
+          "p99_us": 345,
+          "p999_us": 1089,
+          "max_us": 4411
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 160000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 160000,
+          "p50_us": 110,
+          "p99_us": 344,
+          "p999_us": 1112,
+          "max_us": 4239
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 20000.0,
+    "latency": {
+      "count": 480000,
+      "p50_us": 110,
+      "p99_us": 347,
+      "p999_us": 1095,
+      "max_us": 4411
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 27760,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": null,
+    "alloc_bytes_per_event": null,
+    "notes": [
+      "1/1 stalled connections were dropped by the parent"
+    ]
+  },
+  {
+    "scenario": "stalled_consumer",
+    "params": {
+      "drain_secs": 8.0,
+      "drop_plants_at": null,
+      "name": "stalled_consumer",
+      "orders": false,
+      "rate": 20000,
+      "raw": 3,
+      "sample_rss": false,
+      "secs": 8.0,
+      "sessions": 0,
+      "slow_rpc_secs": 0.0,
+      "stalled": 1,
+      "warmup_secs": 0.0,
+      "measurement": {
+        "round": 3,
+        "position": 2,
+        "variant": "candidate",
+        "attempt": 1,
+        "measurement_window": "coordinated-build-pause",
+        "utc_start": "2026-10-15T15:46:58.063848+00:00",
+        "utc_end": "2026-10-15T15:47:06.241142+00:00",
+        "base_revision": "0eb0b177203d0ab970909805f6df633c57c8a520",
+        "candidate_rust_source_sha256": "d65c25ec71fa3dd64a990051a4cc7e13e1cfa7c61c56658317eefdf1c71e8455",
+        "binary": {
+          "path": "/private/mnt/DATA/code/rithmic-connect-wt/b-transport/target/release/rithmic-load",
+          "sha256": "2be72469aa5c19bb4b3b445a8ba474af85acb0838a4cceb42d1a9336670005a2"
+        },
+        "load_before": [
+          5.201171875,
+          5.73779296875,
+          6.4755859375
+        ],
+        "load_after": [
+          4.71533203125,
+          5.6142578125,
+          6.4228515625
+        ],
+        "build_processes_before": [],
+        "build_processes_during": [],
+        "build_processes_after": [],
+        "build_monitor_interval_s": 0.2
+      }
+    },
+    "duration_s": 8.1032945,
+    "sent": 160000,
+    "conns": [
+      {
+        "kind": "raw",
+        "received": 160000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 160000,
+          "p50_us": 115,
+          "p99_us": 325,
+          "p999_us": 683,
+          "max_us": 1722
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 160000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 160000,
+          "p50_us": 116,
+          "p99_us": 359,
+          "p999_us": 834,
+          "max_us": 1688
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 160000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 160000,
+          "p50_us": 104,
+          "p99_us": 317,
+          "p999_us": 757,
+          "max_us": 1674
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 20000.0,
+    "latency": {
+      "count": 480000,
+      "p50_us": 112,
+      "p99_us": 337,
+      "p999_us": 782,
+      "max_us": 1722
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 22960,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": null,
+    "alloc_bytes_per_event": null,
+    "notes": [
+      "1/1 stalled connections were dropped by the parent"
+    ]
+  },
+  {
+    "scenario": "flood_10k_4conn_1session",
+    "params": {
+      "drain_secs": 3.0,
+      "drop_plants_at": null,
+      "name": "flood_10k_4conn_1session",
+      "orders": false,
+      "rate": 10000,
+      "raw": 4,
+      "sample_rss": false,
+      "secs": 5.0,
+      "sessions": 1,
+      "slow_rpc_secs": 0.0,
+      "stalled": 0,
+      "warmup_secs": 0.0,
+      "measurement": {
+        "round": 3,
+        "position": 1,
+        "variant": "base",
+        "attempt": 1,
+        "measurement_window": "coordinated-build-pause",
+        "utc_start": "2026-10-15T15:47:06.298968+00:00",
+        "utc_end": "2026-10-15T15:47:11.473206+00:00",
+        "base_revision": "0eb0b177203d0ab970909805f6df633c57c8a520",
+        "candidate_rust_source_sha256": "d65c25ec71fa3dd64a990051a4cc7e13e1cfa7c61c56658317eefdf1c71e8455",
+        "binary": {
+          "path": "/private/mnt/DATA/code/rithmic-connect-wt/b-transport/target/hop-opt/base/rithmic-load",
+          "sha256": "808b4ea336a5a47c5b72e8bb599730f28249ed90741ea12de4f65e93ef401909"
+        },
+        "load_before": [
+          4.71533203125,
+          5.6142578125,
+          6.4228515625
+        ],
+        "load_after": [
+          4.57763671875,
+          5.57080078125,
+          6.40234375
+        ],
+        "build_processes_before": [],
+        "build_processes_during": [],
+        "build_processes_after": [],
+        "build_monitor_interval_s": 0.2
+      }
+    },
+    "duration_s": 5.10168375,
+    "sent": 50000,
+    "conns": [
+      {
+        "kind": "raw",
+        "received": 50000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 50000,
+          "p50_us": 92,
+          "p99_us": 255,
+          "p999_us": 679,
+          "max_us": 2613
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 50000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 50000,
+          "p50_us": 93,
+          "p99_us": 258,
+          "p999_us": 643,
+          "max_us": 2705
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 50000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 50000,
+          "p50_us": 92,
+          "p99_us": 269,
+          "p999_us": 706,
+          "max_us": 2695
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 50000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 50000,
+          "p50_us": 93,
+          "p99_us": 270,
+          "p999_us": 671,
+          "max_us": 2629
+        }
+      },
+      {
+        "kind": "session",
+        "received": 50000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 50000,
+          "p50_us": 119,
+          "p99_us": 309,
+          "p999_us": 647,
+          "max_us": 2589
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 10000.0,
+    "latency": {
+      "count": 250000,
+      "p50_us": 98,
+      "p99_us": 276,
+      "p999_us": 687,
+      "max_us": 2705
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 15792,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": null,
+    "alloc_bytes_per_event": null,
+    "notes": []
+  },
+  {
+    "scenario": "flood_10k_4conn_1session",
+    "params": {
+      "drain_secs": 3.0,
+      "drop_plants_at": null,
+      "name": "flood_10k_4conn_1session",
+      "orders": false,
+      "rate": 10000,
+      "raw": 4,
+      "sample_rss": false,
+      "secs": 5.0,
+      "sessions": 1,
+      "slow_rpc_secs": 0.0,
+      "stalled": 0,
+      "warmup_secs": 0.0,
+      "measurement": {
+        "round": 3,
+        "position": 2,
+        "variant": "candidate",
+        "attempt": 1,
+        "measurement_window": "coordinated-build-pause",
+        "utc_start": "2026-10-15T15:47:11.528675+00:00",
+        "utc_end": "2026-10-15T15:47:16.711964+00:00",
+        "base_revision": "0eb0b177203d0ab970909805f6df633c57c8a520",
+        "candidate_rust_source_sha256": "d65c25ec71fa3dd64a990051a4cc7e13e1cfa7c61c56658317eefdf1c71e8455",
+        "binary": {
+          "path": "/private/mnt/DATA/code/rithmic-connect-wt/b-transport/target/release/rithmic-load",
+          "sha256": "2be72469aa5c19bb4b3b445a8ba474af85acb0838a4cceb42d1a9336670005a2"
+        },
+        "load_before": [
+          4.57763671875,
+          5.57080078125,
+          6.40234375
+        ],
+        "load_after": [
+          4.37109375,
+          5.51123046875,
+          6.37646484375
+        ],
+        "build_processes_before": [],
+        "build_processes_during": [],
+        "build_processes_after": [],
+        "build_monitor_interval_s": 0.2
+      }
+    },
+    "duration_s": 5.102809417,
+    "sent": 50000,
+    "conns": [
+      {
+        "kind": "raw",
+        "received": 50000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 50000,
+          "p50_us": 98,
+          "p99_us": 288,
+          "p999_us": 760,
+          "max_us": 6191
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 50000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 50000,
+          "p50_us": 98,
+          "p99_us": 290,
+          "p999_us": 1863,
+          "max_us": 6123
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 50000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 50000,
+          "p50_us": 83,
+          "p99_us": 276,
+          "p999_us": 747,
+          "max_us": 6159
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 50000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 50000,
+          "p50_us": 99,
+          "p99_us": 279,
+          "p999_us": 1925,
+          "max_us": 5951
+        }
+      },
+      {
+        "kind": "session",
+        "received": 50000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 50000,
+          "p50_us": 106,
+          "p99_us": 311,
+          "p999_us": 793,
+          "max_us": 6107
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 10000.0,
+    "latency": {
+      "count": 250000,
+      "p50_us": 97,
+      "p99_us": 291,
+      "p999_us": 1600,
+      "max_us": 6191
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 11248,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": null,
+    "alloc_bytes_per_event": null,
+    "notes": []
+  },
+  {
+    "scenario": "reconnect_during_flood",
+    "params": {
+      "drain_secs": 8.0,
+      "drop_plants_at": 3.0,
+      "name": "reconnect_during_flood",
+      "orders": false,
+      "rate": 10000,
+      "raw": 2,
+      "sample_rss": false,
+      "secs": 8.0,
+      "sessions": 0,
+      "slow_rpc_secs": 0.0,
+      "stalled": 0,
+      "warmup_secs": 0.0,
+      "measurement": {
+        "round": 3,
+        "position": 1,
+        "variant": "base",
+        "attempt": 1,
+        "measurement_window": "coordinated-build-pause",
+        "utc_start": "2026-10-15T15:47:16.784150+00:00",
+        "utc_end": "2026-10-15T15:47:32.889765+00:00",
+        "base_revision": "0eb0b177203d0ab970909805f6df633c57c8a520",
+        "candidate_rust_source_sha256": "d65c25ec71fa3dd64a990051a4cc7e13e1cfa7c61c56658317eefdf1c71e8455",
+        "binary": {
+          "path": "/private/mnt/DATA/code/rithmic-connect-wt/b-transport/target/hop-opt/base/rithmic-load",
+          "sha256": "808b4ea336a5a47c5b72e8bb599730f28249ed90741ea12de4f65e93ef401909"
+        },
+        "load_before": [
+          4.37109375,
+          5.51123046875,
+          6.37646484375
+        ],
+        "load_after": [
+          4.50341796875,
+          5.48486328125,
+          6.3515625
+        ],
+        "build_processes_before": [],
+        "build_processes_during": [],
+        "build_processes_after": [],
+        "build_monitor_interval_s": 0.2
+      }
+    },
+    "duration_s": 16.025362375,
+    "sent": 80000,
+    "conns": [
+      {
+        "kind": "raw",
+        "received": 79987,
+        "missing_in_stream": 13,
+        "reordered": 0,
+        "gap_events": 1,
+        "gap_skipped": 13,
+        "resumed": 1,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 79987,
+          "p50_us": 65,
+          "p99_us": 207,
+          "p999_us": 678,
+          "max_us": 2583
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 79987,
+        "missing_in_stream": 13,
+        "reordered": 0,
+        "gap_events": 1,
+        "gap_skipped": 13,
+        "resumed": 1,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 79987,
+          "p50_us": 64,
+          "p99_us": 199,
+          "p999_us": 657,
+          "max_us": 2579
+        }
+      }
+    ],
+    "min_delivered_ratio": 0.9998375,
+    "min_throughput_eps": 9998.375,
+    "latency": {
+      "count": 159974,
+      "p50_us": 65,
+      "p99_us": 202,
+      "p999_us": 660,
+      "max_us": 2583
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 13968,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": null,
+    "alloc_bytes_per_event": null,
+    "notes": [
+      "venue calls after the drop: 1 connect, 1 disconnect, 1 subscribe, 0 unsubscribe"
+    ]
+  },
+  {
+    "scenario": "reconnect_during_flood",
+    "params": {
+      "drain_secs": 8.0,
+      "drop_plants_at": 3.0,
+      "name": "reconnect_during_flood",
+      "orders": false,
+      "rate": 10000,
+      "raw": 2,
+      "sample_rss": false,
+      "secs": 8.0,
+      "sessions": 0,
+      "slow_rpc_secs": 0.0,
+      "stalled": 0,
+      "warmup_secs": 0.0,
+      "measurement": {
+        "round": 3,
+        "position": 2,
+        "variant": "candidate",
+        "attempt": 1,
+        "measurement_window": "coordinated-build-pause",
+        "utc_start": "2026-10-15T15:48:12.473690+00:00",
+        "utc_end": "2026-10-15T15:48:28.620854+00:00",
+        "base_revision": "0eb0b177203d0ab970909805f6df633c57c8a520",
+        "candidate_rust_source_sha256": "d65c25ec71fa3dd64a990051a4cc7e13e1cfa7c61c56658317eefdf1c71e8455",
+        "binary": {
+          "path": "/private/mnt/DATA/code/rithmic-connect-wt/b-transport/target/release/rithmic-load",
+          "sha256": "2be72469aa5c19bb4b3b445a8ba474af85acb0838a4cceb42d1a9336670005a2"
+        },
+        "load_before": [
+          11.9169921875,
+          7.00634765625,
+          6.85205078125
+        ],
+        "load_after": [
+          16.6484375,
+          8.203125,
+          7.2763671875
+        ],
+        "build_processes_before": [],
+        "build_processes_during": [],
+        "build_processes_after": [],
+        "build_monitor_interval_s": 0.2
+      }
+    },
+    "duration_s": 16.047544875,
+    "sent": 80000,
+    "conns": [
+      {
+        "kind": "raw",
+        "received": 79988,
+        "missing_in_stream": 12,
+        "reordered": 0,
+        "gap_events": 1,
+        "gap_skipped": 12,
+        "resumed": 1,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 79988,
+          "p50_us": 60,
+          "p99_us": 393,
+          "p999_us": 3697,
+          "max_us": 21215
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 79988,
+        "missing_in_stream": 12,
+        "reordered": 0,
+        "gap_events": 1,
+        "gap_skipped": 12,
+        "resumed": 1,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 79988,
+          "p50_us": 60,
+          "p99_us": 420,
+          "p999_us": 4219,
+          "max_us": 10239
+        }
+      }
+    ],
+    "min_delivered_ratio": 0.99985,
+    "min_throughput_eps": 9998.5,
+    "latency": {
+      "count": 159976,
+      "p50_us": 60,
+      "p99_us": 412,
+      "p999_us": 3715,
+      "max_us": 21215
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 9968,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": null,
+    "alloc_bytes_per_event": null,
+    "notes": [
+      "venue calls after the drop: 1 connect, 1 disconnect, 1 subscribe, 0 unsubscribe"
+    ]
+  },
+  {
+    "scenario": "orders_flood_slow_rpc",
+    "params": {
+      "drain_secs": 10.0,
+      "drop_plants_at": null,
+      "name": "orders_flood_slow_rpc",
+      "orders": true,
+      "rate": 50000,
+      "raw": 2,
+      "sample_rss": false,
+      "secs": 12.0,
+      "sessions": 1,
+      "slow_rpc_secs": 8.0,
+      "stalled": 0,
+      "warmup_secs": 2.0,
+      "measurement": {
+        "round": 3,
+        "position": 1,
+        "variant": "base",
+        "attempt": 1,
+        "measurement_window": "coordinated-build-pause",
+        "utc_start": "2026-10-15T15:48:28.688651+00:00",
+        "utc_end": "2026-10-15T15:48:42.913482+00:00",
+        "base_revision": "0eb0b177203d0ab970909805f6df633c57c8a520",
+        "candidate_rust_source_sha256": "d65c25ec71fa3dd64a990051a4cc7e13e1cfa7c61c56658317eefdf1c71e8455",
+        "binary": {
+          "path": "/private/mnt/DATA/code/rithmic-connect-wt/b-transport/target/hop-opt/base/rithmic-load",
+          "sha256": "808b4ea336a5a47c5b72e8bb599730f28249ed90741ea12de4f65e93ef401909"
+        },
+        "load_before": [
+          16.6484375,
+          8.203125,
+          7.2763671875
+        ],
+        "load_after": [
+          13.3837890625,
+          7.89794921875,
+          7.18310546875
+        ],
+        "build_processes_before": [],
+        "build_processes_during": [],
+        "build_processes_after": [],
+        "build_monitor_interval_s": 0.2
+      }
+    },
+    "duration_s": 14.145957375,
+    "sent": 600000,
+    "conns": [
+      {
+        "kind": "raw",
+        "received": 600000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 600000,
+          "p50_us": 241,
+          "p99_us": 978,
+          "p999_us": 8663,
+          "max_us": 13015
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 600000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 600000,
+          "p50_us": 237,
+          "p99_us": 984,
+          "p999_us": 9991,
+          "max_us": 13103
+        }
+      },
+      {
+        "kind": "session",
+        "received": 600000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 600000,
+          "p50_us": 341,
+          "p99_us": 8935,
+          "p999_us": 91775,
+          "max_us": 103295
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 50000.0,
+    "latency": {
+      "count": 1800000,
+      "p50_us": 276,
+      "p99_us": 1351,
+      "p999_us": 70719,
+      "max_us": 103295
+    },
+    "order_latency": {
+      "count": 1140,
+      "p50_us": 134,
+      "p99_us": 851,
+      "p999_us": 66495,
+      "max_us": 86719
+    },
+    "order_idle_latency": {
+      "count": 186,
+      "p50_us": 37,
+      "p99_us": 175,
+      "p999_us": 559,
+      "max_us": 559
+    },
+    "peak_rss_kb": 15152,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": null,
+    "alloc_bytes_per_event": null,
+    "notes": [
+      "slow RPC load_fill_history finished in 8.10s: ok (0 rows)"
+    ]
+  },
+  {
+    "scenario": "orders_flood_slow_rpc",
+    "params": {
+      "drain_secs": 10.0,
+      "drop_plants_at": null,
+      "name": "orders_flood_slow_rpc",
+      "orders": true,
+      "rate": 50000,
+      "raw": 2,
+      "sample_rss": false,
+      "secs": 12.0,
+      "sessions": 1,
+      "slow_rpc_secs": 8.0,
+      "stalled": 0,
+      "warmup_secs": 2.0,
+      "measurement": {
+        "round": 3,
+        "position": 2,
+        "variant": "candidate",
+        "attempt": 1,
+        "measurement_window": "coordinated-build-pause",
+        "utc_start": "2026-10-15T15:48:42.999983+00:00",
+        "utc_end": "2026-10-15T15:48:57.183451+00:00",
+        "base_revision": "0eb0b177203d0ab970909805f6df633c57c8a520",
+        "candidate_rust_source_sha256": "d65c25ec71fa3dd64a990051a4cc7e13e1cfa7c61c56658317eefdf1c71e8455",
+        "binary": {
+          "path": "/private/mnt/DATA/code/rithmic-connect-wt/b-transport/target/release/rithmic-load",
+          "sha256": "2be72469aa5c19bb4b3b445a8ba474af85acb0838a4cceb42d1a9336670005a2"
+        },
+        "load_before": [
+          13.3837890625,
+          7.89794921875,
+          7.18310546875
+        ],
+        "load_after": [
+          12.3251953125,
+          7.9345703125,
+          7.2080078125
+        ],
+        "build_processes_before": [],
+        "build_processes_during": [],
+        "build_processes_after": [],
+        "build_monitor_interval_s": 0.2
+      }
+    },
+    "duration_s": 14.10412375,
+    "sent": 600000,
+    "conns": [
+      {
+        "kind": "raw",
+        "received": 600000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 600000,
+          "p50_us": 219,
+          "p99_us": 1302,
+          "p999_us": 6531,
+          "max_us": 42047
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 600000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 600000,
+          "p50_us": 199,
+          "p99_us": 1278,
+          "p999_us": 8487,
+          "max_us": 9375
+        }
+      },
+      {
+        "kind": "session",
+        "received": 600000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 600000,
+          "p50_us": 363,
+          "p99_us": 1526,
+          "p999_us": 5223,
+          "max_us": 11495
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 50000.0,
+    "latency": {
+      "count": 1800000,
+      "p50_us": 264,
+      "p99_us": 1415,
+      "p999_us": 6699,
+      "max_us": 42047
+    },
+    "order_latency": {
+      "count": 1136,
+      "p50_us": 166,
+      "p99_us": 846,
+      "p999_us": 2307,
+      "max_us": 10047
+    },
+    "order_idle_latency": {
+      "count": 186,
+      "p50_us": 37,
+      "p99_us": 176,
+      "p999_us": 209,
+      "max_us": 209
+    },
+    "peak_rss_kb": 11808,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": null,
+    "alloc_bytes_per_event": null,
+    "notes": [
+      "slow RPC load_fill_history finished in 8.02s: ok (0 rows)"
+    ]
+  }
+]
