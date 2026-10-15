@@ -98,6 +98,8 @@
 
 ## 9. market-data-lake (separate repo and PR)
 
+Applied in place in the lake checkout, uncommitted, at the user's request (2026-10-15): attach-only client, no password read, the `max_workers` kwarg the client no longer takes removed, index source in `pyproject.toml`, docs. `uv lock` and the test-account ingest wait for the first index publish.
+
 - [ ] 9.1 Branch in `/private/mnt/DATA/code/market-data-lake`; `market-data-lake-tools/pyproject.toml` uses the `rithmic` index source; `uv lock`
-- [ ] 9.2 `rithmic_client.py`: drop `auto_spawn` / `gateway_bin` / `spawn_environ`; dial an explicitly started parent; small launcher around the wheel's `rithmic-gateway` for local runs; password only in the parent's environment
+- [x] 9.2 `rithmic_client.py`: drop `auto_spawn` / `gateway_bin` / `spawn_environ`; dial an explicitly started parent; small launcher around the wheel's `rithmic-gateway` for local runs; password only in the parent's environment
 - [ ] 9.3 Update the error text, the `worker.py` docstring and `AGENTS.md`; run `tests/test_rithmic_futures.py` and one ingest against a test-account parent; open the PR after the first index publish
