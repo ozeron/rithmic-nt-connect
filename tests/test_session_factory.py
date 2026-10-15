@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import fcntl
 import gc
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -12,7 +14,9 @@ from typing import Any, cast
 import pytest
 from rithmic_nt_connect import _lib
 from rithmic_nt_connect.config import ConnectMode, SessionConfig
+from rithmic_nt_connect.data import resync_ticker_session
 from rithmic_nt_connect.session import _connect_once, create_session
+from rithmic_nt_connect.transport import Interrupted, Resumed
 
 
 def _wait_for(check: Any) -> None:
@@ -123,6 +127,89 @@ def test_session_intents_are_independent_and_repeated_subscribe_is_a_set(
     assert a.next_events("ticker", timeout_ms=10) == []
     a.disconnect()
     b.disconnect()
+
+
+@pytest.mark.parametrize("change", ["resync", "peer_book_join", "recovery"])
+@pytest.mark.parametrize("poll_timeout_ms", [0, 100])
+def test_direct_factory_delivers_after_rejoin_and_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    change: str,
+    poll_timeout_ms: int,
+) -> None:
+    _factory(monkeypatch, tmp_path)
+    session = cast(Any, create_session(_config()))
+    peer = None
+    subscription = None
+    symbol, exchange = "NQZ6", "CME"
+    session.connect()
+    session.subscribe(symbol, exchange)
+    session.subscribe_order_book_summary(symbol, exchange)
+
+    def expect_delivery(price: float) -> None:
+        emitted_ns = time.time_ns()
+        for kind in ("order_book", "last_trade", "last_trade"):
+            row: dict[str, Any] = {
+                "type": kind,
+                "symbol": symbol,
+                "exchange": exchange,
+                "ts_event_ns": emitted_ns,
+            }
+            if kind == "order_book":
+                row.update(update_type=1, bid_price=[price], bid_size=[1])
+            else:
+                row.update(trade_price=price, trade_size=1)
+            session.script.emit("ticker", row)
+        book = session.next_events("ticker", max_events=1, timeout_ms=1000)
+        assert book[0]["type"] == "order_book"
+        assert book[0]["bid_price"] == [price]
+        deadline = time.monotonic() + 3
+        for _ in range(2):
+            event = None
+            while event is None and time.monotonic() < deadline:
+                event = session.poll_event(timeout_ms=poll_timeout_ms)
+                if event is None:
+                    time.sleep(0.005)
+            assert event is not None
+            assert event["type"] == "last_trade"
+            assert event["symbol"] == symbol and event["exchange"] == exchange
+            assert event["trade_price"] == price
+            assert event["ts_event_ns"] >= emitted_ns
+
+    try:
+        expect_delivery(21000.0)
+        if change == "resync":
+            asyncio.run(
+                resync_ticker_session(
+                    session, {(symbol, exchange)}, {(symbol, exchange)}
+                )
+            )
+        elif change == "peer_book_join":
+            peer = cast(Any, create_session(_config()))
+            peer.connect()
+            peer.subscribe_order_book_summary(symbol, exchange)
+        else:
+            events: list[Any] = []
+            resumed = threading.Event()
+
+            def listener(event: Any) -> None:
+                events.append(event)
+                if isinstance(event, Resumed):
+                    resumed.set()
+
+            subscription = session.subscribe_session_events(listener)
+            session.script.fail_stream("ticker")
+            assert resumed.wait(3)
+            assert len(events) == 2
+            assert isinstance(events[0], Interrupted)
+            assert isinstance(events[1], Resumed)
+        expect_delivery(22000.0)
+    finally:
+        if subscription is not None:
+            subscription.cancel()
+        if peer is not None:
+            peer.disconnect()
+        session.disconnect()
 
 
 def test_last_disconnect_releases_flock_even_while_facades_remain_alive(
