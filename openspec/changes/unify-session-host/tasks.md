@@ -95,12 +95,12 @@ Agents run in the shared checkout on branch `feat/unify-session-host`. Each agen
 - [x] 6.3 `execution.py`: replace `_open_direct_gates` with one `open_gates` call and a warning when trading is not granted. Disarm on `Interrupted` and re-arm on `Resumed` in both modes.
 - [x] 6.4 Remove the `recovery_bridge.py` direct-mode no-op and run the bridge on the session's events in both modes.
 - [x] 6.5 Remove `reset_ticker` from `WireSession`, `WireSessionStub` and `_lib.pyi`, and update `tests/test_data_transport_recovery.py`, `tests/test_recovery_bridge.py` and `tests/test_wire_session_parity.py`.
-- [ ] 6.6 Run the full suite. Run `RITHMIC_TEST_DOTENV=.env uv run pytest tests/e2e -v` on the test account (MotiveWave closed) in **both** modes, including a direct-mode plant-reconnect case. Re-run the 0.1 baselines and compare.
+- [x] 6.6 Run the full suite. Run `RITHMIC_TEST_DOTENV=.env uv run pytest tests/e2e -v` on the test account (MotiveWave closed) in **both** modes, including a direct-mode plant-reconnect case. Re-run the 0.1 baselines and compare.
   - **2026-10-15 live run on Rithmic Test** (overrides `RITHMIC_HISTORY_READY_PROBE=0`, `RITHMIC_E2E_CONTRACT=NQZ6`):
     - **direct:** 10 passed, then 3 more after the gate fix; `test_direct_ticker_failure_restores_intent` passed (Interrupted → Resumed, ticks resumed)
     - **gateway:** 7 passed, including the RMS round trip through both the Python and Rust clients
     - **both modes:** 17 errors + 2 failures, all from the Test plant's front-month reply lacking `trading_symbol` (also on `main`); the data-client tests that need a `FuturesContract` cannot run on this account
-  - Still open: re-run after track I (hop optimization) lands; the data-client suite needs an account with reference data, or a contract-based instrument fixture.
+  - **Final run 2026-10-15** (after the hop optimization, the named-contract fixture and the book snapshot timestamp fix): direct **23 passed / 40 skipped**, gateway **20 passed / 43 skipped**, 0 failures. Skips are history (the Test plant's replay times out), trading-gated tests (trading off) and the other mode's tests.
 
 ## 7. Docs and follow-ups
 
@@ -113,4 +113,4 @@ Agents run in the shared checkout on branch `feat/unify-session-host`. Each agen
 - [x] 7.3 Update `crates/README.md`: the crate table, the dependency graph and an old → new name table.
 - [x] 7.4 Update `docs/STATUS.md`: the direct-mode reconnect recovery mark and the gateway notes. Then run `python scripts/status_progress.py` and `--check`.
 - [x] 7.5 Rebase `collapse-session-surface` onto this change: group 1 becomes "delete Python wrappers" (registry, holders and listeners now come from the host), and remove its `reset_ticker` and `configure_gates` mentions.
-- [ ] 7.6 Run the full verify gate from AGENTS.md, including `qlty check --fail-level=medium`.
+- [x] 7.6 Run the full verify gate from AGENTS.md, including `qlty check --fail-level=medium`.
