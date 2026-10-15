@@ -9,6 +9,9 @@ use rithmic_host::{
 use std::sync::Arc;
 use std::time::Duration;
 
+#[path = "session_host/degraded.rs"]
+mod degraded;
+
 const WAIT: Duration = Duration::from_secs(3);
 fn timing() -> Timing {
     Timing {

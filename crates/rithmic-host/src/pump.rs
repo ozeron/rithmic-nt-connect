@@ -1,4 +1,6 @@
 //! Host-owned plant recovery and intent restore, shared by both attachments.
+mod degraded;
+
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -175,8 +177,12 @@ async fn serve_until_issue<V: Venue + ?Sized + 'static>(
             stopped.clone(),
         ));
     }
+    // This future shares the pump's lifetime and is dropped before a rebuild.
+    let retries = degraded::retry(state);
+    tokio::pin!(retries);
     let issue = loop {
         tokio::select! {
+            _ = &mut retries => unreachable!("degraded retry loop never exits"),
             result = streams.join_next() => match result {
                 Some(Ok(Some(issue))) => break issue,
                 Some(Err(_)) | None => break Issue { recovery: Recovery::Login, cause: "plant pump stopped unexpectedly".into() },

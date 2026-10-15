@@ -83,7 +83,7 @@ The host SHALL detect a plant failure through its event pump and SHALL recover t
 - a PnL-plant failure SHALL disconnect its dead handle and recreate only that plant before restoring PnL intent
 - a login-level failure SHALL reconnect all plants
 
-The host SHALL then re-issue every intent the recovered plants carry. A market-data intent that fails a bounded number of restore passes SHALL be left degraded, and the next subscribe for it SHALL retry it. An account intent (PnL, orders, brackets) that cannot be restored SHALL escalate to a full reconnect. Consumers SHALL NOT reset plants or re-issue intents in response to a host recovery. During recovery, `next_events` SHALL return empty batches rather than a stream error. A consumer SHALL see a stream error only after `RecoveryFailed` or after its session is closed.
+The host SHALL then re-issue every intent the recovered plants carry. A market-data intent that fails a bounded number of restore passes SHALL be left degraded. While at least one session holds it, the host SHALL retry it in the background with independent bounded exponential backoff (initially 1 s, doubling to a 60 s cap, with 80–100% jitter on subsequent delays), without requiring a consumer subscribe. Successful retry SHALL clear degradation and restore delivery to all holders; a book retry SHALL request a fresh snapshot through `refresh_book`. Releasing the last holder SHALL stop retries. The host SHALL log each degrade/recover transition. A repeated subscribe SHALL still retry a degraded intent. An account intent (PnL, orders, brackets) that cannot be restored SHALL escalate to a full reconnect. Consumers SHALL NOT reset plants or re-issue intents in response to a host recovery. During recovery, `next_events` SHALL return empty batches rather than a stream error. A consumer SHALL see a stream error only after `RecoveryFailed` or after its session is closed.
 
 #### Scenario: Ticker plant fails while trading
 - **WHEN** the ticker plant fails while sessions hold ticker, book, PnL and order intents
@@ -97,12 +97,20 @@ The host SHALL then re-issue every intent the recovered plants carry. A market-d
 - **WHEN** a plant fails in direct mode
 - **THEN** the host SHALL restore it and its intents without any call from the Python adapter
 
+#### Scenario: Degraded intent recovers without a consumer re-subscribe
+- **WHEN** a held market-data intent is degraded after bounded restore failures and the venue later accepts it
+- **THEN** the host SHALL retry it with bounded exponential backoff, clear its degraded mark on success, log recovery, and deliver data to every holder without a consumer subscribe
+
+#### Scenario: Last holder releases a degraded intent
+- **WHEN** the last holder disconnects, drops, or unsubscribes before a scheduled retry
+- **THEN** the host SHALL stop retrying that intent and SHALL NOT resurrect its venue join
+
 #### Scenario: One market-data intent keeps failing
 - **WHEN** a market-data intent fails every restore pass
 - **THEN** the other intents SHALL be live, the failing one SHALL be degraded, and a later subscribe for it SHALL succeed once the venue accepts it
 
 ### Requirement: Sessions receive the same recovery events in both modes
-Every attached session SHALL receive `Interrupted` when the path from it to the venue breaks. It SHALL then receive either `Resumed { generation }`, once its intents are live again, or `RecoveryFailed`, after recovery gives up. The generation SHALL increase by one per completed recovery. A `RemoteSession` SHALL report socket loss and re-attach as the same three events, and SHALL re-issue its own recorded intents before emitting `Resumed`. A one-shot command in flight when the path broke SHALL return an unknown-outcome error and SHALL NOT be retried.
+Every attached session SHALL receive `Interrupted` when the path from it to the venue breaks. It SHALL then receive either `Resumed { generation }`, once account and non-degraded market-data intents are live again (degraded market-data intents continue background retries and are logged), or `RecoveryFailed`, after recovery gives up. The generation SHALL increase by one per completed recovery. A `RemoteSession` SHALL report socket loss and re-attach as the same three events, and SHALL re-issue its own recorded intents before emitting `Resumed`. A one-shot command in flight when the path broke SHALL return an unknown-outcome error and SHALL NOT be retried.
 
 #### Scenario: Plant reconnect seen by a remote session
 - **WHEN** the parent's host recovers a plant
