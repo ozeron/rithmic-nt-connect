@@ -108,3 +108,27 @@ def test_session_repr_and_errors_do_not_leak_the_password() -> None:
     with pytest.raises(Exception) as excinfo:
         session.poll_event()
     assert "top-secret-pw-9" not in str(excinfo.value)
+
+
+@pytest.mark.skipif(
+    not hasattr(_lib.Session, "_fault_drop_plant"),
+    reason="transport fault hook is compiled only with the testing feature",
+)
+def test_fault_hook_reaches_the_direct_plant_and_rejects_gateway_sessions() -> None:
+    session = _lib.Session(
+        user="offline-fault-test",
+        password="unused",
+        system_name="Rithmic Test",
+        url="ws://127.0.0.1:1",
+        env="Test",
+        connect_mode="direct",
+    )
+    # Construction never connects. A valid fault reaches the missing plant;
+    # unsupported targets must not silently fault the ticker instead.
+    with pytest.raises(ValueError, match="only ticker"):
+        session._fault_drop_plant("order")
+    with pytest.raises(_lib.NotConnectedError):
+        session._fault_drop_plant("ticker")
+    gateway = _lib.Session(user="offline-fault-test", connect_mode="gateway")
+    with pytest.raises(ValueError, match="real direct session"):
+        gateway._fault_drop_plant("ticker")

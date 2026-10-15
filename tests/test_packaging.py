@@ -79,8 +79,12 @@ def test_session_fake_is_dev_only_and_release_wheel_features_exclude_testing() -
     }
     cargo = _toml(REPO_ROOT / "crates" / "rithmic-nt-connect" / "Cargo.toml")
     assert cargo["features"]["default"] == []
-    assert cargo["features"]["testing"] == ["rithmic-host/testing"]
+    assert cargo["features"]["testing"] == [
+        "rithmic-host/testing",
+        "rithmic-plants/testing",
+    ]
     workflow = (REPO_ROOT / ".github" / "workflows" / "wheels.yml").read_text()
     build = workflow.split("- name: Build rithmic-nt-connect")[1].split("- name:")[0]
     assert "--features" not in build and "testing" not in build
     assert "assert not hasattr(_lib.Session, 'fake')" in workflow
+    assert "assert not hasattr(_lib.Session, '_fault_drop_plant')" in workflow

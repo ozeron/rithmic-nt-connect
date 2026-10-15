@@ -596,3 +596,108 @@ async fn join_snapshot_requests_use_the_real_pnl_and_book_protocol() {
     );
     session.disconnect().await.unwrap();
 }
+
+/// The live fault hook must traverse rithmic-rs, not synthesize a host failure.
+#[tokio::test]
+async fn injected_ticker_abort_restores_host_intent_without_reconnecting_siblings() {
+    use rithmic_host::gates::ParentGates;
+    use rithmic_host::host::HistoryPolicy;
+    use rithmic_host::{Session, SessionEvent, SessionHost, Timing};
+
+    let server = venue().await;
+    let host = SessionHost::start(
+        RithmicVenue::new(server.session_config(), PlantSet::EXECUTION).with_gates(true, false),
+        ParentGates {
+            trading_enabled: true,
+            cancel_all_enabled: false,
+        },
+        Timing::default(),
+        HistoryPolicy::Allow,
+    );
+    let session = host.attach();
+    let mut events = session.session_events();
+    session.connect().await.unwrap();
+    session.subscribe("ESZ6", "CME").await.unwrap();
+    session.subscribe_order_updates().await.unwrap();
+    session.subscribe_pnl().await.unwrap();
+
+    server.push(
+        Plant::Ticker,
+        &frames::last_trade("ESZ6", "CME", 5001.25, 3, 1_790_000_000),
+    );
+    assert!(matches!(
+        session.poll_event(WAIT).await.unwrap(),
+        Some(PlantEvent::LastTrade(_))
+    ));
+    let before = server.received();
+    let generation = host.generation();
+    let venue = host.state.session.as_ref().unwrap().checkout().await;
+    venue.fault_inject_drop_plant(Stream::Ticker).await.unwrap();
+
+    let interrupted = tokio::time::timeout(WAIT, events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(interrupted, SessionEvent::Interrupted { generation: g, .. } if g == generation),
+        "{interrupted:?}"
+    );
+    let resumed = tokio::time::timeout(WAIT, events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        resumed,
+        SessionEvent::Resumed {
+            generation: generation + 1
+        }
+    );
+    let after = server.received();
+    let recovery = &after[before.len()..];
+    assert_eq!(
+        recovery
+            .iter()
+            .filter(|r| r.template_id == template::LOGIN && r.plant == Some(Plant::Ticker))
+            .count(),
+        1
+    );
+    for plant in [Plant::History, Plant::Order, Plant::Pnl] {
+        assert!(
+            before
+                .iter()
+                .any(|r| r.template_id == template::LOGIN && r.plant == Some(plant)),
+            "{plant:?} was connected before the fault"
+        );
+        assert!(
+            !recovery.iter().any(|r| r.plant == Some(plant)
+                && [template::LOGIN, template::LOGOUT].contains(&r.template_id)),
+            "{plant:?} must stay connected: {recovery:?}"
+        );
+        assert_eq!(server.connections(plant), 1);
+    }
+    let subscriptions = server.received_of(template::MARKET_DATA_UPDATE);
+    assert_eq!(
+        subscriptions.len(),
+        2,
+        "initial subscribe plus exactly one restore"
+    );
+    for request in subscriptions {
+        let request: rithmic_rs::rti::RequestMarketDataUpdate = request.decode();
+        assert_eq!(request.symbol.as_deref(), Some("ESZ6"));
+        assert_eq!(request.exchange.as_deref(), Some("CME"));
+        assert_eq!(request.request, Some(1)); // SUBSCRIBE, never unsubscribe
+    }
+    server.push(
+        Plant::Ticker,
+        &frames::last_trade("ESZ6", "CME", 5002.0, 1, 1_790_000_001),
+    );
+    match session.poll_event(WAIT).await.unwrap() {
+        Some(PlantEvent::LastTrade(tick)) => {
+            assert_eq!(tick.symbol.as_deref(), Some("ESZ6"));
+            assert_eq!(tick.trade_price, Some(5002.0));
+            assert_eq!(tick.ts_event_ns, Some(1_790_000_001_000_000_000));
+        }
+        other => panic!("expected a fresh post-recovery trade, got {other:?}"),
+    }
+    host.shutdown().await;
+}

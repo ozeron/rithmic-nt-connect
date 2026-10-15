@@ -90,6 +90,15 @@ impl Drop for DisconnectGate<'_> {
 }
 
 impl RithmicVenue {
+    /// Abort the underlying plant without logout or detaching its event lane.
+    /// rithmic-rs closes the websocket and broadcasts a ConnectionError, using
+    /// the same failure path as a lost transport. No host state is changed here.
+    #[cfg(feature = "testing")]
+    pub async fn fault_inject_drop_plant(&self, plant: Stream) -> Result<()> {
+        let (_reset, inner) = self.bring_up().await;
+        inner.fault_inject_drop_plant(plant)
+    }
+
     pub fn new(config: SessionConfig, plants: PlantSet) -> Self {
         let session = Plants::with_plants(config, plants);
         let account = session.resolved_account().map(account_triple);

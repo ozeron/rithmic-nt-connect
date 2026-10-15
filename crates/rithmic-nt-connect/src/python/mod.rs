@@ -564,6 +564,8 @@ pub struct PySession {
     gateway: Option<Arc<RemoteSession>>,
     #[cfg(feature = "testing")]
     script: Option<Arc<rithmic_host::fake::FakeVenue>>,
+    #[cfg(feature = "testing")]
+    fault_venue: Option<Arc<RithmicVenue>>,
 }
 
 impl PySession {
@@ -650,6 +652,8 @@ impl PySession {
                     gateway: Some(gateway),
                     #[cfg(feature = "testing")]
                     script: None,
+                    #[cfg(feature = "testing")]
+                    fault_venue: None,
                 })
             }
             "direct" => {
@@ -699,7 +703,7 @@ impl PySession {
                     lock_filename: lock_path.file_name().map(ToOwned::to_owned),
                     ..HostOptions::default()
                 };
-                let session = py.detach(|| {
+                py.detach(|| {
                     runtime().block_on(async move {
                         let registry = REGISTRY.get_or_init(HostRegistry::default);
                         loop {
@@ -721,16 +725,24 @@ impl PySession {
                                 .await
                                 .map_err(|e| SessionLockError::new_err(e.to_string()))?;
                             if let Ok(session) = host.attach_owned() {
-                                break Ok::<_, PyErr>(Arc::new(session) as Arc<dyn Session>);
+                                break Ok(Self {
+                                    session: Arc::new(session),
+                                    gateway: None,
+                                    #[cfg(feature = "testing")]
+                                    script: None,
+                                    #[cfg(feature = "testing")]
+                                    fault_venue: Some(
+                                        host.state
+                                            .session
+                                            .as_ref()
+                                            .expect("direct venue")
+                                            .checkout()
+                                            .await,
+                                    ),
+                                });
                             }
                         }
                     })
-                })?;
-                Ok(Self {
-                    session,
-                    gateway: None,
-                    #[cfg(feature = "testing")]
-                    script: None,
                 })
             }
             other => Err(PyValueError::new_err(format!(
@@ -773,6 +785,23 @@ impl PySession {
         self.script.as_ref().map(|venue| testing::PyFakeScript {
             venue: venue.clone(),
         })
+    }
+
+    /// Dev-only transport fault; shared direct holders observe the same outage.
+    #[cfg(feature = "testing")]
+    fn _fault_drop_plant(&self, py: Python<'_>, plant: &str) -> PyResult<()> {
+        let venue = self.fault_venue.as_ref().ok_or_else(|| {
+            PyValueError::new_err("fault injection requires a real direct session; gateway and fake sessions are unsupported")
+        })?;
+        if plant != "ticker" {
+            return Err(PyValueError::new_err(
+                "fault injection supports only ticker",
+            ));
+        }
+        self.run(
+            py,
+            venue.fault_inject_drop_plant(rithmic_host::Stream::Ticker),
+        )
     }
 
     #[getter]

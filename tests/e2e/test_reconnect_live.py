@@ -1,4 +1,4 @@
-"""Live proof: ``resync_ticker_session`` restores ticker, book, and EXTERNAL bars.
+"""Live proofs: gap resync and host recovery after a direct ticker failure.
 
 Markers: ``live`` (creds), ``slow`` (~65s bar poll).
 
@@ -89,24 +89,7 @@ class TestResyncRestoresIntent:
 
 
 @pytest.fixture
-def force_live_ticker_failure() -> Callable[[], None]:
-    """Integration point for a real, ticker-only fault; never use Session.fake.
-
-    The pre-wave-5 extension exposes only reset_ticker, which explicitly resets
-    the plant rather than exercising the host's failure detector. D9 removes
-    that method and does not specify a live fault-injection hook. Replace this
-    skip with the real hook when one is available; it must affect only this
-    test's ticker connection, never a login or another process.
-    """
-    pytest.skip(
-        "needs wave 5: no live ticker-only failure hook (Session.fake is offline)"
-    )
-
-
-@pytest.fixture
-def direct_reconnect_session(
-    test_env, require_test_plant, force_live_ticker_failure, request
-):
+def direct_reconnect_session(test_env, require_test_plant, request):
     """Check Test/direct/fault-injection prerequisites before opening a login."""
     from rithmic_nt_connect.config import ConnectMode, parse_connect_mode
 
@@ -119,21 +102,25 @@ class _GenerationEvent(Protocol):
     generation: int
 
 
-def _has_session_events() -> bool:
+def _has_live_ticker_fault() -> bool:
     from rithmic_nt_connect._lib import Session
 
-    return hasattr(Session, "subscribe_session_events")
+    return hasattr(Session, "_fault_drop_plant") and hasattr(
+        Session, "subscribe_session_events"
+    )
 
 
 @pytest.mark.slow
-@pytest.mark.skipif(not _has_session_events(), reason="needs wave 5")
+@pytest.mark.skipif(
+    not _has_live_ticker_fault(),
+    reason="requires testing-only Session._fault_drop_plant; absent in release wheels",
+)
 def test_direct_ticker_failure_restores_intent(
-    direct_reconnect_session, force_live_ticker_failure, request
+    direct_reconnect_session, request
 ) -> None:
     """D9: observe Interrupted then Resumed and fresh ticks without re-subscribing.
 
-    This contract is deliberately skipped until a real ticker failure can be
-    injected. Session.fake would prove an offline scenario, not live recovery.
+    The testing-only hook aborts the real rithmic-rs ticker websocket actor.
     The market-data-only fixture never opens gates or starts order/PnL plants;
     their reconnect counters cannot be observed with today's live hooks.
     """
@@ -167,7 +154,7 @@ def test_direct_ticker_failure_restores_intent(
         )
         # Fresh venue time prevents a buffered pre-failure tick from passing.
         failure_time_ns = time.time_ns()
-        force_live_ticker_failure()
+        session._fault_drop_plant("ticker")
 
         interrupted = None
         resumed = None
