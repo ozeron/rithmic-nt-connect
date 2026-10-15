@@ -10,6 +10,8 @@ cargo build -p rithmic-loadtest --release
 ./target/release/rithmic-load suite --full --out docs/perf/report.json   # spec durations (30 s flood, 10 min soak)
 ./target/release/rithmic-load smoke                                      # CI subset, ~25 s, exits non-zero on failure
 ./target/release/rithmic-load run flood_10k_4conn_1session --rate 20000 --secs 10
+./target/release/rithmic-load run direct_hop_venue --events 200000 --out target/venue.json
+./target/release/rithmic-load run direct_hop_host --events 200000 --out target/host.json
 RITHMIC_PERF=1 uv run pytest tests/test_perf_ffi_throughput.py -s         # S7: Python boundary
 ```
 
@@ -17,7 +19,18 @@ Reading a report: `min_delivered_ratio` is received/sent for the slowest reading
 consumer at the end of the drain window (a ratio below 1 with no gap means the
 events were still queued, not lost). `latency` is creation-to-delivery. Order
 latency is measured open-loop: a place+cancel pair starts every 20 ms whether or
-not the previous one finished. `allocs_per_event` is the server publish path only.
+not the previous one finished. `allocs_per_event` counts only the server publish
+path for `alloc_publish_*`; for `direct_hop_*` it covers the whole measured loop
+(fixture creation, publish, delivery and accounting).
+
+`direct_hop_venue` / `direct_hop_host` compare the same fake's own ticker stream
+with delivery through `SessionHost<FakeVenue>` / `LocalSession`. They use unpaced
+bursts of at most 1,024 events, fully drained before the next burst, and default
+to 200,000 measured events (`--events`), after 8,192 warmup events. Throughput is
+received/actual elapsed time; latency ends at the batched `next_events` return.
+This Rust-only hop proxy does not measure Python FFI throughput. See
+[the five-round comparison and limitations](2026-10-15-direct-hop.md) and its
+[raw JSON](2026-10-15-direct-hop.json).
 
 All parties share one process and CPU, so absolute numbers are conservative; compare
 runs on the same machine.

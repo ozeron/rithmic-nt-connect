@@ -1,0 +1,742 @@
+[
+  {
+    "scenario": "direct_hop_venue",
+    "params": {
+      "batch": 1024,
+      "events": 200000,
+      "max_in_flight": 1024,
+      "path": "venue",
+      "timeout_s": 10,
+      "warmup_events": 8192,
+      "measurement": {
+        "round": 1,
+        "position": 1,
+        "started_utc": "2026-10-15T14:23:53.668873+00:00",
+        "loadavg_before": [
+          13.126953125,
+          8.44189453125,
+          7.1904296875
+        ],
+        "loadavg_after": [
+          13.126953125,
+          8.44189453125,
+          7.1904296875
+        ],
+        "source_revision": "c76859b53dc0d9f817cd1b387f41d22b1e2ad787",
+        "binary_sha256": "808b4ea336a5a47c5b72e8bb599730f28249ed90741ea12de4f65e93ef401909",
+        "build_processes_before_after": []
+      }
+    },
+    "duration_s": 0.034955041,
+    "sent": 200000,
+    "conns": [
+      {
+        "kind": "venue",
+        "received": 200000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 200000,
+          "p50_us": 107,
+          "p99_us": 152,
+          "p999_us": 168,
+          "max_us": 181
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 5721635.400170179,
+    "latency": {
+      "count": 200000,
+      "p50_us": 107,
+      "p99_us": 152,
+      "p999_us": 168,
+      "max_us": 181
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 8656,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": 2.038105,
+    "alloc_bytes_per_event": 1479.21504,
+    "notes": [
+      "Rust-only direct-hop proxy; no Python/FFI, socket, credentials or live plants",
+      "unpaced 1024-event bursts, each fully drained before the next; setup and warmup excluded",
+      "throughput and process-global allocations include fixture creation, publish, delivery and histogram/sequence accounting",
+      "latency: fixture publish timestamp to next_events return, histogram resolution 1 us; RSS is process peak including setup/warmup"
+    ]
+  },
+  {
+    "scenario": "direct_hop_host",
+    "params": {
+      "batch": 1024,
+      "events": 200000,
+      "max_in_flight": 1024,
+      "path": "host",
+      "timeout_s": 10,
+      "warmup_events": 8192,
+      "measurement": {
+        "round": 1,
+        "position": 2,
+        "started_utc": "2026-10-15T14:23:53.766771+00:00",
+        "loadavg_before": [
+          13.126953125,
+          8.44189453125,
+          7.1904296875
+        ],
+        "loadavg_after": [
+          13.126953125,
+          8.44189453125,
+          7.1904296875
+        ],
+        "source_revision": "c76859b53dc0d9f817cd1b387f41d22b1e2ad787",
+        "binary_sha256": "808b4ea336a5a47c5b72e8bb599730f28249ed90741ea12de4f65e93ef401909",
+        "build_processes_before_after": []
+      }
+    },
+    "duration_s": 0.091807875,
+    "sent": 200000,
+    "conns": [
+      {
+        "kind": "host",
+        "received": 200000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 200000,
+          "p50_us": 206,
+          "p99_us": 367,
+          "p999_us": 435,
+          "max_us": 460
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 2178462.359574274,
+    "latency": {
+      "count": 200000,
+      "p50_us": 206,
+      "p99_us": 367,
+      "p999_us": 435,
+      "max_us": 460
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 15424,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": 5.65284,
+    "alloc_bytes_per_event": 3824.02016,
+    "notes": [
+      "Rust-only direct-hop proxy; no Python/FFI, socket, credentials or live plants",
+      "unpaced 1024-event bursts, each fully drained before the next; setup and warmup excluded",
+      "throughput and process-global allocations include fixture creation, publish, delivery and histogram/sequence accounting",
+      "latency: fixture publish timestamp to next_events return, histogram resolution 1 us; RSS is process peak including setup/warmup"
+    ]
+  },
+  {
+    "scenario": "direct_hop_host",
+    "params": {
+      "batch": 1024,
+      "events": 200000,
+      "max_in_flight": 1024,
+      "path": "host",
+      "timeout_s": 10,
+      "warmup_events": 8192,
+      "measurement": {
+        "round": 2,
+        "position": 1,
+        "started_utc": "2026-10-15T14:23:53.920297+00:00",
+        "loadavg_before": [
+          13.126953125,
+          8.44189453125,
+          7.1904296875
+        ],
+        "loadavg_after": [
+          13.126953125,
+          8.44189453125,
+          7.1904296875
+        ],
+        "source_revision": "c76859b53dc0d9f817cd1b387f41d22b1e2ad787",
+        "binary_sha256": "808b4ea336a5a47c5b72e8bb599730f28249ed90741ea12de4f65e93ef401909",
+        "build_processes_before_after": []
+      }
+    },
+    "duration_s": 0.089363833,
+    "sent": 200000,
+    "conns": [
+      {
+        "kind": "host",
+        "received": 200000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 200000,
+          "p50_us": 201,
+          "p99_us": 297,
+          "p999_us": 315,
+          "max_us": 332
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 2238041.8709210916,
+    "latency": {
+      "count": 200000,
+      "p50_us": 201,
+      "p99_us": 297,
+      "p999_us": 315,
+      "max_us": 332
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 14912,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": 5.646535,
+    "alloc_bytes_per_event": 3806.20268,
+    "notes": [
+      "Rust-only direct-hop proxy; no Python/FFI, socket, credentials or live plants",
+      "unpaced 1024-event bursts, each fully drained before the next; setup and warmup excluded",
+      "throughput and process-global allocations include fixture creation, publish, delivery and histogram/sequence accounting",
+      "latency: fixture publish timestamp to next_events return, histogram resolution 1 us; RSS is process peak including setup/warmup"
+    ]
+  },
+  {
+    "scenario": "direct_hop_venue",
+    "params": {
+      "batch": 1024,
+      "events": 200000,
+      "max_in_flight": 1024,
+      "path": "venue",
+      "timeout_s": 10,
+      "warmup_events": 8192,
+      "measurement": {
+        "round": 2,
+        "position": 2,
+        "started_utc": "2026-10-15T14:23:54.072738+00:00",
+        "loadavg_before": [
+          13.126953125,
+          8.44189453125,
+          7.1904296875
+        ],
+        "loadavg_after": [
+          13.126953125,
+          8.44189453125,
+          7.1904296875
+        ],
+        "source_revision": "c76859b53dc0d9f817cd1b387f41d22b1e2ad787",
+        "binary_sha256": "808b4ea336a5a47c5b72e8bb599730f28249ed90741ea12de4f65e93ef401909",
+        "build_processes_before_after": []
+      }
+    },
+    "duration_s": 0.033605792,
+    "sent": 200000,
+    "conns": [
+      {
+        "kind": "venue",
+        "received": 200000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 200000,
+          "p50_us": 103,
+          "p99_us": 144,
+          "p999_us": 149,
+          "max_us": 156
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 5951355.052129108,
+    "latency": {
+      "count": 200000,
+      "p50_us": 103,
+      "p99_us": 144,
+      "p999_us": 149,
+      "max_us": 156
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 8688,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": 2.038105,
+    "alloc_bytes_per_event": 1479.21504,
+    "notes": [
+      "Rust-only direct-hop proxy; no Python/FFI, socket, credentials or live plants",
+      "unpaced 1024-event bursts, each fully drained before the next; setup and warmup excluded",
+      "throughput and process-global allocations include fixture creation, publish, delivery and histogram/sequence accounting",
+      "latency: fixture publish timestamp to next_events return, histogram resolution 1 us; RSS is process peak including setup/warmup"
+    ]
+  },
+  {
+    "scenario": "direct_hop_venue",
+    "params": {
+      "batch": 1024,
+      "events": 200000,
+      "max_in_flight": 1024,
+      "path": "venue",
+      "timeout_s": 10,
+      "warmup_events": 8192,
+      "measurement": {
+        "round": 3,
+        "position": 1,
+        "started_utc": "2026-10-15T14:23:54.164236+00:00",
+        "loadavg_before": [
+          13.126953125,
+          8.44189453125,
+          7.1904296875
+        ],
+        "loadavg_after": [
+          13.126953125,
+          8.44189453125,
+          7.1904296875
+        ],
+        "source_revision": "c76859b53dc0d9f817cd1b387f41d22b1e2ad787",
+        "binary_sha256": "808b4ea336a5a47c5b72e8bb599730f28249ed90741ea12de4f65e93ef401909",
+        "build_processes_before_after": []
+      }
+    },
+    "duration_s": 0.033337417,
+    "sent": 200000,
+    "conns": [
+      {
+        "kind": "venue",
+        "received": 200000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 200000,
+          "p50_us": 102,
+          "p99_us": 143,
+          "p999_us": 151,
+          "max_us": 159
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 5999265.030041169,
+    "latency": {
+      "count": 200000,
+      "p50_us": 102,
+      "p99_us": 143,
+      "p999_us": 151,
+      "max_us": 159
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 8704,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": 2.038105,
+    "alloc_bytes_per_event": 1479.21504,
+    "notes": [
+      "Rust-only direct-hop proxy; no Python/FFI, socket, credentials or live plants",
+      "unpaced 1024-event bursts, each fully drained before the next; setup and warmup excluded",
+      "throughput and process-global allocations include fixture creation, publish, delivery and histogram/sequence accounting",
+      "latency: fixture publish timestamp to next_events return, histogram resolution 1 us; RSS is process peak including setup/warmup"
+    ]
+  },
+  {
+    "scenario": "direct_hop_host",
+    "params": {
+      "batch": 1024,
+      "events": 200000,
+      "max_in_flight": 1024,
+      "path": "host",
+      "timeout_s": 10,
+      "warmup_events": 8192,
+      "measurement": {
+        "round": 3,
+        "position": 2,
+        "started_utc": "2026-10-15T14:23:54.255913+00:00",
+        "loadavg_before": [
+          13.126953125,
+          8.44189453125,
+          7.1904296875
+        ],
+        "loadavg_after": [
+          13.126953125,
+          8.44189453125,
+          7.1904296875
+        ],
+        "source_revision": "c76859b53dc0d9f817cd1b387f41d22b1e2ad787",
+        "binary_sha256": "808b4ea336a5a47c5b72e8bb599730f28249ed90741ea12de4f65e93ef401909",
+        "build_processes_before_after": []
+      }
+    },
+    "duration_s": 0.088172041,
+    "sent": 200000,
+    "conns": [
+      {
+        "kind": "host",
+        "received": 200000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 200000,
+          "p50_us": 205,
+          "p99_us": 291,
+          "p999_us": 306,
+          "max_us": 318
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 2268292.734654968,
+    "latency": {
+      "count": 200000,
+      "p50_us": 205,
+      "p99_us": 291,
+      "p999_us": 306,
+      "max_us": 318
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 14928,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": 5.58067,
+    "alloc_bytes_per_event": 3770.26132,
+    "notes": [
+      "Rust-only direct-hop proxy; no Python/FFI, socket, credentials or live plants",
+      "unpaced 1024-event bursts, each fully drained before the next; setup and warmup excluded",
+      "throughput and process-global allocations include fixture creation, publish, delivery and histogram/sequence accounting",
+      "latency: fixture publish timestamp to next_events return, histogram resolution 1 us; RSS is process peak including setup/warmup"
+    ]
+  },
+  {
+    "scenario": "direct_hop_host",
+    "params": {
+      "batch": 1024,
+      "events": 200000,
+      "max_in_flight": 1024,
+      "path": "host",
+      "timeout_s": 10,
+      "warmup_events": 8192,
+      "measurement": {
+        "round": 4,
+        "position": 1,
+        "started_utc": "2026-10-15T14:23:54.405014+00:00",
+        "loadavg_before": [
+          13.126953125,
+          8.44189453125,
+          7.1904296875
+        ],
+        "loadavg_after": [
+          13.126953125,
+          8.44189453125,
+          7.1904296875
+        ],
+        "source_revision": "c76859b53dc0d9f817cd1b387f41d22b1e2ad787",
+        "binary_sha256": "808b4ea336a5a47c5b72e8bb599730f28249ed90741ea12de4f65e93ef401909",
+        "build_processes_before_after": []
+      }
+    },
+    "duration_s": 0.090889333,
+    "sent": 200000,
+    "conns": [
+      {
+        "kind": "host",
+        "received": 200000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 200000,
+          "p50_us": 203,
+          "p99_us": 301,
+          "p999_us": 320,
+          "max_us": 349
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 2200478.2453404074,
+    "latency": {
+      "count": 200000,
+      "p50_us": 203,
+      "p99_us": 301,
+      "p999_us": 320,
+      "max_us": 349
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 14368,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": 5.68243,
+    "alloc_bytes_per_event": 3829.59604,
+    "notes": [
+      "Rust-only direct-hop proxy; no Python/FFI, socket, credentials or live plants",
+      "unpaced 1024-event bursts, each fully drained before the next; setup and warmup excluded",
+      "throughput and process-global allocations include fixture creation, publish, delivery and histogram/sequence accounting",
+      "latency: fixture publish timestamp to next_events return, histogram resolution 1 us; RSS is process peak including setup/warmup"
+    ]
+  },
+  {
+    "scenario": "direct_hop_venue",
+    "params": {
+      "batch": 1024,
+      "events": 200000,
+      "max_in_flight": 1024,
+      "path": "venue",
+      "timeout_s": 10,
+      "warmup_events": 8192,
+      "measurement": {
+        "round": 4,
+        "position": 2,
+        "started_utc": "2026-10-15T14:23:54.557721+00:00",
+        "loadavg_before": [
+          13.126953125,
+          8.44189453125,
+          7.1904296875
+        ],
+        "loadavg_after": [
+          13.126953125,
+          8.44189453125,
+          7.1904296875
+        ],
+        "source_revision": "c76859b53dc0d9f817cd1b387f41d22b1e2ad787",
+        "binary_sha256": "808b4ea336a5a47c5b72e8bb599730f28249ed90741ea12de4f65e93ef401909",
+        "build_processes_before_after": []
+      }
+    },
+    "duration_s": 0.033838792,
+    "sent": 200000,
+    "conns": [
+      {
+        "kind": "venue",
+        "received": 200000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 200000,
+          "p50_us": 104,
+          "p99_us": 145,
+          "p999_us": 149,
+          "max_us": 154
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 5910376.469703765,
+    "latency": {
+      "count": 200000,
+      "p50_us": 104,
+      "p99_us": 145,
+      "p999_us": 149,
+      "max_us": 154
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 8688,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": 2.038105,
+    "alloc_bytes_per_event": 1479.21504,
+    "notes": [
+      "Rust-only direct-hop proxy; no Python/FFI, socket, credentials or live plants",
+      "unpaced 1024-event bursts, each fully drained before the next; setup and warmup excluded",
+      "throughput and process-global allocations include fixture creation, publish, delivery and histogram/sequence accounting",
+      "latency: fixture publish timestamp to next_events return, histogram resolution 1 us; RSS is process peak including setup/warmup"
+    ]
+  },
+  {
+    "scenario": "direct_hop_venue",
+    "params": {
+      "batch": 1024,
+      "events": 200000,
+      "max_in_flight": 1024,
+      "path": "venue",
+      "timeout_s": 10,
+      "warmup_events": 8192,
+      "measurement": {
+        "round": 5,
+        "position": 1,
+        "started_utc": "2026-10-15T14:23:54.651769+00:00",
+        "loadavg_before": [
+          13.126953125,
+          8.44189453125,
+          7.1904296875
+        ],
+        "loadavg_after": [
+          13.126953125,
+          8.44189453125,
+          7.1904296875
+        ],
+        "source_revision": "c76859b53dc0d9f817cd1b387f41d22b1e2ad787",
+        "binary_sha256": "808b4ea336a5a47c5b72e8bb599730f28249ed90741ea12de4f65e93ef401909",
+        "build_processes_before_after": []
+      }
+    },
+    "duration_s": 0.0335005,
+    "sent": 200000,
+    "conns": [
+      {
+        "kind": "venue",
+        "received": 200000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 200000,
+          "p50_us": 103,
+          "p99_us": 150,
+          "p999_us": 254,
+          "max_us": 270
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 5970060.148355994,
+    "latency": {
+      "count": 200000,
+      "p50_us": 103,
+      "p99_us": 150,
+      "p999_us": 254,
+      "max_us": 270
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 9216,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": 2.038105,
+    "alloc_bytes_per_event": 1479.21504,
+    "notes": [
+      "Rust-only direct-hop proxy; no Python/FFI, socket, credentials or live plants",
+      "unpaced 1024-event bursts, each fully drained before the next; setup and warmup excluded",
+      "throughput and process-global allocations include fixture creation, publish, delivery and histogram/sequence accounting",
+      "latency: fixture publish timestamp to next_events return, histogram resolution 1 us; RSS is process peak including setup/warmup"
+    ]
+  },
+  {
+    "scenario": "direct_hop_host",
+    "params": {
+      "batch": 1024,
+      "events": 200000,
+      "max_in_flight": 1024,
+      "path": "host",
+      "timeout_s": 10,
+      "warmup_events": 8192,
+      "measurement": {
+        "round": 5,
+        "position": 2,
+        "started_utc": "2026-10-15T14:23:54.743767+00:00",
+        "loadavg_before": [
+          13.126953125,
+          8.44189453125,
+          7.1904296875
+        ],
+        "loadavg_after": [
+          13.126953125,
+          8.44189453125,
+          7.1904296875
+        ],
+        "source_revision": "c76859b53dc0d9f817cd1b387f41d22b1e2ad787",
+        "binary_sha256": "808b4ea336a5a47c5b72e8bb599730f28249ed90741ea12de4f65e93ef401909",
+        "build_processes_before_after": []
+      }
+    },
+    "duration_s": 0.092812542,
+    "sent": 200000,
+    "conns": [
+      {
+        "kind": "host",
+        "received": 200000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 200000,
+          "p50_us": 202,
+          "p99_us": 569,
+          "p999_us": 855,
+          "max_us": 929
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 2154881.1797440047,
+    "latency": {
+      "count": 200000,
+      "p50_us": 202,
+      "p99_us": 569,
+      "p999_us": 855,
+      "max_us": 929
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 15424,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": 5.56783,
+    "alloc_bytes_per_event": 3793.52672,
+    "notes": [
+      "Rust-only direct-hop proxy; no Python/FFI, socket, credentials or live plants",
+      "unpaced 1024-event bursts, each fully drained before the next; setup and warmup excluded",
+      "throughput and process-global allocations include fixture creation, publish, delivery and histogram/sequence accounting",
+      "latency: fixture publish timestamp to next_events return, histogram resolution 1 us; RSS is process peak including setup/warmup"
+    ]
+  }
+]
