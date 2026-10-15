@@ -69,3 +69,18 @@ def test_built_wheels_never_contain_the_fake_gateway() -> None:
         if wheel.name.startswith("rithmic_gateway-") and not editable:
             assert [n for n in names if n.endswith("/scripts/rithmic-gateway")], wheel
             assert "rithmic_gateway/client.py" in names, wheel
+
+
+def test_session_fake_is_dev_only_and_release_wheel_features_exclude_testing() -> None:
+    cfg = _toml(REPO_ROOT / "pyproject.toml")
+    assert cfg["tool"]["maturin"]["features"] == ["python", "extension-module"]
+    assert cfg["tool"]["uv"]["config-settings"] == {
+        "build-args": "--features python,extension-module,testing"
+    }
+    cargo = _toml(REPO_ROOT / "crates" / "rithmic-nt-connect" / "Cargo.toml")
+    assert cargo["features"]["default"] == []
+    assert cargo["features"]["testing"] == ["rithmic-host/testing"]
+    workflow = (REPO_ROOT / ".github" / "workflows" / "wheels.yml").read_text()
+    build = workflow.split("- name: Build rithmic-nt-connect")[1].split("- name:")[0]
+    assert "--features" not in build and "testing" not in build
+    assert "assert not hasattr(_lib.Session, 'fake')" in workflow

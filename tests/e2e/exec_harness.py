@@ -12,7 +12,6 @@ venue-conditional skip rule (market closed / permission denied / not entitled).
 
 from __future__ import annotations
 
-import contextlib
 import threading
 import time
 
@@ -175,7 +174,6 @@ class ExecHarness:
         self._assert_no_residual_exposure()
         # A failed dispose is a teardown failure — do not swallow it.
         self.node.dispose()
-        self._release_session_locks()
 
     def _assert_no_residual_exposure(self) -> None:
         """Fail loudly if ``on_stop`` left driver-owned orders/positions behind."""
@@ -187,18 +185,6 @@ class ExecHarness:
                 f"{len(open_orders)} open order(s), {len(open_positions)} open "
                 f"position(s)"
             )
-
-    def _release_session_locks(self) -> None:
-        """Release the credential flock (``disconnect()`` does not); best-effort."""
-        with contextlib.suppress(Exception):
-            from rithmic_nt_connect.session import _SESSION_CACHE
-
-            for _sess in _SESSION_CACHE.values():
-                _lock = getattr(_sess, "_lock", None)
-                if _lock is not None:
-                    with contextlib.suppress(Exception):
-                        _lock.close()
-            _SESSION_CACHE.clear()
 
     # -- reconciliation ---------------------------------------------------------
     def check_orders_consistency(self, timeout_secs: float = 20.0) -> list[object]:

@@ -2,6 +2,7 @@
 use super::{common::*, Duration};
 use async_trait::async_trait;
 use rithmic_gateway::client::{GatewayConfig, RemoteSession};
+use rithmic_host::Venue;
 use rithmic_host::{
     fake::FakeVenue, HistoryPolicy, ParentGates, Session, SessionHost, Timing, VenueHandle,
 };

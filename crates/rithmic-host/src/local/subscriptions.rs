@@ -576,7 +576,7 @@ pub(super) async fn subscribe_order_plant_stream<V: Venue + ?Sized + 'static>(
     denied_msg: &str,
     want_brackets: bool,
 ) -> Result<()> {
-    if !state.gates.trading_enabled {
+    if !state.gates.snapshot().trading {
         return Err(gate_error("trading_disabled", denied_msg));
     }
 
@@ -726,7 +726,7 @@ pub(super) async fn disconnect_order<V: Venue + ?Sized + 'static>(
     Ok(())
 }
 
-pub(super) async fn reset_ticker_plant<V: Venue + ?Sized + 'static>(
+pub(crate) async fn reset_ticker_plant<V: Venue + ?Sized + 'static>(
     state: &HostState<V>,
 ) -> Result<()> {
     let Some(session) = &state.session else {

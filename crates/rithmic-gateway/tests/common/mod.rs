@@ -2,6 +2,7 @@
 //! (`FakeParent`) and a scriptable mock parent (`MockParent`).
 #![allow(dead_code, clippy::large_enum_variant)]
 
+use rithmic_host::Venue;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -119,7 +120,6 @@ fn connection(
 
 impl FakeParent {
     pub async fn start(opts: Opts) -> Self {
-        use rithmic_host::Session;
         let user = unique_user("fake");
         let fake = Arc::new(rithmic_host::fake::FakeVenue::new());
         fake.connect().await.unwrap();

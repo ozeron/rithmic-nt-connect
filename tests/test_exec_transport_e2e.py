@@ -68,7 +68,11 @@ from rithmic_nt_connect.errors import (
 )
 from rithmic_nt_connect.execution import RithmicExecutionClient
 from rithmic_nt_connect.recon import drain_for
-from rithmic_nt_connect.session import WireSession
+from rithmic_nt_connect.session import (
+    WireSession,
+    _FlockedDirectSession,
+    _RustGatewaySession,
+)
 
 
 def _client() -> _TestClient:
@@ -92,6 +96,7 @@ def _trading_client(
     client._config_local = cast(
         Any, SimpleNamespace(enable_trading=enable_trading, soft_fail_pnl=False)
     )
+    client._cancel_all_requested = False
     client._order_plant = OrderPlantPolicy(plant_state)
     client._pnl_snapshot_observed = asyncio.Event()
     client._session = cast(WireSession, session or FaultInjectingSession())
@@ -717,19 +722,17 @@ def test_transport_generation_bump_schedules_l3_rearm(
         client._loop = loop  # type: ignore[attr-defined]
         from rithmic_nt_connect.transport import (
             TransportDown,
-            TransportFault,
-            TransportFaultKind,
             TransportUp,
         )
 
         client._recovery.on_event(
             TransportDown(
-                gen=1,
-                fault=TransportFault(kind=TransportFaultKind.UNIX_EOF, observed_gen=1),
+                generation=1,
+                cause="socket closed",
             )
         )
         assert client._order_plant.state is OrderPlantState.LATCHED
-        client._recovery.on_event(TransportUp(gen=2))
+        client._recovery.on_event(TransportUp(generation=2))
         await asyncio.sleep(0)
         task = client._recovery.task
         assert task is not None
@@ -742,6 +745,7 @@ def test_transport_generation_bump_schedules_l3_rearm(
     assert "load_orders" in session.calls
     # The parent restored the order intent: the shared venue plant is not torn down.
     assert "disconnect_order_plant" not in session.calls
+    assert "disconnect_pnl_plant" not in session.calls
 
 
 def test_order_gap_rereads_venue_state_without_tearing_the_plant_down(
@@ -797,13 +801,11 @@ def _restore_client(
 def _transport_down(gen: int = 1) -> Any:
     from rithmic_nt_connect.transport import (
         TransportDown,
-        TransportFault,
-        TransportFaultKind,
     )
 
     return TransportDown(
-        gen=gen,
-        fault=TransportFault(kind=TransportFaultKind.UNIX_EOF, observed_gen=gen),
+        generation=gen,
+        cause="socket closed",
     )
 
 
@@ -814,7 +816,7 @@ def test_recovery_failed_latches_the_order_plant(
 
     client = _restore_client(_ConnectSession(fail_load_orders=False), monkeypatch)
 
-    client._recovery.on_event(RecoveryFailed(gen=2, attempts=3, cause=None))
+    client._recovery.on_event(RecoveryFailed(generation=2, attempts=3, cause=None))
 
     assert client._order_plant.state is OrderPlantState.LATCHED
 
@@ -831,7 +833,7 @@ def test_up_while_a_restore_is_in_flight_is_dropped(
         client._loop = asyncio.get_running_loop()  # type: ignore[attr-defined]
         in_flight = asyncio.get_running_loop().create_future()
         client._recovery.task = cast(Any, in_flight)
-        client._recovery.on_event(TransportUp(gen=3))
+        client._recovery.on_event(TransportUp(generation=3))
         await asyncio.sleep(0)
         assert client._recovery.task is in_flight
 
@@ -857,7 +859,7 @@ def test_restore_exhaustion_leaves_the_plant_latched(
     async def _run() -> None:
         client._loop = asyncio.get_running_loop()  # type: ignore[attr-defined]
         client._recovery.on_event(_transport_down())
-        client._recovery.on_event(TransportUp(gen=2))
+        client._recovery.on_event(TransportUp(generation=2))
         await real_sleep(0)
         task = client._recovery.task
         assert task is not None
@@ -879,7 +881,7 @@ def test_restore_is_skipped_when_trading_is_disabled(
     async def _run() -> None:
         client._loop = asyncio.get_running_loop()  # type: ignore[attr-defined]
         client._recovery.on_event(_transport_down())
-        client._recovery.on_event(TransportUp(gen=2))
+        client._recovery.on_event(TransportUp(generation=2))
         await asyncio.sleep(0)
         task = client._recovery.task
         assert task is not None
@@ -907,7 +909,7 @@ def test_exec_restores_once_per_generation(
         client._loop = asyncio.get_running_loop()  # type: ignore[attr-defined]
         for gen in (2, 2, 3):
             client._recovery.on_event(_transport_down(gen - 1))
-            client._recovery.on_event(TransportUp(gen=gen))
+            client._recovery.on_event(TransportUp(generation=gen))
             await asyncio.sleep(0)
             task = client._recovery.task
             assert task is not None
@@ -924,11 +926,11 @@ class _UnsubscribeCounting(_ConnectSession):
         super().__init__(fail_load_orders=False)
         self.unsubscribed = 0
 
-    def subscribe_transport_events(self, listener: Any) -> Any:
+    def subscribe_session_events(self, listener: Any) -> Any:
         def _unsubscribe() -> None:
             self.unsubscribed += 1
 
-        return _unsubscribe
+        return SimpleNamespace(cancel=_unsubscribe)
 
     def disconnect(self) -> None:
         self.calls.append("disconnect")
@@ -2538,3 +2540,41 @@ def test_a_failed_connect_leaves_no_poller_or_listener(
 
     asyncio.run(run())
     assert detached == [1]
+
+
+@pytest.mark.parametrize("mode", ["direct", "gateway"])
+@pytest.mark.parametrize("enable_trading", [False, True])
+@pytest.mark.parametrize("granted", [False, True])
+def test_exec_requests_gates_and_warns_when_trading_denied(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    enable_trading: bool,
+    granted: bool,
+) -> None:
+    calls: list[tuple[bool, bool]] = []
+
+    class Session(_ConnectSession):
+        def open_gates(self, trading: bool, cancel_all: bool) -> Any:
+            assert "connect" in self.calls, "gates require completed handshake"
+            calls.append((trading, cancel_all))
+            return SimpleNamespace(trading=granted, cancel_all=cancel_all)
+
+    client = _connect_client(Session(fail_load_orders=False), monkeypatch)
+    client._config_local = cast(
+        Any, SimpleNamespace(enable_trading=enable_trading, soft_fail_pnl=False)
+    )
+    client._cancel_all_requested = True
+    monkeypatch.setenv("RITHMIC_GATEWAY_CANCEL_ALL", "0")
+    inner = client._session
+    client._session = cast(
+        WireSession,
+        _FlockedDirectSession(inner)
+        if mode == "direct"
+        else _RustGatewaySession(inner),
+    )
+    log = _CaptureLog()
+    client._log = log
+    asyncio.run(client._connect())
+    assert calls == [(enable_trading, True)]
+    denied = [m for m in log.messages if "trading requested but not granted" in m]
+    assert bool(denied) is (enable_trading and not granted)

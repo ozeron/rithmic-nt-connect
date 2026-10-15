@@ -21,7 +21,6 @@ and plant recovery. It drives `Venue` (`backend.rs`), implemented by
 (`crates/rithmic-gateway/src/client`) attaches over a socket. The gateway parent
 uses the same host, with a `LocalSession` per connection.
 
-<!-- after wave 5 -->
 The PyO3 `Session` attaches through `LocalSession` in direct mode or
 `RemoteSession` in gateway mode. Both expose the same consumer surface,
 including fill-history and order-history queries (one-shot, trading-gated reads).
@@ -52,9 +51,8 @@ Plant RPCs are **not** all the same shape. Shipping a new stream as a bare `sess
 
 Every RPC also declares a **lane** in the host table. Gateway connections serve the **command** lane (subscriptions and state-changing requests) one at a time in arrival order; the **slow** lane (history, order/fill-history, reference-data, front-month and resolved-account reads) runs a few at a time and replies as each finishes. New RPCs default to command; set `Lane::Slow` on a read that can take seconds. `crates/rithmic-host/tests/lanes.rs` guards classification; `crates/rithmic-gateway/tests/lanes.rs` guards transport scheduling. Never put a request that mutates attachment intent state on the slow lane. Local calls need no transport lanes.
 
-**Recovery.** The host pump (`crates/rithmic-host/src/pump.rs`) recovers plants and restores intents in both attachment modes. `SessionEvent` (`events.rs`) reports `Interrupted`, then `Resumed { generation }` after restore, or `RecoveryFailed` when bounded recovery fails. On socket loss, `RemoteSession` re-attaches and re-joins its recorded intents before reporting `Resumed`; one-shot commands stay unknown after send and are never replayed.
+**Recovery.** The host pump (`crates/rithmic-host/src/pump.rs`) recovers plants and restores intents in both attachment modes. `SessionEvent` (`events.rs`) reports `Interrupted`, then `Resumed { generation }` after restore, or `RecoveryFailed` when bounded recovery fails. On socket loss, `RemoteSession` re-attaches and re-joins its recorded intents before reporting `Resumed`; one-shot commands stay unknown after send and are never replayed. A stream `gap` re-joins only that consumer's intent; `ResetTickerPlantRequest` remains on the wire only as a compatibility RPC for older clients.
 
-<!-- after wave 5 -->
 Adapter consumers only reconcile on `Interrupted` / `Resumed` / `RecoveryFailed`:
 exec disarms, drains working orders and waits for the PnL barrier before re-arming;
 data reconciles books / bars on a gap. No adapter `reset_ticker` or recovery replay.
@@ -164,13 +162,13 @@ Gateway client / wire tests need the plants/gateway crates, a system `protoc`
 the protobuf Python package (core dep):
 
 ```bash
-uv sync --extra dev
+uv sync --extra dev  # editable extension includes testing; release maturin features do not
 # Rust: fmt (hk pre-commit/check only) + clippy (-D warnings) + tests (hk check
 # + CI). clippy is the Rust analog of `ruff check`; `cargo fmt --check` runs
 # locally via the hk hooks but is NOT a CI gate (the pre-commit hook enforces it).
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test -p rithmic-plants -p rithmic-gateway -p rithmic-exec -p rithmic-nt-connect
+cargo test -p rithmic-host -p rithmic-plants -p rithmic-gateway -p rithmic-exec -p rithmic-nt-connect --features rithmic-gateway/testing,rithmic-host/testing
 uv run ruff check .
 uv run ruff format --check .
 uv run ty check python/rithmic_nt_connect python/rithmic_gateway tests

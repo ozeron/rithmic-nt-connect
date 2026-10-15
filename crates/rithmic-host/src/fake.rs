@@ -59,6 +59,7 @@ impl FakeFailure {
 #[derive(Default)]
 struct State {
     connected: bool,
+    plants: PlantSet,
     pnl_plant: bool,
     order_plant: bool,
     /// Feeding side of each attached lane.
@@ -286,6 +287,10 @@ impl Venue for FakeVenue {
         state.order_closed = false;
         self.attach(&mut state, Stream::Ticker);
         self.attach(&mut state, Stream::History);
+        if state.plants.pnl && state.account.is_some() {
+            state.pnl_plant = true;
+            self.attach(&mut state, Stream::Pnl);
+        }
         Ok(())
     }
 
@@ -311,7 +316,14 @@ impl Venue for FakeVenue {
     }
 
     async fn request_plants(&self, extra: PlantSet) -> Result<()> {
-        self.note("request_plants", &format!("{extra:?}"))?;
+        let mut state = self.enter("request_plants", &format!("{extra:?}"))?;
+        state.plants.ticker |= extra.ticker;
+        state.plants.history |= extra.history;
+        state.plants.pnl |= extra.pnl;
+        if state.connected && state.plants.pnl && state.account.is_some() {
+            state.pnl_plant = true;
+            self.attach(&mut state, Stream::Pnl);
+        }
         Ok(())
     }
 

@@ -16,6 +16,7 @@
 
 mod root_config;
 
+use rithmic_host::Venue;
 use std::sync::Arc;
 
 use rithmic_gateway::env_keys::{self, process_env_first};
@@ -25,7 +26,6 @@ use rithmic_gateway::server::{run_gateway, Fingerprint, GatewayParams, SessionHa
 use rithmic_gateway::singleton::{SessionLock, STARTUP_LOCK_GRACE};
 use rithmic_gateway::testing::serve_control;
 use rithmic_host::fake::FakeVenue;
-use rithmic_host::Session;
 use tokio::net::UnixListener;
 
 #[tokio::main]

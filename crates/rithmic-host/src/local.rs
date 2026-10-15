@@ -45,6 +45,7 @@ pub struct LocalSession<V: Venue + ?Sized + 'static = dyn Venue> {
 }
 pub(crate) struct LocalInner<V: Venue + ?Sized + 'static> {
     host: Arc<SessionHost<V>>,
+    can_open_gates: bool,
     id: SessionId,
     client: Mutex<SessionCtx>,
     output: std::sync::Mutex<Option<mpsc::Receiver<Fan>>>,
@@ -58,13 +59,15 @@ pub(crate) struct LocalInner<V: Venue + ?Sized + 'static> {
     events: tokio::sync::broadcast::Sender<crate::SessionEvent>,
 }
 impl<V: Venue + ?Sized + 'static> LocalSession<V> {
-    pub(crate) fn attach(host: Arc<SessionHost<V>>) -> Self {
+    pub(crate) fn attach(host: Arc<SessionHost<V>>, can_open_gates: bool) -> Self {
+        host.attachments.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = mpsc::channel(host.state.hub.capacity());
         let id = SessionId::new();
         host.state.hub.native_attached();
         let session = Self {
             inner: Arc::new(LocalInner {
                 host,
+                can_open_gates,
                 id,
                 client: Mutex::new(SessionCtx::with_id(tx, id)),
                 output: std::sync::Mutex::new(Some(rx)),
@@ -152,11 +155,11 @@ impl<V: Venue + ?Sized + 'static> LocalSession<V> {
             other => other,
         };
         match gate {
-            Gate::Trading if !self.state().gates.trading_enabled => Err(gate_error(
+            Gate::Trading if !self.state().gates.snapshot().trading => Err(gate_error(
                 "trading_disabled",
                 &format!("{what} denied: parent trading disabled"),
             )),
-            Gate::CancelAll if !self.state().gates.cancel_all_enabled => Err(gate_error(
+            Gate::CancelAll if !self.state().gates.snapshot().cancel_all => Err(gate_error(
                 "cancel_all_denied",
                 &format!("{what} denied: parent cancel_all disabled"),
             )),
@@ -316,9 +319,10 @@ impl<V: Venue + ?Sized + 'static> Drop for LocalInner<V> {
         }
         if !self.detached.swap(true, Ordering::SeqCst) {
             let host = self.host.clone();
-            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            if let Some(runtime) = &self.host.runtime {
                 runtime.spawn(async move {
                     client.teardown(&host.state).await;
+                    host.detached().await;
                 });
             }
         }
@@ -344,10 +348,13 @@ impl<V: Venue + ?Sized + 'static> Session for LocalSession<V> {
         detached.teardown(self.state()).await;
         // Dropping its sender closes delivery after queued records drain.
         drop(detached);
+        self.inner.host.detached().await;
         Ok(())
     }
     async fn request_plants(&self, extra: PlantSet) -> Result<()> {
-        self.active()?;
+        if self.inner.detached.load(Ordering::SeqCst) {
+            return Err(Error::NotSent("session detached".into()));
+        }
         self.inner
             .host
             .request_plants(extra)
@@ -399,9 +406,15 @@ impl<V: Venue + ?Sized + 'static> Session for LocalSession<V> {
         self.active()?;
         subscriptions::disconnect_pnl(self.state(), &mut *self.inner.client.lock().await).await
     }
-    async fn reset_ticker(&self) -> Result<()> {
-        self.active()?;
-        subscriptions::reset_ticker_plant(self.state()).await
+    async fn open_gates(&self, trading: bool, cancel_all: bool) -> crate::Gates {
+        if self.inner.can_open_gates
+            && !self.inner.detached.load(Ordering::SeqCst)
+            && !self.inner.host.is_terminal()
+        {
+            self.state().gates.open(trading, cancel_all)
+        } else {
+            self.state().gates.snapshot()
+        }
     }
     async fn resolved_account(&self) -> Option<AccountTriple> {
         if self.active().is_err() {
@@ -711,6 +724,14 @@ impl<V: Venue + ?Sized + 'static> Session for LocalSession<V> {
         self.command(guard.cancel_all_orders()).await
     }
     async fn poll_event(&self, timeout: Duration) -> Result<Option<PlantEvent>> {
+        // A session that has never connected still reports the legacy typed
+        // error. A recovering host keeps the consumer's stream alive instead.
+        if !self.state().ready.load(Ordering::SeqCst)
+            && !self.state().recovering.load(Ordering::SeqCst)
+            && !self.inner.host.is_terminal()
+        {
+            return Err(Error::NotConnected { plant: "ticker" });
+        }
         self.ensure_native_delivery();
         self.inner.streams.poll(Stream::Ticker, timeout).await
     }

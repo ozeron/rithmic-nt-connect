@@ -28,7 +28,6 @@ import pytest
 import rithmic_nt_connect
 from _stubs import WireSessionStub
 from rithmic_nt_connect.session import (
-    TransportAware,
     WireSession,
     _FlockedDirectSession,
     _RustGatewaySession,
@@ -50,7 +49,7 @@ def _protocol_members(protocol: type) -> list[str]:
 
 
 PROTOCOL_MEMBERS = _protocol_members(WireSession)
-TRANSPORT_MEMBERS = _protocol_members(TransportAware)
+SESSION_EVENT_MEMBERS = ["open_gates", "subscribe_session_events"]
 PYI = Path(rithmic_nt_connect.__file__).parent / "_lib.pyi"
 
 
@@ -149,11 +148,15 @@ def test_test_double_matches_protocol() -> None:
 
 @pytest.mark.parametrize(
     "adapter",
-    [WireSessionStub(), _rust_gateway()],
-    ids=["stub", "rust-gateway"],
+    [
+        WireSessionStub(),
+        _rust_gateway(),
+        _FlockedDirectSession(WireSessionStub()),
+    ],
+    ids=["stub", "rust-gateway", "direct"],
 )
-def test_transport_aware_adapters_expose_transport_events(adapter: Any) -> None:
-    for member in TRANSPORT_MEMBERS:
+def test_adapters_expose_session_events(adapter: Any) -> None:
+    for member in SESSION_EVENT_MEMBERS:
         assert callable(getattr(adapter, member)), member
 
 
@@ -180,6 +183,11 @@ def _pyi_session_methods() -> dict[str, list[Param]]:
         first_default = len(args) - n_default
         out[node.name] = [
             Param(name, i >= first_default) for i, name in enumerate(args)
+        ] + [
+            Param(arg.arg, default is not None)
+            for arg, default in zip(
+                node.args.kwonlyargs, node.args.kw_defaults, strict=True
+            )
         ]
     return out
 
@@ -203,7 +211,7 @@ def test_pyi_matches_protocol() -> None:
             failures.append(f"{member}: missing from _lib.pyi")
             continue
         # ``resolved_account`` etc. live on the extension; plant-level facades
-        # (reset_ticker, request_plants, ...) are protocol members too.
+        # (request_plants, ...) are protocol members too.
         proto = _params_of(getattr(WireSession, member))
         for problem in _incompatibilities(proto, stub[member]):
             failures.append(f"{member}: {problem}")
@@ -219,6 +227,8 @@ def test_pyi_matches_built_extension(rust_session: Any) -> None:
         for name, fn in inspect.getmembers(rust_session, inspect.isroutine)
         if not name.startswith("_")
     }
+    if not hasattr(rust_session, "fake"):
+        stub.pop("fake", None)
     assert set(stub) - {"__init__"} == set(runtime), (
         "undeclared or stale methods: "
         f"{sorted((set(stub) - {'__init__'}) ^ set(runtime))}"

@@ -9,8 +9,12 @@ use pyo3::types::{PyDict, PyList};
 use tokio::runtime::Runtime;
 
 mod exec;
+mod session_events;
+#[cfg(feature = "testing")]
+mod testing;
+use session_events::*;
 
-use rithmic_gateway::client::{GatewayConfig, RemoteSession, TransportEvent};
+use rithmic_gateway::client::{GatewayConfig, RemoteSession};
 use rithmic_host::dto::{
     AccountPnlDto, AccountRmsInfoDto, BboDto, BracketUpdateDto, FillHistoryDto, FrontMonthDto,
     HistoryBarDto, HistoryTickDto, InstrumentPnlDto, LastTradeDto, OrderBookDto,
@@ -18,7 +22,10 @@ use rithmic_host::dto::{
 };
 use rithmic_host::error::Error;
 use rithmic_host::plants::PlantSet;
-use rithmic_host::{ModifyOrder, PlaceBracketOrder, PlaceOrder, Session};
+use rithmic_host::{
+    HostFingerprint, HostOptions, HostRegistry, ModifyOrder, PlaceBracketOrder, PlaceOrder,
+    Session, SessionEvent,
+};
 use rithmic_plants::config::{SessionConfig, DEFAULT_LUCID_URL};
 use rithmic_plants::RithmicVenue;
 
@@ -555,8 +562,8 @@ pub struct PySession {
     session: Arc<dyn Session>,
     /// The gateway client, when `connect_mode` is `gateway` (transport hooks).
     gateway: Option<Arc<RemoteSession>>,
-    /// The in-process session, when `connect_mode` is `direct` (it owns the gates).
-    direct: Option<Arc<RithmicVenue>>,
+    #[cfg(feature = "testing")]
+    script: Option<Arc<rithmic_host::fake::FakeVenue>>,
 }
 
 impl PySession {
@@ -596,6 +603,7 @@ impl PySession {
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
+        py: Python<'_>,
         user: String,
         password: Option<String>,
         system_name: &str,
@@ -640,12 +648,21 @@ impl PySession {
                 Ok(Self {
                     session: gateway.clone(),
                     gateway: Some(gateway),
-                    direct: None,
+                    #[cfg(feature = "testing")]
+                    script: None,
                 })
             }
             "direct" => {
                 let password = password
                     .ok_or_else(|| PyValueError::new_err("direct mode requires a password"))?;
+                let mut key = HostFingerprint::new(&user, system_name, url, env_name);
+                key.account_id = account_id.clone();
+                key.fcm_id = fcm_id.clone();
+                key.ib_id = ib_id.clone();
+                key.gateway_listen = gateway_listen;
+                key.beta_url = beta_url.clone();
+                key.app_name = app_name.into();
+                key.app_version = app_version.into();
                 let mut builder = SessionConfig::builder()
                     .user(user)
                     .password(password)
@@ -667,12 +684,53 @@ impl PySession {
                     builder = builder.ib_id(v);
                 }
                 let config = builder.build().map_err(to_py_err)?;
-                let plants = PlantSet::parse(plants).map_err(to_py_err)?;
-                let direct = Arc::new(RithmicVenue::new(config, plants));
+                // Construction creates local paths only. Extra plants are requested
+                // separately, before or after the first idempotent connect.
+                PlantSet::parse(plants).map_err(to_py_err)?;
+                static REGISTRY: OnceLock<HostRegistry<RithmicVenue>> = OnceLock::new();
+                let lock_path = rithmic_gateway::singleton::SessionLock::lock_path(
+                    &key.user,
+                    &key.system_name,
+                    &key.url,
+                    &key.env,
+                );
+                let lock_dir = lock_path.parent().expect("lock directory").to_path_buf();
+                let options = HostOptions {
+                    lock_filename: lock_path.file_name().map(ToOwned::to_owned),
+                    ..HostOptions::default()
+                };
+                let session = py.detach(|| {
+                    runtime().block_on(async move {
+                        let registry = REGISTRY.get_or_init(HostRegistry::default);
+                        loop {
+                            let host = registry
+                                .get_or_start(
+                                    key.clone(),
+                                    || {
+                                        Arc::new(
+                                            RithmicVenue::new(
+                                                config.clone(),
+                                                PlantSet::MARKET_DATA,
+                                            )
+                                            .with_gates(true, true),
+                                        )
+                                    },
+                                    &lock_dir,
+                                    options.clone(),
+                                )
+                                .await
+                                .map_err(|e| SessionLockError::new_err(e.to_string()))?;
+                            if let Ok(session) = host.attach_owned() {
+                                break Ok::<_, PyErr>(Arc::new(session) as Arc<dyn Session>);
+                            }
+                        }
+                    })
+                })?;
                 Ok(Self {
-                    session: direct.clone(),
+                    session,
                     gateway: None,
-                    direct: Some(direct),
+                    #[cfg(feature = "testing")]
+                    script: None,
                 })
             }
             other => Err(PyValueError::new_err(format!(
@@ -681,48 +739,55 @@ impl PySession {
         }
     }
 
-    /// The trading gate: the parent's in gateway mode (read-only; a client cannot
-    /// elevate it) and this process's own in direct mode (closed until
-    /// `configure_gates`). Enforced inside the Rust session in both modes.
+    /// Credential-free attachment to the real host lifecycle, for dev/CI only.
+    #[cfg(feature = "testing")]
+    #[staticmethod]
+    #[pyo3(signature = (user="fake", *, lock_dir=None, system_name="Fake", url="wss://fake", env="Test", account_id=None, fcm_id=None, ib_id=None, beta_url=None, app_name="rithmic-nt-connect", app_version="0.1.0"))]
+    #[allow(clippy::too_many_arguments)]
+    fn fake(
+        py: Python<'_>,
+        user: &str,
+        lock_dir: Option<String>,
+        system_name: &str,
+        url: &str,
+        env: &str,
+        account_id: Option<String>,
+        fcm_id: Option<String>,
+        ib_id: Option<String>,
+        beta_url: Option<String>,
+        app_name: &str,
+        app_version: &str,
+    ) -> PyResult<Self> {
+        let mut key = HostFingerprint::new(user, system_name, url, env);
+        key.account_id = account_id;
+        key.fcm_id = fcm_id;
+        key.ib_id = ib_id;
+        key.beta_url = beta_url;
+        key.app_name = app_name.into();
+        key.app_version = app_version.into();
+        testing::new(py, key, lock_dir)
+    }
+    #[cfg(feature = "testing")]
     #[getter]
-    fn trading_enabled(&self) -> Option<bool> {
-        match (&self.gateway, &self.direct) {
-            (Some(g), _) => Some(g.trading_enabled()),
-            (_, Some(d)) => Some(d.trading_enabled()),
-            _ => None,
-        }
+    fn script(&self) -> Option<testing::PyFakeScript> {
+        self.script.as_ref().map(|venue| testing::PyFakeScript {
+            venue: venue.clone(),
+        })
     }
 
-    /// The plant-wide cancel-all gate, independent of trading (same split as above).
     #[getter]
-    fn cancel_all_enabled(&self) -> Option<bool> {
-        match (&self.gateway, &self.direct) {
-            (Some(g), _) => Some(g.cancel_all_enabled()),
-            (_, Some(d)) => Some(d.cancel_all_enabled()),
-            _ => None,
-        }
+    fn trading_enabled(&self, py: Python<'_>) -> bool {
+        self.open_gates(py, false, false).trading
     }
-
-    /// `True` for an in-process session (it owns its gates), `False` for a gateway
-    /// client (the parent owns them).
     #[getter]
-    fn is_direct(&self) -> bool {
-        self.direct.is_some()
+    fn cancel_all_enabled(&self, py: Python<'_>) -> bool {
+        self.open_gates(py, false, false).cancel_all
     }
-
-    /// Direct mode only: open the trading and/or cancel-all gate for this process.
-    /// A gate is only ever opened (the session is shared by every client in the
-    /// process); a gateway client cannot change the parent's gates and gets an error.
-    #[pyo3(signature = (trading_enabled=false, cancel_all_enabled=false))]
-    fn configure_gates(&self, trading_enabled: bool, cancel_all_enabled: bool) -> PyResult<()> {
-        match &self.direct {
-            Some(direct) => {
-                direct.allow(trading_enabled, cancel_all_enabled);
-                Ok(())
-            }
-            None => Err(PyRuntimeError::new_err(
-                "gates are owned by the gateway parent; a client cannot change them",
-            )),
+    fn open_gates(&self, py: Python<'_>, trading: bool, cancel_all: bool) -> PyGates {
+        let gates = py.detach(|| runtime().block_on(self.session.open_gates(trading, cancel_all)));
+        PyGates {
+            trading: gates.trading,
+            cancel_all: gates.cancel_all,
         }
     }
 
@@ -751,68 +816,13 @@ impl PySession {
         }
     }
 
-    /// Call `callback(kind, generation, attempts, cause)` on every gateway
-    /// transport event: `kind` is `"down"`, `"up"` or `"recovery_failed"`.
-    /// Fire-and-forget from a runtime thread; a no-op in direct mode.
-    fn subscribe_transport_events(
+    /// Deliver host and socket recovery events on a dedicated Python delivery
+    /// thread. Each registration has an independent receiver and cancellation.
+    fn subscribe_session_events(
         &self,
-        callback: Py<PyAny>,
-    ) -> PyResult<Option<PyTransportSubscription>> {
-        let Some(gateway) = self.gateway.as_ref() else {
-            return Ok(None);
-        };
-        let mut transport = gateway.subscribe_transport();
-        let mut failed = gateway.subscribe_recovery_failed();
-        // Python is called from a dedicated thread, never from a tokio worker: a
-        // listener may call a blocking session method, which `block_on`s the
-        // shared runtime and would panic on one of its own workers.
-        let (tx, rx) = std::sync::mpsc::channel::<(&'static str, u64, u32, String)>();
-        let delivery = std::thread::Builder::new()
-            .name("rithmic-transport-events".into())
-            .spawn(move || {
-                while let Ok((kind, generation, attempts, cause)) = rx.recv() {
-                    Python::attach(|py| {
-                        let cause = if cause.is_empty() { None } else { Some(cause) };
-                        if let Err(err) = callback.call1(py, (kind, generation, attempts, cause)) {
-                            err.print(py);
-                        }
-                    });
-                }
-            });
-        // `None` means direct mode; a thread that cannot start is an error, not
-        // a silent subscription that never delivers.
-        delivery.map_err(|e| {
-            PyRuntimeError::new_err(format!("transport event thread did not start: {e}"))
-        })?;
-        let notify = move |kind: &'static str, generation: u64, attempts: u32, cause: String| {
-            let _ = tx.send((kind, generation, attempts, cause));
-        };
-        let task = runtime().spawn(async move {
-            loop {
-                tokio::select! {
-                    event = transport.recv() => match event {
-                        Ok(TransportEvent::Down { generation }) => {
-                            notify("down", generation, 0, String::new());
-                        }
-                        Ok(TransportEvent::Up { generation }) => {
-                            notify("up", generation, 0, String::new());
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-                    },
-                    report = failed.recv() => match report {
-                        Ok(report) => {
-                            notify("recovery_failed", report.generation, report.attempts, report.cause);
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-                    },
-                }
-            }
-        });
-        Ok(Some(PyTransportSubscription {
-            task: task.abort_handle(),
-        }))
+        listener: Py<PyAny>,
+    ) -> PyResult<PySessionEventSubscription> {
+        session_events::subscribe(self.session.session_events(), listener, runtime())
     }
 
     fn request_plants(&self, py: Python<'_>, plants: &str) -> PyResult<()> {
@@ -826,11 +836,6 @@ impl PySession {
 
     fn disconnect(&self, py: Python<'_>) -> PyResult<()> {
         self.run(py, self.session.disconnect())
-    }
-
-    /// Recreate only the ticker plant (the data client's channel-error resync).
-    fn reset_ticker(&self, py: Python<'_>) -> PyResult<()> {
-        self.run(py, self.session.reset_ticker())
     }
 
     fn disconnect_order_plant(&self, py: Python<'_>) -> PyResult<()> {
@@ -1342,28 +1347,6 @@ impl PySession {
     }
 }
 
-/// A running `subscribe_transport_events` registration. Cancelling (or dropping)
-/// it stops the task that holds the Python callback, so a session that no longer
-/// has listeners is not kept alive by it.
-#[pyclass(name = "TransportSubscription")]
-struct PyTransportSubscription {
-    task: tokio::task::AbortHandle,
-}
-
-#[pymethods]
-impl PyTransportSubscription {
-    /// Stop delivering transport events and release the callback. Idempotent.
-    fn cancel(&self) {
-        self.task.abort();
-    }
-}
-
-impl Drop for PyTransportSubscription {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
-
 /// List system names advertised by a gateway (no login).
 #[pyfunction]
 #[pyo3(signature = (url=None))]
@@ -1380,7 +1363,9 @@ fn list_systems(py: Python<'_>, url: Option<&str>) -> PyResult<Vec<String>> {
 fn _lib(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySession>()?;
     m.add_class::<PySessionLock>()?;
-    m.add_class::<PyTransportSubscription>()?;
+    session_events::register(m)?;
+    #[cfg(feature = "testing")]
+    m.add_class::<testing::PyFakeScript>()?;
     exec::register(m)?;
     m.add("SessionLockError", m.py().get_type::<SessionLockError>())?;
     m.add_function(wrap_pyfunction!(list_systems, m)?)?;

@@ -60,8 +60,6 @@ The gateway server already attaches a `LocalSession` to the parent's host for
 each socket. Local and remote consumers share host intent refcounts, gates,
 per-consumer queues, snapshot-on-join for book / PnL, and plant recovery.
 
-<!-- after wave 5 -->
-With the PyO3 direct attachment switched to the host:
 
 ```text
 direct : Python -> PyO3 Session -> LocalSession ------------------------> SessionHost -> RithmicVenue -> Rithmic
@@ -69,16 +67,14 @@ gateway: Python -> PyO3 Session -> RemoteSession -> socket -> server
                                                           -> LocalSession -> SessionHost -> RithmicVenue -> Rithmic
 ```
 
-<!-- after wave 5 -->
 The direct composition root shares a host per credential through the host
 registry and credential flock. The parent owns its host and credentials;
 remote clients remain attach-only. Consumers reconcile `Interrupted` / `Resumed` /
 `RecoveryFailed`; the host restores plant intents, while `RemoteSession` also
 re-joins recorded intents after socket re-attach. The adapter never resets the
-ticker or replays market-data intents. Until wave 5 lands, PyO3 direct mode still
-uses bare `RithmicVenue`, and Python still owns direct singleton / flock handling.
+ticker or replays market-data intents.
 
-Tests: `cargo test -p rithmic-host -p rithmic-plants -p rithmic-gateway -p rithmic-exec -p rithmic-nt-connect`.
+Tests: `cargo test -p rithmic-host -p rithmic-plants -p rithmic-gateway -p rithmic-exec -p rithmic-nt-connect --features rithmic-gateway/testing,rithmic-host/testing,rithmic-nt-connect/testing`.
 
 `server::serve_connection(stream, state)` and `RemoteSession::over(config, stream)`
 accept any `AsyncRead + AsyncWrite + Unpin + Send + 'static` stream. The owned

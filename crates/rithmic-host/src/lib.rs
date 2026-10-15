@@ -27,7 +27,12 @@ pub mod local;
 pub mod pump;
 pub use backend::Venue;
 pub use fanout::SessionId;
-pub use gates::ParentGates;
+pub use gates::{Gates, ParentGates};
 pub use host::{HistoryPolicy, SessionHost, VenueHandle};
 pub use local::LocalSession;
 pub use pump::Timing;
+
+pub mod flock;
+pub mod registry;
+pub use flock::SessionLock;
+pub use registry::{HostFingerprint, HostOptions, HostRegistry};

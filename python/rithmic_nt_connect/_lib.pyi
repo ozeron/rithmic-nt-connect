@@ -7,7 +7,8 @@ and helpers the adapter imports. Keep in sync with ``crates/rithmic-nt-connect``
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Callable
+from typing import Any, final
 
 from rithmic_nt_connect.wire_types import AccountRmsInfo, ProductRmsInfo
 
@@ -200,9 +201,59 @@ class GatewayError(RuntimeError):
 def list_systems(url: str | None = None) -> list[str]:
     """List Rithmic systems via the gateway (template 16); does not log in."""
 
-class TransportSubscription:
-    def cancel(self) -> None:
-        """Stop transport events and release the callback. Idempotent."""
+@final
+class Gates:
+    def __init__(self, trading: bool, cancel_all: bool) -> None: ...
+    @property
+    def trading(self) -> bool: ...
+    @property
+    def cancel_all(self) -> bool: ...
+
+@final
+class Interrupted:
+    def __init__(self, generation: int, cause: str | None = None) -> None: ...
+    @property
+    def generation(self) -> int: ...
+    @property
+    def cause(self) -> str | None: ...
+
+@final
+class Resumed:
+    def __init__(self, generation: int) -> None: ...
+    @property
+    def generation(self) -> int: ...
+
+@final
+class RecoveryFailed:
+    def __init__(
+        self, generation: int, attempts: int, cause: str | None = None
+    ) -> None: ...
+    @property
+    def generation(self) -> int: ...
+    @property
+    def attempts(self) -> int: ...
+    @property
+    def cause(self) -> str | None: ...
+
+type SessionEvent = Interrupted | Resumed | RecoveryFailed
+
+class SessionEventSubscription:
+    def cancel(self) -> None: ...
+
+class FakeScript:
+    """Test-build-only venue scripting handle, independent of attachment lifetime."""
+    def emit(self, stream_name: str, event: dict[str, Any]) -> None: ...
+    def fail_stream(
+        self, stream_name: str, cause: str = "scripted plant failure"
+    ) -> None: ...
+    def drop_plants(self) -> None: ...
+    def reject_next(self, method: str, cause: str = "scripted rejection") -> None: ...
+    def fail_next(
+        self, method: str, cause: str = "scripted connection failure"
+    ) -> None: ...
+    def set_delay(self, method: str, milliseconds: int) -> None: ...
+    def calls(self) -> list[str]: ...
+    def clear_calls(self) -> None: ...
 
 class Session:
     """Rust plant session (ticker + history, PnL, and lazy order plants)."""
@@ -229,37 +280,39 @@ class Session:
         (attach to a started parent; never takes a password).
         """
 
-    # -- gateway-mode hooks (inert in direct mode) -------------------------
+    # ``fake`` and ``script`` exist only in builds with the testing feature.
+    @staticmethod
+    def fake(
+        user: str = "fake",
+        *,
+        lock_dir: str | None = None,
+        system_name: str = "Fake",
+        url: str = "wss://fake",
+        env: str = "Test",
+        account_id: str | None = None,
+        fcm_id: str | None = None,
+        ib_id: str | None = None,
+        beta_url: str | None = None,
+        app_name: str = "rithmic-nt-connect",
+        app_version: str = "0.1.0",
+    ) -> Session: ...
     @property
-    def trading_enabled(self) -> bool | None:
-        """The trading gate: the parent's (gateway) or this process's own
-        (direct, closed until ``configure_gates``). The Rust session enforces it
-        in both modes."""
+    def script(self) -> FakeScript | None: ...
     @property
-    def cancel_all_enabled(self) -> bool | None:
-        """The plant-wide cancel-all gate, independent of trading (same split)."""
+    def trading_enabled(self) -> bool: ...
     @property
-    def is_direct(self) -> bool:
-        """``True`` for an in-process session, ``False`` for a gateway client."""
-    def configure_gates(
-        self, trading_enabled: bool = False, cancel_all_enabled: bool = False
-    ) -> None:
-        """Direct mode: open the trading and/or cancel-all gate (never closes one).
-        Raises ``RuntimeError`` for a gateway client, whose gates the parent owns."""
+    def cancel_all_enabled(self) -> bool: ...
+    def open_gates(self, trading: bool, cancel_all: bool) -> Gates: ...
+    def subscribe_session_events(
+        self, listener: Callable[[SessionEvent], None]
+    ) -> SessionEventSubscription: ...
     def transport_generation(self) -> int: ...
     def transport_connected(self) -> bool: ...
     def ensure_transport_live(self) -> int: ...
-    def subscribe_transport_events(self, callback: Any) -> TransportSubscription | None:
-        """``callback(kind, generation, attempts, cause)``; ``kind`` is
-        ``"down"``, ``"up"`` or ``"recovery_failed"``. Returns a handle whose
-        ``cancel()`` stops delivery and releases the callback (``None`` in direct
-        mode, which has no transport).
-        """
 
     # -- lifecycle ---------------------------------------------------------
     def connect(self) -> None: ...
     def disconnect(self) -> None: ...
-    def reset_ticker(self) -> None: ...
     def request_plants(self, plants: str) -> None: ...
 
     # -- ticker ------------------------------------------------------------

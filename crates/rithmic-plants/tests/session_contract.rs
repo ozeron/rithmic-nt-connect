@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rithmic_host::fake::{FakeFailure, FakeVenue};
-use rithmic_host::{Error, PlaceOrder, PlantSet, Session, Stream};
+use rithmic_host::{Error, PlaceOrder, PlantSet, Stream, Venue};
 use rithmic_plants::fake_server::{template, FakeRithmicServer, Reply};
 use rithmic_plants::RithmicVenue;
 
@@ -16,7 +16,7 @@ use rithmic_plants::RithmicVenue;
 trait Harness: Send + Sync + Sized {
     /// A connected session with the trading gate as given.
     async fn open(trading: bool) -> Self;
-    fn session(&self) -> Arc<dyn Session>;
+    fn session(&self) -> Arc<dyn Venue>;
     /// The next place reaches the venue and its outcome is unknown.
     fn next_place_unknown(&self);
     /// The venue refuses the next place.
@@ -36,7 +36,7 @@ impl Harness for Fake {
         fake.connect().await.unwrap();
         Self(fake)
     }
-    fn session(&self) -> Arc<dyn Session> {
+    fn session(&self) -> Arc<dyn Venue> {
         self.0.clone()
     }
     fn next_place_unknown(&self) {
@@ -75,7 +75,7 @@ impl Harness for Direct {
         session.connect().await.unwrap();
         Self { venue, session }
     }
-    fn session(&self) -> Arc<dyn Session> {
+    fn session(&self) -> Arc<dyn Venue> {
         self.session.clone()
     }
     fn next_place_unknown(&self) {

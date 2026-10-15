@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use rithmic_host::{PlantEvent, PlantSet, Session, Stream};
+use rithmic_host::{PlantEvent, PlantSet, Stream, Venue};
 use rithmic_plants::fake_server::{frames, template, FakeRithmicServer, Plant};
 use rithmic_plants::RithmicVenue;
 use rithmic_rs::rti;

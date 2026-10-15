@@ -825,8 +825,11 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "fs2",
+ "libc",
  "rithmic-exec",
  "rithmic-host",
+ "tempfile",
  "thiserror",
  "tokio",
 ]

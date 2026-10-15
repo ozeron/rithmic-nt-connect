@@ -831,15 +831,15 @@ impl Runtime {
     }
 
     fn on_parent_interrupted(&self) {
-        // The new session channel closes the disarm gap immediately. Keep the
-        // legacy transport channel unchanged until PyO3 migrates in task 5.4.
         self.interrupted("parent plant interrupted");
     }
 
-    fn resumed(&self) {
+    fn resumed(&self, socket: bool) {
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         let _ = self.session_tx.send(SessionEvent::Resumed { generation });
-        let _ = self.transport_tx.send(TransportEvent::Up { generation });
+        if socket {
+            let _ = self.transport_tx.send(TransportEvent::Up { generation });
+        }
         self.wake_all();
     }
 
@@ -849,13 +849,7 @@ impl Runtime {
         if self.recovering.load(Ordering::SeqCst) {
             return;
         }
-        // PyO3's existing bridge still depends on Down to latch exec before Up
-        // starts reconciliation. Preserve its synthetic pair until task 5.4;
-        // session_events has already delivered the real interruption above.
-        let _ = self.transport_tx.send(TransportEvent::Down {
-            generation: self.generation(),
-        });
-        self.resumed();
+        self.resumed(false);
     }
 
     fn on_connection_lost(&self, conn_id: u64) {
@@ -1008,7 +1002,7 @@ impl Runtime {
         if self.generation() == 0 {
             self.generation.store(1, Ordering::SeqCst);
         } else {
-            self.resumed();
+            self.resumed(true);
         }
         self.wake_all();
         Ok(())

@@ -98,7 +98,7 @@ pub const RPC_TABLE: &[Rpc] = &[
     rpc(Some("ensure_order_plant"), "ensure_order", || {
         Body::EnsureOrder(Default::default())
     }),
-    rpc(Some("reset_ticker"), "reset_ticker_plant", || {
+    rpc(None, "reset_ticker_plant", || {
         Body::ResetTickerPlant(Default::default())
     }),
     rpc(Some("get_front_month"), "get_front_month", || {

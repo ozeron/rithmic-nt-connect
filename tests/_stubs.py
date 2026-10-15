@@ -25,8 +25,14 @@ from nautilus_trader.model.identifiers import (
 from rithmic_nt_connect.commission import CommissionRegistry
 from rithmic_nt_connect.data import RithmicDataClient
 from rithmic_nt_connect.execution import RithmicExecutionClient
-from rithmic_nt_connect.session import WireSession
+from rithmic_nt_connect.session import Gates, SessionEventSubscription, WireSession
+from rithmic_nt_connect.transport import SessionEvent
 from rithmic_nt_connect.wire_types import AccountRmsInfo, ProductRmsInfo
+
+
+class SessionEventSubscriptionStub:
+    def cancel(self) -> None:
+        pass
 
 
 class WireSessionStub:
@@ -37,11 +43,7 @@ class WireSessionStub:
     the code under test reaches one it does not stub.
     """
 
-    # Shared-session internals that ``ensure_connected`` / ``_connect_once``
-    # read via ``getattr``: absence means "no flock gate / no inner session".
-    # (``_inner`` is deliberately NOT defaulted here: ``_connect_once`` treats
-    # a missing ``_inner`` as "the session itself".)
-    _connect_gate = None
+    # ``_inner`` is deliberately absent: connect helpers then call this session.
     # Parent-gateway trading gate read via ``getattr(..., default=True)``.
     trading_enabled = True
 
@@ -54,9 +56,6 @@ class WireSessionStub:
         raise NotImplementedError
 
     def disconnect(self, *args: Any, **kwargs: Any) -> None:
-        raise NotImplementedError
-
-    def reset_ticker(self, *args: Any, **kwargs: Any) -> None:
         raise NotImplementedError
 
     def subscribe(self, *args: Any, **kwargs: Any) -> None:
@@ -127,10 +126,13 @@ class WireSessionStub:
     def request_plants(self, *args: Any, **kwargs: Any) -> None:
         raise NotImplementedError
 
-    def subscribe_transport_events(
-        self, listener: Callable[..., Any], *args: Any, **kwargs: Any
-    ) -> Callable[[], None]:
-        return lambda: None
+    def open_gates(self, trading: bool, cancel_all: bool) -> Gates:
+        return SimpleNamespace(trading=trading, cancel_all=cancel_all)
+
+    def subscribe_session_events(
+        self, listener: Callable[[SessionEvent], None]
+    ) -> SessionEventSubscription:
+        return SessionEventSubscriptionStub()
 
     def ensure_transport_live(self, *args: Any, **kwargs: Any) -> int:
         return 0
