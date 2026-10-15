@@ -267,6 +267,15 @@ impl<V: Venue + ?Sized + 'static> SessionHost<V> {
             .unwrap_or_else(|e| e.into_inner());
         LocalSession::attach(self.clone(), false)
     }
+    /// Attach a transport with its event receiver claimed before lifecycle
+    /// notifications can observe the new attachment.
+    pub fn attach_transport(self: &Arc<Self>) -> (LocalSession<V>, crate::EventReceiver) {
+        let _attach = self
+            .attachment_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        LocalSession::attach_transport(self.clone())
+    }
     /// Only the adapter composition root creates attachments that may open gates.
     pub fn attach_owned(self: &Arc<Self>) -> Result<LocalSession<V>> {
         let _attach = self

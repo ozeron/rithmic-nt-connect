@@ -314,7 +314,7 @@ where
     // Attach and subscribe before Ready: a recovery during the handshake must
     // still deliver its interruption and completed generation to this connection.
     state.host.state.hub.set_encoder(encode_plant_event);
-    let client = state.host.attach();
+    let (client, out_rx) = state.host.attach_transport();
     let session_events = client.session_events();
 
     write_frame(
@@ -342,7 +342,7 @@ where
     }
 
     let (read_half, write_half) = tokio::io::split(stream);
-    serve_connection_halves(read_half, write_half, state, client, session_events).await
+    serve_connection_halves(read_half, write_half, state, client, out_rx, session_events).await
 }
 
 async fn serve_connection_halves<R, W>(
@@ -350,13 +350,13 @@ async fn serve_connection_halves<R, W>(
     write_half: W,
     state: Arc<GatewayState>,
     client: rithmic_host::LocalSession,
+    out_rx: rithmic_host::EventReceiver,
     mut session_events: tokio::sync::broadcast::Receiver<rithmic_host::SessionEvent>,
 ) -> Result<(), String>
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let out_rx = client.take_events().expect("new attachment event queue");
     // One connection is four tasks so no request can hold up another:
     //   reader   owns the read half, decodes frames and hands each to a lane;
     //   commands runs state-changing / subscription requests in arrival order;

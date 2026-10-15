@@ -57,10 +57,27 @@ pub(crate) struct LocalInner<V: Venue + ?Sized + 'static> {
 }
 impl<V: Venue + ?Sized + 'static> LocalSession<V> {
     pub(crate) fn attach(host: Arc<SessionHost<V>>, can_open_gates: bool) -> Self {
+        let streams = delivery::Delivery::new(host.state.hub.capacity());
+        Self::attach_with_delivery(host, can_open_gates, streams, true)
+    }
+    pub(crate) fn attach_transport(host: Arc<SessionHost<V>>) -> (Self, delivery::EventReceiver) {
+        let (streams, receiver) = delivery::Delivery::new_transport(host.state.hub.capacity());
+        (
+            Self::attach_with_delivery(host, false, streams, false),
+            receiver,
+        )
+    }
+    fn attach_with_delivery(
+        host: Arc<SessionHost<V>>,
+        can_open_gates: bool,
+        streams: Arc<delivery::Delivery>,
+        native: bool,
+    ) -> Self {
         host.attachments.fetch_add(1, Ordering::SeqCst);
         let id = SessionId::new();
-        host.state.hub.native_attached();
-        let streams = delivery::Delivery::new(host.state.hub.capacity());
+        if native {
+            host.state.hub.native_attached();
+        }
         let client = SessionCtx::new(streams.clone());
         let session = Self {
             inner: Arc::new(LocalInner {
@@ -70,7 +87,7 @@ impl<V: Venue + ?Sized + 'static> LocalSession<V> {
                 client: Mutex::new(client),
                 streams,
                 detached: AtomicBool::new(false),
-                native: AtomicBool::new(true),
+                native: AtomicBool::new(native),
                 order_closed: AtomicBool::new(false),
                 disconnecting_order: AtomicUsize::new(0),
                 order_gate: RwLock::new(()),

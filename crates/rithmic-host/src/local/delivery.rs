@@ -139,6 +139,13 @@ impl Delivery {
             transport: AtomicBool::new(false),
         })
     }
+    /// Claim transport delivery before publishing the attachment to the host.
+    pub(crate) fn new_transport(capacity: usize) -> (Arc<Self>, EventReceiver) {
+        let delivery = Self::new(capacity);
+        delivery.transport.store(true, Ordering::SeqCst);
+        let receiver = EventReceiver(delivery.clone());
+        (delivery, receiver)
+    }
     pub(crate) fn is_transport(&self) -> bool {
         self.transport.load(Ordering::Relaxed)
     }
