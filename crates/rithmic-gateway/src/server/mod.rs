@@ -20,7 +20,7 @@ use rithmic_host::Session;
 use crate::codec;
 use crate::idle_exit::{IdleExit, IdleExitPolicy};
 use crate::pb::{self, frame::Body, Frame, Handshake, Ready};
-use crate::subscriptions::{Fan, Kind};
+use crate::subscriptions::Fan;
 
 mod dispatch;
 pub mod pump;
@@ -248,21 +248,19 @@ async fn write_frame<W: AsyncWrite + Unpin>(stream: &mut W, frame: &Frame) -> Re
 }
 
 /// Encode one event as a wire frame (a single allocation) ready to fan out.
-fn encode_event(event: pb::Event, kind: Kind) -> Option<Fan> {
+fn encode_event(event: pb::Event) -> Option<Bytes> {
     let frame = Frame {
         request_id: 0,
         body: Some(Body::Event(event)),
     };
     let wire = codec::encode(&frame).ok()?;
-    Some(Fan::encoded(kind, Bytes::from(wire)))
+    Some(Bytes::from(wire))
 }
 
 /// The one protobuf encoding boundary, also used as the host's optional
 /// projection for hosts with exclusively remote consumers.
 pub fn encode_plant_event(event: rithmic_host::PlantEvent) -> Bytes {
-    encode_event(crate::convert::plant_event_to_pb(event), Kind::Any)
-        .map(|fan| fan.encoded_with(|_| unreachable!("encoded frame")))
-        .unwrap_or_default()
+    encode_event(crate::convert::plant_event_to_pb(event)).unwrap_or_default()
 }
 pub use rithmic_host::fanout::publish_plant_event;
 
@@ -690,8 +688,7 @@ async fn write_replies<W: tokio::io::AsyncWrite + Unpin>(
             },
             msg = events.recv(), if events_open => match msg {
                 Some(fan) => Some(fan.encoded_with(|event| {
-                    encode_event(crate::convert::plant_event_to_pb(event.clone()), fan.kind())
-                        .map(|fan| fan.encoded_with(|_| unreachable!("encoded frame"))).unwrap_or_default()
+                    encode_event(crate::convert::plant_event_to_pb(event.clone())).unwrap_or_default()
                 })),
                 None => {
                     events_open = false;
