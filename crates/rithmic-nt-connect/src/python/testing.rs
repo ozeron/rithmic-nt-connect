@@ -273,6 +273,7 @@ pub(super) fn new(
                         session: Arc::new(session),
                         gateway: None,
                         script: Some(script),
+                        fault_venue: None,
                     });
                 }
             }
