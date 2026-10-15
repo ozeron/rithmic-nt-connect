@@ -253,4 +253,4 @@ def test_ffi_next_events_batch_field_access_throughput(fake_bin) -> None:
     assert notional > 0.0
     assert got + skipped >= EVENTS, "every event is received or reported as skipped"
     if skipped == 0:
-        assert notional == EVENTS * 100.25 + EVENTS * (EVENTS - 1) / 2
+        assert notional == pytest.approx(EVENTS * 100.25 + EVENTS * (EVENTS - 1) / 2)

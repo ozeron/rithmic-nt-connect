@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 from _stubs import WireSessionStub, _CaptureLog, _TestDataClient
 from rithmic_nt_connect import _lib
 from rithmic_nt_connect.data import BookAssembler
@@ -45,7 +46,7 @@ def test_resumed_reconciles_without_market_data_replay(tmp_path: Path) -> None:
             },
         )
         events = await asyncio.to_thread(session.next_events, "ticker", 1, 1000)
-        assert events[0]["trade_price"] == 42.0
+        assert events[0]["trade_price"] == pytest.approx(42.0)
         await client._recovery.detach()
         await asyncio.to_thread(session.disconnect)
 

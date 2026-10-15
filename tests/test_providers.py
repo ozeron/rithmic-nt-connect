@@ -73,8 +73,8 @@ def test_future_from_listed_reference_without_trading_symbol_or_precision():
     assert str(instrument.id) == "NQZ6-CME.RITHMIC"
     assert instrument.raw_symbol.value == "NQZ6"
     assert instrument.price_precision == 2
-    assert float(instrument.price_increment) == 0.25
-    assert float(instrument.multiplier) == 20.0
+    assert float(instrument.price_increment) == pytest.approx(0.25)
+    assert float(instrument.multiplier) == pytest.approx(20.0)
     assert instrument.underlying == "NQ"
     assert instrument.info["rithmic_symbol"] == "NQZ6"
     assert instrument.info["rithmic_exchange"] == "CME"

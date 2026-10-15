@@ -69,12 +69,10 @@ def test_timeout_reports_raw_trade_timestamps_before_filtering() -> None:
 @pytest.mark.usefixtures("clock")
 def test_fresh_trade_passes_without_changing_the_selected_record() -> None:
     fresh = {"type": "last_trade", "ts_event_ns": 400}
-    assert (
-        wait_for_any_event(
-            _poll([{"type": "last_trade", "ts_event_ns": 100}, None, fresh]),
-            ("last_trade",),
-            timeout_sec=4,
-            accept=lambda event: event["ts_event_ns"] > 300,
-        )
-        is fresh
+    selected = wait_for_any_event(
+        _poll([{"type": "last_trade", "ts_event_ns": 100}, None, fresh]),
+        ("last_trade",),
+        timeout_sec=4,
+        accept=lambda event: event["ts_event_ns"] > 300,
     )
+    assert id(selected) == id(fresh)

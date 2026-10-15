@@ -123,7 +123,9 @@ def test_session_intents_are_independent_and_repeated_subscribe_is_a_set(
             "trade_size": 1,
         },
     )
-    assert b.next_events("ticker", timeout_ms=1000)[0]["trade_price"] == 21000.0
+    assert b.next_events("ticker", timeout_ms=1000)[0]["trade_price"] == pytest.approx(
+        21000.0
+    )
     assert a.next_events("ticker", timeout_ms=10) == []
     a.disconnect()
     b.disconnect()
@@ -271,7 +273,9 @@ def test_dropping_one_attachment_preserves_another_sessions_intents(
             "trade_price": 42.0,
         },
     )
-    assert b.next_events("ticker", timeout_ms=1000)[0]["trade_price"] == 42.0
+    assert b.next_events("ticker", timeout_ms=1000)[0]["trade_price"] == pytest.approx(
+        42.0
+    )
     assert _count(b.script, "unsubscribe NQU6 CME") == 0
     b.disconnect()
 

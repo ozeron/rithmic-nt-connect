@@ -112,14 +112,14 @@ def test_history_probe_has_bounded_replay_and_reaps_worker(
             return messages.pop(0)
 
         def close(self):
-            pass
+            pass  # nothing to release: the fake pipe holds no resources
 
     class Process:
         def __init__(self, *, target, args):
             assert target is live_fixtures._history_probe_worker
 
         def start(self):
-            pass
+            pass  # the fake worker never runs; the test feeds its messages directly
 
         def join(self, *, timeout):
             if not terminated:

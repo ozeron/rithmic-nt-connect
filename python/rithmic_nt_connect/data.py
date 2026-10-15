@@ -1012,12 +1012,12 @@ class RithmicDataClient(LiveMarketDataClient):
         try:
             await self._resync_ticker_subscription()
             self._log.warning(f"{label} subscription resynced after gap")
-            backoff = 0.05
+            next_backoff = 0.05
         except Exception as resync_exc:
             self._log.warning(f"{label} subscription resync failed: {resync_exc}")
-            backoff = min(backoff * 2, 2.0)
-        await asyncio.sleep(backoff)
-        return backoff
+            next_backoff = min(backoff * 2, 2.0)
+        await asyncio.sleep(next_backoff)
+        return next_backoff
 
     async def _poll_loop(self) -> None:
         await self._poll_channel_loop(label="ticker", stream="ticker", idle_sleep=0.01)
