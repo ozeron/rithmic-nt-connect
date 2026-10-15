@@ -4,6 +4,7 @@
 //! The order plant stays lazy via [`RithmicSession::ensure_order_plant`].
 
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -26,9 +27,9 @@ use crate::dto::{
 };
 use crate::error::{Error, Result};
 use crate::history::{
-    bar_replay_index, bar_slice_secs, dedup_bars, dedup_ticks, history_ready_probe_enabled,
+    bar_dedup_key, bar_replay_index, bar_slice_secs, history_ready_probe_enabled,
     history_ready_probe_root, load_sliced, looks_like_listed_contract, parse_time_bar_type,
-    DEFAULT_TICK_SLICE_SECS,
+    tick_dedup_key, DEFAULT_TICK_SLICE_SECS,
 };
 use crate::plants::PlantSet;
 use crate::streams::{Stream, StreamGuard, StreamHub};
@@ -64,6 +65,23 @@ struct OrderPlant {
     handle: RithmicOrderPlantHandle,
     _stream: StreamGuard,
 }
+
+macro_rules! plant_close {
+    ($($plant:ident),*) => {$(
+        impl $plant {
+            /// Detach the event lane, then log the plant out. A deliberate close
+            /// must never read as a lost connection: once the lane is detached
+            /// nothing the closing plant emits reaches a consumer.
+            async fn close(self) {
+                let Self { _plant, handle, _stream } = self;
+                drop(_stream);
+                let _ = handle.disconnect().await;
+            }
+        }
+    )*};
+}
+
+plant_close!(TickerPlant, HistoryPlant, PnlPlant, OrderPlant);
 
 /// Anything that yields plant messages one at a time (the broadcast receiver
 /// of the ticker / history plants and the account filter of the PnL / order plants).
@@ -125,11 +143,24 @@ fn forward<R: Feed + 'static>(
     let task = tokio::spawn(async move {
         loop {
             match rx.next_item().await {
-                Ok(item) => match to_event(item) {
-                    Ok(Some(event)) => task_tx.event(event).await,
-                    Ok(None) => {}
-                    Err(Error::Rithmic(text)) => task_tx.fail(text),
-                    Err(other) => task_tx.fail(other.to_string()),
+                // A panic in the conversion (a venue value it cannot handle)
+                // must not kill the task silently: the lane would stay up with
+                // no producer and its consumers would wait forever.
+                Ok(item) => match std::panic::catch_unwind(AssertUnwindSafe(|| to_event(item))) {
+                    Ok(Ok(Some(event))) => task_tx.event(event).await,
+                    Ok(Ok(None)) => {}
+                    Ok(Err(Error::Rithmic(text))) => task_tx.fail(text),
+                    Ok(Err(other)) => task_tx.fail(other.to_string()),
+                    Err(_) => {
+                        // Fail, then close: the failure is reported once and
+                        // every later poll sees a closed lane, never a silent one.
+                        task_tx.fail(format!(
+                            "{} event conversion panicked; plant stream stopped",
+                            stream.plant()
+                        ));
+                        task_tx.close();
+                        break;
+                    }
                 },
                 Err(RecvError::Lagged(skipped)) => task_tx.gap(skipped).await,
                 Err(RecvError::Closed) => {
@@ -154,6 +185,45 @@ pub struct RithmicSession {
     resolved_account: Option<RithmicAccount>,
     /// Event lanes shared with consumers; they outlive plant reconnects.
     streams: Arc<StreamHub>,
+    /// Bumped by every `connect` / `disconnect`, so a ticker reconnect run
+    /// without the session lock can tell the session moved on underneath it.
+    epoch: u64,
+}
+
+/// A ticker reconnect prepared under the session lock ([`RithmicSession::begin_ticker_reset`])
+/// and run without it ([`TickerReset::reconnect`]), so order calls and account
+/// lookups never wait behind the venue round trips.
+pub struct TickerReset {
+    old: Option<TickerPlant>,
+    epoch: u64,
+    /// `None` when the session does not want a ticker (nothing to reconnect).
+    connect: Option<(RithmicConfig, Arc<StreamHub>)>,
+}
+
+/// The outcome of [`TickerReset::reconnect`], installed by
+/// [`RithmicSession::finish_ticker_reset`].
+pub struct ReconnectedTicker {
+    plant: Option<TickerPlant>,
+    epoch: u64,
+}
+
+impl TickerReset {
+    /// Log the old ticker out and connect a new one. A failed reconnect leaves
+    /// the ticker down (the data client's resync retries); the sibling plants
+    /// are never touched.
+    pub async fn reconnect(self) -> Result<ReconnectedTicker> {
+        if let Some(old) = self.old {
+            old.close().await;
+        }
+        let plant = match self.connect {
+            Some((rc, hub)) => Some(connect_ticker(&rc, &hub).await?),
+            None => None,
+        };
+        Ok(ReconnectedTicker {
+            plant,
+            epoch: self.epoch,
+        })
+    }
 }
 
 impl std::fmt::Debug for RithmicSession {
@@ -284,7 +354,7 @@ impl Handles {
                 load_tick_slice(handle, symbol, exchange, slice_start, slice_end).await
             },
             |t| t.ts_event_ns.unwrap_or(0),
-            dedup_ticks,
+            tick_dedup_key,
         )
         .await
     }
@@ -317,7 +387,7 @@ impl Handles {
                 .await
             },
             |b| b.ts_event_ns.unwrap_or(0),
-            dedup_bars,
+            bar_dedup_key,
         )
         .await
     }
@@ -433,6 +503,7 @@ impl RithmicSession {
             order: None,
             resolved_account,
             streams: StreamHub::new(),
+            epoch: 0,
         }
     }
 
@@ -482,9 +553,13 @@ impl RithmicSession {
             }
         }
         if self.plants.history && self.history.is_none() {
-            match connect_history(&rc, &self.streams).await {
-                Ok(plant) => self.history = Some(plant),
-                Err(err) => return Err(err),
+            self.history = Some(connect_history(&rc, &self.streams).await?);
+            // Same bar as `connect`: logged in is not ready to serve loads (RC4).
+            if let Err(err) = self.prove_history_ready().await {
+                if let Some(history) = self.history.take() {
+                    history.close().await;
+                }
+                return Err(err);
             }
         }
         if self.plants.pnl && self.pnl.is_none() && self.config.account().is_some() {
@@ -510,6 +585,7 @@ impl RithmicSession {
         if self.ticker.is_some() || self.history.is_some() || self.pnl.is_some() {
             return Err(Error::AlreadyConnected);
         }
+        self.epoch += 1;
 
         let rc = self.config.to_rithmic_config()?;
         let hub = Arc::clone(&self.streams);
@@ -614,31 +690,7 @@ impl RithmicSession {
         }
         let account = self.resolve_account().await?;
         let rc = self.config.to_rithmic_config()?;
-        let order_plant = connect_within_deadline(
-            "order",
-            RithmicOrderPlant::connect(&rc, ConnectStrategy::Retry),
-        )
-        .await?;
-        let order_handle = order_plant.get_handle(&account);
-        let result = login_result(order_handle.login().await, "order login");
-        after_failed_login(
-            async {
-                let _ = order_handle.disconnect().await;
-            },
-            result,
-        )
-        .await?;
-        let stream = forward(
-            &self.streams,
-            Stream::Order,
-            order_handle.subscription_receiver.resubscribe(),
-            map_connection_response,
-        );
-        self.order = Some(OrderPlant {
-            _plant: order_plant,
-            handle: order_handle,
-            _stream: stream,
-        });
+        self.order = Some(connect_order(&rc, &account, &self.streams).await?);
         Ok(())
     }
 
@@ -688,51 +740,31 @@ impl RithmicSession {
         }
         let account = self.resolve_account().await?;
         let rc = self.config.to_rithmic_config()?;
-        let pnl_plant =
-            connect_within_deadline("pnl", RithmicPnlPlant::connect(&rc, ConnectStrategy::Retry))
-                .await?;
-        let pnl_handle = pnl_plant.get_handle(&account);
-        let result = login_result(pnl_handle.login().await, "pnl login");
-        after_failed_login(
-            async {
-                let _ = pnl_handle.disconnect().await;
-            },
-            result,
-        )
-        .await?;
-        let stream = forward(
-            &self.streams,
-            Stream::Pnl,
-            pnl_handle.subscription_receiver.resubscribe(),
-            map_connection_response,
-        );
-        self.pnl = Some(PnlPlant {
-            _plant: pnl_plant,
-            handle: pnl_handle,
-            _stream: stream,
-        });
+        self.pnl = Some(connect_pnl(&rc, &account, &self.streams).await?);
         Ok(())
     }
 
     /// Gracefully disconnect connected plants (order first, then PnL, history, ticker).
     pub async fn disconnect(&mut self) -> Result<()> {
+        self.epoch += 1;
         if let Some(order) = self.order.take() {
-            let _ = order.handle.disconnect().await;
+            order.close().await;
         }
         if let Some(pnl) = self.pnl.take() {
-            let _ = pnl.handle.disconnect().await;
+            pnl.close().await;
         }
         if let Some(history) = self.history.take() {
-            let _ = history.handle.disconnect().await;
+            history.close().await;
         }
         if let Some(ticker) = self.ticker.take() {
-            let _ = ticker.handle.disconnect().await;
+            ticker.close().await;
         }
         Ok(())
     }
 
     /// Subscribe to order plant notifications (Rithmic + exchange).
     pub async fn subscribe_order_updates(&mut self) -> Result<()> {
+        let opened_here = self.order.is_none();
         self.ensure_order_plant().await?;
         let result = async {
             let handle = self.order_handle()?;
@@ -742,13 +774,13 @@ impl RithmicSession {
             )
         }
         .await;
-        rollback_order_plant_subscribe(self, result, true).await
+        rollback_order_plant_subscribe(self, result, opened_here).await
     }
 
     /// Disconnect only the order plant (leaves ticker/history/PnL connected).
     pub async fn disconnect_order_plant(&mut self) -> Result<()> {
         if let Some(order) = self.order.take() {
-            let _ = order.handle.disconnect().await;
+            order.close().await;
         }
         Ok(())
     }
@@ -756,29 +788,41 @@ impl RithmicSession {
     /// Disconnect only the PnL plant (leaves ticker/history/order connected).
     pub async fn disconnect_pnl_plant(&mut self) -> Result<()> {
         if let Some(pnl) = self.pnl.take() {
-            let _ = pnl.handle.disconnect().await;
+            pnl.close().await;
         }
         Ok(())
     }
 
-    /// Disconnect + reconnect only the ticker plant (leaves history/PnL/order
-    /// connected).
+    /// Start a ticker-only reconnect (leaves history/PnL/order connected).
     ///
     /// The data client's channel-error resync needs a fresh ticker receiver,
     /// but the exec client shares this session, so the PnL/order plants must
-    /// not be disturbed. A reconnect failure leaves the ticker disconnected
-    /// (the poll loop keeps retrying the resync) and never tears down the
-    /// sibling plants.
-    pub async fn reset_ticker_plant(&mut self) -> Result<()> {
-        if let Some(ticker) = self.ticker.take() {
-            let _ = ticker.handle.disconnect().await;
+    /// not be disturbed. The old ticker is taken out here; the venue round
+    /// trips run in [`TickerReset::reconnect`] without the session lock.
+    pub fn begin_ticker_reset(&mut self) -> Result<TickerReset> {
+        let connect = if self.plants.ticker {
+            Some((self.config.to_rithmic_config()?, Arc::clone(&self.streams)))
+        } else {
+            None
+        };
+        Ok(TickerReset {
+            old: self.ticker.take(),
+            epoch: self.epoch,
+            connect,
+        })
+    }
+
+    /// Install a reconnected ticker. If the session connected or disconnected
+    /// while the reset ran, the new plant belongs to nobody: it is logged out.
+    pub async fn finish_ticker_reset(&mut self, done: ReconnectedTicker) {
+        let Some(plant) = done.plant else {
+            return;
+        };
+        if done.epoch == self.epoch && self.ticker.is_none() {
+            self.ticker = Some(plant);
+        } else {
+            plant.close().await;
         }
-        if !self.plants.ticker {
-            return Ok(());
-        }
-        let rc = self.config.to_rithmic_config()?;
-        self.ticker = Some(connect_ticker(&rc, &self.streams.clone()).await?);
-        Ok(())
     }
 
     /// Subscribe to bracket update notifications (required for plant brackets).
@@ -809,6 +853,11 @@ impl RithmicSession {
             .ok_or(Error::NotConnected { plant: "order" })
     }
 
+    /// The order handle if the order plant is up (no connect attempt).
+    pub fn current_order_handle(&self) -> Option<RithmicOrderPlantHandle> {
+        self.order.as_ref().map(|o| o.handle.clone())
+    }
+
     /// Clone a command handle for order I/O outside the session lock.
     ///
     /// The clone shares the plant command channel; its subscription receiver is a
@@ -816,6 +865,29 @@ impl RithmicSession {
     pub fn clone_order_handle(&self) -> Result<RithmicOrderPlantHandle> {
         Ok(self.order_handle()?.clone())
     }
+}
+
+/// Side, price type and duration from their venue names. A bad value is caught
+/// before anything is sent (`NotSent`); an empty duration is a day order.
+fn parse_order_terms(
+    side: &str,
+    price_type: &str,
+    duration: &str,
+) -> Result<(OrderSide, OrderType, TimeInForce)> {
+    let side: OrderSide = side
+        .parse()
+        .map_err(|e| Error::NotSent(format!("invalid order side: {e}")))?;
+    let price_type: OrderType = price_type
+        .parse()
+        .map_err(|e| Error::NotSent(format!("invalid price type: {e}")))?;
+    let duration: TimeInForce = if duration.is_empty() {
+        TimeInForce::Day
+    } else {
+        duration
+            .parse()
+            .map_err(|e| Error::NotSent(format!("invalid duration: {e}")))?
+    };
+    Ok((side, price_type, duration))
 }
 
 /// Place an order on an already-connected order-plant handle (no session lock).
@@ -834,19 +906,7 @@ pub async fn place_order_on(
     trail_by_ticks: Option<i32>,
     trail_by_price_id: Option<i32>,
 ) -> Result<()> {
-    let side: OrderSide = side
-        .parse()
-        .map_err(|e| Error::NotSent(format!("invalid order side: {e}")))?;
-    let price_type: OrderType = price_type
-        .parse()
-        .map_err(|e| Error::NotSent(format!("invalid price type: {e}")))?;
-    let duration: TimeInForce = if duration.is_empty() {
-        TimeInForce::Day
-    } else {
-        duration
-            .parse()
-            .map_err(|e| Error::NotSent(format!("invalid duration: {e}")))?
-    };
+    let (side, price_type, duration) = parse_order_terms(side, price_type, duration)?;
 
     let mut builder = RithmicOrder::new()
         .symbol(symbol)
@@ -904,19 +964,7 @@ pub async fn place_bracket_order_on(
             "place_bracket_order requires stop_ticks and/or target_ticks".into(),
         ));
     }
-    let side: OrderSide = side
-        .parse()
-        .map_err(|e| Error::NotSent(format!("invalid order side: {e}")))?;
-    let price_type: OrderType = price_type
-        .parse()
-        .map_err(|e| Error::NotSent(format!("invalid price type: {e}")))?;
-    let duration: TimeInForce = if duration.is_empty() {
-        TimeInForce::Day
-    } else {
-        duration
-            .parse()
-            .map_err(|e| Error::NotSent(format!("invalid duration: {e}")))?
-    };
+    let (side, price_type, duration) = parse_order_terms(side, price_type, duration)?;
 
     let mut builder = RithmicBracketOrder::new()
         .symbol(symbol)
@@ -946,26 +994,17 @@ pub async fn place_bracket_order_on(
     )
 }
 
-/// Adjust bracket stop ticks on an already-connected handle.
-pub async fn adjust_bracket_stop_on(
-    handle: &RithmicOrderPlantHandle,
-    basket_id: &str,
-    ticks: i32,
-    level: Option<i32>,
-) -> Result<()> {
-    let mut builder = RithmicBracketLevelAdjustment::new()
-        .id(basket_id)
-        .ticks(ticks);
-    if let Some(lvl) = level {
-        builder = builder.level(lvl);
-    }
-    let adj = builder.build().map_err(|e| Error::NotSent(e.to_string()))?;
-    order_result_one(handle.adjust_stop(adj).await, "adjust_bracket_stop")
+/// Which leg of a plant bracket an adjustment moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BracketLeg {
+    Stop,
+    Target,
 }
 
-/// Adjust bracket target ticks on an already-connected handle.
-pub async fn adjust_bracket_target_on(
+/// Move a bracket leg to `ticks` from the fill, on an already-connected handle.
+pub async fn adjust_bracket_on(
     handle: &RithmicOrderPlantHandle,
+    leg: BracketLeg,
     basket_id: &str,
     ticks: i32,
     level: Option<i32>,
@@ -977,7 +1016,12 @@ pub async fn adjust_bracket_target_on(
         builder = builder.level(lvl);
     }
     let adj = builder.build().map_err(|e| Error::NotSent(e.to_string()))?;
-    order_result_one(handle.adjust_target(adj).await, "adjust_bracket_target")
+    match leg {
+        BracketLeg::Stop => order_result_one(handle.adjust_stop(adj).await, "adjust_bracket_stop"),
+        BracketLeg::Target => {
+            order_result_one(handle.adjust_target(adj).await, "adjust_bracket_target")
+        }
+    }
 }
 
 /// Modify an order on an already-connected handle (no session lock).
@@ -1049,11 +1093,14 @@ fn order_failure(e: rithmic_rs::RithmicError) -> Error {
 }
 
 fn order_response_failure(resp: &rithmic_rs::RithmicResponse, ctx: &str) -> Option<Error> {
-    resp.error.as_ref().map(|e| match order_failure(e.clone()) {
-        Error::Rejected(m) => Error::Rejected(format!("{ctx}: {m}")),
-        Error::NotSent(m) => Error::NotSent(format!("{ctx}: {m}")),
-        Error::OutcomeUnknown(m) => Error::OutcomeUnknown(format!("{ctx}: {m}")),
-        other => other,
+    resp.error.as_ref().map(|e| {
+        let class = order_failure(e.clone());
+        let message = format!("{ctx}: {e}");
+        match class {
+            Error::Rejected(_) => Error::Rejected(message),
+            Error::NotSent(_) => Error::NotSent(message),
+            _ => Error::OutcomeUnknown(message),
+        }
     })
 }
 
@@ -1082,18 +1129,6 @@ fn order_result_one(
     }
 }
 
-/// Drain current working orders on an already-connected handle (no session lock).
-///
-/// `show_orders` triggers a replay of the current working orders, which arrive
-/// on the order-updates subscription channel with no completion marker. This
-/// drains that channel until `ORDER_DRAIN_SETTLE_MS` of silence (or the hard
-/// cap) and returns every order notification seen in arrival order.
-///
-/// **Best-effort, not provably complete.** Replays silently cap at 10,000
-/// records and a quiet channel cannot distinguish "venue has no orders" from
-/// "rows were lost". Callers that need a hard guarantee must treat the result
-/// as advisory (see `death_policy=trust_stop`) rather than as an authoritative
-/// venue snapshot.
 /// A pull source the order-drain reads `PlantEvent`s from.
 ///
 /// Implemented for `SubscriptionFilter` (production, over the order-plant
@@ -1131,13 +1166,7 @@ impl OrderDrainSource for SubscriptionFilter {
 /// `ORDER_DRAIN_SETTLE_MS` of silence (or the `ORDER_DRAIN_MAX_MS` hard cap)
 /// and returns them in arrival order. A `Closed` / `Lagged` source aborts the
 /// drain with the corresponding error (so a dropped order-plant connection
-/// surfaces as `ChannelClosed`).
-///
-/// **Best-effort, not provably complete.** Replays silently cap at 10,000
-/// records and a quiet channel cannot distinguish "venue has no orders" from
-/// "rows were lost". Callers that need a hard guarantee must treat the result
-/// as advisory (see `death_policy=trust_stop`) rather than as an authoritative
-/// venue snapshot.
+/// surfaces as `ChannelClosed`). Best-effort: see [`load_orders_on`].
 pub(crate) async fn drain_order_notifications<S>(mut src: S) -> Result<Vec<OrderNotificationDto>>
 where
     S: OrderDrainSource,
@@ -1153,15 +1182,6 @@ where
         match tokio::time::timeout(settle.min(remaining), src.recv_order()).await {
             Ok(Ok(PlantEvent::OrderNotification(dto))) => out.push(dto),
             Ok(Ok(_)) => {} // non-order events (PnL, brackets, …) are ignored
-            Ok(Err(Error::ChannelLagged { skipped, .. })) => {
-                return Err(Error::ChannelLagged {
-                    plant: "order",
-                    skipped,
-                });
-            }
-            Ok(Err(Error::ChannelClosed { .. })) => {
-                return Err(Error::ChannelClosed { plant: "order" });
-            }
             Ok(Err(err)) => return Err(err),
             Err(_elapsed) => break, // silence window elapsed -> drain complete
         }
@@ -1170,8 +1190,11 @@ where
 }
 
 /// On subscribe failure, disconnect the order plant when `disconnect_on_err`.
-/// Order-updates always pass `true`. Brackets pass `opened_here` so a failure
-/// on an already-live plant does not tear down a shared order stream.
+/// Both subscribes pass `opened_here`: a plant this call opened is closed again,
+/// while a failure on an already-live plant leaves the shared order stream, its
+/// other subscription and in-flight orders alone. No order operation can be in
+/// flight on a plant opened by this call: its handle is published only after
+/// the call returns.
 async fn rollback_order_plant_subscribe(
     session: &mut RithmicSession,
     result: Result<()>,
@@ -1247,11 +1270,19 @@ pub async fn load_fill_history_on(
             Some(FILL_HISTORY_MAX_RECORDS as i32),
         )
         .await?;
+    // Recon must not act on a reply the venue abandoned part-way.
     let rows = collect_history_rows(
         responses,
         "load_fill_history",
         FillHistoryDto::from_response,
-    )?;
+    )
+    .map_err(|e| {
+        if is_partial_reply(&e) {
+            Error::ReconciliationUnavailable(e.to_string())
+        } else {
+            e
+        }
+    })?;
     check_fill_history_cap(rows.len())?;
     Ok(rows)
 }
@@ -1340,60 +1371,57 @@ fn login_result(
     }
 }
 
+/// Bring one plant up: connect within the deadline, log in (logging out again
+/// on a failed login, so no half session lingers), then attach its event lane.
+macro_rules! connect_plant {
+    ($label:literal, $plant:ident, $stream:expr, $rc:expr, $hub:expr, $out:ident, |$p:ident| $handle:expr) => {{
+        let $p =
+            connect_within_deadline($label, $plant::connect($rc, ConnectStrategy::Retry)).await?;
+        let handle = $handle;
+        let result = login_result(handle.login().await, concat!($label, " login"));
+        after_failed_login(
+            async {
+                let _ = handle.disconnect().await;
+            },
+            result,
+        )
+        .await?;
+        let stream = forward(
+            $hub,
+            $stream,
+            handle.subscription_receiver.resubscribe(),
+            map_connection_response,
+        );
+        $out {
+            _plant: $p,
+            handle,
+            _stream: stream,
+        }
+    }};
+}
+
 async fn connect_ticker(rc: &RithmicConfig, hub: &Arc<StreamHub>) -> Result<TickerPlant> {
-    let plant = connect_within_deadline(
+    Ok(connect_plant!(
         "ticker",
-        RithmicTickerPlant::connect(rc, ConnectStrategy::Retry),
-    )
-    .await?;
-    let handle = plant.get_handle();
-    let result = login_result(handle.login().await, "ticker login");
-    after_failed_login(
-        async {
-            let _ = handle.disconnect().await;
-        },
-        result,
-    )
-    .await?;
-    let stream = forward(
-        hub,
+        RithmicTickerPlant,
         Stream::Ticker,
-        handle.subscription_receiver.resubscribe(),
-        map_connection_response,
-    );
-    Ok(TickerPlant {
-        _plant: plant,
-        handle,
-        _stream: stream,
-    })
+        rc,
+        hub,
+        TickerPlant,
+        |plant| { plant.get_handle() }
+    ))
 }
 
 async fn connect_history(rc: &RithmicConfig, hub: &Arc<StreamHub>) -> Result<HistoryPlant> {
-    let plant = connect_within_deadline(
+    Ok(connect_plant!(
         "history",
-        RithmicHistoryPlant::connect(rc, ConnectStrategy::Retry),
-    )
-    .await?;
-    let handle = plant.get_handle();
-    let result = login_result(handle.login().await, "history login");
-    after_failed_login(
-        async {
-            let _ = handle.disconnect().await;
-        },
-        result,
-    )
-    .await?;
-    let stream = forward(
-        hub,
+        RithmicHistoryPlant,
         Stream::History,
-        handle.subscription_receiver.resubscribe(),
-        map_connection_response,
-    );
-    Ok(HistoryPlant {
-        _plant: plant,
-        handle,
-        _stream: stream,
-    })
+        rc,
+        hub,
+        HistoryPlant,
+        |plant| { plant.get_handle() }
+    ))
 }
 
 async fn connect_pnl(
@@ -1401,29 +1429,31 @@ async fn connect_pnl(
     account: &RithmicAccount,
     hub: &Arc<StreamHub>,
 ) -> Result<PnlPlant> {
-    let plant =
-        connect_within_deadline("pnl", RithmicPnlPlant::connect(rc, ConnectStrategy::Retry))
-            .await?;
-    let handle = plant.get_handle(account);
-    let result = login_result(handle.login().await, "pnl login");
-    after_failed_login(
-        async {
-            let _ = handle.disconnect().await;
-        },
-        result,
-    )
-    .await?;
-    let stream = forward(
-        hub,
+    Ok(connect_plant!(
+        "pnl",
+        RithmicPnlPlant,
         Stream::Pnl,
-        handle.subscription_receiver.resubscribe(),
-        map_connection_response,
-    );
-    Ok(PnlPlant {
-        _plant: plant,
-        handle,
-        _stream: stream,
-    })
+        rc,
+        hub,
+        PnlPlant,
+        |plant| { plant.get_handle(account) }
+    ))
+}
+
+async fn connect_order(
+    rc: &RithmicConfig,
+    account: &RithmicAccount,
+    hub: &Arc<StreamHub>,
+) -> Result<OrderPlant> {
+    Ok(connect_plant!(
+        "order",
+        RithmicOrderPlant,
+        Stream::Order,
+        rc,
+        hub,
+        OrderPlant,
+        |plant| { plant.get_handle(account) }
+    ))
 }
 
 async fn load_tick_slice(
@@ -1441,8 +1471,8 @@ async fn load_tick_slice(
             end_time_sec,
         )
         .await?;
-    // Multi-response replay: keep valid rows; if nothing parsed and the plant
-    // reported an error on any frame, surface that instead of Ok([]).
+    // Multi-response replay: an error frame anywhere fails the slice, so the
+    // sliced loader retries or fails it instead of leaving a silent gap.
     collect_history_rows(responses, "load_ticks", HistoryTickDto::from_response)
 }
 
@@ -1470,6 +1500,10 @@ async fn load_bar_slice(
     collect_history_rows(responses, "load_time_bars", HistoryBarDto::from_response)
 }
 
+/// Rows of a multi-frame reply. Any error frame fails the whole reply: an error
+/// after some rows means the venue stopped part-way, and returning the rows that
+/// did arrive would pass a partial answer off as complete. The partial case says
+/// so in its text (`partial reply`) so callers can tell it apart.
 fn collect_history_rows<T>(
     responses: Vec<rithmic_rs::RithmicResponse>,
     ctx: &str,
@@ -1488,12 +1522,24 @@ fn collect_history_rows<T>(
             rows.push(row);
         }
     }
-    if rows.is_empty() {
-        if let Some(err) = first_err {
-            return Err(Error::Rithmic(format!("{ctx}: {err}")));
-        }
+    // "Partial" means rows arrived before the error. rithmic-rs 3 puts `rp_code`
+    // only on the terminal frame, so in practice the error frame ends the reply;
+    // the row count, not frame order, is what is classified here.
+    match first_err {
+        None => Ok(rows),
+        Some(err) if rows.is_empty() => Err(Error::Rithmic(format!("{ctx}: {err}"))),
+        Some(err) => Err(Error::Rithmic(format!(
+            "{ctx}: {PARTIAL_REPLY} after {} rows: {err}",
+            rows.len()
+        ))),
     }
-    Ok(rows)
+}
+
+/// Marks a reply that failed after some rows (see [`collect_history_rows`]).
+const PARTIAL_REPLY: &str = "partial reply";
+
+fn is_partial_reply(err: &Error) -> bool {
+    matches!(err, Error::Rithmic(text) if text.contains(PARTIAL_REPLY))
 }
 
 fn update_bar_type(bar_type: i32) -> Result<request_time_bar_update::BarType> {
@@ -1904,6 +1950,35 @@ mod forward_tests {
     }
 
     #[tokio::test]
+    async fn a_panicking_conversion_fails_the_lane_instead_of_stalling_it() {
+        fn panicking(seq: i32) -> Result<Option<PlantEvent>> {
+            if seq < 0 {
+                panic!("bad venue timestamp");
+            }
+            to_event(seq)
+        }
+        let hub = StreamHub::new();
+        let (tx, rx) = tokio::sync::broadcast::channel(8);
+        let _guard = forward(&hub, Stream::Order, rx, panicking);
+        tx.send(1).unwrap();
+        tx.send(-1).unwrap();
+        tx.send(2).unwrap();
+        let first = hub
+            .next_events(Stream::Order, 8, Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(first.len(), 1);
+        let err = hub
+            .next_events(Stream::Order, 8, Duration::from_secs(2))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, Error::Rithmic(m) if m.contains("panicked")),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
     async fn dropping_the_guard_detaches_the_lane() {
         let hub = StreamHub::new();
         let (_tx, rx) = tokio::sync::broadcast::channel::<i32>(8);
@@ -1975,5 +2050,41 @@ mod order_class_tests {
         let not_sent = order_result_one(Err(E::InvalidArgument("x".into())), "cancel_all_orders");
         assert!(matches!(not_sent, Err(Error::NotSent(_))));
         assert!(order_result_many(Ok(Vec::new()), "place_order").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod forwarder_tests {
+    use super::*;
+
+    struct Items(tokio::sync::mpsc::Receiver<u32>);
+
+    #[async_trait::async_trait]
+    impl Feed for Items {
+        type Item = u32;
+
+        async fn next_item(&mut self) -> std::result::Result<u32, RecvError> {
+            self.0.recv().await.ok_or(RecvError::Closed)
+        }
+    }
+
+    fn panics(_: u32) -> Result<Option<PlantEvent>> {
+        panic!("unconvertible venue value")
+    }
+
+    #[tokio::test]
+    async fn a_conversion_panic_fails_the_lane_once_then_reads_closed_forever() {
+        let hub = StreamHub::new();
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let _guard = forward(&hub, Stream::Ticker, Items(rx), panics);
+        tx.send(1).await.unwrap();
+
+        let wait = Duration::from_secs(2);
+        let first = hub.poll(Stream::Ticker, wait).await.unwrap_err();
+        assert!(first.to_string().contains("panicked"), "{first}");
+        for _ in 0..3 {
+            let later = hub.poll(Stream::Ticker, wait).await.unwrap_err();
+            assert!(matches!(later, Error::ChannelClosed { .. }), "{later}");
+        }
     }
 }

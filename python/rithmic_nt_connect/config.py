@@ -534,11 +534,16 @@ class RithmicDataClientConfig:
     session: SessionConfig
     instrument_ids: list[str] = field(default_factory=list)
     venue: str = VENUE
+    # EXTERNAL bars stamped at the venue bar close (the Nautilus default, and the
+    # faithful stamp). Set False to shift them to the bar open, to match a node
+    # whose DataEngineConfig.time_bars_timestamp_on_close is False.
+    bars_timestamp_on_close: bool = True
 
     def __repr__(self) -> str:
         return (
             f"RithmicDataClientConfig(session={self.session!r}, "
-            f"instrument_ids={self.instrument_ids!r}, venue={self.venue!r})"
+            f"instrument_ids={self.instrument_ids!r}, venue={self.venue!r}, "
+            f"bars_timestamp_on_close={self.bars_timestamp_on_close!r})"
         )
 
     @classmethod
@@ -572,9 +577,14 @@ if _LIVE_DATA_CONFIG_BASE is not None:
     ):
         """TradingNode-facing data config. Factory loads
         ``SessionConfig.from_env()``.
+
+        ``bars_timestamp_on_close`` stamps EXTERNAL bars at the venue close
+        (default, as ``DataEngineConfig.time_bars_timestamp_on_close``); keep the
+        two equal so INTERNAL and EXTERNAL bars share one convention.
         """
 
         session: SessionConfig | None = None
+        bars_timestamp_on_close: bool = True
 
 
 try:

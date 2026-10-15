@@ -1,7 +1,8 @@
 //! Venue DTOs converted from rithmic-rs plant messages.
 
+use rithmic_exec::{exchange_ts_ns, venue_ts_ns};
 use rithmic_rs::rti::messages::RithmicMessage;
-use rithmic_rs::{rithmic_to_unix_nanos, RithmicResponse};
+use rithmic_rs::RithmicResponse;
 
 /// Events a plant stream dropped because its consumer lagged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +32,8 @@ pub enum PlantEvent {
     InstrumentPnl(InstrumentPnlDto),
     /// Order plant notification (Rithmic or exchange).
     OrderNotification(OrderNotificationDto),
+    /// A plant bracket's stop / target levels changed (order plant, template 353).
+    BracketUpdate(BracketUpdateDto),
     /// Live or replay time bar (history plant).
     TimeBar(HistoryBarDto),
     /// A stream dropped events (a lagging consumer); carries the count so the
@@ -43,6 +46,22 @@ pub enum PlantEvent {
         /// Plant source name.
         source: String,
     },
+}
+
+/// Plant bracket state for one basket: stop and target distance in ticks and
+/// the quantities resting / released on each leg.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BracketUpdateDto {
+    pub account_id: Option<String>,
+    pub fcm_id: Option<String>,
+    pub ib_id: Option<String>,
+    pub basket_id: Option<String>,
+    pub stop_ticks: Option<i32>,
+    pub stop_quantity: Option<i32>,
+    pub stop_quantity_released: Option<i32>,
+    pub target_ticks: Option<i32>,
+    pub target_quantity: Option<i32>,
+    pub target_quantity_released: Option<i32>,
 }
 
 /// Product-level RMS (Risk Management System) info — commission fill rate per
@@ -341,6 +360,33 @@ pub struct TimeBarProbeRow {
     pub num_trades: Option<u64>,
 }
 
+/// Why the bar parser drops this row, or `None` when it keeps it. The verdict is
+/// the parser's own ([`HistoryBarDto::from_response`]), so a probe row reads
+/// `parsed` exactly when the load would return the bar; the reason names the
+/// first missing piece.
+fn probe_skip_reason(
+    resp: &RithmicResponse,
+    close: Option<f64>,
+    marker: Option<i32>,
+    open_high_low: [Option<f64>; 3],
+) -> Option<String> {
+    if HistoryBarDto::from_response(resp).is_some() {
+        return None;
+    }
+    Some(
+        if close.is_none() {
+            "no close or settlement"
+        } else if marker.is_none() {
+            "no marker"
+        } else if open_high_low.iter().any(Option::is_none) {
+            "missing open/high/low"
+        } else {
+            "no volume or unusable marker"
+        }
+        .into(),
+    )
+}
+
 impl TimeBarProbeRow {
     pub(crate) fn from_response(resp: &RithmicResponse) -> Self {
         let rp_code = resp
@@ -350,13 +396,12 @@ impl TimeBarProbeRow {
         let error = resp.error.as_ref().map(ToString::to_string);
         match &resp.message {
             RithmicMessage::ResponseTimeBarReplay(m) => {
-                let skip_reason = if m.close_price.is_none() && m.settlement_price.is_none() {
-                    Some("no close or settlement".into())
-                } else if m.marker.is_none() {
-                    Some("no marker".into())
-                } else {
-                    None
-                };
+                let skip_reason = probe_skip_reason(
+                    resp,
+                    m.close_price.or(m.settlement_price),
+                    m.marker,
+                    [m.open_price, m.high_price, m.low_price],
+                );
                 Self {
                     variant: "ResponseTimeBarReplay".into(),
                     source: resp.source.clone(),
@@ -380,13 +425,12 @@ impl TimeBarProbeRow {
                 }
             }
             RithmicMessage::TimeBar(m) => {
-                let skip_reason = if m.close_price.is_none() {
-                    Some("no close".into())
-                } else if m.marker.is_none() {
-                    Some("no marker".into())
-                } else {
-                    None
-                };
+                let skip_reason = probe_skip_reason(
+                    resp,
+                    m.close_price,
+                    m.marker,
+                    [m.open_price, m.high_price, m.low_price],
+                );
                 Self {
                     variant: "TimeBar".into(),
                     source: resp.source.clone(),
@@ -461,8 +505,7 @@ pub struct HistoryBarDto {
 }
 
 fn ts_ns(ssboe: Option<i32>, usecs: Option<i32>) -> Option<u64> {
-    let ssboe = ssboe?;
-    Some(rithmic_to_unix_nanos(ssboe, usecs.unwrap_or(0)))
+    venue_ts_ns(ssboe, usecs)
 }
 
 fn order_kind(
@@ -473,6 +516,53 @@ fn order_kind(
 ) -> Option<String> {
     // One mapping for plant and adapter: see `rithmic_exec::kind_from_notify`.
     rithmic_exec::kind_from_notify(source, notify_type_name?, status, text).map(str::to_string)
+}
+
+/// An order notification DTO from either venue message (Rithmic-side status
+/// or exchange report). They share every field but four, which the caller names.
+macro_rules! order_notification {
+    ($n:ident, $source:literal, $module:ident, $($extra:ident: $value:expr),+ $(,)?) => {{
+        let notify_type_name = $n.notify_type.and_then(|v| {
+            rithmic_rs::rti::$module::NotifyType::try_from(v)
+                .ok()
+                .map(|t| t.as_str_name().to_string())
+        });
+        let kind = order_kind(
+            $source,
+            notify_type_name.as_deref(),
+            $n.status.as_deref(),
+            $n.text.as_deref(),
+        );
+        PlantEvent::OrderNotification(OrderNotificationDto {
+            source: $source.into(),
+            kind,
+            notify_type: $n.notify_type,
+            notify_type_name,
+            status: $n.status.clone(),
+            basket_id: $n.basket_id.clone(),
+            exchange_order_id: $n.exchange_order_id.clone(),
+            user_tag: $n.user_tag.clone(),
+            account_id: $n.account_id.clone(),
+            symbol: $n.symbol.clone(),
+            exchange: $n.exchange.clone(),
+            quantity: $n.quantity,
+            total_fill_size: $n.total_fill_size,
+            total_unfilled_size: $n.total_unfilled_size,
+            price: $n.price,
+            trigger_price: $n.trigger_price,
+            avg_fill_price: $n.avg_fill_price,
+            transaction_type: $n.transaction_type,
+            price_type: $n.price_type,
+            duration: $n.duration,
+            text: $n.text.clone(),
+            report_text: $n.report_text.clone(),
+            ssboe: $n.ssboe,
+            usecs: $n.usecs,
+            ts_event_ns: ts_ns($n.ssboe, $n.usecs),
+            is_snapshot: $n.is_snapshot,
+            $($extra: $value),+
+        })
+    }};
 }
 
 impl From<&RithmicResponse> for PlantEvent {
@@ -486,7 +576,9 @@ impl From<&RithmicResponse> for PlantEvent {
                 aggressor: t.aggressor,
                 ssboe: t.ssboe,
                 usecs: t.usecs,
-                ts_event_ns: ts_ns(t.ssboe, t.usecs),
+                // The exchange's own trade time when sent; Rithmic's otherwise.
+                ts_event_ns: exchange_ts_ns(t.source_ssboe, t.source_usecs, t.source_nsecs)
+                    .or_else(|| ts_ns(t.ssboe, t.usecs)),
                 is_snapshot: t.is_snapshot,
             }),
             RithmicMessage::BestBidOffer(b) => Self::Bbo(BboDto {
@@ -548,96 +640,37 @@ impl From<&RithmicResponse> for PlantEvent {
                     usecs: i.usecs,
                 })
             }
-            RithmicMessage::RithmicOrderNotification(n) => {
-                let notify_type_name = n.notify_type.and_then(|v| {
-                    rithmic_rs::rti::rithmic_order_notification::NotifyType::try_from(v)
-                        .ok()
-                        .map(|t| t.as_str_name().to_string())
-                });
-                let kind = order_kind(
-                    "rithmic",
-                    notify_type_name.as_deref(),
-                    n.status.as_deref(),
-                    n.text.as_deref(),
-                );
-                Self::OrderNotification(OrderNotificationDto {
-                    source: "rithmic".into(),
-                    kind,
-                    notify_type: n.notify_type,
-                    notify_type_name,
-                    status: n.status.clone(),
-                    basket_id: n.basket_id.clone(),
-                    exchange_order_id: n.exchange_order_id.clone(),
-                    user_tag: n.user_tag.clone(),
-                    account_id: n.account_id.clone(),
-                    symbol: n.symbol.clone(),
-                    exchange: n.exchange.clone(),
-                    quantity: n.quantity,
-                    total_fill_size: n.total_fill_size,
-                    total_unfilled_size: n.total_unfilled_size,
-                    fill_size: None,
-                    price: n.price,
-                    trigger_price: n.trigger_price,
-                    avg_fill_price: n.avg_fill_price,
-                    fill_price: None,
-                    transaction_type: n.transaction_type,
-                    price_type: n.price_type,
-                    duration: n.duration,
-                    fill_id: None,
-                    text: n.text.clone(),
-                    report_text: n.report_text.clone(),
-                    completion_reason: n.completion_reason.clone(),
-                    ssboe: n.ssboe,
-                    usecs: n.usecs,
-                    ts_event_ns: ts_ns(n.ssboe, n.usecs),
-                    is_snapshot: n.is_snapshot,
-                })
-            }
-            RithmicMessage::ExchangeOrderNotification(n) => {
-                let notify_type_name = n.notify_type.and_then(|v| {
-                    rithmic_rs::rti::exchange_order_notification::NotifyType::try_from(v)
-                        .ok()
-                        .map(|t| t.as_str_name().to_string())
-                });
-                let kind = order_kind(
-                    "exchange",
-                    notify_type_name.as_deref(),
-                    n.status.as_deref(),
-                    n.text.as_deref(),
-                );
-                Self::OrderNotification(OrderNotificationDto {
-                    source: "exchange".into(),
-                    kind,
-                    notify_type: n.notify_type,
-                    notify_type_name,
-                    status: n.status.clone(),
-                    basket_id: n.basket_id.clone(),
-                    exchange_order_id: n.exchange_order_id.clone(),
-                    user_tag: n.user_tag.clone(),
-                    account_id: n.account_id.clone(),
-                    symbol: n.symbol.clone(),
-                    exchange: n.exchange.clone(),
-                    quantity: n.quantity,
-                    total_fill_size: n.total_fill_size,
-                    total_unfilled_size: n.total_unfilled_size,
-                    fill_size: n.fill_size,
-                    price: n.price,
-                    trigger_price: n.trigger_price,
-                    avg_fill_price: n.avg_fill_price,
-                    fill_price: n.fill_price,
-                    transaction_type: n.transaction_type,
-                    price_type: n.price_type,
-                    duration: n.duration,
-                    fill_id: n.fill_id.clone(),
-                    text: n.text.clone(),
-                    report_text: n.report_text.clone(),
-                    completion_reason: None,
-                    ssboe: n.ssboe,
-                    usecs: n.usecs,
-                    ts_event_ns: ts_ns(n.ssboe, n.usecs),
-                    is_snapshot: n.is_snapshot,
-                })
-            }
+            RithmicMessage::RithmicOrderNotification(n) => order_notification!(
+                n,
+                "rithmic",
+                rithmic_order_notification,
+                // Rithmic-side status: no fill fields; completion reason is its own.
+                fill_size: None,
+                fill_price: None,
+                fill_id: None,
+                completion_reason: n.completion_reason.clone(),
+            ),
+            RithmicMessage::ExchangeOrderNotification(n) => order_notification!(
+                n,
+                "exchange",
+                exchange_order_notification,
+                fill_size: n.fill_size,
+                fill_price: n.fill_price,
+                fill_id: n.fill_id.clone(),
+                completion_reason: None,
+            ),
+            RithmicMessage::BracketUpdates(b) => Self::BracketUpdate(BracketUpdateDto {
+                account_id: b.account_id.clone(),
+                fcm_id: b.fcm_id.clone(),
+                ib_id: b.ib_id.clone(),
+                basket_id: b.basket_id.clone(),
+                stop_ticks: b.stop_ticks,
+                stop_quantity: b.stop_quantity,
+                stop_quantity_released: b.stop_quantity_released,
+                target_ticks: b.target_ticks,
+                target_quantity: b.target_quantity,
+                target_quantity_released: b.target_quantity_released,
+            }),
             RithmicMessage::TimeBar(_) => match HistoryBarDto::from_response(resp) {
                 Some(bar) => Self::TimeBar(bar),
                 None => Self::Other {
@@ -794,7 +827,7 @@ impl HistoryBarDto {
             num_trades,
             bid_volume,
             ask_volume,
-            ts_event_ns: Some(rithmic_to_unix_nanos(ssboe, 0)),
+            ts_event_ns: venue_ts_ns(Some(ssboe), Some(0)),
         })
     }
 

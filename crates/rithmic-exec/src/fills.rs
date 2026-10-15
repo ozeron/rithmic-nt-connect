@@ -15,6 +15,13 @@ pub struct FillParts<'a> {
 
 /// Venue trade id: the venue `fill_id` when present, else a stable composite of
 /// the fill's own fields (so a fill the venue never tagged still dedupes).
+///
+/// Accepted trade-off of the composite: two untagged partial fills of one order
+/// at the same size and price in the same venue time stamp (or both without
+/// one) share an identity, so the second is taken for a replay of the first.
+/// Rithmic tags fills with `fill_id`, so this only matters for a fill that
+/// arrives without it; keying on the adapter clock instead would make every
+/// replay a new fill, which is the worse failure (double-counted position).
 pub fn trade_id(parts: &FillParts<'_>, ts_event: i64) -> String {
     match parts.fill_id {
         Some(id) if !id.is_empty() => id.to_string(),
@@ -38,6 +45,22 @@ pub fn dedup_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn venue_fill_ids_keep_identical_partials_apart() {
+        assert_ne!(
+            trade_id(&parts(Some("F1")), 7),
+            trade_id(&parts(Some("F2")), 7)
+        );
+    }
+
+    #[test]
+    fn untagged_identical_partials_share_an_identity_by_design() {
+        // See `trade_id`: without a venue fill id the fill's own fields are all
+        // there is, and a replay must key the same.
+        assert_eq!(trade_id(&parts(None), 7), trade_id(&parts(None), 7));
+        assert_ne!(trade_id(&parts(None), 7), trade_id(&parts(None), 8));
+    }
 
     fn parts(fill_id: Option<&'static str>) -> FillParts<'static> {
         FillParts {

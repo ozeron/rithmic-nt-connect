@@ -46,6 +46,17 @@ def exposure_complete(
     pnl_ts_ns: int | None,
     drain_ts_ns: int | None,
 ) -> bool: ...
+def book_update_kind(update_type: int) -> str | None: ...
+def history_bar_slice_secs(bar_type: int, period: int) -> int: ...
+def history_window_slices(
+    start: int, end: int, step_secs: int
+) -> list[tuple[int, int]]: ...
+def notification_action(
+    kind: str,
+    text: str | None = None,
+    report_text: str | None = None,
+    status: str | None = None,
+) -> tuple[str, str | None] | None: ...
 def kind_from_notify(
     source: str,
     notify_type_name: str,

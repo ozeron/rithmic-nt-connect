@@ -490,6 +490,14 @@ class _TestDataClient(RithmicDataClient):
     def _log(self, value: _Log) -> None:
         object.__setattr__(self, "_TestDataClient__log", value)
 
+    @property
+    def _clock(self) -> Any:
+        return object.__getattribute__(self, "_TestDataClient__clock")
+
+    @_clock.setter
+    def _clock(self, value: Any) -> None:
+        object.__setattr__(self, "_TestDataClient__clock", value)
+
 
 def _conforms() -> None:
     """Static proof: the stub satisfies the ``WireSession`` protocol."""

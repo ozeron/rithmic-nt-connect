@@ -100,6 +100,123 @@ fn code(err: &Error) -> &str {
 
 // --- subscribe + fan-out + refcount ---------------------------------------------
 
+// --- facades sharing one socket ------------------------------------------------
+
+#[tokio::test]
+async fn one_facades_unsubscribe_does_not_end_another_facades_stream() {
+    let parent = FakeParent::start(Opts::default()).await;
+    // Same config: two facades on one process socket (data clients of two nodes
+    // in one process, say).
+    let a = session_for(&parent).await;
+    let b = session_for(&parent).await;
+    a.subscribe(NQ, CME).await.unwrap();
+    b.subscribe(NQ, CME).await.unwrap();
+
+    a.unsubscribe(NQ, CME).await.unwrap();
+    assert_eq!(
+        parent.count("unsubscribe").await,
+        0,
+        "b still holds the intent: {:?}",
+        parent.calls().await
+    );
+    parent.push_last_trades(NQ, 1).await;
+    assert_eq!(drain(&b, 1, market).await.len(), 1, "b keeps its stream");
+
+    b.unsubscribe(NQ, CME).await.unwrap();
+    assert!(
+        wait_until_async(Duration::from_secs(5), || async {
+            parent.count(&format!("unsubscribe {NQ} {CME}")).await == 1
+        })
+        .await,
+        "the last holder leaves the venue"
+    );
+}
+
+#[tokio::test]
+async fn one_exec_facade_stopping_keeps_the_others_order_stream() {
+    let parent = FakeParent::start(Opts {
+        trading: true,
+        ..Opts::default()
+    })
+    .await;
+    let a = session_for(&parent).await;
+    let b = session_for(&parent).await;
+    a.subscribe_order_updates().await.unwrap();
+    b.subscribe_order_updates().await.unwrap();
+
+    a.disconnect_order_plant().await.unwrap();
+    assert_eq!(
+        parent.count("disconnect_order_plant").await,
+        0,
+        "{:?}",
+        parent.calls().await
+    );
+    parent
+        .command("push order accepted basket-1 tag-1 NQH6")
+        .await;
+    assert_eq!(
+        drain(&b, 1, order).await.len(),
+        1,
+        "b's orders still arrive"
+    );
+}
+
+#[tokio::test]
+async fn a_facade_that_disconnects_releases_only_what_it_held() {
+    let parent = FakeParent::start(Opts::default()).await;
+    let a = session_for(&parent).await;
+    let b = session_for(&parent).await;
+    a.subscribe("ESZ6", CME).await.unwrap();
+    a.subscribe(NQ, CME).await.unwrap();
+    b.subscribe(NQ, CME).await.unwrap();
+
+    a.disconnect().await.unwrap();
+    assert!(
+        wait_until_async(Duration::from_secs(5), || async {
+            parent.count(&format!("unsubscribe ESZ6 {CME}")).await == 1
+        })
+        .await,
+        "a's sole intent is released: {:?}",
+        parent.calls().await
+    );
+    assert_eq!(parent.count(&format!("unsubscribe {NQ} {CME}")).await, 0);
+    parent.push_last_trades(NQ, 1).await;
+    assert_eq!(drain(&b, 1, market).await.len(), 1);
+}
+
+#[tokio::test]
+async fn a_facade_dropped_without_disconnect_still_releases_what_only_it_held() {
+    let parent = FakeParent::start(Opts::default()).await;
+    let a = session_for(&parent).await;
+    let b = session_for(&parent).await;
+    a.subscribe("ESZ6", CME).await.unwrap();
+    a.subscribe(NQ, CME).await.unwrap();
+    b.subscribe(NQ, CME).await.unwrap();
+
+    drop(a);
+    assert!(
+        wait_until_async(Duration::from_secs(5), || async {
+            parent.count(&format!("unsubscribe ESZ6 {CME}")).await == 1
+        })
+        .await,
+        "the dropped facade's sole intent is released: {:?}",
+        parent.calls().await
+    );
+    assert_eq!(parent.count(&format!("unsubscribe {NQ} {CME}")).await, 0);
+
+    // The dropped facade no longer counts as a holder, so b's release reaches
+    // the parent.
+    b.unsubscribe(NQ, CME).await.unwrap();
+    assert!(
+        wait_until_async(Duration::from_secs(5), || async {
+            parent.count(&format!("unsubscribe {NQ} {CME}")).await == 1
+        })
+        .await,
+        "{:?}",
+        parent.calls().await
+    );
+}
+
 #[tokio::test]
 async fn two_connections_share_one_venue_subscription_by_refcount() {
     let parent = FakeParent::start(Opts::default()).await;
@@ -497,6 +614,7 @@ async fn events_arrive_equal_to_what_the_plant_emitted() {
     s.subscribe_time_bars(NQ, CME, 2, 1).await.unwrap();
     s.subscribe_pnl().await.unwrap();
     s.subscribe_order_updates().await.unwrap();
+    s.subscribe_bracket_updates().await.unwrap();
 
     parent.command("push last_trade NQH6 CME 100.25 1").await;
     parent.command("push bbo NQH6 CME 100.0 5 100.25 7").await;
@@ -522,6 +640,39 @@ async fn events_arrive_equal_to_what_the_plant_emitted() {
     );
     assert_eq!(
         drain(&s, 1, order).await[0],
+        scripted::order_notification("accepted", "basket-9", "tag-9", NQ)
+    );
+    // A bracket update rides the order stream with the same record shape.
+    parent.command("push bracket basket-9 8 16").await;
+    assert_eq!(
+        drain(&s, 1, order).await[0],
+        scripted::bracket_update("basket-9", 8, 16)
+    );
+}
+
+#[tokio::test]
+async fn bracket_updates_reach_only_connections_that_subscribed_to_them() {
+    let parent = FakeParent::start(Opts {
+        trading: true,
+        ..Opts::default()
+    })
+    .await;
+    let orders_only = session_for(&parent).await;
+    let with_brackets = second_connection(&parent).await;
+    orders_only.subscribe_order_updates().await.unwrap();
+    with_brackets.subscribe_order_updates().await.unwrap();
+    with_brackets.subscribe_bracket_updates().await.unwrap();
+
+    parent.command("push bracket basket-9 8 16").await;
+    parent
+        .command("push order accepted basket-9 tag-9 NQH6")
+        .await;
+
+    let got = drain(&with_brackets, 2, order).await;
+    assert_eq!(got[0], scripted::bracket_update("basket-9", 8, 16));
+    // The order-only connection gets the order update and nothing before it.
+    assert_eq!(
+        drain(&orders_only, 1, order).await[0],
         scripted::order_notification("accepted", "basket-9", "tag-9", NQ)
     );
 }
@@ -860,4 +1011,69 @@ async fn a_failed_retry_of_a_degraded_join_reports_the_venue_error_and_stays_deg
     assert!(err.to_string().contains("still expired"), "{err}");
     // Still degraded: the next subscribe tries again, and now succeeds.
     s.subscribe(NQ, CME).await.expect("healed on the next try");
+}
+
+#[tokio::test]
+async fn a_panicking_handler_answers_unknown_and_leaks_nothing() {
+    let parent = FakeParent::start(Opts {
+        trading: true,
+        ..Opts::default()
+    })
+    .await;
+    let s = session_for(&parent).await;
+    s.subscribe(NQ, CME).await.unwrap();
+
+    parent.command("fail_next place_order panic boom").await;
+    let err = s.place_order(&place("panics")).await.unwrap_err();
+    assert!(matches!(err, Error::OutcomeUnknown(_)), "{err:?}");
+    // The connection keeps serving...
+    s.place_order(&place("after"))
+        .await
+        .expect("next place served");
+    // ...and its teardown still releases what it held.
+    s.disconnect().await.unwrap();
+    assert!(
+        wait_until_async(Duration::from_secs(5), || async {
+            parent.count(&format!("unsubscribe {NQ} {CME}")).await == 1
+        })
+        .await,
+        "{:?}",
+        parent.calls().await
+    );
+}
+
+#[tokio::test]
+async fn order_peers_are_told_when_the_order_plant_is_reseated() {
+    let parent = FakeParent::start(Opts {
+        trading: true,
+        ..Opts::default()
+    })
+    .await;
+    let brackets_peer = session_for(&parent).await;
+    let order_peer = second_connection(&parent).await;
+    brackets_peer.subscribe_order_updates().await.unwrap();
+    brackets_peer.subscribe_bracket_updates().await.unwrap();
+    order_peer.subscribe_order_updates().await.unwrap();
+
+    // The last brackets holder leaves while an order peer remains: the parent
+    // re-seats the order plant, and events in that window may be lost.
+    brackets_peer.disconnect_order_plant().await.unwrap();
+    assert!(
+        wait_until_async(Duration::from_secs(5), || async {
+            parent.count("subscribe_order_updates").await >= 2
+        })
+        .await
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut told = false;
+    while Instant::now() < deadline && !told {
+        told = matches!(
+            order_peer
+                .poll_order_event(Duration::from_millis(100))
+                .await,
+            Err(Error::ChannelLagged { plant: "order", .. })
+        );
+    }
+    assert!(told, "the order peer was told to reconcile");
+    assert_eq!(parent.count("connect").await, 1, "no full plant rebuild");
 }

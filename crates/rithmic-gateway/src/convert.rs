@@ -1,217 +1,17 @@
 //! DTO ↔ protobuf mapping (the one convert boundary between `rithmic-plants`
 //! DTOs and the wire `pb` types). No Nautilus types cross this boundary.
 
-use rithmic_plants::dto::{
-    AccountPnlDto, AccountRmsInfoDto, BboDto, FillHistoryDto, FrontMonthDto, HistoryBarDto,
-    HistoryTickDto, InstrumentPnlDto, LastTradeDto, OrderBookDto, OrderNotificationDto, PlantEvent,
-    ProductRmsInfoDto, ReferenceDataDto, TimeBarProbeRow,
-};
+use rithmic_plants::dto::{PlantEvent, ReferenceDataDto};
 use rithmic_plants::AccountTriple;
 
+pub use crate::mirror::{
+    account_pnl_to_pb, account_rms_info_to_pb, bbo_to_pb, bracket_update_to_pb, fill_history_to_pb,
+    front_month_to_pb, history_bar_to_pb, history_tick_to_pb, instrument_pnl_to_pb,
+    last_trade_to_pb, order_book_to_pb, order_notification_to_pb, product_rms_info_to_pb,
+    time_bar_probe_row_to_pb,
+};
 use crate::pb;
 use crate::subscriptions::{Kind, SubKey};
-
-pub fn last_trade_to_pb(t: LastTradeDto) -> pb::LastTrade {
-    pb::LastTrade {
-        symbol: t.symbol,
-        exchange: t.exchange,
-        trade_price: t.trade_price,
-        trade_size: t.trade_size,
-        aggressor: t.aggressor,
-        ssboe: t.ssboe,
-        usecs: t.usecs,
-        ts_event_ns: t.ts_event_ns,
-        is_snapshot: t.is_snapshot,
-    }
-}
-
-pub fn bbo_to_pb(b: BboDto) -> pb::Bbo {
-    pb::Bbo {
-        symbol: b.symbol,
-        exchange: b.exchange,
-        bid_price: b.bid_price,
-        bid_size: b.bid_size,
-        ask_price: b.ask_price,
-        ask_size: b.ask_size,
-        ssboe: b.ssboe,
-        usecs: b.usecs,
-        ts_event_ns: b.ts_event_ns,
-        is_snapshot: b.is_snapshot,
-    }
-}
-
-pub fn product_rms_info_to_pb(r: ProductRmsInfoDto) -> pb::ProductRmsInfo {
-    pb::ProductRmsInfo {
-        product_code: r.product_code,
-        commission_fill_rate: r.commission_fill_rate,
-        presence_bits: r.presence_bits,
-    }
-}
-
-pub fn account_rms_info_to_pb(r: AccountRmsInfoDto) -> pb::AccountRmsInfo {
-    pb::AccountRmsInfo {
-        account_id: r.account_id,
-        default_commission: r.default_commission,
-        presence_bits: r.presence_bits,
-    }
-}
-
-pub fn fill_history_to_pb(f: FillHistoryDto) -> pb::FillHistory {
-    pb::FillHistory {
-        account_id: f.account_id,
-        basket_id: f.basket_id,
-        symbol: f.symbol,
-        exchange: f.exchange,
-        transaction_type: f.transaction_type,
-        price_type: f.price_type,
-        duration: f.duration,
-        manual_or_auto: f.manual_or_auto,
-        fill_id: f.fill_id,
-        fill_date: f.fill_date,
-        fill_time: f.fill_time,
-        fill_price: f.fill_price,
-        fill_size: f.fill_size,
-        price: f.price,
-        trigger_price: f.trigger_price,
-        ssboe: f.ssboe,
-        usecs: f.usecs,
-    }
-}
-
-pub fn order_book_to_pb(o: OrderBookDto) -> pb::OrderBook {
-    pb::OrderBook {
-        symbol: o.symbol,
-        exchange: o.exchange,
-        update_type: o.update_type,
-        bid_price: o.bid_price,
-        bid_size: o.bid_size,
-        ask_price: o.ask_price,
-        ask_size: o.ask_size,
-        ssboe: o.ssboe,
-        usecs: o.usecs,
-        ts_event_ns: o.ts_event_ns,
-    }
-}
-
-pub fn account_pnl_to_pb(a: AccountPnlDto) -> pb::AccountPnl {
-    pb::AccountPnl {
-        account_id: a.account_id,
-        fcm_id: a.fcm_id,
-        ib_id: a.ib_id,
-        account_balance: a.account_balance,
-        cash_on_hand: a.cash_on_hand,
-        margin_balance: a.margin_balance,
-        day_pnl: a.day_pnl,
-        open_position_pnl: a.open_position_pnl,
-        closed_position_pnl: a.closed_position_pnl,
-        available_buying_power: a.available_buying_power,
-        used_buying_power: a.used_buying_power,
-        is_snapshot: a.is_snapshot,
-        ssboe: a.ssboe,
-        usecs: a.usecs,
-    }
-}
-
-pub fn instrument_pnl_to_pb(i: InstrumentPnlDto) -> pb::InstrumentPnl {
-    pb::InstrumentPnl {
-        account_id: i.account_id,
-        symbol: i.symbol,
-        exchange: i.exchange,
-        product_code: i.product_code,
-        instrument_type: i.instrument_type,
-        open_position_pnl: i.open_position_pnl,
-        closed_position_pnl: i.closed_position_pnl,
-        mtm_security: i.mtm_security,
-        open_position_quantity: i.open_position_quantity,
-        closed_position_quantity: i.closed_position_quantity,
-        net_quantity: i.net_quantity,
-        avg_open_fill_price: i.avg_open_fill_price,
-        is_snapshot: i.is_snapshot,
-        ssboe: i.ssboe,
-        usecs: i.usecs,
-    }
-}
-
-pub fn order_notification_to_pb(n: OrderNotificationDto) -> pb::OrderNotification {
-    pb::OrderNotification {
-        source: n.source,
-        kind: n.kind,
-        notify_type: n.notify_type,
-        notify_type_name: n.notify_type_name,
-        status: n.status,
-        basket_id: n.basket_id,
-        exchange_order_id: n.exchange_order_id,
-        user_tag: n.user_tag,
-        account_id: n.account_id,
-        symbol: n.symbol,
-        exchange: n.exchange,
-        quantity: n.quantity,
-        total_fill_size: n.total_fill_size,
-        total_unfilled_size: n.total_unfilled_size,
-        fill_size: n.fill_size,
-        price: n.price,
-        trigger_price: n.trigger_price,
-        avg_fill_price: n.avg_fill_price,
-        fill_price: n.fill_price,
-        transaction_type: n.transaction_type,
-        price_type: n.price_type,
-        duration: n.duration,
-        fill_id: n.fill_id,
-        text: n.text,
-        report_text: n.report_text,
-        completion_reason: n.completion_reason,
-        ssboe: n.ssboe,
-        usecs: n.usecs,
-        ts_event_ns: n.ts_event_ns,
-        is_snapshot: n.is_snapshot,
-    }
-}
-
-pub fn history_bar_to_pb(b: HistoryBarDto) -> pb::HistoryBar {
-    pb::HistoryBar {
-        symbol: b.symbol,
-        exchange: b.exchange,
-        bar_type: b.bar_type,
-        period: b.period,
-        marker: b.marker,
-        open_price: b.open_price,
-        high_price: b.high_price,
-        low_price: b.low_price,
-        close_price: b.close_price,
-        volume: b.volume,
-        num_trades: b.num_trades,
-        bid_volume: b.bid_volume,
-        ask_volume: b.ask_volume,
-        ts_event_ns: b.ts_event_ns,
-    }
-}
-
-pub fn history_tick_to_pb(t: HistoryTickDto) -> pb::HistoryTick {
-    pb::HistoryTick {
-        symbol: t.symbol,
-        exchange: t.exchange,
-        open_price: t.open_price,
-        high_price: t.high_price,
-        low_price: t.low_price,
-        close_price: t.close_price,
-        volume: t.volume,
-        num_trades: t.num_trades,
-        ssboe: t.ssboe,
-        usecs: t.usecs,
-        ts_event_ns: t.ts_event_ns,
-    }
-}
-
-pub fn front_month_to_pb(f: FrontMonthDto) -> pb::FrontMonthResponse {
-    pb::FrontMonthResponse {
-        symbol: f.symbol,
-        exchange: f.exchange,
-        trading_symbol: f.trading_symbol,
-        trading_exchange: f.trading_exchange,
-        symbol_name: f.symbol_name,
-        is_front_month_symbol: f.is_front_month_symbol,
-    }
-}
 
 pub fn reference_data_to_pb(r: ReferenceDataDto) -> pb::ReferenceDataResponse {
     pb::ReferenceDataResponse {
@@ -237,30 +37,6 @@ pub fn resolved_account_to_pb(a: AccountTriple) -> pb::ResolvedAccountResponse {
         account_id: Some(a.account_id),
         fcm_id: Some(a.fcm_id),
         ib_id: Some(a.ib_id),
-    }
-}
-
-pub fn time_bar_probe_row_to_pb(r: TimeBarProbeRow) -> pb::TimeBarProbeRow {
-    pb::TimeBarProbeRow {
-        variant: r.variant,
-        source: r.source,
-        error: r.error,
-        rp_code: r.rp_code,
-        parsed: r.parsed,
-        skip_reason: r.skip_reason,
-        symbol: r.symbol,
-        exchange: r.exchange,
-        bar_type: r.bar_type,
-        period: r.period,
-        marker: r.marker,
-        open_price: r.open_price,
-        high_price: r.high_price,
-        low_price: r.low_price,
-        close_price: r.close_price,
-        settlement_price: r.settlement_price,
-        has_settlement_price: r.has_settlement_price,
-        volume: r.volume,
-        num_trades: r.num_trades,
     }
 }
 
@@ -353,7 +129,8 @@ pub fn route_of(event: &PlantEvent) -> Route<'_> {
             kind: Kind::Bars,
         },
         PlantEvent::AccountPnl(_) | PlantEvent::InstrumentPnl(_) => Route::Pnl,
-        PlantEvent::OrderNotification(_) => Route::Order,
+        // Bracket updates ride the order-plant stream, so they share its topic.
+        PlantEvent::OrderNotification(_) | PlantEvent::BracketUpdate(_) => Route::Order,
         PlantEvent::Gap(g) => Route::Gap(g.stream),
         PlantEvent::Other { .. } => Route::Other,
     }
@@ -371,6 +148,7 @@ pub fn plant_event_to_pb(event: PlantEvent) -> pb::Event {
         PlantEvent::AccountPnl(a) => Body::AccountPnl(account_pnl_to_pb(a)),
         PlantEvent::InstrumentPnl(i) => Body::InstrumentPnl(instrument_pnl_to_pb(i)),
         PlantEvent::OrderNotification(n) => Body::OrderNotification(order_notification_to_pb(n)),
+        PlantEvent::BracketUpdate(b) => Body::BracketUpdate(bracket_update_to_pb(b)),
         PlantEvent::Gap(g) => Body::Gap(pb::Gap {
             stream: g.stream.plant().into(),
             skipped: g.skipped,

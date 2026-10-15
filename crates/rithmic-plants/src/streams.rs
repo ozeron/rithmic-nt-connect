@@ -217,41 +217,43 @@ impl StreamHub {
             let notified = lane.changed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if !lane.up.load(Ordering::SeqCst) {
-                return Taken::Down;
-            }
+            let up = lane.up.load(Ordering::SeqCst);
             let current = lane.generation.load(Ordering::SeqCst);
+            // While detached, the items still owed are those of the attachment
+            // that just detached (a detach bumps the generation once); a later
+            // attach bumps it again and turns them into an exact gap.
+            let owed = if up { current } else { current.wrapping_sub(1) };
             // Carried messages from a replaced attachment were lost.
-            if !cons.carry.is_empty() && cons.carry_gen != current {
+            if !cons.carry.is_empty() && cons.carry_gen != owed {
                 lane.stale
                     .fetch_add(cons.carry.len() as u64, Ordering::SeqCst);
                 cons.carry.clear();
             }
             // Queued events come first (carry, then the channel), then a recorded
-            // failure or close.
-            let mut batch = Vec::new();
-            while batch.len() < limit {
-                match cons.carry.pop_front() {
-                    Some(m) => batch.push(m),
-                    None => break,
-                }
-            }
-            while batch.len() < limit {
-                match cons.rx.try_recv() {
-                    Ok(t) if t.generation == current => batch.push(t.msg),
-                    Ok(_) => {
-                        lane.stale.fetch_add(1, Ordering::SeqCst);
-                    }
-                    Err(_) => break,
-                }
-            }
-            if let Some(out) = finish(lane, &mut cons, batch, limit, current) {
+            // failure, close or detach.
+            let batch = drain(lane, &mut cons, limit, owed);
+            if let Some(out) = finish(lane, &mut cons, batch, limit, owed) {
                 return Taken::Msgs(out);
             }
+            if !up {
+                return Taken::Down;
+            }
             if let Some(text) = lane.fail.lock().expect("stream fail").take() {
+                // The forwarder queues an event before it records a failure, so
+                // an event can land between the drain above and this read. It is
+                // delivered first; the failure stays recorded for the next take.
+                let late = drain(lane, &mut cons, limit, current);
+                if let Some(out) = finish(lane, &mut cons, late, limit, current) {
+                    *lane.fail.lock().expect("stream fail") = Some(text);
+                    return Taken::Msgs(out);
+                }
                 return Taken::Fail(text);
             }
             if lane.closed.load(Ordering::SeqCst) {
+                let late = drain(lane, &mut cons, limit, current);
+                if let Some(out) = finish(lane, &mut cons, late, limit, current) {
+                    return Taken::Msgs(out);
+                }
                 return Taken::Closed;
             }
             tokio::select! {
@@ -364,6 +366,28 @@ impl StreamHub {
             }
         }
     }
+}
+
+/// Take up to `limit` queued messages of attachment `generation` (carry first,
+/// then the channel); items of any other attachment are counted as stale.
+fn drain(lane: &Lane, cons: &mut Consumer, limit: usize, generation: u64) -> Vec<Msg> {
+    let mut batch = Vec::new();
+    while batch.len() < limit {
+        match cons.carry.pop_front() {
+            Some(m) => batch.push(m),
+            None => break,
+        }
+    }
+    while batch.len() < limit {
+        match cons.rx.try_recv() {
+            Ok(t) if t.generation == generation => batch.push(t.msg),
+            Ok(_) => {
+                lane.stale.fetch_add(1, Ordering::SeqCst);
+            }
+            Err(_) => break,
+        }
+    }
+    batch
 }
 
 /// Prefix a batch with a gap for any items lost to a replaced attachment, and
@@ -743,6 +767,49 @@ mod tests {
             })
         ));
         assert_eq!(seq(&batch[1]), 10);
+    }
+
+    #[tokio::test]
+    async fn events_queued_before_a_detach_are_delivered_before_down() {
+        let hub = StreamHub::new();
+        let tx = hub.attach(Stream::Order);
+        tx.event(tick(1)).await;
+        tx.event(tick(2)).await;
+        hub.detach(Stream::Order, tx.generation());
+        // The fills that arrived before the plant went away are not lost...
+        let batch = hub.next_events(Stream::Order, 8, SHORT).await.unwrap();
+        assert_eq!(batch.iter().map(seq).collect::<Vec<_>>(), vec![1, 2]);
+        // ...and only then does the lane read as down.
+        assert!(matches!(
+            hub.poll(Stream::Order, SHORT).await,
+            Err(Error::NotConnected { plant: "order" })
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_failure_never_overtakes_an_event_queued_before_it() {
+        // The forwarder queues an event and then records a failure; a consumer
+        // racing it must see the event first, every time.
+        for _ in 0..2_000 {
+            let hub = StreamHub::new();
+            let tx = hub.attach(Stream::Order);
+            let consumer = {
+                let hub = hub.clone();
+                tokio::spawn(async move {
+                    let mut seen = Vec::new();
+                    loop {
+                        match hub.next_events(Stream::Order, 8, SHORT).await {
+                            Ok(batch) => seen.extend(batch.iter().map(seq)),
+                            Err(_) => return seen,
+                        }
+                    }
+                })
+            };
+            tokio::task::yield_now().await;
+            tx.event(tick(7)).await;
+            tx.fail("connection lost".into());
+            assert_eq!(consumer.await.unwrap(), vec![7], "event before failure");
+        }
     }
 
     #[tokio::test]

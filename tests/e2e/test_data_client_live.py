@@ -113,6 +113,39 @@ class TestOrderBook:
         ev = wait_for_event(live_session.poll_event, "order_book", timeout_sec=20)
         assert ev.get("bid_price") or ev.get("ask_price"), "bid/ask levels present"
 
+    def test_tc_d11_book_update_types_are_in_the_venue_set(
+        self, live_session, live_front_month
+    ):
+        """Record which ``update_type`` values the venue actually sends.
+
+        The adapter treats a snapshot image as the whole book and solo / begin /
+        middle / end as changed levels; this pins that the live feed stays
+        inside the known set and prints the histogram for STATUS.
+        """
+        from collections import Counter
+
+        from rithmic_nt_connect._convert import order_book_to_fields
+
+        _, symbol, exchange = live_front_month
+        try:
+            live_session.subscribe_order_book_summary(symbol, exchange)
+        except RuntimeError as exc:
+            if "permission denied" in str(exc) or "not entitled" in str(exc):
+                pytest.skip(f"L2 book not available on this account: {exc}")
+            raise
+        seen: Counter[object] = Counter()
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and sum(seen.values()) < 200:
+            ev = live_session.poll_event()
+            if ev and ev.get("type") == "order_book":
+                order_book_to_fields(ev)  # rejects a value outside the set
+                seen[ev.get("update_type")] += 1
+            elif ev is None:
+                time.sleep(0.05)
+        print(f"order book update_type histogram: {dict(seen)}")
+        assert seen, "no order book events"
+        assert set(seen) <= {1, 2, 3, 4, 5, 6, 7}, seen
+
 
 # ══════════════════════════════════════════════════════════════════════
 # Group 3: Quotes
@@ -234,12 +267,12 @@ class TestBars:
         assert int(ev["volume"]) >= 0, "valid volume"
 
     def test_tc_d41_request_historical_bars(self, live_session, live_front_month):
-        """TC-D41 — request historical bars — OHLCV, ascending, minute-grid open time.
+        """TC-D41 — request historical bars — OHLCV, ascending, minute-grid stamps.
 
-        The venue ``marker`` is the bar CLOSE time; ``fields_to_bar`` shifts it
-        back by the bar duration. A 1m bar's ``ts_event`` must therefore land on
-        the minute grid (``ts_event % 60s == 0``). Skips when the history plant
-        transiently returns empty (LucidTrading).
+        The venue ``marker`` is the bar CLOSE time and bars are stamped at the
+        close by default; a 1m bar's ``ts_event`` must land on the minute grid
+        (``ts_event % 60s == 0``). Skips when the history plant transiently
+        returns empty (LucidTrading).
         """
         inst, *_ = live_front_month
         bar_type = BarType.from_str(f"{inst.id.symbol}.RITHMIC-1-MINUTE-LAST-EXTERNAL")
@@ -253,8 +286,7 @@ class TestBars:
             assert b.high.as_double() >= b.close.as_double(), f"bar[{i}]: high >= close"
             assert int(b.volume) >= 0, f"bar[{i}]: non-negative volume"
             assert b.ts_event % 60_000_000_000 == 0, (
-                f"bar[{i}]: open time not minute-aligned after close→open shift: "
-                f"{b.ts_event}"
+                f"bar[{i}]: bar stamp not minute-aligned: {b.ts_event}"
             )
             if i > 0:
                 assert b.ts_event >= bars[i - 1].ts_event, "ascending timestamps"
@@ -262,11 +294,12 @@ class TestBars:
     def test_tc_d42_historical_bars_close_to_open_shift(
         self, live_session, live_front_month
     ):
-        """TC-D42 - raw marker is CLOSE; converted ts_event is OPEN (marker - 60s).
+        """TC-D42 - raw marker is CLOSE; default stamp is the close, open-stamping
+        is marker - 60s.
 
         Pins the plant contract that ``ts_event_ns`` (always ``marker*1e9`` for
-        intraday bars) is the close time, so the adapter's unconditional
-        close→open shift is correct against the real plant. Skips on empty.
+        intraday bars) is the close time, so both conventions are correct against
+        the real plant. Skips on empty.
         """
         inst, symbol, exchange = live_front_month
         end = int(datetime.now(UTC).timestamp())
@@ -283,16 +316,26 @@ class TestBars:
             price_precision=int(inst.price_precision),
             ts_init=int(datetime.now(UTC).timestamp() * 1_000_000_000),
         )
-        assert len(converted) == len(raw)
-        for i, (r, c) in enumerate(zip(raw, converted, strict=True)):
+        opened = payloads_to_bars(
+            list(raw),
+            symbol=symbol,
+            exchange=exchange,
+            bar_type=bar_type,
+            price_precision=int(inst.price_precision),
+            ts_init=int(datetime.now(UTC).timestamp() * 1_000_000_000),
+            timestamp_on_close=False,
+        )
+        assert len(converted) == len(opened) == len(raw)
+        for i, (r, c, o) in enumerate(zip(raw, converted, opened, strict=True)):
             close_ns = (
                 int(r["ts_event_ns"])
                 if r.get("ts_event_ns") is not None
                 else int(r["marker"]) * 1_000_000_000
             )
-            assert c.ts_event == close_ns - 60_000_000_000, (
-                f"bar[{i}]: converted open != raw close - 60s "
-                f"({c.ts_event} != {close_ns} - 60s)"
+            assert c.ts_event == close_ns, f"bar[{i}]: default stamp is the close"
+            assert o.ts_event == close_ns - 60_000_000_000, (
+                f"bar[{i}]: open stamp != raw close - 60s "
+                f"({o.ts_event} != {close_ns} - 60s)"
             )
 
 

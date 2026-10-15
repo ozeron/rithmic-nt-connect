@@ -79,6 +79,7 @@ from rithmic_nt_connect._orders import (
     nautilus_tif_to_rithmic,
     order_notification_to_fields,
     order_side_from_notification,
+    slim_order_fields,
     trade_id_from_fill_fields,
     trailing_ticks_from_order,
 )
@@ -92,6 +93,7 @@ from rithmic_nt_connect.config import (
 from rithmic_nt_connect.constants import ADAPTER_NAME, DEFAULT_ACCOUNT_CURRENCY, VENUE
 from rithmic_nt_connect.errors import (
     ReconciliationUnavailableError,
+    UnreadableEventError,
     VenueQueryUnavailable,
 )
 from rithmic_nt_connect.exposure import (
@@ -256,6 +258,9 @@ class RithmicExecutionClient(LiveExecutionClient):
         # requires it before clearing the latch (positions ride that stream).
         self._pnl_snapshot_observed = asyncio.Event()
         self._account_seeded = False
+        # The session's resolved account, fetched off the event loop (in gateway
+        # mode it is a socket round trip) and read synchronously from here.
+        self._resolved_account_raw: str | None = None
         # Re-arms the order plant after gateway transport recovery (L3).
         self._recovery = self._build_recovery()
         # PnL is streamed frequently; avoid publishing identical AccountState
@@ -278,6 +283,8 @@ class RithmicExecutionClient(LiveExecutionClient):
 
     _MAX_SEEN_FILL_KEYS = 10_000
     _REARM_PNL_SNAPSHOT_TIMEOUT_S = 5.0
+    # Cached off-loop answer of ``session.resolved_account`` (set in __init__ too).
+    _resolved_account_raw: str | None = None
     _ORDER_POLL_MAX_TRANSIENT = 5
 
     def _fill_key_seen(self, key: str) -> bool:
@@ -313,6 +320,26 @@ class RithmicExecutionClient(LiveExecutionClient):
         return bool(self._config_local.enable_trading)
 
     async def _connect(self) -> None:
+        try:
+            await self._connect_attempt()
+        except BaseException:
+            # A partial connect tears down what it started: a poller or listener
+            # left running would be joined by a second one on the next connect.
+            await self._stop_background()
+            raise
+
+    async def _stop_background(self) -> None:
+        """Cancel the poll tasks and drop the transport listener."""
+        await self._recovery.detach()
+        for task_attr in ("_order_poll_task", "_poll_task"):
+            task = getattr(self, task_attr, None)
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+                setattr(self, task_attr, None)
+
+    async def _connect_attempt(self) -> None:
         from rithmic_nt_connect.session import ensure_connected
 
         # A reconnect must re-observe the PnL/account stream before the order
@@ -330,24 +357,14 @@ class RithmicExecutionClient(LiveExecutionClient):
         self._pnl_connected = False
         try:
             await asyncio.to_thread(self._session.subscribe_pnl)
-            self._seed_account_if_needed()
-            self._poll_task = self.create_task(
-                self._plant_poll_loop(
-                    name="pnl",
-                    poll_fn=self._session.poll_pnl_event,
-                    stream="pnl",
-                    on_event=self._dispatch_pnl_event,
-                    on_resync=self._resync_pnl_subscription,
-                ),
-                log_msg="rithmic_pnl_poll",
-            )
+            await self._resolve_and_seed_account()
+            self._poll_task = self._make_poll_task("pnl")
             self._pnl_connected = True
         except Exception as exc:
             if self._config_local.soft_fail_pnl:
                 self._log.warning(f"PnL/account path soft-failed: {exc}")
             else:
                 raise
-        self._seed_account_if_needed()
 
         if self.enable_trading:
             self._order_plant.begin_connect()
@@ -363,22 +380,12 @@ class RithmicExecutionClient(LiveExecutionClient):
                         f"order plant teardown after subscribe fail: {teardown_exc}"
                     )
                 raise
-            self._seed_account_if_needed()
+            await self._resolve_and_seed_account()
             await self._load_commission_rates()
             # The poll loop starts before the re-arm barrier (never-drop):
             # notifications must keep flowing even while the plant is
             # un-armed, so a slow or failed drain cannot drop venue events.
-            self._order_poll_task = self.create_task(
-                self._plant_poll_loop(
-                    name="order",
-                    poll_fn=self._session.poll_order_event,
-                    stream="order",
-                    on_event=self._dispatch_order_event,
-                    on_resync=self._resync_order_subscription,
-                    on_gap=self._recover_order_gap,
-                ),
-                log_msg="rithmic_order_poll",
-            )
+            self._order_poll_task = self._make_poll_task("order")
             # Every (re)connect re-observes venue state before arming — the
             # disconnect window can hide venue-side accepts/fills/terminal
             # outcomes and position changes even when nothing was latched. The
@@ -415,7 +422,7 @@ class RithmicExecutionClient(LiveExecutionClient):
     ) -> None:
         deadline = time.monotonic() + timeout_secs
         while self.account_id is None and time.monotonic() < deadline:
-            self._seed_account_if_needed()
+            await self._resolve_and_seed_account()
             if self.account_id is not None:
                 break
             await asyncio.sleep(0.05)
@@ -436,12 +443,33 @@ class RithmicExecutionClient(LiveExecutionClient):
         if log_registered:
             self._log.info(f"account observable in cache {self.account_id}")
 
+    async def _resolve_and_seed_account(self) -> None:
+        """Pick up the account once the session has resolved it. Called after
+        each bring-up step (PnL subscribe, order subscribe, the registration
+        wait) because the account can resolve at any of them; a no-op once it
+        is known."""
+        await self._refresh_resolved_account()
+        self._seed_account_if_needed()
+
+    async def _refresh_resolved_account(self) -> None:
+        """Fetch the session's resolved account off the event loop and cache it."""
+        if self._resolved_account_raw is not None:
+            return
+        try:
+            resolved = await asyncio.to_thread(self._session.resolved_account)
+        except Exception as exc:
+            self._log.warning(f"resolved_account lookup failed: {exc}")
+            return
+        if resolved is not None and resolved.get("account_id"):
+            self._resolved_account_raw = str(resolved["account_id"])
+
     def _account_raw(self, hint: str | None = None) -> str | None:
+        """The raw Rithmic account id from cached state only (never a session
+        call: this runs on the event loop)."""
         if hint:
             return str(hint)
-        resolved = self._session.resolved_account()
-        if resolved is not None and resolved.get("account_id"):
-            return str(resolved["account_id"])
+        if self._resolved_account_raw is not None:
+            return self._resolved_account_raw
         session = getattr(self._config_local, "session", None)
         cfg_id = getattr(session, "account_id", None)
         if cfg_id:
@@ -458,6 +486,8 @@ class RithmicExecutionClient(LiveExecutionClient):
         Lucid PnL often omits currency; without generate_account_state the
         engine drops fills (``no account registered``) and flatten is a no-op.
         """
+        if self._account_seeded and self.account_id is not None:
+            return
         raw = self._account_raw(account_raw)
         if not raw:
             return
@@ -491,6 +521,7 @@ class RithmicExecutionClient(LiveExecutionClient):
             on_down=self._on_transport_down,
             on_failed=self._on_transport_recovery_failed,
             on_attempt_failed=lambda exc: self._order_plant.latch(),
+            latch_now=lambda: self._order_plant.latch(),
         )
 
     def _on_transport_down(self, event: TransportDown) -> None:
@@ -516,49 +547,25 @@ class RithmicExecutionClient(LiveExecutionClient):
         (each failed attempt re-latches). Mid-session plant resync never clears
         a latch — only ``begin_connect`` + ``rearm`` after fresh observation.
         """
+        self._forget_pnl_state()
         if not self.enable_trading:
+            # No order plant to restore, but the PnL stream (positions, account)
+            # needs its intent back on the new connection.
+            await self._restore_pnl_stream()
             self._log.warning(
-                f"plant restore skipped (trading disabled) generation={generation}"
+                "order plant restore skipped (trading disabled) "
+                f"generation={generation}"
             )
             return
-        self._forget_pnl_state()
         self._order_plant.begin_connect()
-        if self._pnl_connected:
-            try:
-                await asyncio.to_thread(self._session.disconnect_pnl_plant)
-            except Exception as teardown_exc:
-                self._log.warning(
-                    f"L3 PnL disconnect before resubscribe: {teardown_exc}"
-                )
-            await asyncio.to_thread(self._session.subscribe_pnl)
+        await self._restore_pnl_stream()
         # No order-plant disconnect first: the parent restored (or this client's
         # re-dial dropped) the order intent already, and the subscribes below are
         # idempotent. Tearing the shared venue plant down would be a second churn.
         await asyncio.to_thread(self._session.subscribe_order_updates)
         await asyncio.to_thread(self._session.subscribe_bracket_updates)
         if self._order_poll_task is None or self._order_poll_task.done():
-            self._order_poll_task = self.create_task(
-                self._plant_poll_loop(
-                    name="order",
-                    poll_fn=self._session.poll_order_event,
-                    stream="order",
-                    on_event=self._dispatch_order_event,
-                    on_resync=self._resync_order_subscription,
-                    on_gap=self._recover_order_gap,
-                ),
-                log_msg="rithmic_order_poll",
-            )
-        if self._pnl_connected and (self._poll_task is None or self._poll_task.done()):
-            self._poll_task = self.create_task(
-                self._plant_poll_loop(
-                    name="pnl",
-                    poll_fn=self._session.poll_pnl_event,
-                    stream="pnl",
-                    on_event=self._dispatch_pnl_event,
-                    on_resync=self._resync_pnl_subscription,
-                ),
-                log_msg="rithmic_pnl_poll",
-            )
+            self._order_poll_task = self._make_poll_task("order")
         await self._rearm_after_reconnect()
         poll_alive = self._order_poll_task is not None and not (
             self._order_poll_task.done()
@@ -571,6 +578,18 @@ class RithmicExecutionClient(LiveExecutionClient):
         self._log.warning(
             f"L3 plant restore re-armed (generation={generation}, attempt={attempt})"
         )
+
+    async def _restore_pnl_stream(self) -> None:
+        """Re-issue the PnL subscription and make sure its poller runs."""
+        if not self._pnl_connected:
+            return
+        try:
+            await asyncio.to_thread(self._session.disconnect_pnl_plant)
+        except Exception as teardown_exc:
+            self._log.warning(f"L3 PnL disconnect before resubscribe: {teardown_exc}")
+        await asyncio.to_thread(self._session.subscribe_pnl)
+        if self._poll_task is None or self._poll_task.done():
+            self._poll_task = self._make_poll_task("pnl")
 
     async def _resync_order_subscription(self) -> None:
         # ``resync_start`` (poll loop) / ``resync_complete`` are owned by the
@@ -594,6 +613,10 @@ class RithmicExecutionClient(LiveExecutionClient):
         drop the shared venue plant when this is the last holder.
         """
         self._order_plant.begin_connect()
+        # An observation from before the gap is no proof the stream is alive
+        # now: the PnL gate waits for a fresh one (the venue pushes account PnL
+        # on a short interval even when nothing changed).
+        self._pnl_snapshot_observed.clear()
         await self._rearm_after_reconnect()
         if not self._order_plant.rearm(poll_alive=True):
             raise RuntimeError(
@@ -605,6 +628,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         # Exposure reads Unknown until a fresh observation has settled (a failed
         # resubscribe keeps it Unknown). ``_positions`` stays for position reports.
         self._pnl_live_since_ns = None
+        self._pnl_snapshot_observed.clear()  # the next re-arm waits for the new stream
         self._unreadable_position_symbols.discard(_ANY_SYMBOL)  # a fresh stream
         await asyncio.to_thread(self._session.disconnect_pnl_plant)
         await asyncio.to_thread(self._session.subscribe_pnl)
@@ -625,7 +649,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         # this connect: with ``soft_fail_pnl`` there is no stream to observe.
         if self._pnl_connected:
             await self._await_pnl_snapshot()
-        self._seed_account_if_needed()
+        await self._resolve_and_seed_account()
 
     def _drain_row_from_fields(
         self, fields: dict[str, Any], ts_event: int
@@ -684,6 +708,27 @@ class RithmicExecutionClient(LiveExecutionClient):
                 "observed after reconnect"
             ) from None
 
+    def _make_poll_task(self, stream: str) -> asyncio.Task[Any]:
+        """Start the poller for the ``pnl`` or ``order`` stream."""
+        if stream == "order":
+            loop = self._plant_poll_loop(
+                name="order",
+                poll_fn=self._session.poll_order_event,
+                stream="order",
+                on_event=self._dispatch_order_event,
+                on_resync=self._resync_order_subscription,
+                on_gap=self._recover_order_gap,
+            )
+        else:
+            loop = self._plant_poll_loop(
+                name="pnl",
+                poll_fn=self._session.poll_pnl_event,
+                stream="pnl",
+                on_event=self._dispatch_pnl_event,
+                on_resync=self._resync_pnl_subscription,
+            )
+        return self.create_task(loop, log_msg=f"rithmic_{stream}_poll")
+
     async def _plant_poll_loop(
         self,
         *,
@@ -728,26 +773,30 @@ class RithmicExecutionClient(LiveExecutionClient):
             self._cache_position(event)
 
     def _dispatch_order_event(self, event: dict[str, Any]) -> None:
+        if event.get("type") == "bracket_update":
+            # Plant bracket stop/target state; leg fills arrive as ordinary order
+            # notifications, so no Nautilus event is derived from it.
+            self._log.debug(
+                f"bracket update basket={event.get('basket_id')} "
+                f"stop_ticks={event.get('stop_ticks')} "
+                f"target_ticks={event.get('target_ticks')}"
+            )
+            return
         if event.get("type") != "order_notification":
             return
         try:
             fields = order_notification_to_fields(event)
         except Exception as exc:
-            self._log.error(f"invalid order_notification: {exc}")
-            self._order_plant.disconnect()
-            raise
+            # The poller re-reads venue state (the lost notification may be a
+            # fill) and the stream keeps running.
+            raise UnreadableEventError(
+                f"invalid order_notification ({exc}): {slim_order_fields(event)}"
+            ) from exc
         self._handle_order_notification(fields)
 
     async def _disconnect(self) -> None:
         self._order_plant.disconnect()
-        await self._recovery.detach()
-        for task_attr in ("_order_poll_task", "_poll_task"):
-            task = getattr(self, task_attr)
-            if task is not None:
-                task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await task
-                setattr(self, task_attr, None)
+        await self._stop_background()
         try:
             await asyncio.to_thread(self._session.disconnect)
         except Exception as exc:
@@ -865,17 +914,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         live = self._pnl_live_since_ns
         if self._position_unreadable_for(root):
             live = None  # an unreadable row for this root: net unknown, never flat
-        # Only rows re-observed on the current stream count: a position that went flat
-        # while the stream was down and is not re-pushed must not linger in the net.
-        current = (
-            {
-                key: fields
-                for key, fields in self._positions.items()
-                if self._position_seen_ns.get(key, 0) >= live
-            }
-            if live is not None
-            else {}
-        )
+        current = self._rows_seen_since(live) if live is not None else {}
         return ExposureSnapshot(
             root=root.strip().upper(),
             net=signed_net(current, root) if live is not None else None,
@@ -884,6 +923,27 @@ class RithmicExecutionClient(LiveExecutionClient):
             drain_ts_ns=drain_ts_ns,
             ts_init=self._clock.timestamp_ns(),
             reply=reply,
+        )
+
+    def _rows_seen_since(self, live: int) -> dict[str, dict[str, Any]]:
+        """Position rows re-observed on the current stream (live since ``live``).
+
+        A position that went flat while the stream was down and is not re-pushed
+        must not linger: only rows seen on the current stream count.
+        """
+        return {
+            key: fields
+            for key, fields in self._positions.items()
+            if self._position_seen_ns.get(key, 0) >= live
+        }
+
+    def _positions_known(self) -> bool:
+        """Whether the venue's positions are known: the PnL stream is live and
+        no row on it was unreadable. When not, an empty set means "unknown", not
+        "flat"."""
+        return (
+            self._pnl_live_since_ns is not None
+            and _ANY_SYMBOL not in self._unreadable_position_symbols
         )
 
     def _position_unreadable_for(self, root: str) -> bool:
@@ -1286,26 +1346,56 @@ class RithmicExecutionClient(LiveExecutionClient):
                 reports.append(report)
         return reports
 
+    def _command_refusal(self, kind: str) -> str | None:
+        """Why a ``submit`` / ``modify`` / ``cancel`` is refused before anything is
+        sent, or ``None``. Every command checks the same gates in the same order:
+        this client's trading flag, the parent gateway's trading gate, then the
+        order-plant state (latched, connecting)."""
+        action = f"{kind}_order"
+        if not self.enable_trading:
+            self._log_trading_disabled(action)
+            return _TRADING_DISABLED_REASON
+        if getattr(self._session, "trading_enabled", True) is False:
+            self._log_trading_disabled(f"{action} (parent gateway)")
+            return "Rithmic parent gateway trading disabled"
+        allowed = {
+            "submit": self._order_plant.allow_submit,
+            "modify": self._order_plant.allow_modify,
+            "cancel": self._order_plant.allow_cancel,
+        }[kind]
+        if not allowed():
+            return self._order_plant.reject_reason(kind)
+        return None
+
+    def _modify_rejected(
+        self, command: ModifyOrder, venue_id: str | None, reason: str
+    ) -> None:
+        self.generate_order_modify_rejected(
+            command.strategy_id,
+            command.instrument_id,
+            command.client_order_id,
+            VenueOrderId(venue_id or "UNKNOWN"),
+            reason,
+            self._clock.timestamp_ns(),
+        )
+
+    def _cancel_rejected(
+        self, command: CancelOrder, venue_id: str | None, reason: str
+    ) -> None:
+        self.generate_order_cancel_rejected(
+            command.strategy_id,
+            command.instrument_id,
+            command.client_order_id,
+            VenueOrderId(venue_id or "UNKNOWN"),
+            reason,
+            self._clock.timestamp_ns(),
+        )
+
     async def _submit_order(self, command: SubmitOrder) -> None:
         order: Order = command.order
-        if not self.enable_trading:
-            self._log_trading_disabled("submit_order")
-            self.generate_order_denied(
-                order.strategy_id,
-                order.instrument_id,
-                order.client_order_id,
-                _TRADING_DISABLED_REASON,
-                self._clock.timestamp_ns(),
-            )
-            return
-        if not self._order_plant.allow_submit():
-            self.generate_order_denied(
-                order.strategy_id,
-                order.instrument_id,
-                order.client_order_id,
-                self._order_plant.reject_reason("submit"),
-                self._clock.timestamp_ns(),
-            )
+        refused = self._command_refusal("submit")
+        if refused is not None:
+            self._deny_all([order], refused)
             return
         try:
             symbol, exchange = self._route(order.instrument_id)
@@ -1314,25 +1404,7 @@ class RithmicExecutionClient(LiveExecutionClient):
             duration = nautilus_tif_to_rithmic(order.time_in_force)
             trail_by_ticks = trailing_ticks_from_order(order)
         except ValueError as exc:
-            self.generate_order_denied(
-                order.strategy_id,
-                order.instrument_id,
-                order.client_order_id,
-                str(exc),
-                self._clock.timestamp_ns(),
-            )
-            return
-
-        # Gateway parent trading gate: deny locally before OrderSubmitted.
-        if getattr(self._session, "trading_enabled", True) is False:
-            self._log_trading_disabled("submit_order (parent gateway)")
-            self.generate_order_denied(
-                order.strategy_id,
-                order.instrument_id,
-                order.client_order_id,
-                "Rithmic parent gateway trading disabled",
-                self._clock.timestamp_ns(),
-            )
+            self._deny_all([order], str(exc))
             return
 
         user_tag = order.client_order_id.value
@@ -1368,43 +1440,65 @@ class RithmicExecutionClient(LiveExecutionClient):
             self._order_command_failed(
                 "place_order",
                 exc,
-                reject=lambda reason: self.generate_order_rejected(
-                    order.strategy_id,
-                    order.instrument_id,
-                    order.client_order_id,
-                    reason,
-                    self._clock.timestamp_ns(),
-                ),
+                reject=lambda reason: self._reject_all([order], reason),
             )
 
     def _is_bracket_order_list(self, orders: list) -> bool:
-        # Heuristic: bracket is 3 linked orders (entry + stop + target) with
-        # parent linkage or mixed sides. Non-bracket lists (e.g. 2 independent
-        # orders) fall through to independent legs.
+        """A bracket is three orders linked to one another (an entry and two
+        exits that name it as parent, or linked ids). Unlinked orders are never
+        guessed into one, whatever their sides."""
         if len(orders) != 3:
             return False
-        # Check parent_order_id linkage or contingency
-        try:
-            cids = {str(o.client_order_id) for o in orders}
-            for o in orders:
-                parent = getattr(o, "parent_order_id", None)
-                if parent is not None and str(parent) in cids:
-                    return True
-                linked = getattr(o, "linked_order_ids", None)
-                if linked:
-                    for lid in linked:
-                        if str(lid) in cids:
-                            return True
-        except Exception:
-            pass
-        # Fallback: mixed sides (entry BUY + exits SELL or vice versa)
-        try:
-            sides = {o.side for o in orders}
-            if len(sides) > 1:
+        cids = {str(o.client_order_id) for o in orders}
+        for o in orders:
+            parent = getattr(o, "parent_order_id", None)
+            if parent is not None and str(parent) in cids:
                 return True
-        except Exception:
-            pass
+            linked = getattr(o, "linked_order_ids", None) or ()
+            if any(str(lid) in cids for lid in linked):
+                return True
         return False
+
+    def _bracket_legs(self, orders: list) -> tuple[Any, Any, Any] | None:
+        """``(entry, stop, target)`` when the list has exactly that shape: one
+        order without a parent, a stop exit and a target exit whose parent is it.
+        """
+        entries = [o for o in orders if getattr(o, "parent_order_id", None) is None]
+        if len(entries) != 1:
+            return None
+        entry = entries[0]
+        exits = [o for o in orders if o is not entry]
+        if any(str(o.parent_order_id) != str(entry.client_order_id) for o in exits):
+            return None
+        stops = [
+            o
+            for o in exits
+            if o.order_type in (OrderType.STOP_MARKET, OrderType.STOP_LIMIT)
+        ]
+        targets = [o for o in exits if o not in stops]
+        if len(stops) != 1 or len(targets) != 1:
+            return None
+        return entry, stops[0], targets[0]
+
+    def _reject_all(self, orders: list, reason: str) -> None:
+        for order in orders:
+            self.generate_order_rejected(
+                order.strategy_id,
+                order.instrument_id,
+                order.client_order_id,
+                reason,
+                self._clock.timestamp_ns(),
+            )
+
+    def _deny_all(self, orders: list, reason: str) -> None:
+        for order in orders:
+            self.generate_order_denied(
+                order.strategy_id,
+                order.instrument_id,
+                order.client_order_id,
+                reason,
+                self._clock.timestamp_ns(),
+            )
 
     def _bracket_ticks(
         self, entry: Any, stop: Any | None, target: Any | None
@@ -1461,14 +1555,7 @@ class RithmicExecutionClient(LiveExecutionClient):
     async def _submit_order_list(self, command: SubmitOrderList) -> None:
         if not self.enable_trading:
             self._log_trading_disabled("submit_order_list")
-            for order in command.order_list.orders:
-                self.generate_order_denied(
-                    order.strategy_id,
-                    order.instrument_id,
-                    order.client_order_id,
-                    _TRADING_DISABLED_REASON,
-                    self._clock.timestamp_ns(),
-                )
+            self._deny_all(list(command.order_list.orders), _TRADING_DISABLED_REASON)
             return
         orders = list(command.order_list.orders)
         # Bracket path: try to map 3-leg OrderList to single plant bracket.
@@ -1480,51 +1567,29 @@ class RithmicExecutionClient(LiveExecutionClient):
             ):
                 # Brackets are spike-only (docs/STATUS.md); deny rather than
                 # silently decomposing into 3 independent orders.
-                for order in orders:
-                    self.generate_order_denied(
-                        order.strategy_id,
-                        order.instrument_id,
-                        order.client_order_id,
-                        "Rithmic brackets not enabled (RITHMIC_BRACKETS=1 required)",
-                        self._clock.timestamp_ns(),
-                    )
+                self._deny_all(
+                    orders, "Rithmic brackets not enabled (RITHMIC_BRACKETS=1 required)"
+                )
                 return
-            # Identify entry (no parent) vs exits (with parent)
-            entry = None
-            exits: list[Any] = []
-            for o in orders:
-                parent = getattr(o, "parent_order_id", None)
-                if parent is None:
-                    if entry is None:
-                        entry = o
-                    else:
-                        exits.append(o)
-                else:
-                    exits.append(o)
-            if entry is None:
-                entry = orders[0]
-                exits = orders[1:]
-            # Classify exits into stop vs target via order type
-            stop = None
-            target = None
-            for e in exits:
-                try:
-                    if e.order_type in (OrderType.STOP_MARKET, OrderType.STOP_LIMIT):
-                        stop = e
-                    else:
-                        target = e
-                except Exception:
-                    target = e
+            legs = self._bracket_legs(orders)
+            if legs is None:
+                self._deny_all(
+                    orders,
+                    "bracket needs one entry and a stop and a target exit "
+                    "whose parent is the entry",
+                )
+                return
+            entry, stop, target = legs
             stop_ticks, target_ticks = self._bracket_ticks(entry, stop, target)
-            if stop_ticks is None and target_ticks is None:
-                for order in orders:
-                    self.generate_order_denied(
-                        order.strategy_id,
-                        order.instrument_id,
-                        order.client_order_id,
-                        "bracket not losslessly representable as stop_ticks/target_ticks (need entry limit price + stop/target absolute prices)",  # noqa: E501
-                        self._clock.timestamp_ns(),
-                    )
+            # Both legs or nothing: placing the bracket without a leg that could
+            # not be expressed in ticks would leave the position unprotected.
+            if stop_ticks is None or target_ticks is None:
+                self._deny_all(
+                    orders,
+                    "bracket not losslessly representable as stop_ticks/target_ticks "
+                    "(need entry limit price + stop/target absolute prices a whole "
+                    "number of ticks away)",
+                )
                 return
             # Single plant bracket: localid = entry client_order_id
             try:
@@ -1539,44 +1604,20 @@ class RithmicExecutionClient(LiveExecutionClient):
                 qty = int(entry.quantity)
                 localid = entry.client_order_id.value
             except ValueError as exc:
-                for order in orders:
-                    self.generate_order_denied(
-                        order.strategy_id,
-                        order.instrument_id,
-                        order.client_order_id,
-                        str(exc),
-                        self._clock.timestamp_ns(),
-                    )
+                self._deny_all(orders, str(exc))
                 return
-            if getattr(self._session, "trading_enabled", True) is False:
-                self._log_trading_disabled(
-                    "submit_order_list (bracket, parent gateway)"
+            refused = self._command_refusal("submit")
+            if refused is not None:
+                self._deny_all(orders, refused)
+                return
+            # One plant bracket carries all three legs: they share its events.
+            for order in orders:
+                self.generate_order_submitted(
+                    order.strategy_id,
+                    order.instrument_id,
+                    order.client_order_id,
+                    self._clock.timestamp_ns(),
                 )
-                for order in orders:
-                    self.generate_order_denied(
-                        order.strategy_id,
-                        order.instrument_id,
-                        order.client_order_id,
-                        "Rithmic parent gateway trading disabled",
-                        self._clock.timestamp_ns(),
-                    )
-                return
-            if not self._order_plant.allow_submit():
-                for order in orders:
-                    self.generate_order_denied(
-                        order.strategy_id,
-                        order.instrument_id,
-                        order.client_order_id,
-                        self._order_plant.reject_reason("submit"),
-                        self._clock.timestamp_ns(),
-                    )
-                return
-            self.generate_order_submitted(
-                entry.strategy_id,
-                entry.instrument_id,
-                entry.client_order_id,
-                self._clock.timestamp_ns(),
-            )
             try:
                 await asyncio.to_thread(
                     self._session.place_bracket_order,
@@ -1596,13 +1637,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                 self._order_command_failed(
                     "place_bracket_order",
                     exc,
-                    reject=lambda reason: self.generate_order_rejected(
-                        entry.strategy_id,
-                        entry.instrument_id,
-                        entry.client_order_id,
-                        reason,
-                        self._clock.timestamp_ns(),
-                    ),
+                    reject=lambda reason: self._reject_all(orders, reason),
                 )
             return
         for order in orders:
@@ -1618,62 +1653,25 @@ class RithmicExecutionClient(LiveExecutionClient):
             )
 
     async def _modify_order(self, command: ModifyOrder) -> None:
-        if not self.enable_trading:
-            self._log_trading_disabled("modify_order")
-            self.generate_order_modify_rejected(
-                command.strategy_id,
-                command.instrument_id,
-                command.client_order_id,
-                VenueOrderId("UNKNOWN"),
-                _TRADING_DISABLED_REASON,
-                self._clock.timestamp_ns(),
-            )
-            return
-        if not self._order_plant.allow_modify():
-            self.generate_order_modify_rejected(
-                command.strategy_id,
-                command.instrument_id,
-                command.client_order_id,
-                VenueOrderId("UNKNOWN"),
-                self._order_plant.reject_reason("modify"),
-                self._clock.timestamp_ns(),
-            )
+        hint = command.venue_order_id.value if command.venue_order_id else None
+        refused = self._command_refusal("modify")
+        if refused is not None:
+            self._modify_rejected(command, hint, refused)
             return
         order = self._cache.order(command.client_order_id)
         if order is None:
-            self.generate_order_modify_rejected(
-                command.strategy_id,
-                command.instrument_id,
-                command.client_order_id,
-                VenueOrderId("UNKNOWN"),
-                "order not in cache",
-                self._clock.timestamp_ns(),
-            )
+            self._modify_rejected(command, hint, "order not in cache")
             return
         venue_id = self._venue_id_for_order(order)
         if not venue_id:
-            self.generate_order_modify_rejected(
-                command.strategy_id,
-                command.instrument_id,
-                command.client_order_id,
-                VenueOrderId("UNKNOWN"),
-                "no venue basket_id for modify",
-                self._clock.timestamp_ns(),
-            )
+            self._modify_rejected(command, hint, "no venue basket_id for modify")
             return
         try:
             symbol, exchange = self._route(command.instrument_id)
             price_type = nautilus_order_type_to_rithmic(order.order_type)
             trail_by_ticks = trailing_ticks_from_order(order)
         except ValueError as exc:
-            self.generate_order_modify_rejected(
-                command.strategy_id,
-                command.instrument_id,
-                command.client_order_id,
-                VenueOrderId(venue_id),
-                str(exc),
-                self._clock.timestamp_ns(),
-            )
+            self._modify_rejected(command, venue_id, str(exc))
             return
         qty = (
             int(command.quantity)
@@ -1704,54 +1702,21 @@ class RithmicExecutionClient(LiveExecutionClient):
             self._order_command_failed(
                 "modify_order",
                 exc,
-                reject=lambda reason: self.generate_order_modify_rejected(
-                    command.strategy_id,
-                    command.instrument_id,
-                    command.client_order_id,
-                    command.venue_order_id or VenueOrderId("UNKNOWN"),
-                    reason,
-                    self._clock.timestamp_ns(),
-                ),
+                reject=lambda reason: self._modify_rejected(command, venue_id, reason),
             )
 
     async def _cancel_order(self, command: CancelOrder) -> None:
-        if not self.enable_trading:
-            self._log_trading_disabled("cancel_order")
-            self.generate_order_cancel_rejected(
-                command.strategy_id,
-                command.instrument_id,
-                command.client_order_id,
-                command.venue_order_id or VenueOrderId("UNKNOWN"),
-                _TRADING_DISABLED_REASON,
-                self._clock.timestamp_ns(),
-            )
-            return
-        if not self._order_plant.allow_cancel():
-            self.generate_order_cancel_rejected(
-                command.strategy_id,
-                command.instrument_id,
-                command.client_order_id,
-                command.venue_order_id or VenueOrderId("UNKNOWN"),
-                self._order_plant.reject_reason("cancel"),
-                self._clock.timestamp_ns(),
-            )
-            return
-        venue_id = None
-        if command.venue_order_id is not None:
-            venue_id = command.venue_order_id.value
+        venue_id = command.venue_order_id.value if command.venue_order_id else None
         if not venue_id:
             cached_venue = self._cache.venue_order_id(command.client_order_id)
             if cached_venue is not None:
                 venue_id = cached_venue.value
+        refused = self._command_refusal("cancel")
+        if refused is not None:
+            self._cancel_rejected(command, venue_id, refused)
+            return
         if not venue_id:
-            self.generate_order_cancel_rejected(
-                command.strategy_id,
-                command.instrument_id,
-                command.client_order_id,
-                VenueOrderId("UNKNOWN"),
-                "no venue basket_id for cancel",
-                self._clock.timestamp_ns(),
-            )
+            self._cancel_rejected(command, None, "no venue basket_id for cancel")
             return
         try:
             await asyncio.to_thread(self._session.cancel_order, venue_id)
@@ -1759,14 +1724,7 @@ class RithmicExecutionClient(LiveExecutionClient):
             self._order_command_failed(
                 "cancel_order",
                 exc,
-                reject=lambda reason: self.generate_order_cancel_rejected(
-                    command.strategy_id,
-                    command.instrument_id,
-                    command.client_order_id,
-                    command.venue_order_id or VenueOrderId("UNKNOWN"),
-                    reason,
-                    self._clock.timestamp_ns(),
-                ),
+                reject=lambda reason: self._cancel_rejected(command, venue_id, reason),
             )
 
     async def _cancel_all_orders(self, command: CancelAllOrders) -> None:
@@ -2000,7 +1958,21 @@ class RithmicExecutionClient(LiveExecutionClient):
         ts_init = self._clock.timestamp_ns()
         reports: list[PositionStatusReport] = []
         instrument_filter = command.instrument_id
-        for fields in self._positions.values():
+        if not self._positions_known():
+            # No venue claim either way: reporting nothing keeps recon from
+            # reading the absence of rows as flat positions.
+            self._log.warning(
+                "position reports skipped: the PnL stream is not live, so venue "
+                "positions are unknown"
+            )
+            return reports
+        live = self._pnl_live_since_ns
+        if live is None:  # _positions_known() implies a live stream
+            return reports
+        for fields in self._rows_seen_since(live).values():
+            symbol = str(fields.get("symbol") or "").strip()
+            if symbol and symbol in self._unreadable_position_symbols:
+                continue  # this contract's latest row was unreadable: unknown
             instrument_id = InstrumentId.from_str(str(fields["instrument_id"]))
             if instrument_filter is not None and instrument_id != instrument_filter:
                 continue
@@ -2163,8 +2135,10 @@ class RithmicExecutionClient(LiveExecutionClient):
         # Cache-open instruments with no venue row → explicit FLAT so startup
         # recon surfaces Redis ghosts (still will not clear them on NT 1.231
         # when generate_missing_orders=False).
+        # Only when venue positions are known: with the PnL stream down an empty
+        # venue set is not proof the cache's open positions are flat.
         augment = getattr(self, "_augment_soft_mass_flat_for_cache_opens", None)
-        if callable(augment):
+        if callable(augment) and self._positions_known():
             positions = augment(positions, ts_init=int(mass_status.ts_init))
         warn = getattr(self, "_warn_soft_mass_cache_vs_venue", None)
         if callable(warn):

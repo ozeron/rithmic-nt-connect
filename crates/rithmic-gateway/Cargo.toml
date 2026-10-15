@@ -11,8 +11,8 @@ name = "rithmic-gateway"
 path = "src/bin/rithmic_gateway.rs"
 
 # Test-only: the real server over a scripted fake plant. Never built by default,
-# never bundled into the wheel (scripts/build_wheel.sh builds -p rithmic-gateway
-# --release only), and the production binary cannot select it.
+# never in the wheel (`python/pyproject.toml` `[tool.maturin] targets` lists the
+# production bin only), and the production binary cannot select it.
 [[bin]]
 name = "rithmic-gateway-fake"
 path = "src/bin/rithmic_gateway_fake.rs"
@@ -26,6 +26,7 @@ async-trait = "0.1"
 rithmic-plants = { path = "../rithmic-plants" }
 rithmic-rs = "3"
 bytes = "1"
+futures-util = "0.3"
 prost = "0.14"
 thiserror = "2"
 tokio = { version = "1", features = ["net", "io-util", "macros", "sync", "rt-multi-thread", "fs", "signal", "time"] }

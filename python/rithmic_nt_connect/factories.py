@@ -67,7 +67,12 @@ class RithmicLiveDataClientFactory(LiveDataClientFactory):
         data_config = (
             config
             if isinstance(config, RithmicDataClientConfig)
-            else RithmicDataClientConfig(session=session_cfg)
+            else RithmicDataClientConfig(
+                session=session_cfg,
+                bars_timestamp_on_close=bool(
+                    getattr(config, "bars_timestamp_on_close", True)
+                ),
+            )
         )
         return RithmicDataClient(
             loop=loop,

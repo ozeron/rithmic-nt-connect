@@ -21,6 +21,10 @@ async fn main() {
             print_help();
             return;
         }
+        if arg == "--version" || arg == "-V" {
+            println!("rithmic-gateway {}", env!("CARGO_PKG_VERSION"));
+            return;
+        }
         eprintln!("unknown argument: {arg}");
         print_help();
         std::process::exit(2);
@@ -153,6 +157,7 @@ async fn run() -> Result<(), String> {
         idle_policy,
         gates,
         session: SessionHandle::new(session),
+        timing: rithmic_gateway::server::pump::PumpTiming::default(),
     })
     .await
 }

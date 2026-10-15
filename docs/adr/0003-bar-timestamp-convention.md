@@ -1,0 +1,7 @@
+# Stamp EXTERNAL bars at the bar close by default
+
+`RithmicDataClientConfig.bars_timestamp_on_close` (default `True`) decides how venue (EXTERNAL) time bars are stamped. Rithmic's bar `marker` is the bar CLOSE time, and a bar is only knowable once it has closed, so the default passes the venue's own stamp through: `Bar.ts_event` = close. This is also the Nautilus default (`DataEngineConfig.time_bars_timestamp_on_close=True`) and what the Databento, Bybit and dYdX adapters do (`bars_timestamp_on_close: bool = True`). With `False` an intraday bar is shifted back by its duration to its OPEN time, the convention this adapter used unconditionally until 2026-10-14 to line up with open-time stores (the market-data lake, IBKR exports).
+
+Stamping at open was rejected as the default: it gives a bar a `ts_event` up to one bar length before anyone could have seen it, a look-ahead in backtests and catalogs, and the code comment that justified it ("Nautilus Bar.ts_event is the OPEN time") was wrong. A node must keep `bars_timestamp_on_close` and `DataEngineConfig.time_bars_timestamp_on_close` equal so INTERNAL and EXTERNAL bars share one convention (`tests/test_bar_seam_parity.py` pins both pairings). A data client cannot read the engine's config in Nautilus 1.231, so the client logs its convention at start instead of checking the pair.
+
+Calendar bars (daily, weekly) keep their date marker under either setting; `closed_bars` and `BarSequenceGuard` follow the configured stamp.

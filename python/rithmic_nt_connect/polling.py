@@ -7,7 +7,11 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from rithmic_nt_connect.errors import CHANNEL_ERRORS, is_reconnectable_poll_error
+from rithmic_nt_connect.errors import (
+    CHANNEL_ERRORS,
+    UnreadableEventError,
+    is_reconnectable_poll_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +144,10 @@ class PlantPoller:
             await asyncio.sleep(0.05)
             return backoff, transient_streak
 
+        # A gap or an unreadable event means venue state must be re-read. However
+        # many there are in one batch, it is re-read once, after the batch: one
+        # bad row must not cost one full recovery (and its denial window) each.
+        lost = 0
         for index, event in enumerate(events):
             if event.get("type") == "gap":
                 # The stream dropped events for a slow consumer: same recovery as
@@ -147,15 +155,17 @@ class PlantPoller:
                 self._log.error(
                     f"{self.name} stream dropped {event.get('skipped')} events"
                 )
-                if self.on_gap is not None:
-                    await self._recover_gap()
-                else:
-                    backoff, transient_streak = await self._resync(
-                        backoff, transient_streak
-                    )
+                lost += 1
                 continue
             try:
                 self.on_event(event)
+            except UnreadableEventError as exc:
+                # One event lost on a healthy stream: re-read venue state, keep going.
+                self._log.error(
+                    f"{self.name} event unreadable ({exc}); re-reading venue state"
+                )
+                lost += 1
+                continue
             except Exception as exc:
                 self._log.exception(
                     f"{self.name} event handler error (suppressed)", exc
@@ -173,6 +183,13 @@ class PlantPoller:
                             "events unhandled; the re-arm drain re-reads venue state"
                         )
                     return None
+        if lost:
+            if self.on_gap is not None:
+                await self._recover_gap()
+            else:
+                backoff, transient_streak = await self._resync(
+                    backoff, transient_streak
+                )
         return backoff, transient_streak
 
     async def run(self) -> None:

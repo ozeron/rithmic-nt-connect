@@ -27,12 +27,17 @@ from rithmic_gateway.v1 import session_pb2 as pb
 # Per-chunk history RPC timeout — one plant slice can exceed the dial default.
 DEFAULT_HISTORY_RPC_TIMEOUT_SEC = 300.0
 
-_ORDER_EVENT_TYPES = frozenset({"order_notification"})
+_ORDER_EVENT_TYPES = frozenset({"order_notification", "bracket_update"})
 _PNL_EVENT_TYPES = frozenset({"account_pnl", "instrument_pnl"})
 _HISTORY_EVENT_TYPES = frozenset({"time_bar"})
 _NON_MD_EVENT_TYPES = _ORDER_EVENT_TYPES | _PNL_EVENT_TYPES | _HISTORY_EVENT_TYPES
 
 _CAPABILITY_DENIED_WIRE_CODES = frozenset({"history_denied_live_md"})
+
+# Events read while waiting for something else wait here for their poll. The
+# queue is bounded: past it the oldest are dropped and reported as a gap on
+# their stream, never silently.
+_MAX_PENDING_EVENTS = 100_000
 
 
 def _normalize_error_code(code: str) -> str:
@@ -62,6 +67,17 @@ def _is_history_event(evt: dict[str, Any]) -> bool:
 
 def _is_pnl_event(evt: dict[str, Any]) -> bool:
     return evt.get("type") in _PNL_EVENT_TYPES or _gap_stream(evt) == "pnl"
+
+
+def _stream_of(evt: dict[str, Any]) -> str:
+    """The stream an event is polled from (the gap stream for a lost event)."""
+    if _is_order_event(evt):
+        return "order"
+    if _is_pnl_event(evt):
+        return "pnl"
+    if _is_history_event(evt):
+        return "history"
+    return "ticker"
 
 
 def _is_order_event(evt: dict[str, Any]) -> bool:
@@ -792,7 +808,7 @@ class GatewayClient(FramedConnection):
                 resp = self._read_frame()
                 which = resp.WhichOneof("body")
                 if which == "event":
-                    self._pending.append(_event_to_dict(resp.event))
+                    self._queue_event(_event_to_dict(resp.event))
                     continue
                 if which == "error":
                     if resp.request_id != rid:
@@ -812,9 +828,9 @@ class GatewayClient(FramedConnection):
                     f"while waiting for {rid}",
                 )
         except GatewayError as exc:
-            # Fatal wire errors close the fd inside _recv_exact; null self._sock
-            # so the next call is not_connected (unknown) instead of OSError.
-            if exc.code in {"desync", "eof", "frame_too_large"}:
+            # A fatal wire error leaves the stream unusable: close and null
+            # self._sock so the next call is not_connected instead of OSError.
+            if exc.code in {"eof", "frame_too_large"}:
                 self._close_sock()
             raise
         except (TimeoutError, BlockingIOError) as exc:
@@ -827,6 +843,28 @@ class GatewayClient(FramedConnection):
             raise GatewayError(
                 "timeout", f"RPC {rid} timed out after {effective}s"
             ) from exc
+
+    def _queue_event(self, evt: dict[str, Any]) -> None:
+        """Queue an event for a later poll, dropping the oldest past the bound."""
+        pending = self._pending
+        while len(pending) >= _MAX_PENDING_EVENTS:
+            # Drop the oldest data event. Loss reports are kept, ahead of every
+            # surviving event, so a consumer sees the gap where the loss was.
+            first = next(
+                (i for i, q in enumerate(pending) if q.get("type") != "gap"), None
+            )
+            if first is None:
+                break  # only loss reports are queued
+            dropped = pending[first]
+            del pending[first]
+            stream = _stream_of(dropped)
+            for i in range(first):  # the loss reports at the head
+                if pending[i].get("stream") == stream:
+                    pending[i]["skipped"] = int(pending[i]["skipped"]) + 1
+                    break
+            else:
+                pending.appendleft({"type": "gap", "stream": stream, "skipped": 1})
+        pending.append(evt)
 
     def _poll_filtered(
         self,
@@ -858,7 +896,7 @@ class GatewayClient(FramedConnection):
                     evt = _event_to_dict(frame.event)
                     if predicate(evt):
                         return evt
-                    self._pending.append(evt)
+                    self._queue_event(evt)
                     if not timeout:
                         return None
                     continue
@@ -869,7 +907,7 @@ class GatewayClient(FramedConnection):
                 if not timeout:
                     return None
         except GatewayError as exc:
-            if exc.code in {"desync", "eof", "frame_too_large"}:
+            if exc.code in {"eof", "frame_too_large"}:
                 self._close_sock()
             raise
         except (TimeoutError, BlockingIOError):

@@ -1,16 +1,30 @@
 [project]
 name = "rithmic-gateway"
 version = "0.1.0"
-description = "Pure-Python client for rithmic-gateway (unix protobuf RPC; attach-only, start the parent with `python -m rithmic_gateway`). No Nautilus / maturin."
+description = "rithmic-gateway parent binary plus its Python client (unix protobuf RPC; attach-only). Prebuilt wheels: no Rust, no Nautilus."
 requires-python = ">=3.12"
 license = { text = "Apache-2.0" }
 dependencies = [
   "protobuf==5.29.6",
 ]
 
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+[project.urls]
+Repository = "https://github.com/ozeron/rithmic-nt-connect"
 
-[tool.hatch.build.targets.wheel]
-packages = ["rithmic_gateway"]
+# Built like ruff / uv: a platform wheel whose scripts dir carries the
+# `rithmic-gateway` binary, next to the pure-Python `rithmic_gateway` package.
+# Consumers install the prebuilt wheel (CI, `.github/workflows/wheels.yml`); a
+# source build needs Rust and protoc.
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+bindings = "bin"
+manifest-path = "../crates/rithmic-gateway/Cargo.toml"
+module-name = "rithmic_gateway"
+python-source = "."
+# Production binary only: the fake-plant parent (`rithmic-gateway-fake`) is a
+# test target that needs the `testing` feature and never ships.
+targets = [{ name = "rithmic-gateway", kind = "bin" }]
+exclude = ["rithmic_gateway/**/__pycache__/**"]

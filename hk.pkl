@@ -6,7 +6,6 @@ import "package://github.com/jdx/hk/releases/download/v1.55.0/hk@1.55.0#/Builtin
 local ruff_globs = List("**/*.py", "**/*.pyi")
 local ruff_exclude = List(
     "stubs/**",
-    "wheel-data/**",
     "python/rithmic_gateway/v1/session_pb2.py",
 )
 
@@ -26,7 +25,6 @@ local qlty_globs = List(
 )
 local qlty_exclude = List(
     "stubs/**",
-    "wheel-data/**",
     "target/**",
     ".venv/**",
     ".qlty/**",

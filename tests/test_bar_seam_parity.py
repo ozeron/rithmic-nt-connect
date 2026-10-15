@@ -27,6 +27,7 @@ ticks; ``marker`` = bar CLOSE time for EXTERNAL bars).
 
 from __future__ import annotations
 
+import pytest
 from nautilus_trader.common.component import TestClock
 from nautilus_trader.data.aggregation import TimeBarAggregator
 from nautilus_trader.model.data import Bar, BarType
@@ -79,7 +80,7 @@ def _ticks(payloads: list[dict]) -> list:
     return ticks
 
 
-def _internal_bars(ticks: list) -> list[Bar]:
+def _internal_bars(ticks: list, on_close: bool = False) -> list[Bar]:
     """Drive the engine's 1-MINUTE-INTERNAL aggregator over the ticks.
 
     Mirrors the ``LiveDataEngine`` configuration the dropped live e2e used
@@ -97,7 +98,7 @@ def _internal_bars(ticks: list) -> list[Bar]:
         BarType.from_str("NQU6-CME.RITHMIC-1-MINUTE-LAST-INTERNAL"),
         handler,
         TestClock(),
-        timestamp_on_close=False,
+        timestamp_on_close=on_close,
     )
     # Historical mode advances the clock to each tick's ts_init and closes
     # bars at interval boundaries — deterministic, no real timers.
@@ -107,7 +108,7 @@ def _internal_bars(ticks: list) -> list[Bar]:
     return bars
 
 
-def _external_bars(payloads: list[dict]) -> list[Bar]:
+def _external_bars(payloads: list[dict], on_close: bool = False) -> list[Bar]:
     return payloads_to_bars(
         payloads,
         symbol="NQU6",
@@ -115,6 +116,7 @@ def _external_bars(payloads: list[dict]) -> list[Bar]:
         bar_type=BarType.from_str("NQU6-CME.RITHMIC-1-MINUTE-LAST-EXTERNAL"),
         price_precision=2,
         ts_init=1_800_000_000_000_000_000,
+        timestamp_on_close=on_close,
     )
 
 
@@ -179,8 +181,12 @@ def _venue_bar_for_minute(open_, high, low, close, volume: int) -> list[dict]:
     ]
 
 
-def test_internal_and_external_bars_agree_on_same_minute() -> None:
-    """Engine-aggregated INTERNAL bar == adapter-converted EXTERNAL bar."""
+@pytest.mark.parametrize(
+    "on_close", [True, False], ids=["close-stamped", "open-stamped"]
+)
+def test_internal_and_external_bars_agree_on_same_minute(on_close: bool) -> None:
+    """Engine-aggregated INTERNAL bar == adapter-converted EXTERNAL bar, under
+    either stamping convention (engine and adapter configured alike)."""
     ticks = _ticks(
         [
             _tick(100.00, 2, 45_000_000),
@@ -190,22 +196,23 @@ def test_internal_and_external_bars_agree_on_same_minute() -> None:
         ]
     )
     # The first tick of the next minute closes the 16:00:00Z bucket.
-    internal = _internal_bars([*ticks, *_boundary_tick()])
+    internal = _internal_bars([*ticks, *_boundary_tick()], on_close)
     assert len(internal) == 1, "exactly one closed minute from this tape"
     internal_bar = internal[0]
 
     external_bar = _external_bars(
         _venue_bar_for_minute(
             open_=100.00, high=100.75, low=100.00, close=100.25, volume=10
-        )
+        ),
+        on_close,
     )[0]
 
-    # Same open-minute grid: both bars are stamped with the OPEN minute.
-    assert int(internal_bar.ts_event) == _MINUTE_NS * _NS, (
-        "INTERNAL bar is minute-aligned open time (timestamp_on_close=False)"
+    expected = (_MINUTE_NS + 60) * _NS if on_close else _MINUTE_NS * _NS
+    assert int(internal_bar.ts_event) == expected, (
+        f"INTERNAL bar stamped at the minute {'close' if on_close else 'open'}"
     )
     assert int(internal_bar.ts_event) == int(external_bar.ts_event), (
-        "INTERNAL and EXTERNAL bars share the open-minute ts_event"
+        "INTERNAL and EXTERNAL bars share one ts_event convention"
     )
 
     tick = float(_instrument().price_increment.as_double())

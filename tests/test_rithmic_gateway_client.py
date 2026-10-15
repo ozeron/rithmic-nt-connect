@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from rithmic_gateway.binary import (
     GatewayBinaryError,
-    _bundled_bin,
+    _wheel_bin,
     resolve_gateway_bin,
 )
 from rithmic_gateway.client import GatewayClient, GatewayError
@@ -47,8 +47,28 @@ def test_resolve_bin_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.delenv("RITHMIC_GATEWAY_BIN", raising=False)
     monkeypatch.delenv("CARGO_TARGET_DIR", raising=False)
     monkeypatch.setenv("PATH", str(tmp_path))
-    monkeypatch.setattr("rithmic_gateway.binary._bin_search_starts", lambda: [tmp_path])
+    monkeypatch.setattr("rithmic_gateway.binary._checkout_root", lambda _start: None)
     with pytest.raises(GatewayBinaryError, match="RITHMIC_GATEWAY_BIN"):
+        resolve_gateway_bin(None)
+
+
+def test_the_dev_fallback_never_searches_the_working_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``target/release/rithmic-gateway`` under an untrusted cwd is never run."""
+    planted = tmp_path / "target" / "release" / "rithmic-gateway"
+    planted.parent.mkdir(parents=True)
+    planted.write_text("#!/bin/sh\nexit 0\n")
+    planted.chmod(0o755)
+    (tmp_path / "Cargo.toml").write_text("[workspace]\n")
+    (tmp_path / "crates" / "rithmic-gateway").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("RITHMIC_GATEWAY_BIN", raising=False)
+    monkeypatch.delenv("CARGO_TARGET_DIR", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path / "nobin"))
+    monkeypatch.setattr("rithmic_gateway.binary._wheel_bin", lambda: None)
+    monkeypatch.setattr("rithmic_gateway.binary._checkout_root", lambda _start: None)
+    with pytest.raises(GatewayBinaryError):
         resolve_gateway_bin(None)
 
 
@@ -57,33 +77,33 @@ def test_resolve_bin_explicit_missing(tmp_path: Path) -> None:
         resolve_gateway_bin(str(tmp_path / "missing-bin"))
 
 
-def test_resolve_bin_prefers_bundled_over_path(
+def test_resolve_bin_prefers_the_wheel_binary_over_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A binary bundled in the wheel must win over PATH / target fallback."""
+    """The binary the wheel installed must win over PATH / target fallback."""
     monkeypatch.delenv("RITHMIC_GATEWAY_BIN", raising=False)
     monkeypatch.delenv("CARGO_TARGET_DIR", raising=False)
     bundled = tmp_path / "bundled" / "rithmic-gateway"
     bundled.parent.mkdir(parents=True)
     bundled.write_text("#!/bin/sh\nexit 0\n")
     bundled.chmod(0o755)
-    monkeypatch.setattr("rithmic_gateway.binary._bundled_bin", lambda: str(bundled))
+    monkeypatch.setattr("rithmic_gateway.binary._wheel_bin", lambda: str(bundled))
     # PATH points at an empty dir with no binary; target fallback also empty.
     monkeypatch.setenv("PATH", str(tmp_path / "nobin"))
     (tmp_path / "nobin").mkdir(exist_ok=True)
-    monkeypatch.setattr("rithmic_gateway.binary._bin_search_starts", lambda: [tmp_path])
+    monkeypatch.setattr("rithmic_gateway.binary._checkout_root", lambda _start: None)
     assert resolve_gateway_bin(None) == str(bundled.resolve())
 
 
-def test_resolve_bin_prefers_explicit_and_env_over_bundled(
+def test_resolve_bin_prefers_explicit_and_env_over_the_wheel_binary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """explicit and RITHMIC_GATEWAY_BIN must still override the bundled binary."""
+    """explicit and RITHMIC_GATEWAY_BIN must still override the wheel binary."""
     bundled = tmp_path / "bundled" / "rithmic-gateway"
     bundled.parent.mkdir(parents=True)
     bundled.write_text("x")
     bundled.chmod(0o755)
-    monkeypatch.setattr("rithmic_gateway.binary._bundled_bin", lambda: str(bundled))
+    monkeypatch.setattr("rithmic_gateway.binary._wheel_bin", lambda: str(bundled))
 
     env_bin = tmp_path / "env-bin" / "rithmic-gateway"
     env_bin.parent.mkdir(parents=True)
@@ -99,41 +119,29 @@ def test_resolve_bin_prefers_explicit_and_env_over_bundled(
     assert resolve_gateway_bin(str(explicit)) == str(explicit.resolve())
 
 
-def _bundled_bin_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Fake package dir so _bundled_bin looks in ``tmp_path/pkg/bin``."""
-    pkg_dir = tmp_path / "pkg"
-    bin_dir = pkg_dir / "bin"
-    bin_dir.mkdir(parents=True)
-    monkeypatch.setattr("rithmic_gateway.binary.__file__", str(pkg_dir / "spawn.py"))
-    return bin_dir
+def _scripts_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point the environment's scripts dir (where a wheel installs its binary)
+    at ``tmp_path/scripts``."""
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    monkeypatch.setattr(
+        "rithmic_gateway.binary.sysconfig.get_path", lambda name: str(scripts)
+    )
+    monkeypatch.setattr(
+        "rithmic_gateway.binary.sys.executable", str(scripts / "python")
+    )
+    return scripts
 
 
-def test_bundled_bin_requires_executable(
+def test_wheel_bin_requires_executable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """_bundled_bin() returns None unless the bundled binary is executable."""
-    binary = _bundled_bin_dir(tmp_path, monkeypatch) / "rithmic-gateway"
+    """_wheel_bin() returns None unless the installed binary is executable."""
+    binary = _scripts_dir(tmp_path, monkeypatch) / "rithmic-gateway"
     binary.write_text("#!/bin/sh\n")
-    assert _bundled_bin() is None
+    assert _wheel_bin() is None
     binary.chmod(0o755)
-    assert _bundled_bin() == str(binary.resolve())
-
-
-def test_bundled_bin_prefers_extensionless_over_exe(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """When both names exist, the plain name wins; .exe is the fallback."""
-    bin_dir = _bundled_bin_dir(tmp_path, monkeypatch)
-    plain = bin_dir / "rithmic-gateway"
-    exe = bin_dir / "rithmic-gateway.exe"
-    plain.write_text("plain")
-    exe.write_text("exe")
-    plain.chmod(0o755)
-    exe.chmod(0o755)
-    assert _bundled_bin() == str(plain.resolve())
-
-    plain.unlink()
-    assert _bundled_bin() == str(exe.resolve())
+    assert _wheel_bin() == str(binary.resolve())
 
 
 def test_client_handshake_auth_failed() -> None:
@@ -681,7 +689,7 @@ def test_order_book_event_always_has_side_keys() -> None:
     assert list(out["ask_size"]) == [2]
 
 
-def test_desync_nulls_sock_for_next_rpc() -> None:
+def test_a_mid_payload_timeout_nulls_sock_for_next_rpc() -> None:
     """Partial-frame timeout must yield not_connected on the next call, not OSError."""
     sock = Path(f"/tmp/rgw-test-{os.getpid()}-desync.sock")
     if sock.exists():
@@ -713,7 +721,7 @@ def test_desync_nulls_sock_for_next_rpc() -> None:
                 )
             )
             # Accept Subscribe request, then send a partial length-prefixed frame
-            # so the client times out mid-payload and raises desync.
+            # so the client times out mid-payload (a timeout, not a desync).
             header = conn.recv(4)
             (n,) = struct.unpack("!I", header)
             conn.recv(n)
@@ -734,9 +742,11 @@ def test_desync_nulls_sock_for_next_rpc() -> None:
         )
         client = GatewayClient(cfg, rpc_timeout_sec=0.3)
         client.connect()
+        # A reply that stalls part-way is a timeout (outcome unknown); the RPC
+        # path closes the socket so the next call cannot misread the stream.
         with pytest.raises(GatewayError) as ei:
             client.subscribe("NQ", "CME")
-        assert ei.value.code == "desync"
+        assert ei.value.code == "timeout"
         with pytest.raises(GatewayError) as ei2:
             client.subscribe("ES", "CME")
         assert ei2.value.code == "not_connected"
@@ -990,3 +1000,65 @@ def test_history_denied_live_md_maps_to_capability_denied() -> None:
     finally:
         if sock.exists():
             sock.unlink()
+
+
+def _bare_client() -> tuple[GatewayClient, socket.socket]:
+    """A client wired to one end of a socket pair, past the handshake."""
+    from collections import deque
+
+    ours, theirs = socket.socketpair()
+    client = GatewayClient.__new__(GatewayClient)
+    client._sock = ours
+    client._rpc_timeout_sec = 2.0
+    client._io_lock = threading.RLock()
+    client._pending = deque()
+    client._next_id = 1
+    return client, theirs
+
+
+def _event_frame(symbol: str) -> bytes:
+    frame = pb.Frame(
+        request_id=0,
+        event=pb.Event(last_trade=pb.LastTrade(symbol=symbol, exchange="CME")),
+    )
+    return encode_frame(frame.SerializeToString())
+
+
+def test_a_poll_that_reads_half_a_frame_keeps_it_for_the_next_poll() -> None:
+    client, peer = _bare_client()
+    wire = _event_frame("NQU6")
+    peer.sendall(wire[:5])  # header plus one byte
+    assert client.poll_event(timeout_ms=0) is None
+    peer.sendall(wire[5:])
+    evt = client.poll_event(timeout_ms=500)
+    assert evt is not None and evt["symbol"] == "NQU6", evt
+    peer.sendall(_event_frame("ESZ6"))
+    after = client.poll_event(timeout_ms=500)
+    assert after is not None and after["symbol"] == "ESZ6", "stream still aligned"
+
+
+def test_a_request_that_could_not_be_written_is_not_sent() -> None:
+    client, peer = _bare_client()
+    peer.close()
+    with pytest.raises(GatewayError) as err:
+        client._rpc(pb.Frame(cancel_order=pb.CancelOrderRequest(basket_id="B")))
+    assert err.value.code == "not_sent"
+
+
+def test_unpolled_events_are_bounded_and_the_loss_is_a_gap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import rithmic_gateway.client as client_mod
+
+    monkeypatch.setattr(client_mod, "_MAX_PENDING_EVENTS", 3)
+    client, _peer = _bare_client()
+    for i in range(10):
+        client._queue_event({"type": "last_trade", "symbol": f"T{i}"})
+    pending = list(client._pending)
+    assert len(pending) <= 3, pending
+    gaps = [e for e in pending if e.get("type") == "gap"]
+    kept = [e for e in pending if e.get("type") != "gap"]
+    # Every event is either kept or counted in the gap: none vanish.
+    assert gaps == [{"type": "gap", "stream": "ticker", "skipped": 10 - len(kept)}]
+    assert kept[-1]["symbol"] == "T9", "the newest events are kept"
+    assert pending[0]["type"] == "gap", "the loss is reported before what followed it"

@@ -93,6 +93,7 @@ async fn run() -> Result<(), String> {
         idle_policy,
         gates: ParentGates::from_env(),
         session: SessionHandle::new(fake),
+        timing: rithmic_gateway::server::pump::PumpTiming::default(),
     })
     .await;
     let _ = std::fs::remove_file(&control_path);

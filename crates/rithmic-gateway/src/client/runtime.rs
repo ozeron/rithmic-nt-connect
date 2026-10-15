@@ -9,10 +9,10 @@
 //! generation counter; state-changing RPCs in flight at the moment of loss are
 //! never retried (their outcome is unknown).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use prost::Message;
 use rithmic_plants::dto::PlantEvent;
@@ -22,6 +22,7 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
 use tokio::sync::{broadcast, oneshot, Mutex as TokioMutex, Notify};
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 
 use super::attach::{attach, parent_flock_held};
 use super::convert::{plant_event_from_pb, Channel};
@@ -417,6 +418,144 @@ async fn handshake(
     }
 }
 
+// --- intents shared by the facades on one socket --------------------------------------
+
+/// A subscription intent. The parent counts intents per *socket*, and every
+/// facade in the process shares that socket, so the facades' holdings are
+/// counted here: only the last holder's release reaches the parent.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(super) enum IntentKey {
+    Ticker(String, String),
+    Book(String, String),
+    TimeBars(String, String, i32, i32),
+    Pnl,
+    Order,
+    Brackets,
+}
+
+/// What a facade's release of an intent asks of the parent.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Release {
+    /// Nobody in the process holds it any more: release it on the parent.
+    Send,
+    /// Another facade still holds it: the parent must keep it.
+    Keep,
+}
+
+/// Which facades hold which intents. A facade either holds an intent or not
+/// (the parent treats a repeat subscribe as a no-op, and the adapter replays
+/// its subscriptions after a gap, so this is a set, not a count).
+#[derive(Default)]
+pub(super) struct Intents {
+    held: HashMap<IntentKey, HashSet<u64>>,
+}
+
+impl Intents {
+    pub(super) fn hold(&mut self, facade: u64, key: IntentKey) {
+        self.held.entry(key).or_default().insert(facade);
+    }
+
+    /// Drop `facade`'s hold. The parent is told when nobody holds the intent
+    /// afterwards, including when nobody held it at all (a release the parent
+    /// answers as a no-op, as before facades were counted).
+    pub(super) fn release(&mut self, facade: u64, key: &IntentKey) -> Release {
+        match self.held.get_mut(key) {
+            Some(holders) => {
+                holders.remove(&facade);
+                if holders.is_empty() {
+                    self.held.remove(key);
+                    Release::Send
+                } else {
+                    Release::Keep
+                }
+            }
+            None => Release::Send,
+        }
+    }
+
+    pub(super) fn is_held(&self, key: &IntentKey) -> bool {
+        self.held.contains_key(key)
+    }
+
+    pub(super) fn holds(&self, facade: u64, key: &IntentKey) -> bool {
+        self.held.get(key).is_some_and(|h| h.contains(&facade))
+    }
+
+    /// Every intent `facade` holds.
+    pub(super) fn held_by(&self, facade: u64) -> Vec<IntentKey> {
+        self.held
+            .iter()
+            .filter(|(_, holders)| holders.contains(&facade))
+            .map(|(key, _)| key.clone())
+            .collect()
+    }
+
+    /// Remove every hold of a facade that is leaving, and return the intents
+    /// nobody holds any more (the releases the parent must be told). Order and
+    /// brackets are one release (`DisconnectOrder`), returned as
+    /// [`IntentKey::Order`] once neither is held.
+    pub(super) fn drop_facade(&mut self, facade: u64) -> Vec<IntentKey> {
+        let mut freed = Vec::new();
+        let mut order_group = false;
+        for key in self.held_by(facade) {
+            let last = self.release(facade, &key) == Release::Send;
+            match key {
+                IntentKey::Order | IntentKey::Brackets => order_group = true,
+                key if last => freed.push(key),
+                _ => {}
+            }
+        }
+        if order_group && !self.order_group_held() {
+            freed.push(IntentKey::Order);
+        }
+        freed
+    }
+
+    /// Whether any facade holds order or bracket updates.
+    pub(super) fn order_group_held(&self) -> bool {
+        self.is_held(&IntentKey::Order) || self.is_held(&IntentKey::Brackets)
+    }
+}
+
+impl IntentKey {
+    /// The key whose lock orders this intent's requests. Order and brackets
+    /// share one: the parent releases them together.
+    fn lock_key(&self) -> IntentKey {
+        match self {
+            IntentKey::Brackets => IntentKey::Order,
+            other => other.clone(),
+        }
+    }
+
+    /// The request that releases this intent on the parent.
+    pub(super) fn release_body(&self) -> Body {
+        match self {
+            IntentKey::Ticker(symbol, exchange) => Body::Unsubscribe(pb::UnsubscribeRequest {
+                symbol: symbol.clone(),
+                exchange: exchange.clone(),
+            }),
+            IntentKey::Book(symbol, exchange) => {
+                Body::UnsubscribeBook(pb::UnsubscribeBookRequest {
+                    symbol: symbol.clone(),
+                    exchange: exchange.clone(),
+                })
+            }
+            IntentKey::TimeBars(symbol, exchange, bar_type, period) => {
+                Body::UnsubscribeTimeBars(pb::UnsubscribeTimeBarsRequest {
+                    symbol: symbol.clone(),
+                    exchange: exchange.clone(),
+                    bar_type: *bar_type,
+                    period: *period,
+                })
+            }
+            IntentKey::Pnl => Body::DisconnectPnl(pb::DisconnectPnlRequest {}),
+            IntentKey::Order | IntentKey::Brackets => {
+                Body::DisconnectOrder(pb::DisconnectOrderRequest {})
+            }
+        }
+    }
+}
+
 // --- the runtime ---------------------------------------------------------------
 
 pub(super) struct Runtime {
@@ -429,6 +568,13 @@ pub(super) struct Runtime {
     ready: StdMutex<ReadyInfo>,
     facades: StdMutex<HashMap<u64, Arc<Queues>>>,
     next_facade_id: AtomicU64,
+    /// The facades' intent holdings. Only ever locked for an instant.
+    intents: StdMutex<Intents>,
+    /// One async lock per intent, held across the request a hold or release
+    /// decides on, so a release and a subscribe of the same intent from two
+    /// facades reach the parent in the order they were decided. A slow request
+    /// for one intent never holds up another.
+    intent_locks: StdMutex<HashMap<IntentKey, Arc<TokioMutex<()>>>>,
     transport_tx: broadcast::Sender<TransportEvent>,
     failed_tx: broadcast::Sender<RecoveryFailed>,
     /// Set while the last facade is detaching: no recovery after a deliberate close.
@@ -447,12 +593,17 @@ impl Runtime {
     /// Get or create the runtime for this credential fingerprint (one socket
     /// per process). The first creator's timeouts win.
     pub(super) fn for_config(cfg: &GatewayConfig) -> Arc<Self> {
+        // The account is part of the handshake, so two accounts never share a
+        // socket (the first creator's handshake would win for both).
         let key = format!(
-            "{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}|{}|{}",
             cfg.user,
             cfg.system_name,
             cfg.url,
             cfg.env,
+            cfg.account_id,
+            cfg.fcm_id,
+            cfg.ib_id,
             cfg.socket_path().display()
         );
         let mut map = registry().lock().expect("registry");
@@ -468,6 +619,8 @@ impl Runtime {
             ready: StdMutex::new(ReadyInfo::default()),
             facades: StdMutex::new(HashMap::new()),
             next_facade_id: AtomicU64::new(1),
+            intents: StdMutex::new(Intents::default()),
+            intent_locks: StdMutex::new(HashMap::new()),
             transport_tx: broadcast::channel(16).0,
             failed_tx: broadcast::channel(4).0,
             stopping: AtomicBool::new(false),
@@ -483,6 +636,46 @@ impl Runtime {
         let id = self.next_facade_id.fetch_add(1, Ordering::SeqCst);
         self.facades.lock().expect("facades").insert(id, queues);
         id
+    }
+
+    /// The intent holdings (locked for an instant; never across an await).
+    pub(super) fn intents(&self) -> std::sync::MutexGuard<'_, Intents> {
+        self.intents.lock().expect("intents")
+    }
+
+    /// Take the ordering lock for one intent (see `intent_locks`).
+    pub(super) async fn intent_lock(&self, key: &IntentKey) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = self
+            .intent_locks
+            .lock()
+            .expect("intent locks")
+            .entry(key.lock_key())
+            .or_default()
+            .clone();
+        lock.lock_owned().await
+    }
+
+    /// Tell the parent about intents a leaving facade was the last to hold.
+    /// Best effort: each is re-checked under its lock (another facade may have
+    /// taken it since) and a failure is dropped, since the parent releases
+    /// every intent on the socket when the last facade closes it.
+    pub(super) async fn send_releases(&self, freed: Vec<IntentKey>) {
+        for key in freed {
+            let _ordered = self.intent_lock(&key).await;
+            let still_free = {
+                let intents = self.intents();
+                match key {
+                    IntentKey::Order | IntentKey::Brackets => !intents.order_group_held(),
+                    ref key => !intents.is_held(key),
+                }
+            };
+            if !still_free {
+                continue;
+            }
+            if let Ok(conn) = self.ensure_live().await {
+                let _ = conn.call(key.release_body(), self.cfg.rpc_timeout).await;
+            }
+        }
     }
 
     /// Returns true when no facade remains attached.
@@ -714,5 +907,118 @@ impl Drop for Runtime {
             conn.fail_all();
             conn.abort_reader();
         }
+    }
+}
+
+#[cfg(test)]
+mod intent_tests {
+    use super::*;
+
+    fn nq() -> IntentKey {
+        IntentKey::Ticker("NQH6".into(), "CME".into())
+    }
+
+    #[test]
+    fn the_last_holder_releases_on_the_parent() {
+        let mut intents = Intents::default();
+        intents.hold(1, nq());
+        intents.hold(2, nq());
+        assert_eq!(intents.release(1, &nq()), Release::Keep);
+        assert_eq!(intents.release(2, &nq()), Release::Send);
+        assert!(!intents.is_held(&nq()));
+    }
+
+    #[test]
+    fn a_repeat_subscribe_is_one_hold() {
+        let mut intents = Intents::default();
+        intents.hold(1, nq());
+        intents.hold(1, nq());
+        assert_eq!(intents.release(1, &nq()), Release::Send);
+    }
+
+    #[test]
+    fn releasing_what_nobody_holds_still_reaches_the_parent() {
+        assert_eq!(Intents::default().release(1, &nq()), Release::Send);
+    }
+
+    #[test]
+    fn a_release_from_a_facade_that_never_held_it_keeps_the_others() {
+        let mut intents = Intents::default();
+        intents.hold(2, nq());
+        assert_eq!(intents.release(1, &nq()), Release::Keep);
+        assert!(intents.holds(2, &nq()));
+    }
+
+    #[test]
+    fn held_by_lists_one_facades_intents() {
+        let mut intents = Intents::default();
+        intents.hold(1, nq());
+        intents.hold(1, IntentKey::Order);
+        intents.hold(2, IntentKey::Pnl);
+        let mut mine = intents.held_by(1);
+        mine.sort_by_key(|k| format!("{k:?}"));
+        assert_eq!(mine, vec![IntentKey::Order, nq()]);
+    }
+
+    #[test]
+    fn a_leaving_facade_frees_only_what_nobody_else_holds() {
+        let mut intents = Intents::default();
+        intents.hold(1, nq());
+        intents.hold(1, IntentKey::Pnl);
+        intents.hold(2, IntentKey::Pnl);
+        intents.hold(1, IntentKey::Brackets);
+        let mut freed = intents.drop_facade(1);
+        freed.sort_by_key(|k| format!("{k:?}"));
+        assert_eq!(freed, vec![IntentKey::Order, nq()]);
+        assert!(intents.holds(2, &IntentKey::Pnl));
+        assert!(intents.held_by(1).is_empty());
+    }
+
+    #[test]
+    fn the_order_group_is_freed_only_when_neither_part_is_held() {
+        let mut intents = Intents::default();
+        intents.hold(1, IntentKey::Order);
+        intents.hold(2, IntentKey::Brackets);
+        assert!(intents.drop_facade(1).is_empty());
+        assert_eq!(intents.drop_facade(2), vec![IntentKey::Order]);
+    }
+
+    #[tokio::test]
+    async fn intent_locks_order_one_intent_and_never_block_another() {
+        let cfg = GatewayConfig::new("u-intent-locks", "S", "wss://x", "Live");
+        let runtime = Runtime::for_config(&cfg);
+        let _nq = runtime.intent_lock(&nq()).await;
+        let other = IntentKey::Ticker("ESZ6".into(), "CME".into());
+        tokio::time::timeout(Duration::from_millis(200), runtime.intent_lock(&other))
+            .await
+            .expect("another intent is not held up");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), runtime.intent_lock(&nq()))
+                .await
+                .is_err(),
+            "the same intent waits its turn"
+        );
+        let _order = runtime.intent_lock(&IntentKey::Order).await;
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                runtime.intent_lock(&IntentKey::Brackets)
+            )
+            .await
+            .is_err(),
+            "order and brackets share one release, so one lock"
+        );
+    }
+
+    #[test]
+    fn different_accounts_never_share_a_runtime() {
+        let mut a = GatewayConfig::new("u-acct-key", "S", "wss://x", "Live");
+        a.account_id = "A1".into();
+        let mut b = a.clone();
+        b.account_id = "B2".into();
+        let ra = Runtime::for_config(&a);
+        let rb = Runtime::for_config(&b);
+        assert!(!Arc::ptr_eq(&ra, &rb));
+        assert!(Arc::ptr_eq(&ra, &Runtime::for_config(&a)));
     }
 }

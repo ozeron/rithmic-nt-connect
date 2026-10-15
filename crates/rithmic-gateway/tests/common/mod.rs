@@ -111,7 +111,9 @@ impl FakeParent {
         let up = wait_until(Duration::from_secs(20), || {
             std::os::unix::net::UnixStream::connect(&self.listen).is_ok()
                 && flock_held(&self.user, SYSTEM, URL, "Live")
-                && self.control.exists()
+                // The socket file exists from `bind`, before it listens: wait for
+                // a connect to succeed, not for the file.
+                && std::os::unix::net::UnixStream::connect(&self.control).is_ok()
         })
         .await;
         assert!(up, "fake gateway did not come up");
@@ -430,4 +432,24 @@ pub fn mock_config(path: &Path) -> GatewayConfig {
     cfg.rpc_timeout = Duration::from_secs(5);
     cfg.attach_timeout = Duration::from_secs(5);
     cfg
+}
+
+/// Wait until the async `cond` holds, bounded by `timeout` (the async twin of
+/// `rithmic_gateway::testing::wait_until`). Tests wait on an observable
+/// condition instead of a fixed sleep.
+pub async fn wait_until_async<F, Fut>(timeout: Duration, mut cond: F) -> bool
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if cond().await {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }

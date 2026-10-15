@@ -771,3 +771,32 @@ async fn subscribing_arms_the_channel_before_the_first_event() {
         Some(PlantEvent::LastTrade(_))
     ));
 }
+
+#[tokio::test]
+async fn a_timed_out_history_slice_costs_at_most_two_attempts() {
+    let dir = short_dir();
+    let path = dir.path().join("gw.sock");
+    let (mock, session) = connected(
+        &path,
+        |frame, _| match frame.body {
+            Some(Body::LoadTimeBars(_)) => Action::Hang,
+            _ => Action::Ack,
+        },
+        |cfg| cfg.history_rpc_timeout = Duration::from_millis(150),
+    )
+    .await;
+    let err = session
+        .load_time_bars("NQH6", "CME", 0, 3_600, 2, 1)
+        .await
+        .expect_err("every attempt times out");
+    assert!(matches!(err, Error::Transport(_)), "{err:?}");
+    let attempts = mock
+        .request_bodies()
+        .iter()
+        .filter(|b| matches!(b, Body::LoadTimeBars(_)))
+        .count();
+    assert!(
+        attempts <= 2,
+        "one read retry at most, not a retry loop on top: {attempts}"
+    );
+}

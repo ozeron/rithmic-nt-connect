@@ -6,10 +6,11 @@
 //! launcher command.
 
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use rithmic_plants::{Error, Result};
 use tokio::net::UnixStream;
+use tokio::time::Instant;
 
 use super::GatewayConfig;
 use crate::singleton::flock_held;

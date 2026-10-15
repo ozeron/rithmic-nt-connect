@@ -142,14 +142,15 @@ def test_two_clients_share_one_venue_subscription(fake_bin, make_client) -> None
             assert len(events) == 3
             assert {e["symbol"] for e in events} == {NQ}
 
-        if make_client.kind == "python-plain":
-            a.unsubscribe(NQ, EXCHANGE)
-            assert parent.count("unsubscribe") == 0, "peer still subscribed"
-        # Mux facades share ONE parent connection, so the parent cannot refcount
-        # them: the first facade's unsubscribe leaves the venue topic (recorded
-        # in rust-unified-session design, "Current-behavior findings").
+        # Python clients hold a connection each and the parent refcounts them;
+        # Rust facades share one socket and the client runtime refcounts them.
+        # Either way a peer that still holds the topic keeps it.
+        a.unsubscribe(NQ, EXCHANGE)
+        assert parent.count("unsubscribe") == 0, "peer still subscribed"
         b.unsubscribe(NQ, EXCHANGE)
-        assert parent.count(f"unsubscribe {NQ} {EXCHANGE}") >= 1, parent.calls()
+        assert wait_for(lambda: parent.count(f"unsubscribe {NQ} {EXCHANGE}") == 1), (
+            parent.calls()
+        )
 
 
 def test_disconnect_leaves_the_venue_when_the_last_peer_goes(
@@ -265,6 +266,22 @@ def test_every_intent_is_reissued_after_a_plant_drop(fake_bin, make_client) -> N
         assert len(drain(client.poll_event, 1)) == 1
         orders = drain(client.poll_order_event, 1)
         assert orders and orders[0].get("basket_id") == "basket-9"
+
+
+def test_a_bracket_update_rides_the_order_stream(fake_bin, make_client) -> None:
+    """Typed bracket state reaches every client on its order channel."""
+    with running_fake(fake_bin, trading=True) as parent:
+        client = make_client(parent)
+        client.subscribe_order_updates()
+        client.subscribe_bracket_updates()
+        parent.push("bracket", "basket-9", "8", "16")
+        events = drain(client.poll_order_event, 1)
+        assert events, "no bracket update arrived"
+        update = events[0]
+        assert update["type"] == "bracket_update"
+        assert update.get("basket_id") == "basket-9"
+        assert int(update["stop_ticks"]) == 8
+        assert int(update["target_ticks"]) == 16
 
 
 def test_plant_drop_keeps_clients_attached_and_signals_resumed(
@@ -407,6 +424,37 @@ def test_rust_client_recovers_after_the_parent_restarts(fake_bin, make_client) -
         client.subscribe(NQ, EXCHANGE)  # the adapter re-issues intent after UP
         parent.push_last_trades(NQ, 1)
         assert len(drain(client.poll_event, 1)) == 1
+
+
+def test_a_transport_listener_may_call_the_session_synchronously(
+    fake_bin, make_client
+) -> None:
+    """Transport callbacks run on their own thread, never a tokio worker.
+
+    A listener that makes a blocking session call from inside the callback must
+    get an answer, not a "runtime within a runtime" panic.
+    """
+    if make_client.kind == "python-plain":
+        pytest.skip("transport events are a Rust-session API")
+    with running_fake(fake_bin) as parent:
+        client = make_client(parent)
+        answers: list[Any] = []
+        errors: list[BaseException] = []
+
+        def listener(kind: str, generation: int, attempts: int, cause: Any) -> None:
+            try:
+                answers.append((kind, client.resolved_account()))
+            # A pyo3 PanicException is a BaseException: catch it to fail the test.
+            except BaseException as exc:  # NOSONAR
+                errors.append(exc)
+
+        subscription = client.subscribe_transport_events(listener)
+        assert subscription is not None
+        parent.restart()
+        client.ensure_transport_live()
+        assert wait_for(lambda: bool(answers) or bool(errors)), "no transport event"
+        assert not errors, errors
+        subscription.cancel()
 
 
 # -- a plant lag is a typed gap, never silence ----------------------------------

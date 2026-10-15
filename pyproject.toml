@@ -22,6 +22,11 @@ dev = [
 nautilus = [
   "nautilus_trader==1.231.0",
 ]
+# The gateway parent binary + pure-Python lake client ship as their own platform
+# wheel (`python/`); the adapter never imports it, so it is opt-in.
+gateway = [
+  "rithmic-gateway",
+]
 
 [build-system]
 requires = ["maturin>=1.7,<2.0"]
@@ -32,7 +37,10 @@ manifest-path = "crates/rithmic-nt-connect/Cargo.toml"
 module-name = "rithmic_nt_connect._lib"
 python-source = "python"
 features = ["python", "extension-module"]
-data = "wheel-data"
+
+[tool.uv.sources]
+# In-repo source for `--extra gateway`; consumers resolve it from the wheel index.
+rithmic-gateway = { path = "python" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -61,7 +69,6 @@ target-version = "py312"
 line-length = 88
 exclude = [
   "stubs",
-  "wheel-data",
   "python/rithmic_gateway/v1/session_pb2.py",
 ]
 

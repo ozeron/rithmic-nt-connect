@@ -51,6 +51,8 @@ pub enum Kind {
     Book,
     /// Live time bars.
     Bars,
+    /// Bracket updates on the order topic (only clients that subscribed to them).
+    Brackets,
 }
 
 impl Kind {
@@ -61,6 +63,7 @@ impl Kind {
             Self::Ticker => 1,
             Self::Book => 2,
             Self::Bars => 4,
+            Self::Brackets => 8,
         }
     }
 }

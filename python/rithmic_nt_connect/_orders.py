@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from nautilus_trader.model.enums import OrderStatus, OrderType, TimeInForce
 
@@ -351,6 +351,14 @@ def _fill_parts(fields: Mapping[str, Any]) -> tuple[str | None, str, str, str, s
     )
 
 
+def fill_identity_ts(fields: Mapping[str, Any]) -> int:
+    """The time stamp that enters a fill's identity: the venue's own (0 when it
+    sent none), never the adapter clock, so a fill seen live and again in recon
+    or after a restart keys the same."""
+    raw = fields.get("ts_event")
+    return int(raw) if raw else 0
+
+
 def trade_id_from_fill_fields(fields: Mapping[str, Any], ts_event: int) -> str:
     fill_id, basket, exch, size, px = _fill_parts(fields)
     return _lib.fill_trade_id(fill_id, basket, exch, size, px, ts_event)
@@ -414,50 +422,52 @@ def slim_order_fields(fields: Mapping[str, Any]) -> dict[str, Any]:
     return {k: fields.get(k) for k in keys if fields.get(k) is not None}
 
 
+def _text_or_none(value: Any) -> str | None:
+    """A reason candidate as text; any falsy value (``0``, ``False``, ``""``) is
+    no reason, as the original ``text or report_text or status`` chain had it."""
+    return str(value) if value else None
+
+
 def notification_action(fields: Mapping[str, Any], order: Any) -> OrderAction | None:
-    """Classify a normalized notification into one emit action (or None to ignore)."""
+    """Classify a normalized notification into one emit action (or None to ignore).
+
+    Which action a kind asks for, and a refusal's reason, are the
+    ``rithmic_exec::notification_action`` rule; this adds the Python values the
+    action carries (quantities, prices, the fill's trade id).
+    """
     kind = fields.get("kind")
     if not kind:
         return None
-    reason = fields.get("text") or fields.get("report_text") or fields.get("status")
-
-    if kind == "accepted":
-        return OrderAction(kind="accepted")
-    if kind == "rejected":
-        return OrderAction(kind="rejected", reason=str(reason or "REJECT"))
-    if kind == "modify_rejected":
-        return OrderAction(kind="modify_rejected", reason=str(reason or "NOT_MODIFIED"))
-    if kind == "cancel_rejected":
-        return OrderAction(
-            kind="cancel_rejected", reason=str(reason or "NOT_CANCELLED")
-        )
-    if kind == "updated":
+    decided = _lib.notification_action(
+        str(kind),
+        _text_or_none(fields.get("text")),
+        _text_or_none(fields.get("report_text")),
+        _text_or_none(fields.get("status")),
+    )
+    if decided is None:
+        return None
+    action, reason = decided
+    if action == "updated":
         qty_raw = fields.get("quantity")
         qty = int(qty_raw) if qty_raw is not None else int(order.quantity)
-        price = fields.get("price")
-        trigger = fields.get("trigger_price")
         return OrderAction(
             kind="updated",
             quantity=qty,
-            price=price,
-            trigger=trigger,
+            price=fields.get("price"),
+            trigger=fields.get("trigger_price"),
         )
-    if kind == "canceled":
-        return OrderAction(kind="canceled")
-    if kind == "triggered":
-        return OrderAction(kind="triggered")
-    if kind == "filled":
+    if action == "filled":
         # "Is a fill" is independent of "is this fill priceable": a definitive
         # fill whose price is absent/pending must still reach the fill handler,
         # which latches (exposure incomplete) instead of silently dropping it.
         fill_sz = fields.get("fill_size")
         if fill_sz is None:
             return None
-        ts_event = int(fields.get("ts_event") or 0)
+        ts_event = fill_identity_ts(fields)
         return OrderAction(
             kind="filled",
             fill_qty=int(fill_sz),
             fill_px=fields.get("fill_price"),
             trade_id=trade_id_from_fill_fields(fields, ts_event),
         )
-    return None
+    return OrderAction(kind=cast(OrderActionKind, action), reason=reason)

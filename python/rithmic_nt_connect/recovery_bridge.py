@@ -48,8 +48,13 @@ class TransportRecoveryBridge:
         on_down: Callable[[TransportDown], None],
         on_failed: Callable[[RecoveryFailed], None],
         on_attempt_failed: Callable[[BaseException], None] | None = None,
+        latch_now: Callable[[], None] | None = None,
         max_attempts: int = 5,
     ) -> None:
+        """``on_down`` / ``on_failed`` run on the client's loop. ``latch_now``,
+        when given, runs at once on the transport thread for Down and Failed: it
+        must be thread-safe (the exec client's plant latch is a single store), and
+        it closes the order path before the loop gets to the handler."""
         self._label = label
         self._task_name = task_name
         self._log = log
@@ -59,6 +64,7 @@ class TransportRecoveryBridge:
         self._on_down = on_down
         self._on_failed = on_failed
         self._on_attempt_failed = on_attempt_failed
+        self._latch_now = latch_now
         self._unsubscribe: Callable[[], None] | None = None
         self._pending_generation = 0
         self.max_attempts = max_attempts
@@ -97,15 +103,28 @@ class TransportRecoveryBridge:
                 self._log().warning(f"{self._label} unsubscribe failed: {exc}")
 
     def on_event(self, event: object) -> None:
+        """Called on the transport thread."""
         if isinstance(event, TransportDown):
-            self._on_down(event)
+            self._latch_and_hop(lambda: self._on_down(event))
         elif isinstance(event, TransportUp):
             self._log().warning(
                 f"gateway TRANSPORT_UP gen={event.gen}; scheduling {self._label}"
             )
             self.schedule(event.gen)
         elif isinstance(event, RecoveryFailed):
-            self._on_failed(event)
+            self._latch_and_hop(lambda: self._on_failed(event))
+
+    def _latch_and_hop(self, handler: Callable[[], None]) -> None:
+        if self._latch_now is not None:
+            self._latch_now()
+        loop = self._get_loop()
+        if loop is None:
+            self._log().error(f"{self._label}: client loop missing; handling inline")
+            handler()
+            return
+        # A closed loop (shutdown) leaves nobody to read the state.
+        with contextlib.suppress(RuntimeError):
+            loop.call_soon_threadsafe(handler)
 
     def schedule(self, generation: int) -> None:
         """Thread-safe: transport events fire on the Rust runtime thread."""

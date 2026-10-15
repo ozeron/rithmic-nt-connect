@@ -39,6 +39,12 @@ pub fn product_root(symbol: &str) -> String {
     sym
 }
 
+/// Whether `symbol` names one listed contract (`ESZ6`, `ESZ26`, `esu6`) rather
+/// than a product root (`ES`, `6E`).
+pub fn is_listed_contract(symbol: &str) -> bool {
+    product_root(symbol) != symbol.trim().to_uppercase()
+}
+
 /// `MNQZ6` belongs to root `MNQ` (and exact `MNQ` matches itself). Never a
 /// prefix match: `ES` must not claim `ESTX6`.
 pub fn matches_root(symbol: &str, root: &str) -> bool {

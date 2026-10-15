@@ -7,7 +7,7 @@ description = "Shared Rithmic plant session façade over rithmic-rs"
 
 [features]
 # Scripted in-memory `Session` for gateway tests. Never enabled in the shipped wheel.
-testing = []
+testing = ["dep:tokio-tungstenite", "dep:futures-util", "tokio/net"]
 
 [dependencies]
 async-trait = "0.1"
@@ -15,6 +15,10 @@ rithmic-exec = { path = "../rithmic-exec" }
 rithmic-rs = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio-tungstenite = { version = "0.30", optional = true }
+futures-util = { version = "0.3", optional = true }
 
 [dev-dependencies]
+# Integration tests use the fake venue / FakeSession from the `testing` feature.
+rithmic-plants = { path = ".", features = ["testing"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "test-util"] }

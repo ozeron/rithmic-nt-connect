@@ -45,7 +45,6 @@ exclude_patterns = [
   ".pytest_cache/**",
   ".mypy_cache/**",
   ".ruff_cache/**",
-  "wheel-data/**",               # maturin build artifacts
   "stubs/**",                    # stubgen output for `ty`
   "proto/**",                    # gated Rithmic .proto sources (see .gitignore)
   "tests/_stubs.py",             # local python stubs shared with the test suite

@@ -72,8 +72,11 @@ def test_time_bar_to_fields_and_bar():
     bar = fields_to_bar(fields, bar_type, ts_init=1)
     assert float(bar.close) == pytest.approx(100.5)
     assert int(bar.volume) == 42
-    # 1-minute bar: Bar.ts_event = close (marker) - 60s = open time.
-    assert bar.ts_event == (1_700_000_000 - 60) * 1_000_000_000
+    # Default: Bar.ts_event is the venue close (the marker), as Nautilus stamps bars.
+    assert bar.ts_event == 1_700_000_000 * 1_000_000_000
+    opened = fields_to_bar(fields, bar_type, ts_init=1, timestamp_on_close=False)
+    # Open-stamped: close (marker) - 60s.
+    assert opened.ts_event == (1_700_000_000 - 60) * 1_000_000_000
 
 
 def test_time_bar_requires_volume():
@@ -111,15 +114,17 @@ def test_live_time_bar_dict_converts():
         fields,
         BarType.from_str("NQU6.RITHMIC-15-MINUTE-LAST-EXTERNAL"),
         ts_init=1,
+        timestamp_on_close=False,
     )
-    # 15-minute bar: Bar.ts_event = marker - 15*60s = open time.
+    # Open-stamped 15-minute bar: Bar.ts_event = marker - 15*60s = open time.
     assert bar.ts_event == (1_700_000_000 - 900) * 1_000_000_000
     assert float(bar.close) == pytest.approx(100.5)
 
 
 def test_time_bar_close_to_open_shift():
-    # Shift is driven by the authoritative BarType (SECOND step), independent of
-    # the wire `period` unit; daily marker (YYYYMMDD) is left as-is.
+    # Open-stamping (timestamp_on_close=False): the shift is driven by the
+    # authoritative BarType (SECOND step), independent of the wire `period`
+    # unit; daily marker (YYYYMMDD) is left as-is.
     sec_fields = time_bar_to_fields(
         {
             "type": "history_bar",
@@ -139,6 +144,7 @@ def test_time_bar_close_to_open_shift():
         sec_fields,
         BarType.from_str("NQU6.RITHMIC-1-SECOND-LAST-EXTERNAL"),
         ts_init=1,
+        timestamp_on_close=False,
     )
     # 1-second bar shifts by 1s.
     assert sec.ts_event == (1_700_000_000 - 1) * 1_000_000_000
@@ -164,6 +170,7 @@ def test_time_bar_close_to_open_shift():
         min_fields,
         BarType.from_str("NQU6.RITHMIC-1-MINUTE-LAST-EXTERNAL"),
         ts_init=1,
+        timestamp_on_close=False,
     )
     assert one_min.ts_event == (1_700_000_000 - 60) * 1_000_000_000
 
@@ -188,6 +195,7 @@ def test_time_bar_close_to_open_shift():
         hour_fields,
         BarType.from_str("NQU6.RITHMIC-1-HOUR-LAST-EXTERNAL"),
         ts_init=1,
+        timestamp_on_close=False,
     )
     assert hour.ts_event == (1_700_000_000 - 3600) * 1_000_000_000
 
@@ -211,6 +219,7 @@ def test_time_bar_close_to_open_shift():
         daily_fields,
         BarType.from_str("NQU6.RITHMIC-1-DAY-LAST-EXTERNAL"),
         ts_init=1,
+        timestamp_on_close=False,
     )
     assert daily.ts_event == 1_780_000_000 * 1_000_000_000  # untouched
 

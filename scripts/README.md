@@ -22,8 +22,8 @@ Run from the repo root. Live scripts read credentials from `.env`; exit code `2`
 
 | Script | Purpose |
 | --- | --- |
-| `_gateway_parent.py` | Library, not a CLI: starts a `rithmic-gateway` parent for smokes / live e2e, waits until attachable, terminates it on exit. The shipped client never spawns a parent; operators use `python -m rithmic_gateway` or a service manager |
-| `build_wheel.sh` | Build the self-contained wheel: bundles the release `rithmic-gateway` binary and the `rithmic_gateway` package, then runs `maturin build` (`--install` also installs it) |
+| `_gateway_parent.py` | Library, not a CLI: starts a `rithmic-gateway` parent for smokes / live e2e, waits until attachable, terminates it on exit. The shipped client never spawns a parent; operators run the wheel's `rithmic-gateway` (or `python -m rithmic_gateway`) or a service manager |
+| `publish_index.py` | CI only (`wheels.yml`): prune old dev wheels from the `main-dev` release and write the PEP 503 index for GitHub Pages |
 | `gen_gateway_proto.py` | Regenerate `python/rithmic_gateway/v1/session_pb2.py` from `session.proto` with the pinned protoc and restore the `5.29.6` marker |
 | `gen_nautilus_stubs.py` | Regenerate the local `stubs/` for `nautilus_trader` and re-apply the known fixes |
 | `status_progress.py` | Roll up `docs/STATUS.md` marks; `--check` fails if the At-a-glance table drifts |

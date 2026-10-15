@@ -166,9 +166,10 @@ PLANTS_EXECUTION = "execution"
 
 # Process-wide singleton for DIRECT sessions: one in-process Rithmic login per
 # credential fingerprint, whichever entry point asks first (data factory, exec
-# factory, or ``connect_market_data_session``). Gateway is deliberately NOT
-# cached — each Nautilus client gets its own ``GatewayClient`` and the parent
-# ``rithmic-gateway`` holds the single login. Values are always
+# factory, or ``connect_market_data_session``). Gateway sessions are not cached
+# here: each client gets its own facade, and the Rust client runtime shares one
+# socket per credential fingerprint (refcounting intents per facade), while the
+# parent ``rithmic-gateway`` holds the single login. Values are always
 # ``_FlockedDirectSession`` (which owns ``acquire`` / the holder refcount);
 # ``create_rust_session`` casts on the way out.
 _SESSION_CACHE: dict[str, WireSession] = {}

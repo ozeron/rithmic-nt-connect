@@ -67,7 +67,10 @@ def test_resolve_gateway_bin_finds_cargo_target(
     monkeypatch.delenv("RITHMIC_GATEWAY_BIN", raising=False)
     monkeypatch.delenv("CARGO_TARGET_DIR", raising=False)
     monkeypatch.setattr("rithmic_gateway.binary.shutil.which", lambda _n: None)
-    monkeypatch.setattr("rithmic_gateway.binary._bin_search_starts", lambda: [tmp_path])
+    monkeypatch.setattr("rithmic_gateway.binary._wheel_bin", lambda: None)
+    monkeypatch.setattr(
+        "rithmic_gateway.binary._checkout_root", lambda _start: tmp_path
+    )
     found = resolve_gateway_bin()
     assert Path(found).resolve() == release.resolve()
 
@@ -85,7 +88,10 @@ def test_resolve_gateway_bin_skips_non_executable_target(
     monkeypatch.delenv("RITHMIC_GATEWAY_BIN", raising=False)
     monkeypatch.delenv("CARGO_TARGET_DIR", raising=False)
     monkeypatch.setattr("rithmic_gateway.binary.shutil.which", lambda _n: None)
-    monkeypatch.setattr("rithmic_gateway.binary._bin_search_starts", lambda: [tmp_path])
+    monkeypatch.setattr("rithmic_gateway.binary._wheel_bin", lambda: None)
+    monkeypatch.setattr(
+        "rithmic_gateway.binary._checkout_root", lambda _start: tmp_path
+    )
     with pytest.raises(GatewayBinaryError, match="RITHMIC_GATEWAY_BIN"):
         resolve_gateway_bin()
 
@@ -96,7 +102,8 @@ def test_resolve_gateway_bin_missing_mentions_env(
     monkeypatch.delenv("RITHMIC_GATEWAY_BIN", raising=False)
     monkeypatch.delenv("CARGO_TARGET_DIR", raising=False)
     monkeypatch.setattr("rithmic_gateway.binary.shutil.which", lambda _n: None)
-    monkeypatch.setattr("rithmic_gateway.binary._bin_search_starts", lambda: [tmp_path])
+    monkeypatch.setattr("rithmic_gateway.binary._wheel_bin", lambda: None)
+    monkeypatch.setattr("rithmic_gateway.binary._checkout_root", lambda _start: None)
     with pytest.raises(GatewayBinaryError, match="RITHMIC_GATEWAY_BIN"):
         resolve_gateway_bin()
 
@@ -207,3 +214,30 @@ def test_load_time_bars_range_async(monkeypatch: pytest.MonkeyPatch) -> None:
         client.load_time_bars_range_async("NQU6", "CME", 0, 3600, bar_type=2, period=1)
     )
     assert len(bars) == 1
+
+
+def test_history_slicing_matches_the_rust_rule() -> None:
+    """The pure-Python lake client slices history exactly like the Rust path
+    (``rithmic_plants::history``), so both send the same bounded RPCs."""
+    import pytest
+
+    lib = pytest.importorskip("rithmic_nt_connect._lib")
+    from rithmic_gateway.history_window import bar_slice_secs, window_slices
+
+    for bar_type in (1, 2, 3, 4):
+        for period in (1, 5, 14, 15, 59, 60, 240):
+            assert bar_slice_secs(bar_type, period) == lib.history_bar_slice_secs(
+                bar_type, period
+            ), (bar_type, period)
+    for start, end, step in [
+        (0, 0, 60),
+        (0, 1800, 900),
+        (0, 900, 900),
+        (1_700_000_000, 1_700_100_000, 7_200),
+        (5, 3, 10),
+        (0, 10, 0),
+        (2_000_000_000, 2_147_483_000, 536_870_911),
+    ]:
+        assert window_slices(start, end, step) == [
+            tuple(x) for x in lib.history_window_slices(start, end, step)
+        ], (start, end, step)

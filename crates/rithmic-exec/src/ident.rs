@@ -145,6 +145,13 @@ pub fn split_instrument_id(
     }
 }
 
+const NANOS_PER_SEC: i128 = 1_000_000_000;
+
+/// `ssboe` seconds plus `usecs` microseconds, in unix nanoseconds.
+fn nanos(ssboe: i128, usecs: i128) -> i128 {
+    ssboe * NANOS_PER_SEC + usecs * 1_000
+}
+
 /// Event time in unix nanoseconds: the plant's `ts_event_ns` when present, else
 /// derived from `ssboe` (+ `usecs`); `None` when the event carries neither.
 pub fn event_ts_ns(
@@ -155,12 +162,100 @@ pub fn event_ts_ns(
     if let Some(ts) = ts_event_ns {
         return Some(ts);
     }
-    ssboe.map(|s| s * 1_000_000_000 + usecs.unwrap_or(0) * 1_000)
+    ssboe.map(|s| nanos(s, usecs.unwrap_or(0)))
+}
+
+/// A venue time stamp (`ssboe` seconds since the epoch, `usecs` within the
+/// second) in unix nanoseconds. `None` without `ssboe`, or when either part is
+/// out of range: a bad venue value is absent, never a panic or a wrapped time.
+pub fn venue_ts_ns(ssboe: Option<i32>, usecs: Option<i32>) -> Option<u64> {
+    let ssboe = ssboe?;
+    let usecs = usecs.unwrap_or(0);
+    if ssboe < 0 || !(0..1_000_000).contains(&usecs) {
+        return None;
+    }
+    u64::try_from(nanos(i128::from(ssboe), i128::from(usecs))).ok()
+}
+
+/// The exchange's own time stamp (`source_ssboe`, `source_usecs`,
+/// `source_nsecs`) in unix nanoseconds, or `None` when the venue sent none.
+///
+/// `source_nsecs` is read as nanoseconds within the second when it agrees with
+/// `source_usecs`, and as the part below a microsecond when it is under 1000;
+/// otherwise only the microseconds are used. Both readings occur in the
+/// field's documentation, and the cross-check keeps either from producing a
+/// time a second off.
+pub fn exchange_ts_ns(
+    source_ssboe: Option<i32>,
+    source_usecs: Option<i32>,
+    source_nsecs: Option<i32>,
+) -> Option<u64> {
+    let ssboe = source_ssboe?;
+    if ssboe <= 0 {
+        return None;
+    }
+    let base = i128::from(ssboe) * NANOS_PER_SEC;
+    let usecs = source_usecs.filter(|u| (0..1_000_000).contains(u));
+    let within = match (usecs, source_nsecs) {
+        (Some(u), Some(n)) if n >= 0 && i128::from(n) / 1_000 == i128::from(u) => i128::from(n),
+        (Some(u), Some(n)) if (0..1_000).contains(&n) => i128::from(u) * 1_000 + i128::from(n),
+        (Some(u), _) => i128::from(u) * 1_000,
+        (None, Some(n)) if (0..1_000_000_000).contains(&n) => i128::from(n),
+        (None, _) => 0,
+    };
+    u64::try_from(base + within).ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const T: i32 = 1_790_000_000;
+    const T_NS: u64 = 1_790_000_000_000_000_000;
+
+    #[test]
+    fn venue_time_is_seconds_plus_micros() {
+        assert_eq!(venue_ts_ns(Some(T), Some(250)), Some(T_NS + 250_000));
+        assert_eq!(venue_ts_ns(Some(T), None), Some(T_NS));
+        assert_eq!(venue_ts_ns(None, Some(1)), None);
+    }
+
+    #[test]
+    fn bad_venue_time_is_absent_not_a_panic() {
+        assert_eq!(venue_ts_ns(Some(-1), Some(0)), None);
+        assert_eq!(venue_ts_ns(Some(T), Some(1_000_000)), None);
+        assert_eq!(venue_ts_ns(Some(T), Some(-5)), None);
+    }
+
+    #[test]
+    fn exchange_nanos_within_the_second_agreeing_with_micros() {
+        assert_eq!(
+            exchange_ts_ns(Some(T), Some(123_456), Some(123_456_789)),
+            Some(T_NS + 123_456_789)
+        );
+    }
+
+    #[test]
+    fn exchange_nanos_below_a_microsecond() {
+        assert_eq!(
+            exchange_ts_ns(Some(T), Some(123_456), Some(789)),
+            Some(T_NS + 123_456_789)
+        );
+    }
+
+    #[test]
+    fn exchange_nanos_that_disagree_fall_back_to_micros() {
+        assert_eq!(
+            exchange_ts_ns(Some(T), Some(123_456), Some(999_999_999)),
+            Some(T_NS + 123_456_000)
+        );
+    }
+
+    #[test]
+    fn no_exchange_time_without_source_seconds() {
+        assert_eq!(exchange_ts_ns(None, Some(1), Some(1)), None);
+        assert_eq!(exchange_ts_ns(Some(0), Some(1), None), None);
+    }
 
     const V: &str = "RITHMIC";
 

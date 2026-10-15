@@ -43,6 +43,12 @@ except ImportError:  # pragma: no cover
         """Order-history reconciliation cannot be answered authoritatively."""
 
 
+class UnreadableEventError(ValueError):
+    """A venue event the adapter could not convert. The stream itself is
+    healthy: the event is lost, so the consumer re-reads venue state (as after a
+    gap) instead of stopping."""
+
+
 class VenueQueryUnavailable(RuntimeError):
     """Venue query cannot be answered authoritatively (no snapshot API)."""
 
@@ -62,7 +68,6 @@ _RECONNECTABLE_GATEWAY_CODES = frozenset(
         "not_connected",
         "eof",
         "shutting_down",
-        "desync",
         "transport_reset",
         "frame_too_large",
     }

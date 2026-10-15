@@ -109,20 +109,26 @@ impl IdleExit {
             return;
         }
         loop {
+            // Register for the wakeup before reading the state: `notify_waiters`
+            // stores no permit, so a detach between the read and the wait would
+            // otherwise be lost and the exit never armed.
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             let deadline = {
                 let g = self.inner.lock().await;
                 g.armed_deadline
             };
             match deadline {
                 None => {
-                    self.notify.notified().await;
+                    notified.await;
                 }
                 Some(deadline) => {
                     let now = Instant::now();
                     if now < deadline {
                         tokio::select! {
                             _ = sleep_until(deadline) => {}
-                            _ = self.notify.notified() => {}
+                            _ = &mut notified => {}
                         }
                         continue;
                     }
@@ -247,6 +253,24 @@ mod tests {
             .await
             .expect("idle-exit after grace");
         assert!(idle.is_shutting_down());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_detach_racing_the_waiter_still_arms_the_exit() {
+        for _ in 0..500 {
+            let idle = std::sync::Arc::new(IdleExit::new(IdleExitPolicy::After(Duration::ZERO)));
+            assert!(idle.peer_attached().await);
+            let waiter = {
+                let idle = idle.clone();
+                tokio::spawn(async move { idle.wait_until_should_exit().await })
+            };
+            tokio::task::yield_now().await;
+            idle.peer_detached().await;
+            tokio::time::timeout(Duration::from_secs(2), waiter)
+                .await
+                .expect("the last detach woke the waiter")
+                .unwrap();
+        }
     }
 
     #[tokio::test(start_paused = true)]

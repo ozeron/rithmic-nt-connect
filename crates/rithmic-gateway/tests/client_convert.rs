@@ -179,12 +179,24 @@ fn every_event_variant_round_trips() {
         Body::InstrumentPnl(instrument_pnl()),
         Body::OrderNotification(order_notification()),
         Body::TimeBar(history_bar()),
+        Body::BracketUpdate(pb::BracketUpdate {
+            account_id: Some("ACCT".into()),
+            fcm_id: Some("FCM".into()),
+            ib_id: None,
+            basket_id: Some("B1".into()),
+            stop_ticks: Some(8),
+            stop_quantity: Some(1),
+            stop_quantity_released: Some(0),
+            target_ticks: Some(16),
+            target_quantity: Some(1),
+            target_quantity_released: None,
+        }),
         Body::Other(pb::OtherEvent {
             type_name: "Unhandled".into(),
             source: "ticker".into(),
         }),
     ];
-    assert_eq!(events.len(), 8, "one case per pb::event::Body variant");
+    assert_eq!(events.len(), 9, "one case per pb::event::Body variant");
     for body in events {
         let wire = pb::Event {
             body: Some(body.clone()),

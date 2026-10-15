@@ -14,6 +14,8 @@ pub mod dto;
 pub mod error;
 #[cfg(feature = "testing")]
 pub mod fake;
+#[cfg(feature = "testing")]
+pub mod fake_venue;
 pub mod history;
 pub mod plants;
 pub mod session;
@@ -28,8 +30,8 @@ pub use config::{
 };
 pub use direct::DirectSession;
 pub use dto::{
-    AccountPnlDto, BboDto, FillHistoryDto, FrontMonthDto, GapDto, HistoryBarDto, HistoryTickDto,
-    InstrumentPnlDto, LastTradeDto, OrderBookDto, OrderNotificationDto, PlantEvent,
+    AccountPnlDto, BboDto, BracketUpdateDto, FillHistoryDto, FrontMonthDto, GapDto, HistoryBarDto,
+    HistoryTickDto, InstrumentPnlDto, LastTradeDto, OrderBookDto, OrderNotificationDto, PlantEvent,
     ReferenceDataDto, TimeBarProbeRow,
 };
 pub use error::{Error, Result};

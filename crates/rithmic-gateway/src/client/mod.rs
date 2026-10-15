@@ -15,8 +15,8 @@ mod runtime;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use rithmic_plants::dto::{
@@ -28,19 +28,30 @@ use rithmic_plants::{
     AccountTriple, Error, ModifyOrder, PlaceBracketOrder, PlaceOrder, PlantSet, Result, Session,
 };
 use tokio::sync::broadcast;
+use tokio::time::Instant;
 
 use self::convert::Channel;
-use self::runtime::{CallError, Queues, Runtime, Take};
+use self::runtime::{CallError, IntentKey, Queues, Release, Runtime, Take};
 pub use self::runtime::{ReadyInfo, RecoveryFailed, TransportEvent, EVENT_QUEUE_CAP};
 use crate::listen::{default_unix_path, ListenEndpoint};
 use crate::pb::{self, frame::Body, Frame};
+
+/// The typed body of `$frame` (`Body::$variant`), mapped by `$map`; any other
+/// body is a protocol error naming the variant expected.
+macro_rules! reply {
+    ($frame:expr, $variant:ident, |$r:pat_param| $map:expr) => {
+        match $frame.body {
+            Some(Body::$variant($r)) => Ok($map),
+            other => Err(unexpected(stringify!($variant), other)),
+        }
+    };
+}
 
 const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(30);
 /// One plant history slice can exceed the normal dial timeout.
 const DEFAULT_HISTORY_RPC_TIMEOUT: Duration = Duration::from_secs(300);
 const DEFAULT_ATTACH_TIMEOUT: Duration = Duration::from_secs(90);
-/// Bounded retries of one history slice that timed out in transport.
-const SLICE_RETRIES: u32 = 2;
+
 /// Automatic recovery after a transport loss (the Python `TransportRecovery` budget).
 const DEFAULT_RECOVERY_ATTEMPTS: u32 = 8;
 const DEFAULT_RECOVERY_INITIAL_BACKOFF: Duration = Duration::from_millis(500);
@@ -157,6 +168,9 @@ pub struct GatewaySession {
     queues: Arc<Queues>,
     facade_id: AtomicU64,
     connected: AtomicBool,
+    /// The runtime `connect` ran on; `Drop` (which may run outside any runtime,
+    /// e.g. from Python) spawns the facade's last releases there.
+    rt_handle: StdMutex<Option<tokio::runtime::Handle>>,
 }
 
 impl GatewaySession {
@@ -167,6 +181,7 @@ impl GatewaySession {
             queues: Arc::new(Queues::new()),
             facade_id: AtomicU64::new(0),
             connected: AtomicBool::new(false),
+            rt_handle: StdMutex::new(None),
         }
     }
 
@@ -271,10 +286,86 @@ impl GatewaySession {
     }
 
     async fn ack(&self, body: Body, mode: Mode) -> Result<()> {
-        match self.call(body, mode, false).await?.body {
-            Some(Body::Ack(_)) => Ok(()),
-            other => Err(unexpected("ack", other)),
+        reply!(self.call(body, mode, false).await?, Ack, |_| ())
+    }
+
+    fn facade(&self) -> u64 {
+        self.facade_id.load(Ordering::SeqCst)
+    }
+
+    /// Send a subscription intent and record this facade's hold once the parent
+    /// acknowledged it. Always sent, even when another facade holds the intent:
+    /// a repeat subscribe is how a client retries a join a rebuild left degraded,
+    /// and how it re-joins a parent that lost the connection's intents.
+    async fn hold_intent(&self, key: IntentKey, body: Body) -> Result<()> {
+        let _ordered = self.runtime.intent_lock(&key).await;
+        self.ack(body, Mode::Intent).await?;
+        self.runtime.intents().hold(self.facade(), key);
+        Ok(())
+    }
+
+    /// Drop this facade's hold on an intent; the parent is told only when no
+    /// other facade on the shared socket still holds it.
+    async fn release_intent(&self, key: IntentKey, body: Body) -> Result<()> {
+        let _ordered = self.runtime.intent_lock(&key).await;
+        let facade = self.facade();
+        let held_here = {
+            let mut intents = self.runtime.intents();
+            let held_here = intents.holds(facade, &key);
+            if intents.release(facade, &key) == Release::Keep {
+                return Ok(());
+            }
+            held_here
+        };
+        let sent = self.ack(body, Mode::Intent).await;
+        if sent.is_err() && held_here {
+            self.runtime.intents().hold(facade, key);
         }
+        sent
+    }
+
+    /// Release this facade's order and bracket intents. The parent drops both
+    /// together (`DisconnectOrder`), so it is told only when no other facade
+    /// holds either; otherwise the order plant, and any bracket subscription on
+    /// it, stay for the others.
+    async fn release_order(&self) -> Result<()> {
+        let _ordered = self.runtime.intent_lock(&IntentKey::Order).await;
+        let facade = self.facade();
+        let had = {
+            let mut intents = self.runtime.intents();
+            let had = [IntentKey::Order, IntentKey::Brackets]
+                .into_iter()
+                .filter(|k| intents.holds(facade, k))
+                .collect::<Vec<_>>();
+            intents.release(facade, &IntentKey::Order);
+            intents.release(facade, &IntentKey::Brackets);
+            if intents.order_group_held() {
+                return Ok(());
+            }
+            had
+        };
+        let sent = self
+            .ack(IntentKey::Order.release_body(), Mode::Intent)
+            .await;
+        if sent.is_err() {
+            let mut intents = self.runtime.intents();
+            for key in had {
+                intents.hold(facade, key);
+            }
+        }
+        sent
+    }
+
+    /// This facade is leaving: drop its holds and return whether it was the
+    /// last facade, plus the releases the parent still needs (the intents only
+    /// this facade held). Shared by `disconnect` and `Drop`.
+    fn leave(&self) -> Option<(bool, Vec<IntentKey>)> {
+        let id = self.facade_id.swap(0, Ordering::SeqCst);
+        if id == 0 {
+            return None;
+        }
+        let freed = self.runtime.intents().drop_facade(id);
+        Some((self.runtime.unregister(id), freed))
     }
 
     /// Compatibility poll: a gap reads as [`Error::ChannelLagged`].
@@ -341,34 +432,37 @@ impl GatewaySession {
             start_time_sec: start,
             end_time_sec: end,
         });
-        let mut last: Option<Error> = None;
-        for _ in 0..=SLICE_RETRIES {
-            match self.call(body.clone(), Mode::Read, true).await {
-                Ok(frame) => {
-                    return match frame.body {
-                        Some(Body::LoadTimeBarsResponse(r)) => Ok(r
-                            .bars
-                            .into_iter()
-                            .map(convert::history_bar_from_pb)
-                            .collect()),
-                        other => Err(unexpected("load_time_bars_response", other)),
-                    }
-                }
-                // A transport timeout is transient: retry the slice a bounded
-                // number of times. A typed gateway error is not.
-                Err(err @ Error::Transport(_)) => last = Some(err),
-                Err(other) => return Err(other),
-            }
-        }
-        Err(last.unwrap_or_else(|| Error::Transport("history slice failed".into())))
+        // One call: the read retry in `call` and the parent's own slice retries
+        // are the budget. Retrying here as well multiplied every timeout, and
+        // each abandoned attempt kept a slow-lane slot busy on the parent.
+        reply!(
+            self.call(body, Mode::Read, true).await?,
+            LoadTimeBarsResponse,
+            |r| r
+                .bars
+                .into_iter()
+                .map(convert::history_bar_from_pb)
+                .collect()
+        )
     }
 }
 
 impl Drop for GatewaySession {
+    /// A facade dropped without `disconnect` still releases what only it held,
+    /// or the parent would keep those subscriptions (and keep fanning them to
+    /// this socket) until the last facade closed it. The releases run on the
+    /// runtime the facade connected on.
     fn drop(&mut self) {
-        let id = self.facade_id.load(Ordering::SeqCst);
-        if id != 0 {
-            self.runtime.unregister(id);
+        let Some((last, freed)) = self.leave() else {
+            return;
+        };
+        if last || freed.is_empty() {
+            return;
+        }
+        let handle = self.rt_handle.lock().expect("rt handle").take();
+        if let Some(handle) = handle.or_else(|| tokio::runtime::Handle::try_current().ok()) {
+            let runtime = Arc::clone(&self.runtime);
+            handle.spawn(async move { runtime.send_releases(freed).await });
         }
     }
 }
@@ -387,10 +481,18 @@ fn map_reply(frame: Frame) -> Result<Frame> {
         // gateway client reports exactly what a direct session would.
         Some(Body::Error(e)) if e.code == "venue_rejected" => Err(Error::Rejected(e.message)),
         Some(Body::Error(e)) if e.code == "not_sent" => Err(Error::NotSent(e.message)),
+        // The parent could not read the request, so it dispatched nothing.
+        Some(Body::Error(e)) if e.code == crate::server::BAD_REQUEST => {
+            Err(Error::NotSent(e.message))
+        }
         // Older parents refuse requests with `not_ready` while rebuilding; nothing
         // reached the venue. (The handshake matches `not_ready` itself in runtime.rs.)
         Some(Body::Error(e)) if e.code == "not_ready" => Err(Error::NotSent(e.message)),
         Some(Body::Error(e)) if e.code == "venue_unknown" => Err(Error::OutcomeUnknown(e.message)),
+        // The parent's handler failed part-way: whatever it did is unknown.
+        Some(Body::Error(e)) if e.code == crate::server::INTERNAL => {
+            Err(Error::OutcomeUnknown(e.message))
+        }
         Some(Body::Error(e)) => Err(Error::Gateway {
             code: e.code,
             message: e.message,
@@ -407,6 +509,7 @@ impl Session for GatewaySession {
         }
         let id = self.runtime.register(Arc::clone(&self.queues));
         self.facade_id.store(id, Ordering::SeqCst);
+        *self.rt_handle.lock().expect("rt handle") = tokio::runtime::Handle::try_current().ok();
         self.runtime.allow_recovery();
         match self.runtime.ensure_live().await {
             Ok(_) => {
@@ -424,10 +527,13 @@ impl Session for GatewaySession {
 
     async fn disconnect(&self) -> Result<()> {
         self.connected.store(false, Ordering::SeqCst);
-        let id = self.facade_id.swap(0, Ordering::SeqCst);
-        if id != 0 && self.runtime.unregister(id) {
-            // Last facade in the process: close the socket; the parent stays up.
-            self.runtime.close().await;
+        match self.leave() {
+            // Last facade in the process: close the socket; the parent drops its
+            // intents and stays up.
+            Some((true, _)) => self.runtime.close().await,
+            // Other facades keep the socket: release what only this one held.
+            Some((false, freed)) => self.runtime.send_releases(freed).await,
+            None => {}
         }
         Ok(())
     }
@@ -453,17 +559,13 @@ impl Session for GatewaySession {
     }
 
     async fn disconnect_order_plant(&self) -> Result<()> {
-        self.ack(
-            Body::DisconnectOrder(pb::DisconnectOrderRequest {}),
-            Mode::Intent,
-        )
-        .await
+        self.release_order().await
     }
 
     async fn disconnect_pnl_plant(&self) -> Result<()> {
-        self.ack(
+        self.release_intent(
+            IntentKey::Pnl,
             Body::DisconnectPnl(pb::DisconnectPnlRequest {}),
-            Mode::Intent,
         )
         .await
     }
@@ -493,46 +595,46 @@ impl Session for GatewaySession {
 
     async fn subscribe(&self, symbol: &str, exchange: &str) -> Result<()> {
         self.queues.get(Channel::Market).arm();
-        self.ack(
+        self.hold_intent(
+            IntentKey::Ticker(symbol.into(), exchange.into()),
             Body::Subscribe(pb::SubscribeRequest {
                 symbol: symbol.into(),
                 exchange: exchange.into(),
             }),
-            Mode::Intent,
         )
         .await
     }
 
     async fn unsubscribe(&self, symbol: &str, exchange: &str) -> Result<()> {
-        self.ack(
+        self.release_intent(
+            IntentKey::Ticker(symbol.into(), exchange.into()),
             Body::Unsubscribe(pb::UnsubscribeRequest {
                 symbol: symbol.into(),
                 exchange: exchange.into(),
             }),
-            Mode::Intent,
         )
         .await
     }
 
     async fn subscribe_order_book_summary(&self, symbol: &str, exchange: &str) -> Result<()> {
         self.queues.get(Channel::Market).arm();
-        self.ack(
+        self.hold_intent(
+            IntentKey::Book(symbol.into(), exchange.into()),
             Body::SubscribeBook(pb::SubscribeBookRequest {
                 symbol: symbol.into(),
                 exchange: exchange.into(),
             }),
-            Mode::Intent,
         )
         .await
     }
 
     async fn unsubscribe_order_book_summary(&self, symbol: &str, exchange: &str) -> Result<()> {
-        self.ack(
+        self.release_intent(
+            IntentKey::Book(symbol.into(), exchange.into()),
             Body::UnsubscribeBook(pb::UnsubscribeBookRequest {
                 symbol: symbol.into(),
                 exchange: exchange.into(),
             }),
-            Mode::Intent,
         )
         .await
     }
@@ -545,14 +647,14 @@ impl Session for GatewaySession {
         period: i32,
     ) -> Result<()> {
         self.queues.get(Channel::History).arm();
-        self.ack(
+        self.hold_intent(
+            IntentKey::TimeBars(symbol.into(), exchange.into(), bar_type, period),
             Body::SubscribeTimeBars(pb::SubscribeTimeBarsRequest {
                 symbol: symbol.into(),
                 exchange: exchange.into(),
                 bar_type,
                 period,
             }),
-            Mode::Intent,
         )
         .await
     }
@@ -564,38 +666,41 @@ impl Session for GatewaySession {
         bar_type: i32,
         period: i32,
     ) -> Result<()> {
-        self.ack(
+        self.release_intent(
+            IntentKey::TimeBars(symbol.into(), exchange.into(), bar_type, period),
             Body::UnsubscribeTimeBars(pb::UnsubscribeTimeBarsRequest {
                 symbol: symbol.into(),
                 exchange: exchange.into(),
                 bar_type,
                 period,
             }),
-            Mode::Intent,
         )
         .await
     }
 
     async fn subscribe_pnl(&self) -> Result<()> {
         self.queues.get(Channel::Pnl).arm();
-        self.ack(Body::SubscribePnl(pb::SubscribePnlRequest {}), Mode::Intent)
-            .await
+        self.hold_intent(
+            IntentKey::Pnl,
+            Body::SubscribePnl(pb::SubscribePnlRequest {}),
+        )
+        .await
     }
 
     async fn subscribe_order_updates(&self) -> Result<()> {
         self.queues.get(Channel::Order).arm();
-        self.ack(
+        self.hold_intent(
+            IntentKey::Order,
             Body::SubscribeOrderUpdates(pb::SubscribeOrderUpdatesRequest {}),
-            Mode::Intent,
         )
         .await
     }
 
     async fn subscribe_bracket_updates(&self) -> Result<()> {
         self.queues.get(Channel::Order).arm();
-        self.ack(
+        self.hold_intent(
+            IntentKey::Brackets,
             Body::SubscribeBracketUpdates(pb::SubscribeBracketUpdatesRequest {}),
-            Mode::Intent,
         )
         .await
     }
@@ -605,10 +710,11 @@ impl Session for GatewaySession {
             symbol: symbol.into(),
             exchange: exchange.into(),
         });
-        match self.call(body, Mode::Read, false).await?.body {
-            Some(Body::FrontMonthResponse(r)) => Ok(convert::front_month_from_pb(r)),
-            other => Err(unexpected("front_month_response", other)),
-        }
+        reply!(
+            self.call(body, Mode::Read, false).await?,
+            FrontMonthResponse,
+            |r| convert::front_month_from_pb(r)
+        )
     }
 
     async fn get_reference_data(&self, symbol: &str, exchange: &str) -> Result<ReferenceDataDto> {
@@ -616,10 +722,11 @@ impl Session for GatewaySession {
             symbol: symbol.into(),
             exchange: exchange.into(),
         });
-        match self.call(body, Mode::Read, false).await?.body {
-            Some(Body::ReferenceDataResponse(r)) => Ok(convert::reference_data_from_pb(r)),
-            other => Err(unexpected("reference_data_response", other)),
-        }
+        reply!(
+            self.call(body, Mode::Read, false).await?,
+            ReferenceDataResponse,
+            |r| convert::reference_data_from_pb(r)
+        )
     }
 
     async fn load_ticks(
@@ -635,14 +742,15 @@ impl Session for GatewaySession {
             start_time_sec,
             end_time_sec,
         });
-        match self.call(body, Mode::Read, true).await?.body {
-            Some(Body::LoadTicksResponse(r)) => Ok(r
+        reply!(
+            self.call(body, Mode::Read, true).await?,
+            LoadTicksResponse,
+            |r| r
                 .ticks
                 .into_iter()
                 .map(convert::history_tick_from_pb)
-                .collect()),
-            other => Err(unexpected("load_ticks_response", other)),
-        }
+                .collect()
+        )
     }
 
     /// Wide windows are split into calendar slices (the same lengths the direct
@@ -690,14 +798,15 @@ impl Session for GatewaySession {
             start_time_sec,
             end_time_sec,
         });
-        match self.call(body, Mode::Read, true).await?.body {
-            Some(Body::ProbeTimeBarsResponse(r)) => Ok(r
+        reply!(
+            self.call(body, Mode::Read, true).await?,
+            ProbeTimeBarsResponse,
+            |r| r
                 .rows
                 .into_iter()
                 .map(convert::time_bar_probe_row_from_pb)
-                .collect()),
-            other => Err(unexpected("probe_time_bars_response", other)),
-        }
+                .collect()
+        )
     }
 
     async fn load_orders(&self, start_sec: i32, end_sec: i32) -> Result<Vec<OrderNotificationDto>> {
@@ -705,38 +814,41 @@ impl Session for GatewaySession {
             start_time_sec: start_sec,
             end_time_sec: end_sec,
         });
-        match self.call(body, Mode::Read, false).await?.body {
-            Some(Body::LoadOrdersResponse(r)) => Ok(r
+        reply!(
+            self.call(body, Mode::Read, false).await?,
+            LoadOrdersResponse,
+            |r| r
                 .events
                 .into_iter()
                 .map(convert::order_notification_from_pb)
-                .collect()),
-            other => Err(unexpected("load_orders_response", other)),
-        }
+                .collect()
+        )
     }
 
     async fn load_product_rms_info(&self) -> Result<Vec<ProductRmsInfoDto>> {
         let body = Body::LoadProductRmsInfo(pb::LoadProductRmsInfoRequest {});
-        match self.call(body, Mode::Read, false).await?.body {
-            Some(Body::LoadProductRmsInfoResponse(r)) => Ok(r
+        reply!(
+            self.call(body, Mode::Read, false).await?,
+            LoadProductRmsInfoResponse,
+            |r| r
                 .rows
                 .into_iter()
                 .map(convert::product_rms_info_from_pb)
-                .collect()),
-            other => Err(unexpected("load_product_rms_info_response", other)),
-        }
+                .collect()
+        )
     }
 
     async fn load_account_rms_info(&self) -> Result<Vec<AccountRmsInfoDto>> {
         let body = Body::LoadAccountRmsInfo(pb::LoadAccountRmsInfoRequest {});
-        match self.call(body, Mode::Read, false).await?.body {
-            Some(Body::LoadAccountRmsInfoResponse(r)) => Ok(r
+        reply!(
+            self.call(body, Mode::Read, false).await?,
+            LoadAccountRmsInfoResponse,
+            |r| r
                 .rows
                 .into_iter()
                 .map(convert::account_rms_info_from_pb)
-                .collect()),
-            other => Err(unexpected("load_account_rms_info_response", other)),
-        }
+                .collect()
+        )
     }
 
     async fn load_fill_history(&self, start: i32, finish: i32) -> Result<Vec<FillHistoryDto>> {
@@ -744,36 +856,39 @@ impl Session for GatewaySession {
             start_date: start,
             finish_date: finish,
         });
-        match self.call(body, Mode::Read, false).await?.body {
-            Some(Body::LoadFillHistoryResponse(r)) => Ok(r
+        reply!(
+            self.call(body, Mode::Read, false).await?,
+            LoadFillHistoryResponse,
+            |r| r
                 .rows
                 .into_iter()
                 .map(convert::fill_history_from_pb)
-                .collect()),
-            other => Err(unexpected("load_fill_history_response", other)),
-        }
+                .collect()
+        )
     }
 
     async fn load_order_history(&self, date: &str) -> Result<Vec<OrderNotificationDto>> {
         let body = Body::LoadOrderHistory(pb::LoadOrderHistoryRequest {
             date: date.to_string(),
         });
-        match self.call(body, Mode::Read, false).await?.body {
-            Some(Body::LoadOrderHistoryResponse(r)) => Ok(r
+        reply!(
+            self.call(body, Mode::Read, false).await?,
+            LoadOrderHistoryResponse,
+            |r| r
                 .events
                 .into_iter()
                 .map(convert::order_notification_from_pb)
-                .collect()),
-            other => Err(unexpected("load_order_history_response", other)),
-        }
+                .collect()
+        )
     }
 
     async fn load_order_history_dates(&self) -> Result<Vec<String>> {
         let body = Body::LoadOrderHistoryDates(pb::LoadOrderHistoryDatesRequest {});
-        match self.call(body, Mode::Read, false).await?.body {
-            Some(Body::LoadOrderHistoryDatesResponse(r)) => Ok(r.dates),
-            other => Err(unexpected("load_order_history_dates_response", other)),
-        }
+        reply!(
+            self.call(body, Mode::Read, false).await?,
+            LoadOrderHistoryDatesResponse,
+            |r| r.dates
+        )
     }
 
     async fn place_order(&self, o: &PlaceOrder) -> Result<()> {
@@ -923,5 +1038,44 @@ impl Session for GatewaySession {
             }
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod reply_class_tests {
+    use super::*;
+
+    fn error(code: &str) -> Frame {
+        Frame {
+            request_id: 1,
+            body: Some(Body::Error(pb::ErrorResponse {
+                code: code.into(),
+                message: "m".into(),
+            })),
+        }
+    }
+
+    #[test]
+    fn an_unreadable_request_was_not_sent() {
+        assert!(matches!(
+            map_reply(error(crate::server::BAD_REQUEST)),
+            Err(Error::NotSent(_))
+        ));
+    }
+
+    #[test]
+    fn source_classes_survive_the_wire() {
+        assert!(matches!(
+            map_reply(error("venue_rejected")),
+            Err(Error::Rejected(_))
+        ));
+        assert!(matches!(
+            map_reply(error("venue_unknown")),
+            Err(Error::OutcomeUnknown(_))
+        ));
+        assert!(matches!(
+            map_reply(error("not_sent")),
+            Err(Error::NotSent(_))
+        ));
     }
 }
