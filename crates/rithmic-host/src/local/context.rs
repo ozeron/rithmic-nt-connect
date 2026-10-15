@@ -4,13 +4,9 @@ use crate::intents::TimeBarIntent;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicU8;
 use subscriptions::TopicIntent;
-use tokio::sync::{broadcast, mpsc};
-use tokio::task::JoinHandle;
 
-/// Per-connection fan-out bookkeeping: which topics this client forwards,
-/// typed venue joins this client asked for, and forwarder tasks.
+/// Per-attachment topic delivery and typed venue intent bookkeeping.
 pub(super) struct SessionCtx {
-    id: SessionId,
     pub(super) subscribed: HashSet<SubKey>,
     pub(super) ticker: HashSet<SubKey>,
     pub(super) book: HashSet<SubKey>,
@@ -18,21 +14,16 @@ pub(super) struct SessionCtx {
     pub(super) pnl: bool,
     pub(super) order: bool,
     pub(super) brackets: bool,
-    pub(super) forwarders: HashMap<SubKey, JoinHandle<()>>,
-    /// Per forwarded topic: which frame kinds this client asked for (bit mask of
-    /// [`Kind::bit`]). A forwarder drops frames of other kinds.
+    /// Per topic: which frame kinds this client asked for (bit mask of
+    /// [`Kind::bit`]). The publisher skips records of other kinds.
     pub(super) kinds: HashMap<SubKey, Arc<AtomicU8>>,
-    pub(super) out_tx: mpsc::Sender<Fan>,
+    pub(super) topics: HashMap<SubKey, Arc<DeliveryTopic>>,
+    pub(super) delivery: Arc<delivery::Delivery>,
 }
 
 impl SessionCtx {
-    pub(super) fn new(out_tx: mpsc::Sender<Fan>) -> Self {
-        Self::with_id(out_tx, SessionId::new())
-    }
-
-    pub(super) fn with_id(out_tx: mpsc::Sender<Fan>, id: SessionId) -> Self {
+    pub(super) fn new(delivery: Arc<delivery::Delivery>) -> Self {
         Self {
-            id,
             subscribed: HashSet::new(),
             ticker: HashSet::new(),
             book: HashSet::new(),
@@ -40,9 +31,9 @@ impl SessionCtx {
             pnl: false,
             order: false,
             brackets: false,
-            forwarders: HashMap::new(),
             kinds: HashMap::new(),
-            out_tx,
+            topics: HashMap::new(),
+            delivery,
         }
     }
 
@@ -66,8 +57,8 @@ impl SessionCtx {
         if self.brackets && *key == crate::fanout::order_key() {
             mask |= Kind::Brackets.bit();
         }
-        if mask == 0 && !self.forwarders.contains_key(key) {
-            // Nothing forwarded and nothing wanted: keep no empty entry around.
+        if mask == 0 && !self.subscribed.contains(key) {
+            // No delivery and nothing wanted: keep no empty entry around.
             self.kinds.remove(key);
             return;
         }
@@ -88,49 +79,33 @@ impl SessionCtx {
 
     /// Attach this client to `key`'s fan-out topic (idempotent). The topic
     /// must already exist in the hub (caller subscribes hub interest first).
-    pub(super) async fn ensure_forwarder(&mut self, hub: &FanoutHub, key: &SubKey) {
+    pub(super) async fn ensure_delivery(&mut self, hub: &FanoutHub, key: &SubKey) {
         if self.subscribed.contains(key) {
             return;
         }
-        if let Some(rx) = hub.subscribe_receiver(key).await {
-            let kinds = Arc::clone(
-                self.kinds
-                    .entry(key.clone())
-                    .or_insert_with(|| Arc::new(AtomicU8::new(0))),
-            );
-            let handle = spawn_forwarder(
-                self.id,
-                rx,
-                self.out_tx.clone(),
-                stream_of_topic(key),
-                kinds,
-            );
-            self.forwarders.insert(key.clone(), handle);
+        let kinds = Arc::clone(
+            self.kinds
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(AtomicU8::new(0))),
+        );
+        if let Some(topic) = hub
+            .subscribe_delivery(key, self.delivery.clone(), kinds)
+            .await
+        {
+            self.topics.insert(key.clone(), topic);
             self.subscribed.insert(key.clone());
         }
     }
 
-    /// Flush each topic through this session's final delivery queue. A stopped
-    /// consumer cannot block plant recovery indefinitely.
-    pub(super) async fn flush(&self, hub: &FanoutHub) {
-        let mut acks = Vec::new();
-        for key in &self.subscribed {
-            let (done, ack) = tokio::sync::oneshot::channel();
-            hub.publish(key, Fan::flush(self.id, done)).await;
-            acks.push(ack);
+    pub(super) async fn flush(&self) {
+        if let Some(ack) = self.delivery.flush() {
+            // A stalled writer cannot block recovery indefinitely.
+            let _ = tokio::time::timeout(Duration::from_secs(2), ack).await;
         }
-        let _ = tokio::time::timeout(Duration::from_secs(2), async {
-            for ack in acks {
-                let _ = ack.await;
-            }
-        })
-        .await;
     }
 
-    pub(super) fn drop_forwarder(&mut self, key: &SubKey) {
-        if let Some(handle) = self.forwarders.remove(key) {
-            handle.abort();
-        }
+    pub(super) fn drop_delivery(&mut self, key: &SubKey) {
+        self.topics.remove(key);
         self.kinds.remove(key);
         self.subscribed.remove(key);
     }
@@ -155,10 +130,7 @@ impl SessionCtx {
     /// Detach-only disconnect: clear typed intents + hub interest; venue
     /// unsubscribe only when the last peer of that typed join leaves.
     pub(crate) async fn teardown<V: Venue + ?Sized + 'static>(&mut self, state: &HostState<V>) {
-        for handle in self.forwarders.values() {
-            handle.abort();
-        }
-        self.forwarders.clear();
+        self.topics.clear();
 
         // Fire-and-forget per topic: the client is dying, so unlike
         // `unsubscribe_topic` there is no re-note on failure. The topic_lock
@@ -195,106 +167,5 @@ impl SessionCtx {
         if let Err((code, e)) = subscriptions::leave_order(state, self, false).await {
             eprintln!("rithmic-gateway: teardown {code}: {e}");
         }
-    }
-}
-
-/// Which plant stream a topic's events come from, for a gap frame.
-fn stream_of_topic(key: &SubKey) -> crate::Stream {
-    match key.symbol.as_str() {
-        "__pnl__" => crate::Stream::Pnl,
-        "__order__" => crate::Stream::Order,
-        _ => crate::Stream::Ticker,
-    }
-}
-
-/// The streams a forwarder overflow is reported on. A symbol topic carries
-/// ticks, book and live bars, but bars are consumed from the history channel: a
-/// client that asked for bars is told on that channel too, so its bar consumer
-/// resyncs instead of continuing with a hole.
-fn overflow_gap_streams(stream: crate::Stream, kinds: u8) -> Vec<crate::Stream> {
-    let mut streams = vec![stream];
-    if stream == crate::Stream::Ticker && kinds & Kind::Bars.bit() != 0 {
-        streams.push(crate::Stream::History);
-    }
-    streams
-}
-
-/// Forward one topic to one client. A receiver that falls behind the topic's
-/// ring is not disconnected: it is told exactly how many frames it missed (a
-/// `Gap` in order with the rest) and keeps going. A client that stops reading
-/// altogether is cut by the writer's timeout.
-fn spawn_forwarder(
-    id: SessionId,
-    rx: broadcast::Receiver<Fan>,
-    out_tx: mpsc::Sender<Fan>,
-    stream: crate::Stream,
-    kinds: Arc<AtomicU8>,
-) -> JoinHandle<()> {
-    let mut queue = crate::fanout::ClientQueue::from_receiver(id, rx);
-    tokio::spawn(async move {
-        loop {
-            match queue.recv().await {
-                Ok(fan) => {
-                    if fan.flush_for(id) == Some(false) {
-                        continue;
-                    }
-                    // A frame of a kind this client never asked for (a book
-                    // update for a ticker-only client) is dropped here, before
-                    // it costs a socket write or a decode on the far side.
-                    let wanted = fan.kind() == Kind::Any
-                        || kinds.load(Ordering::Relaxed) & fan.kind().bit() != 0;
-                    if wanted && out_tx.send(fan).await.is_err() {
-                        return;
-                    }
-                }
-                Err(crate::fanout::ClientQueueError::Overflow { skipped }) => {
-                    for gap_stream in overflow_gap_streams(stream, kinds.load(Ordering::Relaxed)) {
-                        let gap = Fan::native(
-                            Kind::Any,
-                            PlantEvent::Gap(crate::GapDto {
-                                stream: gap_stream,
-                                skipped,
-                            }),
-                        );
-                        if out_tx.send(gap).await.is_err() {
-                            return;
-                        }
-                    }
-                }
-                Err(crate::fanout::ClientQueueError::Closed) => return,
-            }
-        }
-    })
-}
-
-#[cfg(test)]
-mod overflow_gap_tests {
-    use super::*;
-    use crate::Stream;
-
-    #[test]
-    fn a_bar_subscriber_hears_about_the_overflow_on_its_bar_channel() {
-        let kinds = Kind::Ticker.bit() | Kind::Bars.bit();
-        assert_eq!(
-            overflow_gap_streams(Stream::Ticker, kinds),
-            vec![Stream::Ticker, Stream::History]
-        );
-    }
-
-    #[test]
-    fn a_ticker_only_subscriber_gets_one_gap() {
-        assert_eq!(
-            overflow_gap_streams(Stream::Ticker, Kind::Ticker.bit()),
-            vec![Stream::Ticker]
-        );
-    }
-
-    #[test]
-    fn account_topics_report_on_their_own_stream() {
-        assert_eq!(
-            overflow_gap_streams(Stream::Order, 0xff),
-            vec![Stream::Order]
-        );
-        assert_eq!(overflow_gap_streams(Stream::Pnl, 0xff), vec![Stream::Pnl]);
     }
 }

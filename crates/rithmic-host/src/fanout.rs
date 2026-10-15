@@ -2,16 +2,14 @@
 
 use crate::PlantEvent;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock, Weak};
 
 use tokio::sync::{broadcast, RwLock};
 
-/// Default fan-out capacity: events a topic's broadcast ring, and a client's
-/// outbound queue, hold. A receiver that falls further behind than this is told
-/// of an exact gap; a client whose socket stops draining is disconnected by the
-/// writer's timeout. Sized so a 200k events/s burst of ~100-byte frames costs a
-/// few MB per topic, not so small that a brief stall drops events.
+/// Events retained per attachment stream (and by compatibility topic rings).
+/// A stalled attachment gets an exact gap without blocking its peers; a socket
+/// writer that stops draining is disconnected by its write timeout.
 pub const DEFAULT_QUEUE_CAP: usize = 65_536;
 
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
@@ -39,9 +37,7 @@ pub struct SubKey {
     pub exchange: String,
 }
 
-/// Fan-out hub: one broadcast channel per sub key + per-client receivers.
-/// What a fanned-out frame is, so a client's forwarder can drop kinds that client
-/// never asked for without writing them to its socket.
+/// Interest class used to filter records before attachment delivery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     /// Delivered to every attached client (account/order events, gaps).
@@ -93,7 +89,6 @@ enum FanPayload {
 /// records without changing event records or their shared encoding.
 #[derive(Debug)]
 struct Flush {
-    session: SessionId,
     done: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
 
@@ -106,18 +101,11 @@ struct EventRecord {
 }
 
 impl Fan {
-    pub(crate) fn flush(session: SessionId, done: tokio::sync::oneshot::Sender<()>) -> Self {
+    pub(crate) fn flush(done: tokio::sync::oneshot::Sender<()>) -> Self {
         Self {
             payload: FanPayload::Flush(Arc::new(Flush {
-                session,
                 done: std::sync::Mutex::new(Some(done)),
             })),
-        }
-    }
-    pub(crate) fn flush_for(&self, session: SessionId) -> Option<bool> {
-        match &self.payload {
-            FanPayload::Flush(flush) => Some(flush.session == session),
-            _ => None,
         }
     }
     /// A transport acknowledges a recovery barrier after writing all preceding
@@ -163,6 +151,16 @@ impl Fan {
         }
     }
 
+    pub(crate) fn into_event(self) -> Option<PlantEvent> {
+        match self.payload {
+            FanPayload::Native { record, .. } => Some(match Arc::try_unwrap(record) {
+                Ok(record) => record.event,
+                Err(record) => record.event.clone(),
+            }),
+            _ => None,
+        }
+    }
+
     /// All remote consumers of a record share one encoding and allocation.
     pub fn encoded_with(&self, encode: impl FnOnce(&PlantEvent) -> bytes::Bytes) -> bytes::Bytes {
         match &self.payload {
@@ -175,13 +173,13 @@ impl Fan {
     }
 }
 
-/// Fan-out hub: one broadcast ring per topic; every attached client has its own
-/// receiver. Topics are held as `symbol -> exchange -> state` so the event hot
-/// path can look one up from borrowed `&str`s without allocating a key.
 /// An optional transport projection. It consumes a record only when no native
 /// session can need it; mixed native/remote hosts retain the shared typed record.
 pub type EventEncoder = fn(PlantEvent) -> bytes::Bytes;
 
+/// Refcounted topics deliver synchronously to each attachment's bounded queues.
+/// Compatibility broadcast receivers share the same routing. Borrowed symbol /
+/// exchange lookup avoids allocating routing keys on the event path.
 pub struct FanoutHub {
     capacity: usize,
     native_sessions: AtomicUsize,
@@ -191,7 +189,80 @@ pub struct FanoutHub {
 
 struct SubState {
     refcount: usize,
-    tx: broadcast::Sender<Fan>,
+    // Session delivery does not use this compatibility ring. Allocate it only
+    // for explicit broadcast receivers, especially on remote-only hosts.
+    tx: OnceLock<broadcast::Sender<Fan>>,
+    deliveries: Vec<Weak<DeliveryTopic>>,
+}
+
+/// Held by the attachment, weakly referenced by a topic. Releasing an intent
+/// stops delivery synchronously without async work or a publisher/session cycle.
+pub(crate) struct DeliveryTopic {
+    delivery: Arc<crate::local::delivery::Delivery>,
+    kinds: Arc<AtomicU8>,
+    stream: crate::Stream,
+}
+impl DeliveryTopic {
+    fn shared(&self, fan: Fan) {
+        let stream = fan
+            .event()
+            .map(crate::local::delivery::stream_of)
+            .unwrap_or_else(|| {
+                if fan.kind() == Kind::Bars {
+                    crate::Stream::History
+                } else {
+                    self.stream
+                }
+            });
+        self.delivery.shared(stream, fan);
+    }
+    fn wants(&self, kind: Kind) -> bool {
+        kind == Kind::Any || self.kinds.load(Ordering::Relaxed) & kind.bit() != 0
+    }
+}
+impl SubState {
+    fn receiver_count(&self) -> usize {
+        self.tx.get().map_or(0, broadcast::Sender::receiver_count)
+    }
+    fn publish(&self, fan: Fan) -> usize {
+        let mut count = 0;
+        for native in self.deliveries.iter().filter_map(Weak::upgrade) {
+            if native.wants(fan.kind()) {
+                native.shared(fan.clone());
+                count += 1;
+            }
+        }
+        count + self.tx.get().map_or(0, |tx| tx.send(fan).unwrap_or(0))
+    }
+    fn event(&self, hub: &FanoutHub, kind: Kind, event: PlantEvent) {
+        // The common direct path moves the venue record, including strings,
+        // straight into its only consumer. Multicast retains one shared record
+        // until an owned/native or encoded/wire consumer actually needs it.
+        if self.receiver_count() == 0 {
+            let mut wanted = self
+                .deliveries
+                .iter()
+                .filter_map(Weak::upgrade)
+                .filter(|n| n.wants(kind));
+            let Some(first) = wanted.next() else {
+                return;
+            };
+            if let Some(second) = wanted.next() {
+                let fan = hub.fan(kind, event);
+                first.shared(fan.clone());
+                second.shared(fan.clone());
+                for native in wanted {
+                    native.shared(fan.clone());
+                }
+            } else if first.delivery.is_transport() {
+                first.shared(hub.fan(kind, event));
+            } else {
+                first.delivery.event(event);
+            }
+        } else {
+            self.publish(hub.fan(kind, event));
+        }
+    }
 }
 
 impl FanoutHub {
@@ -214,9 +285,13 @@ impl FanoutHub {
     pub(crate) fn native_detached(&self) {
         self.native_sessions.fetch_sub(1, Ordering::SeqCst);
     }
+    pub(crate) fn has_native_sessions(&self) -> bool {
+        self.native_sessions.load(Ordering::Relaxed) != 0
+    }
 
     fn fan(&self, kind: Kind, event: PlantEvent) -> Fan {
-        if self.native_sessions.load(Ordering::SeqCst) == 0 {
+        if !matches!(event, PlantEvent::Gap(_)) && self.native_sessions.load(Ordering::SeqCst) == 0
+        {
             if let Some(encode) = self.encoder.get() {
                 return Fan::encoded(kind, encode(event));
             }
@@ -238,8 +313,14 @@ impl FanoutHub {
                 false
             }
             None => {
-                let (tx, _) = broadcast::channel(self.capacity);
-                by_exchange.insert(key.exchange, SubState { refcount: 1, tx });
+                by_exchange.insert(
+                    key.exchange,
+                    SubState {
+                        refcount: 1,
+                        tx: OnceLock::new(),
+                        deliveries: Vec::new(),
+                    },
+                );
                 true
             }
         }
@@ -270,15 +351,38 @@ impl FanoutHub {
     /// Subscribe a receiver to an existing key (after add_interest).
     pub async fn subscribe_receiver(&self, key: &SubKey) -> Option<broadcast::Receiver<Fan>> {
         let guard = self.subs.read().await;
-        guard
-            .get(&key.symbol)?
-            .get(&key.exchange)
-            .map(|st| st.tx.subscribe())
+        guard.get(&key.symbol)?.get(&key.exchange).map(|st| {
+            st.tx
+                .get_or_init(|| broadcast::channel(self.capacity).0)
+                .subscribe()
+        })
     }
 
-    /// The topic's sender, looked up from borrowed strings, when at least one
-    /// client is attached to it. `None` means nobody would receive the event, so
-    /// the caller can skip converting and encoding it altogether.
+    pub(crate) async fn subscribe_delivery(
+        &self,
+        key: &SubKey,
+        delivery: Arc<crate::local::delivery::Delivery>,
+        kinds: Arc<AtomicU8>,
+    ) -> Option<Arc<DeliveryTopic>> {
+        let mut guard = self.subs.write().await;
+        let state = guard.get_mut(&key.symbol)?.get_mut(&key.exchange)?;
+        state.deliveries.retain(|n| n.strong_count() > 0);
+        let stream = match key.symbol.as_str() {
+            "__pnl__" => crate::Stream::Pnl,
+            "__order__" => crate::Stream::Order,
+            _ => crate::Stream::Ticker,
+        };
+        let topic = Arc::new(DeliveryTopic {
+            delivery,
+            kinds,
+            stream,
+        });
+        state.deliveries.push(Arc::downgrade(&topic));
+        Some(topic)
+    }
+
+    /// Compatibility sender for a topic with an explicit broadcast receiver.
+    /// Session attachments are fed by `publish_plant_event` instead.
     pub async fn live_sender(
         &self,
         symbol: &str,
@@ -286,7 +390,8 @@ impl FanoutHub {
     ) -> Option<broadcast::Sender<Fan>> {
         let guard = self.subs.read().await;
         let st = guard.get(symbol)?.get(exchange)?;
-        (st.tx.receiver_count() > 0).then(|| st.tx.clone())
+        let tx = st.tx.get()?;
+        (tx.receiver_count() > 0).then(|| tx.clone())
     }
 
     /// Publish to every symbol topic (not the internal `__*__` sentinels). Used
@@ -297,7 +402,7 @@ impl FanoutHub {
             .iter()
             .filter(|(symbol, _)| !symbol.starts_with("__"))
             .flat_map(|(_, by_exchange)| by_exchange.values())
-            .map(|st| st.tx.send(fan.clone()).unwrap_or(0))
+            .map(|st| st.publish(fan.clone()))
             .sum()
     }
 
@@ -305,7 +410,7 @@ impl FanoutHub {
     pub async fn publish(&self, key: &SubKey, fan: Fan) -> usize {
         let guard = self.subs.read().await;
         match guard.get(&key.symbol).and_then(|m| m.get(&key.exchange)) {
-            Some(st) => st.tx.send(fan).unwrap_or(0),
+            Some(st) => st.publish(fan),
             None => 0,
         }
     }
@@ -449,10 +554,13 @@ pub async fn publish_plant_event(hub: &FanoutHub, event: PlantEvent) {
             exchange,
             kind,
         } => {
-            let Some(tx) = hub.live_sender(symbol, exchange).await else {
-                return;
-            };
-            let _ = tx.send(hub.fan(kind, event));
+            let guard = hub.subs.read().await;
+            if let Some(state) = guard
+                .get(symbol)
+                .and_then(|by_exchange| by_exchange.get(exchange))
+            {
+                state.event(hub, kind, event);
+            }
         }
         Route::Gap(crate::Stream::Ticker | crate::Stream::History) => {
             hub.publish_symbols(hub.fan(Kind::Any, event)).await;
@@ -470,7 +578,54 @@ pub async fn publish_plant_event(hub: &FanoutHub, event: PlantEvent) {
             } else {
                 Kind::Any
             };
-            hub.publish(&key, hub.fan(kind, event)).await;
+            let guard = hub.subs.read().await;
+            if let Some(state) = guard
+                .get(&key.symbol)
+                .and_then(|by_exchange| by_exchange.get(&key.exchange))
+            {
+                state.event(hub, kind, event);
+            }
         }
+    }
+}
+
+/// Hand a homogeneous venue batch to its sole native holder without per-event
+/// queue locks, wakeups, shared allocations or owned clones. Mixed-topic and
+/// multicast batches use the same routing and record conversion below.
+pub(crate) async fn publish_plant_events(hub: &FanoutHub, events: Vec<PlantEvent>) {
+    if let Some(first) = events.first() {
+        let route = route_of(first);
+        if let Route::Topic {
+            symbol,
+            exchange,
+            kind,
+        } = route
+        {
+            let guard = hub.subs.read().await;
+            if let Some(state) = guard
+                .get(symbol)
+                .and_then(|by_exchange| by_exchange.get(exchange))
+            {
+                if state.receiver_count() == 0 {
+                    let mut wanted = state
+                        .deliveries
+                        .iter()
+                        .filter_map(Weak::upgrade)
+                        .filter(|n| n.wants(kind));
+                    if let Some(only) = wanted.next() {
+                        if wanted.next().is_none()
+                            && !only.delivery.is_transport()
+                            && events.iter().all(|event| route_of(event) == route)
+                        {
+                            only.delivery.batch(events);
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for event in events {
+        publish_plant_event(hub, event).await;
     }
 }

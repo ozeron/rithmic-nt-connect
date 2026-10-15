@@ -20,7 +20,6 @@ use rithmic_host::Session;
 use crate::codec;
 use crate::idle_exit::{IdleExit, IdleExitPolicy};
 use crate::pb::{self, frame::Body, Frame, Handshake, Ready};
-use crate::subscriptions::Fan;
 
 mod dispatch;
 pub mod pump;
@@ -663,7 +662,7 @@ async fn run_slow_lane(
 async fn write_replies<W: tokio::io::AsyncWrite + Unpin>(
     mut write: W,
     mut replies: mpsc::Receiver<Frame>,
-    mut events: mpsc::Receiver<Fan>,
+    mut events: rithmic_host::EventReceiver,
 ) {
     let mut events_open = true;
     // Ends when the reply channel has closed and drained (that flushes a final

@@ -1031,3 +1031,244 @@ async fn requested_login_recovery_before_the_pump_starts_is_not_lost() {
     assert_eq!(fake.calls(), ["disconnect", "connect"]);
     host.shutdown().await;
 }
+
+#[tokio::test]
+async fn stalled_local_session_has_exact_gaps_while_its_peer_loses_nothing() {
+    let (host, fake, slow) = running().await;
+    let fast = host.attach();
+    slow.subscribe("NQU6", "CME").await.unwrap();
+    fast.subscribe("NQU6", "CME").await.unwrap();
+    // Exceed even the old native StreamHub plus forwarding queues. Keep the
+    // venue and healthy peer drained so any loss belongs only to this session.
+    const TOTAL: i32 = 70_000;
+    for n in 0..TOTAL {
+        fake.push_event(Stream::Ticker, tick(n));
+        let batch = fast.next_events(Stream::Ticker, 1, WAIT).await.unwrap();
+        let PlantEvent::LastTrade(trade) = &batch[0] else {
+            panic!("unexpected peer record")
+        };
+        assert_eq!(trade.trade_price, Some(n as f64));
+    }
+    let mut accounted = 0;
+    let mut skipped = 0;
+    while accounted < TOTAL as u64 {
+        let batch = slow.next_events(Stream::Ticker, 1024, WAIT).await.unwrap();
+        assert!(!batch.is_empty(), "missing records at {accounted}");
+        for event in batch {
+            match event {
+                PlantEvent::Gap(gap) => {
+                    assert_eq!(gap.stream, Stream::Ticker);
+                    assert!(gap.skipped > 0);
+                    accounted += gap.skipped;
+                    skipped += gap.skipped;
+                }
+                PlantEvent::LastTrade(trade) => {
+                    assert_eq!(trade.trade_price, Some(accounted as f64));
+                    accounted += 1;
+                }
+                other => panic!("unexpected record: {other:?}"),
+            }
+        }
+    }
+    assert_eq!(accounted, TOTAL as u64);
+    assert!(skipped > 0);
+    host.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn lifecycle_barriers_leave_every_topic_queued_before_signalling() {
+    let (host, fake, session) = running().await;
+    session.subscribe("NQU6", "CME").await.unwrap();
+    session.subscribe("ESU6", "CME").await.unwrap();
+    let mut signals = session.session_events();
+    for n in 0..8 {
+        fake.push_event(Stream::Ticker, tick(n));
+        let PlantEvent::LastTrade(mut trade) = tick(n) else {
+            unreachable!()
+        };
+        trade.symbol = Some("ESU6".into());
+        fake.push_event(Stream::Ticker, PlantEvent::LastTrade(trade));
+    }
+    fake.fail_stream(Stream::Ticker, "failure after both topics");
+    resumed(&mut signals, 2).await;
+    // Both signals must follow enqueue, even with no native polling during
+    // recovery. A non-blocking read must already have every pre-failure record.
+    let mut nq = Vec::new();
+    let mut es = Vec::new();
+    for _ in 0..16 {
+        let batch = session
+            .next_events(Stream::Ticker, 1, Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(batch.len(), 1);
+        let PlantEvent::LastTrade(trade) = &batch[0] else {
+            panic!("unexpected record")
+        };
+        match trade.symbol.as_deref() {
+            Some("NQU6") => nq.push(trade.trade_price.unwrap() as i32),
+            Some("ESU6") => es.push(trade.trade_price.unwrap() as i32),
+            other => panic!("unexpected symbol: {other:?}"),
+        }
+    }
+    assert_eq!(nq, (0..8).collect::<Vec<_>>());
+    assert_eq!(es, nq);
+    host.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_native_batch_overflow_is_exact_and_partial_takes_keep_source_order() {
+    let (host, fake, session) = running().await;
+    session.subscribe("NQU6", "CME").await.unwrap();
+    let mut signals = session.session_events();
+    for n in 0..32 {
+        fake.push_event(Stream::Ticker, tick(n));
+    }
+    fake.fail_stream(Stream::Ticker, "after native batch");
+    resumed(&mut signals, 2).await;
+    let batch = session
+        .next_events(Stream::Ticker, 1, Duration::ZERO)
+        .await
+        .unwrap();
+    assert!(
+        matches!(&batch[..], [PlantEvent::Gap(gap)] if gap.stream == Stream::Ticker && gap.skipped == 16)
+    );
+    for n in 16..32 {
+        let batch = session
+            .next_events(Stream::Ticker, 1, Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(format!("{:?}", batch[0]), format!("{:?}", tick(n)));
+    }
+    assert!(session
+        .next_events(Stream::Ticker, 1, Duration::ZERO)
+        .await
+        .unwrap()
+        .is_empty());
+    host.shutdown().await;
+}
+
+#[tokio::test]
+async fn concurrent_native_readers_wake_for_every_record_in_one_batch() {
+    let (host, fake, session) = running().await;
+    session.subscribe("NQU6", "CME").await.unwrap();
+    let a = session.clone();
+    let a = tokio::spawn(async move { a.next_events(Stream::Ticker, 1, WAIT).await.unwrap() });
+    let b = session.clone();
+    let b = tokio::spawn(async move { b.next_events(Stream::Ticker, 1, WAIT).await.unwrap() });
+    tokio::task::yield_now().await;
+    fake.push_event(Stream::Ticker, tick(1));
+    fake.push_event(Stream::Ticker, tick(2));
+    let mut prices = Vec::new();
+    for batch in [a.await.unwrap(), b.await.unwrap()] {
+        assert_eq!(batch.len(), 1, "a waiting reader missed the batch wakeup");
+        let PlantEvent::LastTrade(trade) = &batch[0] else {
+            panic!("unexpected record")
+        };
+        prices.push(trade.trade_price.unwrap() as i32);
+    }
+    prices.sort_unstable();
+    assert_eq!(prices, [1, 2]);
+    host.shutdown().await;
+}
+
+// Behavioral replacements for the removed topic-forwarder gap helper tests:
+// overflow the real attachment queues and check the channels consumers read.
+async fn overflow_channels(streams: &[Stream]) {
+    let (host, fake) = make(
+        HistoryPolicy::Allow,
+        ParentGates {
+            trading_enabled: true,
+            cancel_all_enabled: false,
+        },
+        2,
+    );
+    let slow = host.attach();
+    let fast = host.attach();
+    slow.connect().await.unwrap();
+    for session in [&slow, &fast] {
+        for stream in streams {
+            match stream {
+                Stream::Ticker => session.subscribe("NQU6", "CME").await.unwrap(),
+                Stream::History => session
+                    .subscribe_time_bars("NQU6", "CME", 2, 1)
+                    .await
+                    .unwrap(),
+                Stream::Pnl => session.subscribe_pnl().await.unwrap(),
+                Stream::Order => session.subscribe_bracket_updates().await.unwrap(),
+            }
+        }
+    }
+    for stream in streams {
+        for n in 0..8 {
+            let event = match stream {
+                Stream::Ticker => tick(n),
+                Stream::History => PlantEvent::TimeBar(rithmic_host::HistoryBarDto {
+                    symbol: Some("NQU6".into()),
+                    exchange: Some("CME".into()),
+                    bar_type: Some(2),
+                    period: Some("1".into()),
+                    marker: Some(n),
+                    open_price: Some(1.0),
+                    high_price: Some(1.0),
+                    low_price: Some(1.0),
+                    close_price: Some(1.0),
+                    volume: Some(1),
+                    num_trades: Some(1),
+                    bid_volume: None,
+                    ask_volume: None,
+                    ts_event_ns: None,
+                }),
+                Stream::Pnl => PlantEvent::AccountPnl(rithmic_host::AccountPnlDto {
+                    account_id: Some("test-account".into()),
+                    fcm_id: None,
+                    ib_id: None,
+                    account_balance: None,
+                    cash_on_hand: None,
+                    margin_balance: None,
+                    day_pnl: Some(n.to_string()),
+                    open_position_pnl: None,
+                    closed_position_pnl: None,
+                    available_buying_power: None,
+                    used_buying_power: None,
+                    is_snapshot: Some(false),
+                    ssboe: None,
+                    usecs: None,
+                }),
+                Stream::Order => PlantEvent::BracketUpdate(rithmic_host::BracketUpdateDto {
+                    basket_id: Some(n.to_string()),
+                    stop_ticks: Some(10),
+                    ..Default::default()
+                }),
+            };
+            fake.push_event(*stream, event.clone());
+            assert_eq!(fast.next_events(*stream, 1, WAIT).await.unwrap(), [event]);
+        }
+    }
+    for stream in Stream::ALL {
+        let batch = slow.next_events(stream, 16, Duration::ZERO).await.unwrap();
+        if streams.contains(&stream) {
+            assert!(
+                matches!(&batch[..], [PlantEvent::Gap(gap), _, _] if gap.stream == stream && gap.skipped == 6),
+                "{stream:?}: {batch:?}"
+            );
+        } else {
+            assert!(batch.is_empty(), "overflow leaked onto {stream:?}");
+        }
+    }
+    host.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_bar_subscriber_hears_about_the_overflow_on_its_bar_channel() {
+    overflow_channels(&[Stream::Ticker, Stream::History]).await;
+}
+
+#[tokio::test]
+async fn a_ticker_only_subscriber_gets_one_gap() {
+    overflow_channels(&[Stream::Ticker]).await;
+}
+
+#[tokio::test]
+async fn account_topics_report_on_their_own_stream() {
+    overflow_channels(&[Stream::Pnl, Stream::Order]).await;
+}

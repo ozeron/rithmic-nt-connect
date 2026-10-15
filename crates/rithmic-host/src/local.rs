@@ -1,13 +1,12 @@
 //! Consumer attachment: gates, intent ownership, rollback and read admission.
 mod context;
+pub(crate) mod delivery;
 pub(crate) mod subscriptions;
 
-use crate::fanout::{Fan, SubKey};
+use crate::fanout::SubKey;
 use crate::host::{HistoryPolicy, HostState};
 use crate::intents::TimeBarIntent;
-use crate::{
-    backend::*, dto::*, Error, PlantSet, Result, SessionHost, SessionId, Stream, StreamHub, Venue,
-};
+use crate::{backend::*, dto::*, Error, PlantSet, Result, SessionHost, SessionId, Stream, Venue};
 use async_trait::async_trait;
 use context::SessionCtx;
 use std::sync::{
@@ -16,7 +15,7 @@ use std::sync::{
 };
 use std::time::Duration;
 use subscriptions::TopicIntent;
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock};
 
 pub(crate) fn gate_error(code: &str, message: &str) -> Error {
     Error::Gateway {
@@ -48,9 +47,7 @@ pub(crate) struct LocalInner<V: Venue + ?Sized + 'static> {
     can_open_gates: bool,
     id: SessionId,
     client: Mutex<SessionCtx>,
-    output: std::sync::Mutex<Option<mpsc::Receiver<Fan>>>,
-    streams: Arc<StreamHub>,
-    delivery: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    streams: Arc<delivery::Delivery>,
     detached: AtomicBool,
     native: AtomicBool,
     order_closed: AtomicBool,
@@ -61,18 +58,17 @@ pub(crate) struct LocalInner<V: Venue + ?Sized + 'static> {
 impl<V: Venue + ?Sized + 'static> LocalSession<V> {
     pub(crate) fn attach(host: Arc<SessionHost<V>>, can_open_gates: bool) -> Self {
         host.attachments.fetch_add(1, Ordering::SeqCst);
-        let (tx, rx) = mpsc::channel(host.state.hub.capacity());
         let id = SessionId::new();
         host.state.hub.native_attached();
+        let streams = delivery::Delivery::new(host.state.hub.capacity());
+        let client = SessionCtx::new(streams.clone());
         let session = Self {
             inner: Arc::new(LocalInner {
                 host,
                 can_open_gates,
                 id,
-                client: Mutex::new(SessionCtx::with_id(tx, id)),
-                output: std::sync::Mutex::new(Some(rx)),
-                streams: StreamHub::new(),
-                delivery: std::sync::Mutex::new(None),
+                client: Mutex::new(client),
+                streams,
                 detached: AtomicBool::new(false),
                 native: AtomicBool::new(true),
                 order_closed: AtomicBool::new(false),
@@ -96,15 +92,7 @@ impl<V: Venue + ?Sized + 'static> LocalSession<V> {
         if self.inner.detached.load(Ordering::SeqCst) {
             return;
         }
-        if self.inner.native.load(Ordering::SeqCst) {
-            self.ensure_native_delivery();
-        }
-        self.inner
-            .client
-            .lock()
-            .await
-            .flush(&self.state().hub)
-            .await;
+        self.inner.client.lock().await.flush().await;
         if self.inner.detached.load(Ordering::SeqCst) {
             return;
         }
@@ -115,10 +103,7 @@ impl<V: Venue + ?Sized + 'static> LocalSession<V> {
         }
     }
     pub(crate) fn close_streams(&self) {
-        self.ensure_native_delivery();
-        for stream in Stream::ALL {
-            self.inner.streams.close(stream);
-        }
+        self.inner.streams.close();
     }
     pub fn id(&self) -> SessionId {
         self.inner.id
@@ -211,61 +196,12 @@ impl<V: Venue + ?Sized + 'static> LocalSession<V> {
     }
     /// Transfer the attachment's shared event records to a transport. Must be
     /// called before native polling. Encoding is a consumer concern.
-    pub fn take_events(&self) -> Option<mpsc::Receiver<Fan>> {
-        let output = self.take_output()?;
+    pub fn take_events(&self) -> Option<delivery::EventReceiver> {
+        let output = self.inner.streams.take_events()?;
         if self.inner.native.swap(false, Ordering::SeqCst) {
             self.state().hub.native_detached();
         }
         Some(output)
-    }
-    fn take_output(&self) -> Option<mpsc::Receiver<Fan>> {
-        self.inner
-            .output
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
-    }
-    fn ensure_native_delivery(&self) {
-        let mut delivery = self
-            .inner
-            .delivery
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if delivery.is_some() {
-            return;
-        }
-        let Some(mut rx) = self.take_output() else {
-            return;
-        };
-        let streams = self.inner.streams.clone();
-        let txs: Vec<_> = Stream::ALL.into_iter().map(|s| streams.attach(s)).collect();
-        *delivery = Some(tokio::spawn(async move {
-            while let Some(fan) = rx.recv().await {
-                if fan.acknowledge_flush() {
-                    continue;
-                }
-                let Some(event) = fan.event() else {
-                    continue;
-                };
-                let stream = match event {
-                    PlantEvent::TimeBar(_) => Stream::History,
-                    PlantEvent::AccountPnl(_) | PlantEvent::InstrumentPnl(_) => Stream::Pnl,
-                    PlantEvent::OrderNotification(_) | PlantEvent::BracketUpdate(_) => {
-                        Stream::Order
-                    }
-                    PlantEvent::Gap(g) => g.stream,
-                    _ => Stream::Ticker,
-                };
-                txs.iter()
-                    .find(|tx| tx.stream() == stream)
-                    .expect("stream sender")
-                    .event(event.clone())
-                    .await;
-            }
-            for tx in txs {
-                tx.close();
-            }
-        }));
     }
     async fn command<T>(&self, call: impl std::future::Future<Output = Result<T>>) -> Result<T> {
         let mut interruption = self.state().interruption.subscribe();
@@ -295,6 +231,7 @@ impl<V: Venue + ?Sized + 'static> Clone for LocalSession<V> {
 }
 impl<V: Venue + ?Sized + 'static> Drop for LocalInner<V> {
     fn drop(&mut self) {
+        self.streams.close();
         self.host
             .state
             .sessions
@@ -304,19 +241,10 @@ impl<V: Venue + ?Sized + 'static> Drop for LocalInner<V> {
         if self.native.swap(false, Ordering::SeqCst) {
             self.host.state.hub.native_detached();
         }
-        if let Some(task) = self
-            .delivery
-            .get_mut()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
-        {
-            task.abort();
-        }
-        let mut client =
-            std::mem::replace(self.client.get_mut(), SessionCtx::new(mpsc::channel(1).0));
-        for task in client.forwarders.values() {
-            task.abort();
-        }
+        let mut client = std::mem::replace(
+            self.client.get_mut(),
+            SessionCtx::new(delivery::Delivery::new(1)),
+        );
         if !self.detached.swap(true, Ordering::SeqCst) {
             let host = self.host.clone();
             if let Some(runtime) = &self.host.runtime {
@@ -344,9 +272,10 @@ impl<V: Venue + ?Sized + 'static> Session for LocalSession<V> {
         let _gate = self.inner.order_gate.write().await;
         self.inner.order_closed.store(true, Ordering::SeqCst);
         let mut client = self.inner.client.lock().await;
-        let mut detached = std::mem::replace(&mut *client, SessionCtx::new(mpsc::channel(1).0));
+        let mut detached =
+            std::mem::replace(&mut *client, SessionCtx::new(delivery::Delivery::new(1)));
         detached.teardown(self.state()).await;
-        // Dropping its sender closes delivery after queued records drain.
+        self.inner.streams.close();
         drop(detached);
         self.inner.host.detached().await;
         Ok(())
@@ -732,19 +661,15 @@ impl<V: Venue + ?Sized + 'static> Session for LocalSession<V> {
         {
             return Err(Error::NotConnected { plant: "ticker" });
         }
-        self.ensure_native_delivery();
         self.inner.streams.poll(Stream::Ticker, timeout).await
     }
     async fn poll_history_event(&self, timeout: Duration) -> Result<Option<PlantEvent>> {
-        self.ensure_native_delivery();
         self.inner.streams.poll(Stream::History, timeout).await
     }
     async fn poll_pnl_event(&self, timeout: Duration) -> Result<Option<PlantEvent>> {
-        self.ensure_native_delivery();
         self.inner.streams.poll(Stream::Pnl, timeout).await
     }
     async fn poll_order_event(&self, timeout: Duration) -> Result<Option<PlantEvent>> {
-        self.ensure_native_delivery();
         self.inner.streams.poll(Stream::Order, timeout).await
     }
     fn session_events(&self) -> tokio::sync::broadcast::Receiver<crate::SessionEvent> {
@@ -756,7 +681,6 @@ impl<V: Venue + ?Sized + 'static> Session for LocalSession<V> {
         max: usize,
         timeout: Duration,
     ) -> Result<Vec<PlantEvent>> {
-        self.ensure_native_delivery();
         self.inner.streams.next_events(stream, max, timeout).await
     }
 }

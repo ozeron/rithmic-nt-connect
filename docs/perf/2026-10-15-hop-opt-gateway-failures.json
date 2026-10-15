@@ -1,0 +1,94 @@
+[
+  {
+    "scenario": "reconnect_during_flood",
+    "params": {
+      "drain_secs": 8.0,
+      "drop_plants_at": 3.0,
+      "name": "reconnect_during_flood",
+      "orders": false,
+      "rate": 10000,
+      "raw": 2,
+      "sample_rss": false,
+      "secs": 8.0,
+      "sessions": 0,
+      "slow_rpc_secs": 0.0,
+      "stalled": 0,
+      "warmup_secs": 0.0,
+      "measurement": {
+        "base_revision": "0eb0b177203d0ab970909805f6df633c57c8a520",
+        "candidate_rust_source_sha256": "ddca2e1a95bd89aea2a63caefb64a580b6f6ec76eb513a53943dbd887c3bbc7e",
+        "binary": {
+          "path": "/private/mnt/DATA/code/rithmic-connect-wt/b-transport/target/hop-opt/base/rithmic-load",
+          "sha256": "808b4ea336a5a47c5b72e8bb599730f28249ed90741ea12de4f65e93ef401909"
+        },
+        "variant": "base",
+        "round": 1,
+        "position": 1,
+        "status": "timed_out",
+        "timeout_s": 120,
+        "note": "Initial runner timed out after the report was written; exact load/time metadata was lost with that interrupted runner. This failed trial is excluded from successful-run medians."
+      }
+    },
+    "duration_s": 16.081490959,
+    "sent": 80000,
+    "conns": [
+      {
+        "kind": "raw",
+        "received": 29994,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 29994,
+          "p50_us": 64,
+          "p99_us": 188,
+          "p999_us": 526,
+          "max_us": 787
+        }
+      },
+      {
+        "kind": "raw",
+        "received": 29994,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 29994,
+          "p50_us": 64,
+          "p99_us": 185,
+          "p999_us": 553,
+          "max_us": 593
+        }
+      }
+    ],
+    "min_delivered_ratio": 0.374925,
+    "min_throughput_eps": 3749.25,
+    "latency": {
+      "count": 59988,
+      "p50_us": 64,
+      "p99_us": 187,
+      "p999_us": 531,
+      "max_us": 787
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 48992,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": null,
+    "alloc_bytes_per_event": null,
+    "notes": [
+      "venue calls after the drop: 0 connect, 0 disconnect, 0 subscribe, 0 unsubscribe"
+    ]
+  }
+]

@@ -168,3 +168,248 @@ unmodified harness output.
   `unknown scenario direct_hop_venue`.
 - No live tests ran. Adapter conventions for emitted Nautilus events are N/A:
   this change only adds a synthetic Rust harness and performance documentation.
+
+## After hop optimization
+
+The original sections above describe the earlier implementation and are retained
+as historical evidence. This section measures the optimized implementation on
+`ush/i-hop-opt`, based on `0eb0b177203d0ab970909805f6df633c57c8a520`.
+
+**The final candidate misses the requested 10% throughput target.** Its median is
+4,385,885 events/s versus 5,882,850 for the venue,
+**25.4% lower** (host/venue = 0.7455). The historical host median
+was 2,200,478 events/s; the new host median is 1.99× that
+rate. Allocations fell from 5.647 to 2.231/event, versus
+2.038 for the matched venue. The historical comparison spans different
+runs/load conditions; the final interleaved venue is the acceptance control.
+The FFI requirement in task 5.5a2 remains unproven and unchecked.
+
+**The gateway no-regression gate is also not established.** Functional delivery
+and ordering checks pass, but the latest series has higher median p99 in the
+10k flood, reconnect and order-flood workloads, and higher order-RPC tails.
+The tables below report those increases rather than treating overlapping ranges
+as proof of equivalence. This is a verified functional candidate with incomplete
+performance acceptance.
+
+### Delivery path and ordering
+
+The native path is now venue `StreamHub` → host pump → attachment queue →
+`LocalSession::next_events`. `SessionCtx` installs weak topic delivery handles
+instead of spawning a forwarder. Publication synchronously appends to the
+matching session/stream queues. There is no topic-broadcast hop, per-session
+mpsc hop, native delivery task, or second `StreamHub` on this path.
+
+For a homogeneous batch with one interested native attachment, the host moves
+the venue's owned batch into that attachment and moves it out at `next_events`;
+its strings are never cloned. Other unicast native records are moved in owned
+batches. Multicast retains the existing shared `Arc<EventRecord>` and memoized
+encoding. Owned conversion happens once at the native consumer boundary
+(`Arc::try_unwrap` moves the last record when possible); the gateway keeps the
+shared/encoded record through wire encoding. Explicit compatibility broadcast
+receivers still work, but their rings are allocated only when requested.
+
+The gateway writer consumes these **same attachment queues** through
+`EventReceiver`, replacing its mpsc receiver. `take_events` still works after
+subscribing and before native polling. RPC kinds, lanes, gates, intent sets,
+refcounts, reconnect restore and wire/event DTO shapes are unchanged.
+
+The guarantees are:
+
+- Each session has an independent bound per stream, set by the host queue
+  capacity. A full queue evicts only that session's oldest records and prefixes
+  the retained records with an exact typed gap. Evicting an existing gap carries
+  its skipped count forward. A stalled session never backpressures its peers.
+  The queue layout/depth changed, so retained prefixes and skip counts can
+  differ from the old multi-queue path; the contract permits depth-dependent
+  counts and still requires delivered + skipped conservation.
+- A stream's pump publishes in venue source order. All topics feeding that
+  stream append directly to one session queue, so their source order is kept.
+  The old topic forwarders only guaranteed FIFO within each topic; cross-topic
+  task scheduling had no source-order guarantee. Different plant streams still
+  have independent source ordering; no venue-wide order is invented.
+- The gateway merges stream heads by attachment enqueue sequence. Native reads
+  honor `max`, including partial batch reads, and preserve gap/record order.
+  Reads are cancellation safe; concurrent readers hand off wakeups when records
+  remain.
+- Before lifecycle notification the host still quiesces every publisher. Native
+  records/gaps are already queued at that point. A gateway barrier is sequenced
+  after preceding records and acknowledged by the writer after their writes;
+  the existing two-second wait for a stalled writer's barrier acknowledgment is
+  retained. Queued records drain before terminal close; recovery keeps streams
+  open and returns empty batches.
+
+No contract semantics were changed. In particular, failure after a taken batch
+stays pending until that batch is published. With native attachments, the pump
+cooperatively coalesces already available records up to its existing 1,024-record
+bound, without a timer or waiting for a full batch. Gateway-only hosts publish
+immediately: their records are encoded individually, so this extra yield/drain
+has no batch-move benefit. Empty zero-timeout `StreamHub` takes now return
+immediately after checking queued records/failure/close instead of waiting for
+a timer tick.
+
+### Failure found during validation
+
+The first development candidate's reconnect-under-flood trial exposed an
+existing `StreamHub::take` deadlock. An `if let` temporary retained the failure
+mutex while a late queued record made the code try to lock that same mutex to
+put the failure back. A process sample showed the pump blocked in
+`StreamHub::take` → `std::sync::Mutex::lock`. The new deterministic
+`a_record_arriving_during_the_failure_check_is_drained_without_relocking_failure`
+test failed with `late drain deadlocked on its own failure mutex` before the fix
+and passes after moving the failure take into a separate statement. The final
+candidate completes recovery; the frozen base still contains that bug.
+
+### Final direct-hop measurements
+
+Five rounds, alternating `venue, host; host, venue; venue, host; host, venue;
+venue, host`, with the original 200,000 measured / 8,192 warmup / 1,024 burst
+parameters. Every trial delivered all 200,000 records in exact sequence, with
+zero gaps, duplicates or unsignalled loss. Percentiles are medians of per-run
+percentiles, not pooled percentiles.
+
+| Path / version | Events/s median | Events/s range | p50 µs | p99 µs | p99.9 µs | Allocs/event | Bytes/event | Peak RSS MiB median |
+| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Historical venue | 5,951,355 | 5,721,635–5,999,265 | 103 | 145 | 151 | 2.038 | 1,479.2 | 8.48 |
+| Historical host | 2,200,478 | 2,154,881–2,268,293 | 203 | 301 | 320 | 5.647 | 3,806.2 | 14.58 |
+| Final venue | 5,882,850 | 5,051,223–5,889,029 | 104 | 148 | 164 | 2.038 | 1,479.3 | 8.28 |
+| Final host | 4,385,885 | 4,066,446–4,741,162 | 111 | 210 | 220 | 2.231 | 2,103.8 | 9.08 |
+
+| Round.position | Path | Events/s | p50 µs | p99 µs | Allocs/event | Bytes/event | Peak RSS MiB |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1.1 | `venue` | 5,769,016 | 105 | 153 | 2.038 | 1,479.3 | 8.28 |
+| 1.2 | `host` | 4,385,885 | 111 | 210 | 2.225 | 2,100.4 | 9.06 |
+| 2.1 | `host` | 4,480,709 | 108 | 209 | 2.231 | 2,103.8 | 9.38 |
+| 2.2 | `venue` | 5,885,043 | 104 | 148 | 2.038 | 1,479.3 | 8.23 |
+| 3.1 | `venue` | 5,882,850 | 104 | 148 | 2.038 | 1,479.3 | 8.28 |
+| 3.2 | `host` | 4,066,446 | 119 | 225 | 2.282 | 2,117.3 | 8.91 |
+| 4.1 | `host` | 4,741,162 | 101 | 198 | 2.144 | 2,251.2 | 9.73 |
+| 4.2 | `venue` | 5,051,223 | 121 | 175 | 2.038 | 1,479.3 | 8.75 |
+| 5.1 | `venue` | 5,889,029 | 104 | 148 | 2.038 | 1,479.3 | 8.36 |
+| 5.2 | `host` | 4,282,201 | 114 | 213 | 2.241 | 2,094.2 | 9.08 |
+
+The remaining host overhead includes its required pump/task handoff, routing and
+queue synchronization, extra dynamic `Venue::next_events` calls during burst
+drains, and batch growth when coalescing takes. The process-global allocator
+counter also contends across the producer and pump, while the venue case
+produces and consumes in one task. These are source-level explanations for
+remaining work, not measured CPU percentages or proof that the 10% target is
+impossible. This implementation removes the diagnosed extra hops/clones but
+still fails that performance gate.
+
+### Gateway comparisons against the frozen base
+
+Three valid interleaved rounds per scenario: base/candidate in rounds 1 and 3,
+candidate/base in round 2. Preset rates, durations, connections, slow RPC and
+plant-drop timing were unchanged. These workloads are paced, so delivered
+rates are not saturation-throughput measurements. Raw records, including order
+RPC percentiles, gaps, resumes and load averages, are in
+[the gateway JSON](2026-10-15-hop-opt-gateway.json).
+
+Bracketed values are min–max across the three trials; medians precede brackets.
+
+| Scenario | Version | Delivered events/s | p50 µs | p99 µs [range] | p99.9 µs | Peak RSS MiB [range] |
+| --- | --- | ---: | ---: | --- | ---: | --- |
+| `stalled_consumer` | base | 20,000 | 109 | 347 [336–7,023] | 1,358 | 26.34 [25.33–27.11] |
+| `stalled_consumer` | candidate | 20,000 | 108 | 337 [337–1,261] | 782 | 22.42 [22.25–22.69] |
+| `flood_10k_4conn_1session` | base | 10,000 | 95 | 276 [251–493] | 687 | 15.42 [15.25–15.44] |
+| `flood_10k_4conn_1session` | candidate | 10,000 | 86 | 291 [260–1,532] | 1,600 | 10.98 [10.88–10.98] |
+| `reconnect_during_flood` | base | 9,998 | 65 | 188 [185–202] | 480 | 13.84 [13.64–13.97] |
+| `reconnect_during_flood` | candidate | 9,998 | 60 | 222 [192–412] | 3,715 | 9.73 [9.67–9.75] |
+| `orders_flood_slow_rpc` | base | 50,000 | 290 | 991 [965–1,351] | 47,519 | 15.17 [14.80–15.48] |
+| `orders_flood_slow_rpc` | candidate | 50,000 | 288 | 1,415 [970–1,869] | 6,699 | 11.23 [10.78–11.53] |
+
+| Order RPC phase (`orders_flood_slow_rpc`) | Base p99 µs [range] | Candidate p99 µs [range] |
+| --- | --- | --- |
+| Idle | 175 [153–178] | 206 [176–276] |
+| Flood + slow RPC | 775 [732–851] | 846 [819–885] |
+
+Relative to base, candidate median event p99 changed by −2.9% for stalled
+consumers, +5.4% for the 10k flood (+15 µs), +18.1% for reconnect (+34 µs),
+and +42.8% for order flood (+424 µs). Idle order-RPC p99 increased 17.7%
+(+31 µs); loaded order-RPC p99 increased 9.2% (+71 µs). Candidate median RSS
+fell in every scenario, and healthy consumers delivered the complete offered
+rate in every non-recovery trial. Recovery gaps remained explicit and accounted
+for missing records. Higher p99.9 for the 10k/reconnect cases is visible above;
+it is not hidden by the improved p50 or memory figures.
+
+All 24 valid trials have zero unsignalled loss and zero reordered records.
+The frozen base timed out 1 time(s) during reconnect; those failed trials
+are retained separately in [the failure JSON](2026-10-15-hop-opt-gateway-failures.json)
+and excluded from successful-run medians. Baseline reconnect retries were bounded
+at four per resumed round. This conditions the comparison on successful base
+runs; it does not hide the base's recovery failure. A development candidate trial
+was also aborted before the mutex fix and is not part of the final measurements.
+Additional trial attempts were discarded when the process monitor observed
+Maturin/cargo/rustc/clang/Swift builders; they are not included in the valid data.
+The series waited between attempts for those interruptions, with the assigned
+round order preserved on resume.
+
+### Repeated measurements and noise limits
+
+The final source and binary were measured twice. Before the user coordinated a
+five-minute build pause, a complete five-round direct series and three-round
+gateway series finished across multiple quiet windows. Those accepted trials
+also had no observed builders; interrupted attempts were discarded. Their raw
+results are retained in [the earlier direct JSON](2026-10-15-direct-hop-after-busy.json)
+and [the earlier gateway JSON](2026-10-15-hop-opt-gateway-busy.json).
+
+The tables above use a fresh series started immediately after that coordination.
+Its direct trials completed without interruption at a one-minute load of 3.969.
+Builders were observed again before the final three gateway trials, so those
+trials waited for quiet windows too. Accepted samples all have empty
+before/during/after builder lists. The gateway series ran from
+`2026-10-15T15:44:01.458453+00:00` to `2026-10-15T15:48:57.183451+00:00`.
+The metadata's `coordinated-build-pause` label identifies this requested series;
+it does not assert that every attempt ran during the pause.
+
+The earlier direct series measured 4,324,106 host versus 5,524,410 venue events/s
+(21.7% lower), also failing the 10% bar. The earlier gateway series had lower
+candidate median p99 for stalled, reconnect and order-flood workloads, but 9.7%
+higher p99 for the 10k flood. Idle order-RPC p99 was 179 versus 149 µs there,
+also higher for the candidate. Direction and size varied across series, with
+large tail outliers despite the process checks. These data do not establish
+the requested absence of regressions. A stable workload profile and further
+optimization are still needed; overlapping ranges alone do not close that gate.
+
+### Provenance and verification
+
+- Same worktree and machine as the original report; release optimization.
+  Frozen base binary SHA-256: `808b4ea336a5a47c5b72e8bb599730f28249ed90741ea12de4f65e93ef401909`.
+  Final candidate binary SHA-256: `2be72469aa5c19bb4b3b445a8ba474af85acb0838a4cceb42d1a9336670005a2`.
+  Candidate Rust-source SHA-256: `d65c25ec71fa3dd64a990051a4cc7e13e1cfa7c61c56658317eefdf1c71e8455` (sorted changed `.rs` paths and
+  their bytes, including `local/delivery.rs`). The commit introducing this section
+  contains that source; no binaries or one-off probe scripts are committed.
+- Final direct trial UTC starts: `2026-10-15T15:43:59.792772+00:00`
+  through `2026-10-15T15:44:01.282872+00:00`.
+  Direct-trial 1/5/15-minute load ranges: 3.969–3.969 / 5.721–5.721 / 6.645–6.645.
+  All valid-trial 1/5/15-minute load ranges: 3.616–16.648 / 5.424–8.203 / 6.352–7.276.
+  Every sample has before/after process checks and a 0.2-second build-process
+  monitor; no listed builder was observed in any accepted sample. This shared
+  Mac still had scheduling noise; no isolated-core or quiet-host claim is made.
+- Full precision, timestamps, hashes, order and load averages are retained in
+  [the final direct JSON](2026-10-15-direct-hop-after.json) and the gateway JSON.
+  Metric fields are the harness output; added provenance lives under
+  `params.measurement`. The initial timed-out base trial lost exact load/time
+  metadata when its runner stopped; its failure record says so.
+- `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`
+  and the requested six-package Rust test command with gateway/host/extension
+  testing features passed: **503 tests**. The unchanged client scenario suite
+  (Local/Remote conservation included), host recovery ordering, and all four
+  ticker-failure characterizations passed.
+- `uv sync --extra dev` passed; the final extension was additionally rebuilt with
+  `--reinstall-package rithmic-nt-connect` so Python tested this Rust source.
+  `uv run pytest -q`: **832 passed, 101 skipped**, with two EOF-on-shutdown thread
+  warnings in existing Python fake-server tests. `uv run ruff check .`,
+  `uv run ruff format --check .` and the requested `uv run ty check` passed.
+- Added coverage proves exact stalled-LocalSession gap conservation with a
+  lossless peer; multi-topic lifecycle enqueue barriers; partial-batch/overflow
+  order; concurrent-reader wakeups; true zero-timeout drains; and the late-record
+  failure-mutex race. The removed forwarder's ticker/bar/account gap helper tests
+  were replaced by actual attachment-overflow tests on those consumer channels.
+  The two primary isolation/barrier tests passed on the frozen source before the
+  implementation changed, establishing their meaning independently of the new
+  queue layout.
+- No live tests ran. Data conversion, timestamps, instrument identity, execution
+  classification, command retry policy, config and credentials are untouched.
+  The applicable stream isolation, typed-gap, ordered failure and recovery rows
+  are exercised by the tests above. No advertised capability or STATUS mark changed.
