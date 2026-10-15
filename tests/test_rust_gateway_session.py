@@ -272,6 +272,8 @@ def test_recovery_exhaustion_delivers_failure_and_registry_replaces_the_host(
         old.connect()
     subscription.cancel()
     old.disconnect()
+    with pytest.raises(RuntimeError, match=r"detached|new host"):
+        old.connect()
     replacement.disconnect()
 
 

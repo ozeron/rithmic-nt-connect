@@ -316,3 +316,50 @@ def test_the_extension_flock_is_the_one_the_python_lake_client_probes() -> None:
             _lib.SessionLock.try_acquire(user, "Fake", "wss://fake", "Test")
     finally:
         held.close()
+
+
+@pytest.mark.parametrize("keep_peer", [False, True])
+def test_direct_facade_reconnects_with_a_fresh_attachment(
+    tmp_path: Path, keep_peer: bool
+) -> None:
+    session = _fake(tmp_path)
+    peer = _fake(tmp_path) if keep_peer else None
+    session.request_plants("execution")
+    session.open_gates(True, True)
+    session.connect()
+    old_script = session.script
+    path = next(tmp_path.glob("*.lock"))
+    try:
+        session.disconnect()
+        assert _count(old_script, "disconnect") == (0 if keep_peer else 1)
+        session.connect()
+        script = session.script
+        assert _count(script, "connect") == 1
+        assert session.trading_enabled and session.cancel_all_enabled
+        assert any("request_plants" in c and "pnl: true" in c for c in script.calls())
+        session.subscribe("NQU6", "CME")
+        script.emit(
+            "ticker",
+            {
+                "type": "last_trade",
+                "symbol": "NQU6",
+                "exchange": "CME",
+                "trade_price": 21000.0,
+            },
+        )
+        assert session.next_events("ticker", timeout_ms=1000)[0][
+            "trade_price"
+        ] == pytest.approx(21000.0)
+        with path.open("r+") as lock:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if peer is not None:
+                peer.disconnect()
+            session.disconnect()
+            assert _count(script, "disconnect") == 1
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(lock, fcntl.LOCK_UN)
+    finally:
+        if peer is not None:
+            peer.disconnect()
+        session.disconnect()

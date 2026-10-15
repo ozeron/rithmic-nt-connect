@@ -165,6 +165,7 @@ So the `is_direct` check goes away, and a gateway client still can't elevate a g
 
 - **`get_or_start(config, make_venue, lock_dir)`:** takes the flock and starts the host on a miss; returns the existing host on a hit.
 - **Plant requests:** extra plants (execution) are a host call (`request_plants`). A direct constructor records its requested set on the host, including registry hits; the next `connect` applies their union even when the host is already connected. Construction performs no plant I/O.
+- **Explicit direct reconnect:** the PyO3 facade releases its old attachment on `disconnect`. A later `connect` obtains a fresh registry attachment and reapplies this facade's requested plants and gates it opened. It shares a still-held host or starts a new incarnation after the last holder left. Recovery failure remains terminal for an old facade, including after explicit disconnect.
 - **Shutdown:** when the last attached session detaches, the host disconnects the venue (in the background on `Drop`, inline on `disconnect`) and drops the flock. A pump task or the registry's `Weak` keeps nothing alive.
 - **The gateway binary** uses the same registry with a single host. Its process singleton (`singleton.rs`) still guards the socket path.
 

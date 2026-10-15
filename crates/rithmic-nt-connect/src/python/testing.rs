@@ -225,7 +225,7 @@ pub(super) fn new(
     let lock_dir = lock_dir
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::env::temp_dir().join("rithmic-fake-hosts"));
-    py.detach(|| {
+    direct::new(py, PlantSet::MARKET_DATA, move || {
         runtime().block_on(async {
             let account = match (&key.account_id, &key.fcm_id, &key.ib_id) {
                 (Some(account_id), Some(fcm_id), Some(ib_id)) => {
@@ -269,9 +269,15 @@ pub(super) fn new(
                     .checkout()
                     .await;
                 if let Ok(session) = host.attach_owned() {
-                    break Ok(PySession {
+                    let failed_host = host.clone();
+                    break Ok(direct::Attachment {
                         session: Arc::new(session),
-                        gateway: None,
+                        failed: Box::new(move || {
+                            failed_host
+                                .state
+                                .failed
+                                .load(std::sync::atomic::Ordering::SeqCst)
+                        }),
                         script: Some(script),
                         fault_venue: None,
                     });

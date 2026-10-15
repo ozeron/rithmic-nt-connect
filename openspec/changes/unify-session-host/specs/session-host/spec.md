@@ -18,6 +18,12 @@ The system SHALL run every Rithmic login through a `SessionHost`. A process SHAL
 ### Requirement: Sessions are independent attachments
 Each attached session SHALL have its own event queues and its own set of intents on the host. A repeated subscribe from the same session SHALL be idempotent, and SHALL re-join the intent if it is degraded. `connect` on a session SHALL ensure the host is connected: it SHALL succeed when the host is already up, and concurrent callers SHALL cause at most one plant connect. `disconnect_order_plant` SHALL release only this session's order and bracket intents. This session's order commands SHALL then fail as not-sent until it ensures or subscribes again, while other sessions keep trading. Detaching a session, by `disconnect` or by dropping it, SHALL release only that session's intents and queues. The host SHALL leave the venue for an intent only when no attached session still holds it. Dropping a session SHALL NOT block on venue I/O. When the last session detaches, the host SHALL disconnect the venue and release the flock.
 
+#### Scenario: Direct facade reconnects after explicit disconnect
+- **WHEN** a direct Python facade disconnects and later connects again
+- **THEN** it SHALL obtain a fresh attachment, reapply its requested plants and gates it opened, and receive events from new subscriptions
+- **AND** the released attachment SHALL remain released, a sibling's live login SHALL be shared, and the last holder's departure SHALL release the flock
+- **AND** a facade whose host exhausted recovery SHALL remain terminal even after explicit disconnect
+
 #### Scenario: Two sessions share a symbol
 - **WHEN** sessions A and B subscribe ES on one host and A unsubscribes
 - **THEN** B SHALL keep receiving ES events and the venue SHALL see no unsubscribe

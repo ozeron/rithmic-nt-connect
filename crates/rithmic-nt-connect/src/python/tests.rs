@@ -32,7 +32,7 @@ fn direct_constructor_honors_execution_plants_without_constructor_io() {
         };
         let data = existing_host.then(|| construct("market_data"));
         if let Some(data) = &data {
-            runtime().block_on(data.session.connect()).unwrap();
+            Python::attach(|py| data.connect(py)).unwrap();
         }
         let execution = construct("execution");
         assert_eq!(
@@ -40,16 +40,23 @@ fn direct_constructor_honors_execution_plants_without_constructor_io() {
             0,
             "constructor did plant I/O"
         );
-        runtime().block_on(execution.session.connect()).unwrap();
+        Python::attach(|py| execution.connect(py)).unwrap();
         assert_eq!(server.connections(Plant::Pnl), 1, "execution omitted PnL");
         assert_eq!(
             server.connections(Plant::Ticker),
             1,
             "registry shared login"
         );
-        runtime().block_on(execution.session.disconnect()).unwrap();
+        Python::attach(|py| execution.disconnect(py)).unwrap();
+        Python::attach(|py| execution.connect(py)).unwrap();
+        assert_eq!(
+            server.connections(Plant::Pnl),
+            1,
+            "reconnect reapplies constructor plants"
+        );
+        Python::attach(|py| execution.disconnect(py)).unwrap();
         if let Some(data) = data {
-            runtime().block_on(data.session.disconnect()).unwrap();
+            Python::attach(|py| data.disconnect(py)).unwrap();
         }
     }
 }
