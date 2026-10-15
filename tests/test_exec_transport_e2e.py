@@ -73,6 +73,7 @@ from rithmic_nt_connect.session import (
     _FlockedDirectSession,
     _RustGatewaySession,
 )
+from rithmic_nt_connect.transport import Interrupted
 
 
 def _client() -> _TestClient:
@@ -2510,6 +2511,87 @@ def test_a_pnl_resync_resets_the_snapshot_barrier() -> None:
     client._pnl_snapshot_observed.set()
     asyncio.run(client._resync_pnl_subscription())
     assert not client._pnl_snapshot_observed.is_set()
+
+
+def test_inflight_pnl_before_interruption_cannot_rearm_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+
+    async def run() -> None:
+        loop = asyncio.get_running_loop()
+        started: asyncio.Queue[int] = asyncio.Queue()
+        release = [threading.Event() for _ in range(3)]
+
+        class _InflightPnl(_ConnectSession):
+            polls = 0
+
+            def next_events(
+                self, stream: str, max_events: int = 256, timeout_ms: int = 100
+            ) -> list[dict[str, Any]]:
+                assert stream == "pnl"
+                index = self.polls
+                self.polls += 1
+                loop.call_soon_threadsafe(started.put_nowait, index)
+                if not release[index].wait(5):
+                    raise TimeoutError("test did not release PnL batch")
+                return [
+                    {"type": "account_pnl", "account_id": "ACC1", "cash_on_hand": "100"}
+                ]
+
+        session = _InflightPnl(fail_load_orders=False)
+        client = _connect_client(session, monkeypatch, stub_snapshot_wait=False)
+        monkeypatch.setattr(client, "generate_account_state", lambda **kwargs: None)
+        client._pnl_connected = True
+        client._poll_task = client._make_poll_task("pnl")
+        # Keep a real, live task for the order re-arm without a second wire poller.
+        client._order_poll_task = asyncio.create_task(asyncio.Event().wait())
+        drained = asyncio.Event()
+
+        def note_drain() -> None:
+            loop.call_soon_threadsafe(drained.set)
+
+        session.on_load_orders = note_drain
+        restore: asyncio.Task[None] | None = None
+        try:
+            assert await asyncio.wait_for(started.get(), 2) == 0
+            client._on_transport_down(Interrupted(generation=1))
+            restore = asyncio.create_task(
+                client._restore_plants_after_transport_up(2, 1)
+            )
+            await asyncio.wait_for(drained.wait(), 2)
+            # This call started before Interrupted, but completes after recovery
+            # cleared the barrier and re-subscribed. It cannot prove freshness.
+            release[0].set()
+            assert await asyncio.wait_for(started.get(), 2) == 1
+            assert not client._pnl_snapshot_observed.is_set(), (
+                "pre-interruption PnL satisfied fresh barrier"
+            )
+            assert client._pnl_live_since_ns is None
+            assert not client._order_plant.allow_submit()
+            assert not restore.done()
+
+            release[1].set()
+            assert await asyncio.wait_for(started.get(), 2) == 2
+            await asyncio.wait_for(restore, 2)
+            assert client._pnl_snapshot_observed.is_set()
+            assert client._order_plant.allow_submit()
+        finally:
+            for gate in release:
+                gate.set()
+            for task in (restore, client._poll_task, client._order_poll_task):
+                if task is not None:
+                    task.cancel()
+            await asyncio.gather(
+                *(
+                    task
+                    for task in (restore, client._poll_task, client._order_poll_task)
+                    if task is not None
+                ),
+                return_exceptions=True,
+            )
+
+    asyncio.run(run())
 
 
 def test_a_failed_connect_leaves_no_poller_or_listener(

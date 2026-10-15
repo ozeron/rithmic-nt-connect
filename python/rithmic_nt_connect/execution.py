@@ -288,6 +288,8 @@ class RithmicExecutionClient(LiveExecutionClient):
     # Cached off-loop answer of ``session.resolved_account`` (set in __init__ too).
     _resolved_account_raw: str | None = None
     _ORDER_POLL_MAX_TRANSIENT = 5
+    # A poll begun on an older PnL stream cannot establish fresh exposure.
+    _pnl_epoch: int = 0
 
     def _fill_key_seen(self, key: str) -> bool:
         return self._seen_fill_keys.has_seen(key)
@@ -619,6 +621,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         # An observation from before the gap is no proof the stream is alive
         # now: the PnL gate waits for a fresh one (the venue pushes account PnL
         # on a short interval even when nothing changed).
+        self._pnl_epoch += 1
         self._pnl_snapshot_observed.clear()
         await self._rearm_after_reconnect()
         if not self._order_plant.rearm(poll_alive=True):
@@ -631,6 +634,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         # Exposure reads Unknown until a fresh observation has settled (a failed
         # resubscribe keeps it Unknown). ``_positions`` stays for position reports.
         self._pnl_live_since_ns = None
+        self._pnl_epoch += 1
         self._pnl_snapshot_observed.clear()  # the next re-arm waits for the new stream
         self._unreadable_position_symbols.discard(_ANY_SYMBOL)  # a fresh stream
         await asyncio.to_thread(self._session.disconnect_pnl_plant)
@@ -742,18 +746,33 @@ class RithmicExecutionClient(LiveExecutionClient):
         stream: str | None = None,
         on_gap: Callable[[], Any] | None = None,
     ) -> None:
+        poll_epoch = self._pnl_epoch
+
+        def poll_with_epoch() -> dict[str, Any] | None:
+            nonlocal poll_epoch
+            poll_epoch = self._pnl_epoch
+            return poll_fn()
+
+        def dispatch_current(event: dict[str, Any]) -> None:
+            # The blocking call may complete after recovery invalidated its
+            # stream. Ignore the whole old batch, including its exposure rows.
+            if name != "pnl" or poll_epoch == self._pnl_epoch:
+                on_event(event)
+
         batch_fn = None
         if stream is not None:
             session = self._session
 
             def batch_fn() -> list[dict[str, Any]]:
+                nonlocal poll_epoch
+                poll_epoch = self._pnl_epoch
                 return session.next_events(stream, _POLL_BATCH, _POLL_WAIT_MS)
 
         poller = PlantPoller(
             name=name,
-            poll_fn=poll_fn,
+            poll_fn=poll_with_epoch,
             batch_fn=batch_fn,
-            on_event=on_event,
+            on_event=dispatch_current,
             on_resync=on_resync,
             on_gap=on_gap,
             max_transient=self._ORDER_POLL_MAX_TRANSIENT,
@@ -900,6 +919,7 @@ class RithmicExecutionClient(LiveExecutionClient):
 
     def _forget_pnl_state(self) -> None:
         """(Re)connect: the previous stream's rows are not proof of current exposure."""
+        self._pnl_epoch += 1
         self._pnl_snapshot_observed.clear()
         self._pnl_live_since_ns = None
         self._positions.clear()
