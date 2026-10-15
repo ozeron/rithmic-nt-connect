@@ -97,3 +97,36 @@ fn proto_schema_has_auth_token_not_password_field() {
 // Direct/gateway RPC parity (bracket RPCs, ticker reset, every request variant)
 // is checked structurally by `tests/rpc_table.rs` against `rpc_table::RPC_TABLE`,
 // the `Session` trait, `RestorePlan`, and the gates; string greps are retired.
+
+#[test]
+fn handshake_and_enclosing_frame_debug_redact_auth_token() {
+    let hs = Handshake {
+        user: "offline-user".into(),
+        auth_token: "handshake-secret-294".into(),
+        ..Default::default()
+    };
+    assert!(!format!("{hs:?}").contains("handshake-secret-294"));
+    let frame = Frame {
+        request_id: 1,
+        body: Some(Body::Handshake(hs)),
+    };
+    assert!(!format!("{frame:#?}").contains("handshake-secret-294"));
+    let decoded = Frame::decode(frame.encode_to_vec().as_slice()).unwrap();
+    match decoded.body.unwrap() {
+        Body::Handshake(hs) => assert_eq!(hs.auth_token, "handshake-secret-294"),
+        _ => panic!("expected handshake"),
+    }
+}
+
+#[test]
+fn binary_does_not_echo_unknown_arguments() {
+    // This exits before reading any environment or connecting to plants.
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rithmic-gateway"))
+        .env_clear()
+        .arg("--password=argv-secret-395")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("argv-secret-395"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("argv-secret-395"));
+}

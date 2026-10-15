@@ -129,7 +129,7 @@ impl SessionConfig {
 }
 
 /// Builder for [`SessionConfig`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SessionConfigBuilder {
     user: Option<String>,
     password: Option<String>,
@@ -142,6 +142,18 @@ pub struct SessionConfigBuilder {
     account_id: Option<String>,
     fcm_id: Option<String>,
     ib_id: Option<String>,
+}
+
+impl std::fmt::Debug for SessionConfigBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionConfigBuilder")
+            .field("user", &self.user)
+            .field("password", &self.password.as_ref().map(|_| "***"))
+            .field("system_name", &self.system_name)
+            .field("url", &self.url)
+            .field("env", &self.env)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for SessionConfigBuilder {
@@ -270,6 +282,16 @@ fn require_field(name: &str, value: Option<String>) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builder_debug_redacts_password() {
+        let builder = SessionConfig::builder()
+            .user("alice")
+            .password("builder-secret-193");
+        assert!(!format!("{builder:?}").contains("builder-secret-193"));
+        assert!(!format!("{builder:#?}").contains("builder-secret-193"));
+        assert!(format!("{builder:?}").contains("alice"));
+    }
 
     #[test]
     fn rejects_empty_user() {

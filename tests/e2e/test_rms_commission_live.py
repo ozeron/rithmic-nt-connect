@@ -119,7 +119,7 @@ def test_gateway_rms_round_trip(
         or (test_env or {}).get("RITHMIC_ENABLE_TRADING")
     )
     parent_extra_env = parent_trading_env(test_env)
-    password = str((test_env or {}).get("RITHMIC_PASSWORD") or "")
+    password = (test_env or {}).get("RITHMIC_PASSWORD") or ""
     if not password:
         pytest.skip("test env has no RITHMIC_PASSWORD for the gateway parent")
 
