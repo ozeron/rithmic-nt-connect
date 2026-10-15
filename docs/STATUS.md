@@ -30,13 +30,13 @@ Legend: **Done** `[x]` · **Partial** `[~]` · **Not started** `[ ]` · `N/A` ou
 | Area | Total | Done | Partial | Not started | N/A |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | **Capability matrix** | 22 | 4 | 12 | 0 | 6 |
-| **Phase marks (0–9)** | 29 | 14 | 9 | 2 | 4 |
+| **Phase marks (0–9)** | 29 | 15 | 8 | 2 | 4 |
 | **Convention marks** | 18 | 14 | 4 | 0 | 0 |
 | **Close-outs (advertised path)** | 10 | 5 | 3 | 0 | 2 |
 | **Paper path (intraday)** | 8 | 8 | 0 | 0 | 0 |
-| **TOTAL** | 87 | 45 | 28 | 2 | 12 |
+| **TOTAL** | 87 | 46 | 27 | 2 | 12 |
 
-**Implemented:** 79% (`45` done + `28` partial of `75` in-scope marked items (`12` N/A excluded); partial counts as half).
+**Implemented:** 79% (`46` done + `27` partial of `75` in-scope marked items (`12` N/A excluded); partial counts as half).
 
 Not started (real leftover work): Phase 2 definition updates, Phase 7 recovery suite.
 
@@ -98,7 +98,7 @@ Not started (real leftover work): Phase 2 definition updates, Phase 7 recovery s
 - **Attach-only clients** (`simplify-gateway-modes`). One shared socket per process; the client never spawns the parent and has no `dual` topology. With no parent it fails `parent_not_running` (names the listen path + `python -m rithmic_gateway`), and it waits a bounded `attach_timeout_sec` for a parent whose flock is held. Gateway-mode clients are credential-free: `SessionConfig.password` is optional and discarded in gateway mode, only the parent holds `RITHMIC_PASSWORD`; direct mode still requires it. Retired knobs fail fast (`CLIENT_MODE`, `SPAWN_POLICY`, `AUTO_SPAWN` → `ConfigError` for any set value; the former `mux` / `never` / `AUTO_SPAWN=0` no-ops were removed by `retire-python-mux-and-noop-knobs`). Smokes/e2e start their parent through the harness helper `scripts/_gateway_parent.py`. Evidence: the shared-consumer smoke was green on Lucid before attach-only; after it, attach to a harness-started parent is verified on Rithmic Test 2026-10-13 (tick delivery unverified: that Test account has no reference data). Native TLS remote **N/A**.
 - **Unified Rust session** (`rust-unified-session`). Direct and gateway are both implementations of the Rust `Session` trait; the gateway server is generic over it and shares a table-checked RPC surface (`rpc_table.rs`). The Rust `GatewaySession` is the only adapter gateway client (the Python `gateway_wire` facade and the `RITHMIC_GATEWAY_CLIENT` selector are gone): bounded per-session queues (overflow → a typed `gap` event; the single-event `poll_*` still reads it as `ChannelLagged`), single-flight automatic re-dial with adapter-visible `TransportDown/Up/RecoveryFailed`, post-send command loss → `OutcomeUnknown` (never retried), chunked `load_time_bars`. The adapter imports neither `rithmic_gateway` nor protobuf (`tests/test_import_isolation.py`). One scenario suite passes against the Python plain client and the Rust client; the Python mux stack (`GatewayMux`, `GatewayRuntime`, `transport_recovery`) was retired by `retire-python-mux-and-noop-knobs` and `load_time_bars_range` is sequential-only. The Rust client is the default on offline + partial live evidence (attach, handshake, typed gate/Rithmic errors, recovery from a real parent restart on Rithmic Test); tick delivery and the reconnect smoke through the Rust client are NOT live-verified (Test account has no reference data) — run `scripts/smoke_gateway_shared_ticks.py` and `tests/e2e/test_reconnect_live.py` on a market-data account when one is available.
 - **Execution rules in Rust** (`rust-exec-core`). The Nautilus-independent exec rules live once in `crates/rithmic-exec`: order-plant lifecycle policy (exhaustive state x event table), exposure/commission lookup, the notification-kind mapping (also used by `rithmic-plants`), fill identity and dedup keys, the instrument-id codec, the bounded recency cache, drain-row trust / freshest-row / stale-row decisions, and inventory rules. Python keeps Nautilus translation, Python-object coercion and effects. Every ported rule is compared against its original Python implementation in `tests/test_exec_rules_parity.py`; the existing exec suites run unchanged against the bindings.
-- **Wheels and lake.** Prebuilt wheels, Nautilus-style (`.github/workflows/wheels.yml`, 2026-10-14): every push to `main` builds `rithmic-gateway` (maturin bin wheel: parent binary in the venv's `bin/` + the pure-Python client, `protobuf` only) and `rithmic-nt-connect` (cp312–cp314, `[gateway]` extra) for Linux x86_64/ARM64 and macOS ARM64, installs them with `--no-build` and runs the python-client scenarios against the fake parent, attests provenance, and publishes to the rolling `main-dev` prerelease plus a GitHub Pages PEP 503 index (README "Install"). No PyPI, no Windows. The first CI publish is not yet run. market-data-lake hardcodes `GatewayClient` + `load_time_bars_range` (client-side chunks) and installs the `rithmic-gateway` wheel (no Nautilus).
+- **Wheels and lake.** Prebuilt wheels, Nautilus-style (`.github/workflows/wheels.yml`, 2026-10-14): every push to `main` builds `rithmic-gateway` (maturin bin wheel: parent binary in the venv's `bin/` + the pure-Python client, `protobuf` only) and `rithmic-nt-connect` (cp312–cp314, `[gateway]` extra) for Linux x86_64/ARM64 and macOS ARM64, installs them with `--no-build` and runs the python-client scenarios against the fake parent, attests provenance, and publishes to the rolling `main-dev` prerelease plus a GitHub Pages PEP 503 index at `https://alexlapchenko.com/rithmic-nt-connect/simple/` (README "Install"; the `ozeron.github.io` URL redirects there over plain http). No PyPI, no Windows. First publish 2026-10-15 (`0.1.0.dev2026101500005`); a clean `uv` install from the index and the lake's `uv lock` against it are verified. market-data-lake hardcodes `GatewayClient` + `load_time_bars_range` (client-side chunks) and installs the `rithmic-gateway` wheel (no Nautilus).
 
 ### Test plan
 
@@ -172,7 +172,7 @@ Not started (real leftover work): Phase 2 definition updates, Phase 7 recovery s
 ### Phase 9: Docs / ops
 
 - [x] Matrix in this file; testers default dry-run
-- [~] Prebuilt wheels from CI (`wheels.yml`): gateway bin wheel + adapter wheel, Pages index; local build + no-build install smoke verified, first CI publish pending
+- [x] Prebuilt wheels from CI (`wheels.yml`): gateway bin wheel + adapter wheel, Pages index; first publish 2026-10-15 (run 38671128261, `0.1.0.dev2026101500005`), `uv` install from `https://alexlapchenko.com/rithmic-nt-connect/simple/` verified
 - [~] Recovery / troubleshooting still thin ([`references/ops-runbook.md`](references/ops-runbook.md))
 
 ---

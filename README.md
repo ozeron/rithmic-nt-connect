@@ -34,7 +34,7 @@ Prebuilt wheels, the way NautilusTrader ships: CI builds them on every push to `
 # pyproject.toml of the consuming project
 [[tool.uv.index]]
 name = "rithmic"
-url = "https://ozeron.github.io/rithmic-nt-connect/simple/"
+url = "https://alexlapchenko.com/rithmic-nt-connect/simple/"
 explicit = true
 
 [tool.uv.sources]

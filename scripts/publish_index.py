@@ -6,7 +6,9 @@ asset on the repo's GitHub releases, optionally deletes dev builds beyond the
 newest ``--keep`` per project from the rolling ``main-dev`` release, and writes
 ``<out>/simple/index.html`` plus one page per project. Links point at the
 release download URLs with a ``#sha256=`` fragment (from the asset's
-``digest``; downloaded and hashed when GitHub has none).
+``digest``; downloaded and hashed when GitHub has none). Served at
+``https://alexlapchenko.com/rithmic-nt-connect/simple/`` (the account's Pages
+custom domain; ``ozeron.github.io`` redirects there over plain http).
 
     GH_TOKEN=... python scripts/publish_index.py --repo owner/name --out site \
         --keep 30 --prune
