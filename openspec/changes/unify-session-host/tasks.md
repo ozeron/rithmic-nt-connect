@@ -70,14 +70,14 @@ Agents run in the shared checkout on branch `feat/unify-session-host`. Each agen
 
 ## 5. Direct mode on the host; gates; fake session for Python
 
-- [ ] 5.1 Add `HostRegistry`. (From A2: a host whose recovery is exhausted is terminal, so the registry must replace a terminal host on the next `get_or_start` rather than return it.) In the **same PR**, delete `_SESSION_CACHE`, the Python `SessionLock` acquire and the holder count in `session.py`, so the flock is taken once (D8.3); the forwarding wrapper may remain until `collapse-session-surface`. The registry maps fingerprint → `Weak<SessionHost>`, with flock-before-login, a `lock_dir` parameter, last-detach shutdown, and non-blocking drop. The gateway binary uses it for its single host.
-- [ ] 5.2 `_lib.Session` holds `Arc<dyn Session>`: direct → `HostRegistry::get_or_start(..RithmicVenue..).attach()`, gateway → `RemoteSession`. `request_plants` stays a separate call.
-- [ ] 5.3 Add `Session.open_gates(trading, cancel_all) -> Gates` (design D4) and remove `configure_gates` and `is_direct` from the extension and `_lib.pyi`.
-- [ ] 5.4 (from B2) Switch the PyO3 binding to `session_events()`, so exec disarms at interruption time rather than after the restore, then remove the legacy synthetic Down/Up the Rust client still emits for `subscribe_transport`. Deliver `SessionEvent` to Python listeners in both modes on the existing dedicated delivery thread. Add `Interrupted` / `Resumed` / `RecoveryFailed` pyclasses, with `transport.py` re-exporting the old names for one release.
-- [ ] 5.5 Add `Session.fake(...)` (feature `testing`) attaching to `SessionHost<FakeVenue>`, with a script API for events, plant failure, request rejection and call log. Build it in the CI test wheel.
-- [ ] 5.5a Add a packaging test asserting that the release wheel's `_lib.Session` has no `fake` attribute.
+- [x] 5.1 Add `HostRegistry`. (From A2: a host whose recovery is exhausted is terminal, so the registry must replace a terminal host on the next `get_or_start` rather than return it.) In the **same PR**, delete `_SESSION_CACHE`, the Python `SessionLock` acquire and the holder count in `session.py`, so the flock is taken once (D8.3); the forwarding wrapper may remain until `collapse-session-surface`. The registry maps fingerprint → `Weak<SessionHost>`, with flock-before-login, a `lock_dir` parameter, last-detach shutdown, and non-blocking drop. The gateway binary uses it for its single host.
+- [x] 5.2 `_lib.Session` holds `Arc<dyn Session>`: direct → `HostRegistry::get_or_start(..RithmicVenue..).attach()`, gateway → `RemoteSession`. `request_plants` stays a separate call.
+- [x] 5.3 Add `Session.open_gates(trading, cancel_all) -> Gates` (design D4) and remove `configure_gates` and `is_direct` from the extension and `_lib.pyi`.
+- [x] 5.4 (from B2) Switch the PyO3 binding to `session_events()`, so exec disarms at interruption time rather than after the restore, then remove the legacy synthetic Down/Up the Rust client still emits for `subscribe_transport`. Deliver `SessionEvent` to Python listeners in both modes on the existing dedicated delivery thread. Add `Interrupted` / `Resumed` / `RecoveryFailed` pyclasses, with `transport.py` re-exporting the old names for one release.
+- [x] 5.5 Add `Session.fake(...)` (feature `testing`) attaching to `SessionHost<FakeVenue>`, with a script API for events, plant failure, request rejection and call log. Build it in the CI test wheel.
+- [x] 5.5a Add a packaging test asserting that the release wheel's `_lib.Session` has no `fake` attribute.
 - [ ] 5.5a2 Record the direct-mode baseline. Run the FFI benchmark on `Session.fake` built against the pre-switch direct path (or `git stash` the switch-over), then again after the switch, and compare the two (spec: Direct mode keeps its throughput). Use a quiet machine with no other agents running.
-- [ ] 5.6 Port `tests/test_session_factory.py` / `tests/test_rust_gateway_session.py` cases that need real session behaviour to `Session.fake`. Cover:
+- [x] 5.6 Port `tests/test_session_factory.py` / `tests/test_rust_gateway_session.py` cases that need real session behaviour to `Session.fake`. Cover:
   - one login per credential
   - per-session intents
   - last detach frees the flock
@@ -87,25 +87,25 @@ Agents run in the shared checkout on branch `feat/unify-session-host`. Each agen
 ## 6. `RemoteSession` re-joins intents; simplify the Python adapter
 
 - [x] 6.1 After a socket re-attach, `RemoteSession` re-issues its recorded intents before emitting `Resumed`. Commands in flight stay unknown. Add a duplex test for the drop → re-dial → re-join flow.
-- [ ] 6.2 *(code-complete on `ush/d-python` @ `cf570df`; merges after 5.4)* `data.py` (move to `Session.fake` once 5.5 lands; develop against `WireSessionStub` from 0.6 until then):
+- [x] 6.2 *(code-complete on `ush/d-python` @ `cf570df`; merges after 5.4)* `data.py` (move to `Session.fake` once 5.5 lands; develop against `WireSessionStub` from 0.6 until then):
   - remove the `reset_ticker` call and the `is_direct` check from `resync_ticker_session`
   - make transport recovery reconcile-only (no market-data replay)
   - remove the channel-error → `_resync_channel(reset=True)` path; a stream error now means `RecoveryFailed` or a closed session
   - a gap still replays only that consumer's intent
-- [ ] 6.3 `execution.py`: replace `_open_direct_gates` with one `open_gates` call and a warning when trading is not granted. Disarm on `Interrupted` and re-arm on `Resumed` in both modes.
-- [ ] 6.4 Remove the `recovery_bridge.py` direct-mode no-op and run the bridge on the session's events in both modes.
-- [ ] 6.5 Remove `reset_ticker` from `WireSession`, `WireSessionStub` and `_lib.pyi`, and update `tests/test_data_transport_recovery.py`, `tests/test_recovery_bridge.py` and `tests/test_wire_session_parity.py`.
+- [x] 6.3 `execution.py`: replace `_open_direct_gates` with one `open_gates` call and a warning when trading is not granted. Disarm on `Interrupted` and re-arm on `Resumed` in both modes.
+- [x] 6.4 Remove the `recovery_bridge.py` direct-mode no-op and run the bridge on the session's events in both modes.
+- [x] 6.5 Remove `reset_ticker` from `WireSession`, `WireSessionStub` and `_lib.pyi`, and update `tests/test_data_transport_recovery.py`, `tests/test_recovery_bridge.py` and `tests/test_wire_session_parity.py`.
 - [ ] 6.6 Run the full suite. Run `RITHMIC_TEST_DOTENV=.env uv run pytest tests/e2e -v` on the test account (MotiveWave closed) in **both** modes, including a direct-mode plant-reconnect case. Re-run the 0.1 baselines and compare.
 
 ## 7. Docs and follow-ups
 
-- [ ] 7.1 Write ADR 0004 "Market-data replay lives in the session layer". It supersedes ADR 0002's market-data replay clause and keeps its re-arm and capability policy clause.
-- [ ] 7.2 Update AGENTS.md:
+- [x] 7.1 Write ADR 0004 "Market-data replay lives in the session layer". It supersedes ADR 0002's market-data replay clause and keeps its re-arm and capability policy clause.
+- [x] 7.2 Update AGENTS.md:
   - "Direct ↔ gateway plant-surface parity" becomes "one host, two attachments"
   - the RPC checklist uses the new names
   - gateway RPC kinds point at `rithmic-host`
   - recovery: the host restores, consumers only reconcile
-- [ ] 7.3 Update `crates/README.md`: the crate table, the dependency graph and an old → new name table.
+- [x] 7.3 Update `crates/README.md`: the crate table, the dependency graph and an old → new name table.
 - [ ] 7.4 Update `docs/STATUS.md`: the direct-mode reconnect recovery mark and the gateway notes. Then run `python scripts/status_progress.py` and `--check`.
 - [ ] 7.5 Rebase `collapse-session-surface` onto this change: group 1 becomes "delete Python wrappers" (registry, holders and listeners now come from the host), and remove its `reset_ticker` and `configure_gates` mentions.
 - [ ] 7.6 Run the full verify gate from AGENTS.md, including `qlty check --fail-level=medium`.

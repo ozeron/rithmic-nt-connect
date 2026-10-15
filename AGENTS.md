@@ -168,7 +168,7 @@ uv sync --extra dev  # editable extension includes testing; release maturin feat
 # locally via the hk hooks but is NOT a CI gate (the pre-commit hook enforces it).
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test -p rithmic-host -p rithmic-plants -p rithmic-gateway -p rithmic-exec -p rithmic-nt-connect --features rithmic-gateway/testing,rithmic-host/testing
+cargo test -p rithmic-host -p rithmic-plants -p rithmic-gateway -p rithmic-exec -p rithmic-nt-connect --features rithmic-gateway/testing,rithmic-host/testing,rithmic-nt-connect/testing
 uv run ruff check .
 uv run ruff format --check .
 uv run ty check python/rithmic_nt_connect python/rithmic_gateway tests
