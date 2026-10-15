@@ -100,6 +100,10 @@
 
 Applied in place in the lake checkout, uncommitted, at the user's request (2026-10-15): attach-only client, no password read, the `max_workers` kwarg the client no longer takes removed, index source in `pyproject.toml`, docs. `uv lock` and the test-account ingest wait for the first index publish.
 
-- [ ] 9.1 Branch in `/private/mnt/DATA/code/market-data-lake`; `market-data-lake-tools/pyproject.toml` uses the `rithmic` index source; `uv lock`
+- [x] 9.1 Branch in `/private/mnt/DATA/code/market-data-lake`; `market-data-lake-tools/pyproject.toml` uses the `rithmic` index source; `uv lock`
+  - 2026-10-15: index source `https://alexlapchenko.com/rithmic-nt-connect/simple/` (the `ozeron.github.io` URL redirects to the account's custom domain over plain http); `uv lock` resolves `rithmic-gateway 0.1.0.dev2026101500005`; `uv sync` installs the wheel's parent binary. In the lake working tree, uncommitted; no branch (the user's in-progress work shares the tree).
 - [x] 9.2 `rithmic_client.py`: drop `auto_spawn` / `gateway_bin` / `spawn_environ`; dial an explicitly started parent; small launcher around the wheel's `rithmic-gateway` for local runs; password only in the parent's environment
-- [ ] 9.3 Update the error text, the `worker.py` docstring and `AGENTS.md`; run `tests/test_rithmic_futures.py` and one ingest against a test-account parent; open the PR after the first index publish
+- [x] 9.3 Update the error text, the `worker.py` docstring and `AGENTS.md`; run `tests/test_rithmic_futures.py` and one ingest against a test-account parent; open the PR after the first index publish
+  - 2026-10-15: `test_rithmic_futures.py` + `test_queue_payloads.py` 27 passed; full lake suite 443 passed, 1 skipped, 2 known unrelated failures (IB Gateway on 4001; parquet `what_to_show` schema).
+  - Ingest: a Test-account parent started from the lake's installed `rithmic-gateway` binary (password in the parent's environment only) came up attachable; `download-data --venue rithmic` with `RITHMIC_USER` / `RITHMIC_SYSTEM` / `RITHMIC_GATEWAY` and no `RITHMIC_PASSWORD` exited 2 at the lake's credential loader, which refuses `Rithmic Test` / `rituz00100` by design. No production login was used.
+  - Lake PR deferred by the user: it would commit their in-progress Rithmic futures/queue work, which shares the working tree with these fixes.
