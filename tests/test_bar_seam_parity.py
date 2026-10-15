@@ -137,30 +137,6 @@ def _boundary_tick(minute_offset: int = 60) -> list:
     return _ticks([_tick(100.50, 1, 10_000_000, minute_offset=minute_offset)])
 
 
-def _first_complete_traded_minute(
-    bars: list[Bar], ticks: list, *, min_ts_ns: int = 0
-) -> Bar | None:
-    """First INTERNAL bar with volume whose open minute is complete by construction.
-
-    A bar is only comparable against the venue's EXTERNAL bar when it opened
-    strictly after the first *recent* tick's minute: the bar containing the
-    subscribe moment is partial (its volume counts only post-subscribe
-    prints). ``min_ts_ns`` bounds the tape to this run — a stale replay tick
-    must never define the cutoff (that would silently accept the partial
-    subscribe-minute). Returns ``None`` when the recent tape is empty or no
-    complete traded minute has closed yet. This is the pure selector the
-    dropped live e2e polled.
-    """
-    recent = [t for t in ticks if int(t.ts_event) >= min_ts_ns]
-    if not recent:
-        return None
-    cutoff = _open_minute(min(int(t.ts_event) for t in recent))
-    for bar in bars:
-        if int(bar.volume) > 0 and _open_minute(int(bar.ts_event)) > cutoff:
-            return bar
-    return None
-
-
 def _venue_bar_for_minute(open_, high, low, close, volume: int) -> list[dict]:
     # marker = bar CLOSE time (venue contract); payloads_to_bars shifts it back
     # to the open minute.
@@ -251,46 +227,6 @@ def test_same_timestamp_sweep_prints_all_counted() -> None:
 
     assert int(internal.volume) == 10, "all same-ts prints counted by the engine"
     assert int(internal.volume) == int(external.volume) == 10
-
-
-def test_complete_minute_selector_excludes_partial_subscribe_minute() -> None:
-    """The complete-minute selector must pick the first genuinely complete minute.
-
-    Pins ``_first_complete_traded_minute`` — the pure selector the dropped
-    live e2e polled. Given a tape that starts mid-minute, the partial
-    subscribe-minute (16:00) must never be selected; the first complete minute
-    (16:01) is. A late-starting or quiet recent tape must return ``None``
-    rather than silently degrading to the partial minute.
-    """
-    # Tape starts mid-minute 16:00 (partial); minute 16:01 trades fully.
-    tape = _ticks(
-        [
-            _tick(100.00, 2, 45_000_000),  # 16:00:45 — post-subscribe only
-            _tick(100.25, 5, 30_000_000, minute_offset=60),  # 16:01:30
-        ]
-    )
-    bars = _internal_bars([*tape, *_boundary_tick(120)])
-    assert len(bars) == 2, "one partial (16:00) + one complete (16:01) minute"
-
-    selected = _first_complete_traded_minute(bars, tape, min_ts_ns=0)
-    assert selected is not None
-    assert int(selected.ts_event) == (_MINUTE_NS + 60) * _NS, (
-        "selector must return the first complete minute (16:01), not the "
-        "partial subscribe-minute (16:00)"
-    )
-    assert int(selected.volume) == 5
-
-    # A recent tape that starts late in 16:00 has no complete minute yet: the
-    # cutoff becomes 16:01 and the 16:01 bar is still the in-progress one.
-    late = _first_complete_traded_minute(bars, tape, min_ts_ns=(_MINUTE_NS + 50) * _NS)
-    assert late is None, "no complete minute when the recent tape starts at 16:00:50"
-
-    # A quiet recent tape (nothing recent) must not silently degrade to a
-    # partial bar — this is the degradation that previously hid a dead feed.
-    quiet = _first_complete_traded_minute(
-        bars, tape, min_ts_ns=(_MINUTE_NS + 600) * _NS
-    )
-    assert quiet is None, "quiet tape -> no selection (no silent degradation)"
 
 
 def test_partial_subscribe_minute_undercounts_venue_bar() -> None:
