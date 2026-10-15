@@ -176,6 +176,86 @@ async fn one_exec_facade_stopping_keeps_the_others_order_stream() {
 }
 
 #[tokio::test]
+async fn a_closed_order_facade_cannot_trade_on_its_peers_socket() {
+    let parent = FakeParent::start(Opts {
+        trading: true,
+        cancel_all: true,
+    })
+    .await;
+    // Clones of one `over` runtime share exactly one duplex connection.
+    let a = RemoteSession::over(
+        GatewayConfig::new(&parent.user, SYSTEM, URL, "Live").with_auth_token(AUTH_TOKEN),
+        parent.stream(),
+    );
+    let b = a.clone();
+    a.connect().await.unwrap();
+    b.connect().await.unwrap();
+    a.subscribe_order_updates().await.unwrap();
+    b.subscribe_order_updates().await.unwrap();
+    a.disconnect_order_plant().await.unwrap();
+    parent.fake.clear_calls();
+
+    for method in super::COMMANDS {
+        let result = super::command(&a, method).await;
+        assert!(
+            matches!(result, Err(Error::NotSent(_))),
+            "{method}: {result:?}"
+        );
+    }
+    assert!(parent.fake.calls().is_empty(), "{:?}", parent.fake.calls());
+    b.place_order(&place("peer-open")).await.unwrap();
+    assert_eq!(parent.fake.calls(), ["place_order peer-open"]);
+
+    // Only this facade's explicit order bring-up can reopen its gate.
+    for reopen in ["ensure", "orders", "brackets"] {
+        match reopen {
+            "ensure" => a.ensure_order_plant().await.unwrap(),
+            "orders" => a.subscribe_order_updates().await.unwrap(),
+            _ => a.subscribe_bracket_updates().await.unwrap(),
+        }
+        a.place_order(&place(reopen)).await.unwrap();
+        a.disconnect_order_plant().await.unwrap();
+    }
+    assert_eq!(parent.fake.count("place_order"), 4);
+}
+
+#[tokio::test(start_paused = true)]
+async fn closing_an_order_facade_waits_for_its_inflight_command() {
+    let parent = FakeParent::start(Opts {
+        trading: true,
+        ..Opts::default()
+    })
+    .await;
+    let a = session_for(&parent).await;
+    let b = session_for(&parent).await;
+    a.subscribe_order_updates().await.unwrap();
+    b.subscribe_order_updates().await.unwrap();
+    parent.fake.set_delay("place_order", Duration::from_secs(1));
+    let first_order = place("already-sent");
+    let first = a.place_order(&first_order);
+    tokio::pin!(first);
+    assert!(futures_util::poll!(first.as_mut()).is_pending());
+    // Keep the clock still until the parent has received the first command.
+    for _ in 0..100 {
+        if parent.fake.count("place_order already-sent") == 1 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(parent.fake.count("place_order already-sent"), 1);
+    let close = a.disconnect_order_plant();
+    tokio::pin!(close);
+    assert!(futures_util::poll!(close.as_mut()).is_pending());
+    let later_order = place("after-close-started");
+    let (sent, closed, denied) = tokio::join!(first, close, a.place_order(&later_order));
+    sent.unwrap();
+    closed.unwrap();
+    assert!(matches!(denied, Err(Error::NotSent(_))), "{denied:?}");
+    assert_eq!(parent.fake.count("place_order"), 1);
+    b.place_order(&place("peer-still-open")).await.unwrap();
+}
+
+#[tokio::test]
 async fn a_facade_that_disconnects_releases_only_what_it_held() {
     let parent = FakeParent::start(Opts::default()).await;
     let a = session_for(&parent).await;

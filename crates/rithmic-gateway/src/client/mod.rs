@@ -18,7 +18,7 @@ mod transport;
 mod recovery_tests;
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -33,7 +33,7 @@ use rithmic_host::{
 };
 
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, RwLock};
 use tokio::time::Instant;
 
 use self::convert::Channel;
@@ -175,6 +175,9 @@ pub struct RemoteSession {
     facade_id: AtomicU64,
     connected: AtomicBool,
     has_connected: AtomicBool,
+    order_closed: AtomicBool,
+    disconnecting_order: AtomicUsize,
+    order_gate: RwLock<()>,
     /// The runtime `connect` ran on; `Drop` (which may run outside any runtime,
     /// e.g. from Python) spawns the facade's last releases there.
     rt_handle: StdMutex<Option<tokio::runtime::Handle>>,
@@ -233,6 +236,9 @@ impl RemoteSession {
             facade_id: AtomicU64::new(0),
             connected: AtomicBool::new(false),
             has_connected: AtomicBool::new(false),
+            order_closed: AtomicBool::new(false),
+            disconnecting_order: AtomicUsize::new(0),
+            order_gate: RwLock::new(()),
             rt_handle: StdMutex::new(None),
         }
     }
@@ -297,9 +303,30 @@ impl RemoteSession {
         }
     }
 
+    fn require_order_open(&self) -> Result<()> {
+        if self.order_closed.load(Ordering::SeqCst)
+            || self.disconnecting_order.load(Ordering::SeqCst) != 0
+        {
+            Err(Error::NotSent("order plant explicitly disconnected".into()))
+        } else {
+            Ok(())
+        }
+    }
+
     /// Send `body`, applying the retry / outcome rules for `mode`.
     async fn call(&self, body: Body, mode: Mode, history: bool) -> Result<Frame> {
         self.require_connected()?;
+        // Hold the facade's gate through send and reply: closing waits for
+        // commands already in flight and prevents any later command being sent.
+        let _order = if mode == Mode::Command {
+            self.require_order_open()?;
+            let guard = self.order_gate.read().await;
+            self.require_connected()?;
+            self.require_order_open()?;
+            Some(guard)
+        } else {
+            None
+        };
         let timeout = self.timeout_for(history);
         // At most one retry: a read after a lost reply, or any request that
         // never left (the connection closed before it was written).
@@ -647,8 +674,11 @@ impl Session for RemoteSession {
     }
 
     async fn ensure_order_plant(&self) -> Result<()> {
+        let _gate = self.order_gate.write().await;
         self.ack(Body::EnsureOrder(pb::EnsureOrderRequest {}), Mode::Intent)
-            .await
+            .await?;
+        self.order_closed.store(false, Ordering::SeqCst);
+        Ok(())
     }
 
     async fn ensure_pnl_plant(&self) -> Result<()> {
@@ -657,6 +687,19 @@ impl Session for RemoteSession {
     }
 
     async fn disconnect_order_plant(&self) -> Result<()> {
+        struct Closing<'a>(&'a AtomicUsize);
+        impl Drop for Closing<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        self.require_connected()?;
+        self.disconnecting_order.fetch_add(1, Ordering::SeqCst);
+        let _closing = Closing(&self.disconnecting_order);
+        self.order_closed.store(true, Ordering::SeqCst);
+        let _gate = self.order_gate.write().await;
+        // An ensure already ahead of this writer may have reopened the gate.
+        self.order_closed.store(true, Ordering::SeqCst);
         self.release_order().await
     }
 
@@ -784,21 +827,27 @@ impl Session for RemoteSession {
     }
 
     async fn subscribe_order_updates(&self) -> Result<()> {
+        let _gate = self.order_gate.write().await;
         self.queues.get(Channel::Order).arm();
         self.hold_intent(
             IntentKey::Order,
             Body::SubscribeOrderUpdates(pb::SubscribeOrderUpdatesRequest {}),
         )
-        .await
+        .await?;
+        self.order_closed.store(false, Ordering::SeqCst);
+        Ok(())
     }
 
     async fn subscribe_bracket_updates(&self) -> Result<()> {
+        let _gate = self.order_gate.write().await;
         self.queues.get(Channel::Order).arm();
         self.hold_intent(
             IntentKey::Brackets,
             Body::SubscribeBracketUpdates(pb::SubscribeBracketUpdatesRequest {}),
         )
-        .await
+        .await?;
+        self.order_closed.store(false, Ordering::SeqCst);
+        Ok(())
     }
 
     async fn get_front_month(&self, symbol: &str, exchange: &str) -> Result<FrontMonthDto> {
