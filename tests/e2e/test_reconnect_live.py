@@ -39,53 +39,50 @@ def wait_for_any_event(
 
 
 class TestResyncRestoresIntent:
+    def test_resync_restores_ticker_and_book(self, live_session, live_front_month):
+        self._resync(live_session, live_front_month, include_bars=False)
+
     @pytest.mark.slow
+    @pytest.mark.usefixtures("live_history_available")
     def test_resync_restores_ticker_book_and_bars(self, live_session, live_front_month):
-        """Subscribe ticker, book, and 1m bars; resync; assert events resume."""
+        self._resync(live_session, live_front_month, include_bars=True)
+
+    @staticmethod
+    def _resync(live_session, live_front_month, *, include_bars: bool):
+        """Subscribe and resync; keep ticker/book coverage independent of history."""
         _, symbol, exchange = live_front_month
         ticker_subs = {(symbol, exchange)}
         book_subs = {(symbol, exchange)}
-        bar_subs = {(symbol, exchange, 2, 1)}  # 1-MINUTE-LAST-EXTERNAL
+        bar_subs = {(symbol, exchange, 2, 1)} if include_bars else set()
 
         live_session.subscribe(symbol, exchange)
         live_session.subscribe_order_book_summary(symbol, exchange)
-        live_session.subscribe_time_bars(symbol, exchange, 2, 1)
+        if include_bars:
+            live_session.subscribe_time_bars(symbol, exchange, 2, 1)
 
-        wait_for_any_event(
-            live_session.poll_event,
-            ("last_trade",),
-            timeout_sec=_EVENT_TIMEOUT_SEC,
-        )
-        wait_for_any_event(
-            live_session.poll_event,
-            ("bbo", "order_book"),
-            timeout_sec=_EVENT_TIMEOUT_SEC,
-        )
-        wait_for_any_event(
-            live_session.poll_history_event,
-            ("time_bar",),
-            timeout_sec=_BAR_POLL_TIMEOUT_SEC,
-        )
+        def wait_for_streams():
+            wait_for_any_event(
+                live_session.poll_event,
+                ("last_trade",),
+                timeout_sec=_EVENT_TIMEOUT_SEC,
+            )
+            wait_for_any_event(
+                live_session.poll_event,
+                ("bbo", "order_book"),
+                timeout_sec=_EVENT_TIMEOUT_SEC,
+            )
+            if include_bars:
+                wait_for_any_event(
+                    live_session.poll_history_event,
+                    ("time_bar",),
+                    timeout_sec=_BAR_POLL_TIMEOUT_SEC,
+                )
 
+        wait_for_streams()
         asyncio.run(
             resync_ticker_session(live_session, ticker_subs, book_subs, bar_subs)
         )
-
-        wait_for_any_event(
-            live_session.poll_event,
-            ("last_trade",),
-            timeout_sec=_EVENT_TIMEOUT_SEC,
-        )
-        wait_for_any_event(
-            live_session.poll_event,
-            ("bbo", "order_book"),
-            timeout_sec=_EVENT_TIMEOUT_SEC,
-        )
-        wait_for_any_event(
-            live_session.poll_history_event,
-            ("time_bar",),
-            timeout_sec=_BAR_POLL_TIMEOUT_SEC,
-        )
+        wait_for_streams()
 
 
 @pytest.fixture
