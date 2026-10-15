@@ -57,7 +57,6 @@ pub struct FakeParent {
     pub fake: Arc<rithmic_host::fake::FakeVenue>,
     pub state: Arc<rithmic_gateway::server::GatewayState>,
     tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
-    pump: tokio::task::JoinHandle<()>,
     shared: RemoteSession,
 }
 
@@ -68,23 +67,23 @@ pub fn gateway_state(
 ) -> Arc<rithmic_gateway::server::GatewayState> {
     use rithmic_gateway::{
         idle_exit::{IdleExit, IdleExitPolicy},
-        reconnect::ReconnectController,
         server::{boot_gateway_metadata, Fingerprint, GatewayState, SessionHandle},
-        subscriptions::{FanoutHub, ParentGates},
     };
-    use std::collections::HashMap;
-    use std::sync::atomic::AtomicBool;
-    let hub = Arc::new(FanoutHub::new(
-        rithmic_gateway::subscriptions::DEFAULT_QUEUE_CAP,
-    ));
-    let (gateway_instance_id, transport_generation, transport_epoch) = boot_gateway_metadata();
+    use rithmic_host::{HistoryPolicy, ParentGates, SessionHost, Timing};
+    let (gateway_instance_id, _, _) = boot_gateway_metadata();
     Arc::new(GatewayState {
-        gates: ParentGates {
-            trading_enabled: opts.trading,
-            cancel_all_enabled: opts.cancel_all,
-        },
-        reconnect: Arc::new(ReconnectController::new(hub.clone())),
-        hub,
+        host: SessionHost::from_connected(
+            SessionHandle::new(fake),
+            ParentGates {
+                trading_enabled: opts.trading,
+                cancel_all_enabled: opts.cancel_all,
+            },
+            Timing {
+                restore_backoff: Duration::from_millis(50),
+                ..Default::default()
+            },
+            HistoryPolicy::RefuseUnderLiveMd,
+        ),
         fingerprint: Fingerprint {
             user: user.into(),
             system_name: SYSTEM.into(),
@@ -94,23 +93,9 @@ pub fn gateway_state(
             fcm_id: String::new(),
             ib_id: String::new(),
         },
-        ready: AtomicBool::new(true),
-        force_reconnect: AtomicBool::new(false),
-        reconnect_wake: tokio::sync::Notify::new(),
         expected_auth_token: AUTH_TOKEN.into(),
-        session: Some(SessionHandle::new(fake)),
-        topic_locks: tokio::sync::Mutex::new(HashMap::new()),
-        recon_lock: Arc::new(tokio::sync::Mutex::new(())),
-        md_history_gate: Arc::new(tokio::sync::Mutex::new(())),
-        history_load_lock: Arc::new(tokio::sync::Mutex::new(())),
         idle: IdleExit::new(IdleExitPolicy::Never),
         gateway_instance_id,
-        transport_generation,
-        transport_epoch,
-        timing: rithmic_gateway::server::pump::PumpTiming {
-            restore_backoff: Duration::from_millis(50),
-            ..Default::default()
-        },
     })
 }
 
@@ -139,12 +124,6 @@ impl FakeParent {
         let fake = Arc::new(rithmic_host::fake::FakeVenue::new());
         fake.connect().await.unwrap();
         let state = gateway_state(&user, fake.clone(), opts);
-        let pump = tokio::spawn(rithmic_gateway::server::pump::run_event_pump(
-            state.session.clone().unwrap(),
-            state.hub.clone(),
-            state.reconnect.clone(),
-            state.clone(),
-        ));
         let tasks = Arc::new(Mutex::new(Vec::new()));
         let cfg = GatewayConfig::new(&user, SYSTEM, URL, "Live").with_auth_token(AUTH_TOKEN);
         let shared = RemoteSession::with_connector(cfg, {
@@ -160,7 +139,6 @@ impl FakeParent {
             fake,
             state,
             tasks,
-            pump,
             shared,
         }
     }
@@ -177,7 +155,10 @@ impl FakeParent {
         for task in self.tasks.lock().unwrap().drain(..) {
             task.abort();
         }
-        self.pump.abort();
+        let host = self.state.host.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move { host.shutdown().await });
+        }
     }
 
     pub async fn control(&self, commands: &[String]) -> Vec<Vec<String>> {

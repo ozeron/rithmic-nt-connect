@@ -1,0 +1,298 @@
+//! Host lifecycle and concurrency. No transport, authentication or credentials.
+use crate::fanout::{FanoutHub, SharedFanout, SubKey, DEFAULT_QUEUE_CAP};
+use crate::gates::ParentGates;
+use crate::intents::ReconnectController;
+use crate::pump::Timing;
+use crate::{Error, LocalSession, PlantSet, Result, Venue};
+use std::collections::HashMap;
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc,
+};
+use tokio::sync::{watch, Mutex, RwLock};
+
+/// The parent's plant session behind the [`Venue`] trait, guarded by one gate.
+///
+/// The gate only separates *using* the plants from *rebuilding* them. RPCs take it
+/// shared ([`VenueHandle::lock`]) and run concurrently, so no call waits behind
+/// another; reconnect and shutdown take it exclusively
+/// ([`VenueHandle::lock_exclusive`]), which waits for in-flight calls and keeps
+/// new ones out. Waiting for events needs no gate at all: the pump uses
+/// [`VenueHandle::checkout`] once and then runs on the shared session.
+pub struct VenueHandle<V: Venue + ?Sized = dyn Venue> {
+    gate: Arc<RwLock<()>>,
+    session: Arc<V>,
+}
+
+/// Shared guard returned by [`VenueHandle::lock`]; derefs to the session. Any
+/// number of RPCs hold it at once, so a slow call never queues the others.
+pub struct VenueGuard<'a, V: Venue + ?Sized = dyn Venue> {
+    _gate: tokio::sync::RwLockReadGuard<'a, ()>,
+    session: &'a Arc<V>,
+}
+
+impl<V: Venue + ?Sized> std::ops::Deref for VenueGuard<'_, V> {
+    type Target = V;
+
+    fn deref(&self) -> &Self::Target {
+        self.session
+    }
+}
+
+/// Exclusive guard for rebuilding the plants (reconnect, shutdown): it waits for
+/// in-flight RPCs to finish and keeps new ones out while it is held.
+pub struct ExclusiveVenueGuard<'a, V: Venue + ?Sized = dyn Venue> {
+    _gate: tokio::sync::RwLockWriteGuard<'a, ()>,
+    session: &'a Arc<V>,
+}
+
+impl<V: Venue + ?Sized> std::ops::Deref for ExclusiveVenueGuard<'_, V> {
+    type Target = V;
+
+    fn deref(&self) -> &Self::Target {
+        self.session
+    }
+}
+
+impl<V: Venue + ?Sized> VenueHandle<V> {
+    pub fn new(session: Arc<V>) -> Self {
+        Self {
+            gate: Arc::new(RwLock::new(())),
+            session,
+        }
+    }
+
+    /// Shared access: RPCs run concurrently and only wait while plants are being
+    /// rebuilt.
+    pub async fn lock(&self) -> VenueGuard<'_, V> {
+        VenueGuard {
+            _gate: self.gate.read().await,
+            session: &self.session,
+        }
+    }
+
+    /// Exclusive access, for disconnect / connect / restore.
+    pub async fn lock_exclusive(&self) -> ExclusiveVenueGuard<'_, V> {
+        ExclusiveVenueGuard {
+            _gate: self.gate.write().await,
+            session: &self.session,
+        }
+    }
+
+    /// Wait out any rebuild, then return the session without holding the gate.
+    pub async fn checkout(&self) -> Arc<V> {
+        drop(self.gate.read().await);
+        Arc::clone(&self.session)
+    }
+}
+
+impl<V: Venue + ?Sized> Clone for VenueHandle<V> {
+    fn clone(&self) -> Self {
+        Self {
+            gate: self.gate.clone(),
+            session: self.session.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryPolicy {
+    Allow,
+    RefuseUnderLiveMd,
+}
+
+pub struct HostState<V: Venue + ?Sized = dyn Venue> {
+    pub gates: ParentGates,
+    pub hub: SharedFanout,
+    pub ready: AtomicBool,
+    pub force_reconnect: AtomicBool,
+    pub recovering: AtomicBool,
+    pub reconnect_wake: tokio::sync::Notify,
+    pub session: Option<VenueHandle<V>>,
+    pub reconnect: Arc<ReconnectController>,
+    pub topic_locks: Mutex<HashMap<SubKey, Arc<Mutex<()>>>>,
+    pub recon_lock: Mutex<()>,
+    pub md_history_gate: Mutex<()>,
+    pub history_load_lock: Mutex<()>,
+    pub transport_generation: AtomicU64,
+    pub transport_epoch: watch::Sender<u64>,
+    pub timing: Timing,
+    pub history_policy: HistoryPolicy,
+}
+
+impl<V: Venue + ?Sized> HostState<V> {
+    pub fn request_reconnect(&self) {
+        self.force_reconnect.store(true, Ordering::SeqCst);
+        self.reconnect_wake.notify_one();
+    }
+
+    pub async fn topic_lock(&self, key: &SubKey) -> Arc<Mutex<()>> {
+        self.topic_locks
+            .lock()
+            .await
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    pub fn check_ready(&self) -> Result<()> {
+        if self.ready.load(Ordering::SeqCst) {
+            Ok(())
+        } else {
+            Err(Error::NotSent(
+                "gateway not ready (plants reconnecting); request not sent".into(),
+            ))
+        }
+    }
+}
+
+pub struct SessionHost<V: Venue + ?Sized = dyn Venue> {
+    pub state: Arc<HostState<V>>,
+    pump: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+impl<V: Venue + 'static> SessionHost<V> {
+    /// Start local delivery paths. `connect` on an attachment ensures the login.
+    pub fn start(venue: V, gates: ParentGates, timing: Timing, policy: HistoryPolicy) -> Arc<Self> {
+        Self::with_handle(
+            Some(VenueHandle::new(Arc::new(venue))),
+            gates,
+            timing,
+            policy,
+            false,
+            DEFAULT_QUEUE_CAP,
+        )
+    }
+}
+
+impl<V: Venue + ?Sized + 'static> SessionHost<V> {
+    /// Adopt a venue connected by the composition root (gateway startup).
+    pub fn from_connected(
+        venue: VenueHandle<V>,
+        gates: ParentGates,
+        timing: Timing,
+        policy: HistoryPolicy,
+    ) -> Arc<Self> {
+        Self::with_handle(Some(venue), gates, timing, policy, true, DEFAULT_QUEUE_CAP)
+    }
+
+    /// Explicit capacity is useful for bounded-queue characterization tests.
+    pub fn with_handle(
+        venue: Option<VenueHandle<V>>,
+        gates: ParentGates,
+        timing: Timing,
+        policy: HistoryPolicy,
+        connected: bool,
+        capacity: usize,
+    ) -> Arc<Self> {
+        let hub = Arc::new(FanoutHub::new(capacity));
+        let (transport_epoch, _) = watch::channel(1);
+        let state = Arc::new(HostState {
+            gates,
+            reconnect: Arc::new(ReconnectController::new(hub.clone())),
+            hub,
+            ready: AtomicBool::new(connected),
+            force_reconnect: AtomicBool::new(false),
+            recovering: AtomicBool::new(false),
+            reconnect_wake: tokio::sync::Notify::new(),
+            session: venue,
+            topic_locks: Mutex::new(HashMap::new()),
+            recon_lock: Mutex::new(()),
+            md_history_gate: Mutex::new(()),
+            history_load_lock: Mutex::new(()),
+            transport_generation: AtomicU64::new(1),
+            transport_epoch,
+            timing,
+            history_policy: policy,
+        });
+        let host = Arc::new(Self {
+            state,
+            pump: std::sync::Mutex::new(None),
+        });
+        if host.state.session.is_some() {
+            let state = host.state.clone();
+            *host.pump.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some(tokio::spawn(crate::pump::run_event_pump(state)));
+        }
+        host
+    }
+
+    pub fn attach(self: &Arc<Self>) -> LocalSession<V> {
+        LocalSession::attach(self.clone())
+    }
+    pub fn generation(&self) -> u64 {
+        self.state.transport_generation.load(Ordering::SeqCst)
+    }
+    pub fn subscribe_generation(&self) -> watch::Receiver<u64> {
+        self.state.transport_epoch.subscribe()
+    }
+    pub async fn request_plants(&self, extra: PlantSet) -> Result<()> {
+        self.state
+            .session
+            .as_ref()
+            .ok_or_else(crate::local::no_venue)?
+            .lock()
+            .await
+            .request_plants(extra)
+            .await
+    }
+    pub async fn connect(&self) -> Result<()> {
+        let venue = self
+            .state
+            .session
+            .as_ref()
+            .ok_or_else(crate::local::no_venue)?;
+        loop {
+            let mut generation = self.subscribe_generation();
+            let guard = venue.lock_exclusive().await;
+            if self.state.ready.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+            // The reconnect loop owns connect + restore. A concurrent consumer
+            // connect waits for its completed generation rather than exposing a
+            // half-restored venue or starting a second login.
+            if self.state.recovering.load(Ordering::SeqCst) {
+                drop(guard);
+                generation
+                    .changed()
+                    .await
+                    .map_err(|_| Error::Session("host closed during reconnect".into()))?;
+                continue;
+            }
+            match guard.connect().await {
+                Ok(()) | Err(Error::AlreadyConnected) => {}
+                Err(e) => {
+                    let _ = guard.disconnect().await;
+                    return Err(e);
+                }
+            }
+            self.state.ready.store(true, Ordering::SeqCst);
+            self.state.reconnect_wake.notify_one();
+            return Ok(());
+        }
+    }
+
+    pub async fn shutdown(&self) {
+        let pump = self.pump.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(pump) = pump {
+            pump.abort();
+            let _ = pump.await;
+        }
+        self.state.ready.store(false, Ordering::SeqCst);
+        if let Some(venue) = &self.state.session {
+            let _ = venue.lock_exclusive().await.disconnect().await;
+        }
+    }
+}
+impl<V: Venue + ?Sized> Drop for SessionHost<V> {
+    fn drop(&mut self) {
+        if let Some(pump) = self
+            .pump
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            pump.abort();
+        }
+    }
+}

@@ -16,3 +16,16 @@ pub use env::{Env, ParseEnvError};
 pub use error::{Error, Result};
 pub use plants::PlantSet;
 pub use streams::{Stream, StreamHub};
+
+pub mod fanout;
+pub mod gates;
+pub mod host;
+pub mod intents;
+pub mod local;
+pub mod pump;
+pub use backend::Venue;
+pub use fanout::SessionId;
+pub use gates::ParentGates;
+pub use host::{HistoryPolicy, SessionHost, VenueHandle};
+pub use local::LocalSession;
+pub use pump::Timing;

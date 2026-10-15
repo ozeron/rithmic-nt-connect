@@ -8,14 +8,12 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use crate::convert::{order_key, pnl_key};
-use crate::pb::Frame;
-use crate::reconnect::{MdIntent, ReconnectController, TimeBarIntent};
-use crate::subscriptions::SubKey;
+use crate::fanout::{order_key, pnl_key};
 
-use super::{
-    ack_frame, err_to_frame, error_frame, no_session_frame, topic_lock, ClientCtx, GatewayState,
-};
+use crate::fanout::SubKey;
+use crate::intents::{MdIntent, ReconnectController, TimeBarIntent};
+
+use super::{coded_error, gate_error, no_venue, topic_lock, HostState, Result, SessionCtx, Venue};
 
 fn sub_key(symbol: &str, exchange: &str) -> SubKey {
     SubKey {
@@ -29,7 +27,7 @@ fn sub_key(symbol: &str, exchange: &str) -> SubKey {
 /// the venue session call — everything the subscribe/unsubscribe templates
 /// need except their differing rollback direction.
 #[derive(Debug, Clone)]
-pub(in crate::server) enum TopicIntent {
+pub(crate) enum TopicIntent {
     Ticker(SubKey),
     Book(SubKey),
     TimeBars(TimeBarIntent),
@@ -37,7 +35,7 @@ pub(in crate::server) enum TopicIntent {
 
 impl TopicIntent {
     /// This intent as the hashable key the controller tracks degradation by.
-    pub(in crate::server) fn md_intent(&self) -> MdIntent {
+    pub(crate) fn md_intent(&self) -> MdIntent {
         match self {
             Self::Ticker(key) => MdIntent::Ticker(key.clone()),
             Self::Book(key) => MdIntent::Book(key.clone()),
@@ -45,7 +43,7 @@ impl TopicIntent {
         }
     }
 
-    pub(in crate::server) fn from_md(intent: &MdIntent) -> Self {
+    pub(crate) fn from_md(intent: &MdIntent) -> Self {
         match intent {
             MdIntent::Ticker(key) => Self::Ticker(key.clone()),
             MdIntent::Book(key) => Self::Book(key.clone()),
@@ -53,14 +51,14 @@ impl TopicIntent {
         }
     }
 
-    pub(in crate::server) fn key(&self) -> SubKey {
+    pub(crate) fn key(&self) -> SubKey {
         match self {
             Self::Ticker(key) | Self::Book(key) => key.clone(),
             Self::TimeBars(intent) => sub_key(&intent.symbol, &intent.exchange),
         }
     }
 
-    fn client_has(&self, client: &ClientCtx) -> bool {
+    fn client_has(&self, client: &SessionCtx) -> bool {
         match self {
             Self::Ticker(key) => client.ticker.contains(key),
             Self::Book(key) => client.book.contains(key),
@@ -68,7 +66,7 @@ impl TopicIntent {
         }
     }
 
-    fn client_insert(&self, client: &mut ClientCtx) {
+    fn client_insert(&self, client: &mut SessionCtx) {
         match self {
             Self::Ticker(key) => {
                 client.ticker.insert(key.clone());
@@ -83,7 +81,7 @@ impl TopicIntent {
         client.sync_kinds(&self.key());
     }
 
-    fn client_remove(&self, client: &mut ClientCtx) {
+    fn client_remove(&self, client: &mut SessionCtx) {
         match self {
             Self::Ticker(key) => {
                 client.ticker.remove(key);
@@ -108,7 +106,7 @@ impl TopicIntent {
     }
 
     /// Removes the reconnect intent; returns whether this was the last peer.
-    pub(in crate::server) async fn forget(&self, rc: &ReconnectController) -> bool {
+    pub(crate) async fn forget(&self, rc: &ReconnectController) -> bool {
         match self {
             Self::Ticker(key) => rc.forget_ticker(key).await,
             Self::Book(key) => rc.forget_book(key).await,
@@ -116,10 +114,7 @@ impl TopicIntent {
         }
     }
 
-    pub(in crate::server) async fn venue_join(
-        &self,
-        session: &dyn rithmic_host::Session,
-    ) -> rithmic_host::Result<()> {
+    pub(crate) async fn venue_join<V: Venue + ?Sized>(&self, session: &V) -> crate::Result<()> {
         match self {
             Self::Ticker(key) => session.subscribe(&key.symbol, &key.exchange).await,
             Self::Book(key) => {
@@ -140,10 +135,7 @@ impl TopicIntent {
         }
     }
 
-    pub(in crate::server) async fn venue_leave(
-        &self,
-        session: &dyn rithmic_host::Session,
-    ) -> rithmic_host::Result<()> {
+    pub(crate) async fn venue_leave<V: Venue + ?Sized>(&self, session: &V) -> crate::Result<()> {
         match self {
             Self::Ticker(key) => session.unsubscribe(&key.symbol, &key.exchange).await,
             Self::Book(key) => {
@@ -183,7 +175,7 @@ impl TopicIntent {
     /// Log line for a failed pump-side restore; kept byte-identical to the
     /// pre-pump-relocation strings. (Pump policy is log-and-continue —
     /// dispatch's rollback policy lives in `subscribe_topic`/`fail_*`.)
-    pub(in crate::server) fn resubscribe_fail_log(&self, e: rithmic_host::Error) -> String {
+    pub(crate) fn resubscribe_fail_log(&self, e: crate::Error) -> String {
         match self {
             Self::Ticker(key) => format!(
                 "rithmic-gateway: resubscribe ticker {}/{} failed: {e}",
@@ -203,7 +195,11 @@ impl TopicIntent {
 
 /// Attach this client to a shared hub topic (refcount once per client per key).
 /// Returns whether this client already had a forwarder (no new hub bump).
-async fn attach_shared_topic(state: &GatewayState, client: &mut ClientCtx, key: &SubKey) -> bool {
+async fn attach_shared_topic<V: Venue + ?Sized + 'static>(
+    state: &HostState<V>,
+    client: &mut SessionCtx,
+    key: &SubKey,
+) -> bool {
     let had_forwarder = client.subscribed.contains(key);
     if !had_forwarder {
         state.reconnect.add_hub_interest(key.clone()).await;
@@ -212,9 +208,9 @@ async fn attach_shared_topic(state: &GatewayState, client: &mut ClientCtx, key: 
     had_forwarder
 }
 
-async fn rollback_shared_topic(
-    state: &GatewayState,
-    client: &mut ClientCtx,
+async fn rollback_shared_topic<V: Venue + ?Sized + 'static>(
+    state: &HostState<V>,
+    client: &mut SessionCtx,
     key: &SubKey,
     had_forwarder: bool,
 ) {
@@ -224,7 +220,11 @@ async fn rollback_shared_topic(
     }
 }
 
-async fn release_md_if_unused(state: &GatewayState, client: &mut ClientCtx, key: &SubKey) {
+async fn release_md_if_unused<V: Venue + ?Sized + 'static>(
+    state: &HostState<V>,
+    client: &mut SessionCtx,
+    key: &SubKey,
+) {
     if !client.wants_md(key) {
         client.drop_forwarder(key);
         if state.reconnect.remove_hub_interest(key).await {
@@ -233,7 +233,7 @@ async fn release_md_if_unused(state: &GatewayState, client: &mut ClientCtx, key:
     }
 }
 
-async fn prune_topic_lock(state: &GatewayState, key: &SubKey) {
+async fn prune_topic_lock<V: Venue + ?Sized + 'static>(state: &HostState<V>, key: &SubKey) {
     let mut map = state.topic_locks.lock().await;
     if let Some(lock) = map.get(key) {
         // Only the map holds the Arc → safe to drop.
@@ -243,21 +243,20 @@ async fn prune_topic_lock(state: &GatewayState, key: &SubKey) {
     }
 }
 
-pub(super) async fn subscribe_topic(
-    state: &GatewayState,
-    client: &mut ClientCtx,
-    request_id: u64,
+pub(super) async fn subscribe_topic<V: Venue + ?Sized + 'static>(
+    state: &HostState<V>,
+    client: &mut SessionCtx,
     intent: TopicIntent,
-) -> Frame {
+) -> Result<()> {
     let key = intent.key();
     if intent.client_has(client) {
         // A repeat subscribe is normally a no-op. If a plant rebuild left this join
         // degraded (the venue lost it and the restore could not bring it back), it
         // is the client's cue to retry: do the venue join now.
         if !state.reconnect.is_degraded(&intent.md_intent()).await {
-            return ack_frame(request_id);
+            return Ok(());
         }
-        return rejoin_degraded(state, request_id, intent).await;
+        return rejoin_degraded(state, intent).await;
     }
     // Hold md_history_gate across note + venue join so a history load cannot
     // pass its live-MD check while this intent is being created (RC2.3). A load
@@ -281,7 +280,7 @@ pub(super) async fn subscribe_topic(
             intent.client_remove(client);
             intent.forget(&state.reconnect).await;
             rollback_shared_topic(state, client, &key, had_forwarder).await;
-            return no_session_frame(request_id);
+            return Err(no_venue());
         };
         // MD joins take `&self`; holding the guard only serializes against
         // plant reset / teardown.
@@ -291,49 +290,51 @@ pub(super) async fn subscribe_topic(
             intent.client_remove(client);
             intent.forget(&state.reconnect).await;
             rollback_shared_topic(state, client, &key, had_forwarder).await;
-            return err_to_frame(request_id, intent.subscribe_failed_code(), e);
+            return Err(coded_error(intent.subscribe_failed_code(), e));
         }
         if degraded {
             state.reconnect.clear_degraded(&intent.md_intent()).await;
         }
     }
-    ack_frame(request_id)
+    Ok(())
 }
 
 /// Retry the venue join of an intent a rebuild left degraded, on behalf of a client
 /// that already holds it. Clears the degradation on success; on failure the client
 /// gets the venue's own error and the intent stays degraded for the next try.
-async fn rejoin_degraded(state: &GatewayState, request_id: u64, intent: TopicIntent) -> Frame {
+async fn rejoin_degraded<V: Venue + ?Sized + 'static>(
+    state: &HostState<V>,
+    intent: TopicIntent,
+) -> Result<()> {
     let key = intent.key();
     let _md_gate = state.md_history_gate.lock().await;
     let lock = topic_lock(state, &key).await;
     let _guard = lock.lock().await;
     // Another client's retry may have healed it while this one waited.
     if !state.reconnect.is_degraded(&intent.md_intent()).await {
-        return ack_frame(request_id);
+        return Ok(());
     }
     let Some(session) = &state.session else {
-        return no_session_frame(request_id);
+        return Err(no_venue());
     };
     let session_guard = session.lock().await;
     match intent.venue_join(&*session_guard).await {
         Ok(()) => {
             state.reconnect.clear_degraded(&intent.md_intent()).await;
-            ack_frame(request_id)
+            Ok(())
         }
-        Err(e) => err_to_frame(request_id, intent.subscribe_failed_code(), e),
+        Err(e) => Err(coded_error(intent.subscribe_failed_code(), e)),
     }
 }
 
-pub(super) async fn unsubscribe_topic(
-    state: &GatewayState,
-    client: &mut ClientCtx,
-    request_id: u64,
+pub(super) async fn unsubscribe_topic<V: Venue + ?Sized + 'static>(
+    state: &HostState<V>,
+    client: &mut SessionCtx,
     intent: TopicIntent,
-) -> Frame {
+) -> Result<()> {
     let key = intent.key();
     if !intent.client_has(client) {
-        return ack_frame(request_id);
+        return Ok(());
     }
     // Same gate as subscribe/history so a failed leave re-note cannot race
     // a history admission check (RC2.3).
@@ -343,7 +344,7 @@ pub(super) async fn unsubscribe_topic(
     let lock = topic_lock(state, &key).await;
     let _guard = lock.lock().await;
     if !intent.client_has(client) {
-        return ack_frame(request_id);
+        return Ok(());
     }
     intent.client_remove(client);
     let last = intent.forget(&state.reconnect).await;
@@ -355,22 +356,21 @@ pub(super) async fn unsubscribe_topic(
                 // Restore intent so reconnect still re-joins venue.
                 intent.note(&state.reconnect).await;
                 intent.client_insert(client);
-                return err_to_frame(request_id, intent.unsubscribe_failed_code(), e);
+                return Err(coded_error(intent.unsubscribe_failed_code(), e));
             }
         }
     }
     release_md_if_unused(state, client, &key).await;
-    ack_frame(request_id)
+    Ok(())
 }
 
-pub(super) async fn subscribe_pnl(
-    state: &GatewayState,
-    client: &mut ClientCtx,
-    request_id: u64,
-) -> Frame {
+pub(super) async fn subscribe_pnl<V: Venue + ?Sized + 'static>(
+    state: &HostState<V>,
+    client: &mut SessionCtx,
+) -> Result<()> {
     let key = pnl_key();
     if client.pnl {
-        return ack_frame(request_id);
+        return Ok(());
     }
     let lock = topic_lock(state, &key).await;
     let _guard = lock.lock().await;
@@ -382,7 +382,7 @@ pub(super) async fn subscribe_pnl(
             client.pnl = false;
             state.reconnect.forget_pnl().await;
             rollback_shared_topic(state, client, &key, had_forwarder).await;
-            return no_session_frame(request_id);
+            return Err(no_venue());
         };
         let session_guard = session.lock().await;
         let venue_err = match session_guard.ensure_pnl_plant().await {
@@ -394,10 +394,10 @@ pub(super) async fn subscribe_pnl(
             client.pnl = false;
             state.reconnect.forget_pnl().await;
             rollback_shared_topic(state, client, &key, had_forwarder).await;
-            return err_to_frame(request_id, "subscribe_pnl_failed", e);
+            return Err(coded_error("subscribe_pnl_failed", e));
         }
     }
-    ack_frame(request_id)
+    Ok(())
 }
 
 /// Release `client`'s PnL intent and, for the last holder, disconnect the PnL
@@ -406,11 +406,11 @@ pub(super) async fn subscribe_pnl(
 /// connection passes `false`. Same lock as `subscribe_pnl`: a first-peer join
 /// must not have its venue subscribe undone by a leaving peer that saw the count
 /// reach zero before it.
-pub(in crate::server) async fn leave_pnl(
-    state: &GatewayState,
-    client: &mut ClientCtx,
+pub(super) async fn leave_pnl<V: Venue + ?Sized + 'static>(
+    state: &HostState<V>,
+    client: &mut SessionCtx,
     rollback: bool,
-) -> Result<(), (&'static str, rithmic_host::Error)> {
+) -> std::result::Result<(), (&'static str, crate::Error)> {
     if !client.pnl {
         return Ok(());
     }
@@ -435,28 +435,27 @@ pub(in crate::server) async fn leave_pnl(
     Ok(())
 }
 
-pub(super) async fn disconnect_pnl(
-    state: &GatewayState,
-    client: &mut ClientCtx,
-    request_id: u64,
-) -> Frame {
+pub(super) async fn disconnect_pnl<V: Venue + ?Sized + 'static>(
+    state: &HostState<V>,
+    client: &mut SessionCtx,
+) -> Result<()> {
     if let Err((code, e)) = leave_pnl(state, client, true).await {
-        return err_to_frame(request_id, code, e);
+        return Err(coded_error(code, e));
     }
     let key = pnl_key();
     if client.subscribed.contains(&key) {
         client.drop_forwarder(&key);
         state.reconnect.remove_hub_interest(&key).await;
     }
-    ack_frame(request_id)
+    Ok(())
 }
 
 /// Order-plant notification streams (order updates / brackets): fanout + intent + restore.
 /// Anything this RPC notes / attaches must roll back on failure so Error never
 /// leaves a half-applied order+brackets intent.
-async fn rollback_order_plant_stream_introductions(
-    state: &GatewayState,
-    client: &mut ClientCtx,
+async fn rollback_order_plant_stream_introductions<V: Venue + ?Sized + 'static>(
+    state: &HostState<V>,
+    client: &mut SessionCtx,
     key: &SubKey,
     had_forwarder: bool,
     introduced_order: bool,
@@ -464,7 +463,7 @@ async fn rollback_order_plant_stream_introductions(
 ) {
     if introduced_brackets {
         client.brackets = false;
-        client.sync_kinds(&crate::convert::order_key());
+        client.sync_kinds(&crate::fanout::order_key());
         let _ = state.reconnect.forget_brackets().await;
     }
     if !introduced_order {
@@ -488,15 +487,15 @@ async fn rollback_order_plant_stream_introductions(
     rollback_shared_topic(state, client, key, had_forwarder).await;
 }
 
-async fn fail_order_plant_stream(
-    state: &GatewayState,
-    client: &mut ClientCtx,
+async fn fail_order_plant_stream<V: Venue + ?Sized + 'static>(
+    state: &HostState<V>,
+    client: &mut SessionCtx,
     key: &SubKey,
     had_forwarder: bool,
     introduced_order: bool,
     introduced_brackets: bool,
-    frame: Frame,
-) -> Frame {
+    outcome: Result<()>,
+) -> Result<()> {
     rollback_order_plant_stream_introductions(
         state,
         client,
@@ -506,15 +505,15 @@ async fn fail_order_plant_stream(
         introduced_brackets,
     )
     .await;
-    frame
+    outcome
 }
 
 /// No venue unsubscribe for brackets. When the last brackets peer leaves and
 /// order peers remain, disconnect + `subscribe_order_updates` to drop brackets,
 /// then tell the order peers with an order gap so they reconcile the window.
-pub(in crate::server) async fn reseat_order_plant_without_brackets(
-    state: &GatewayState,
-) -> Result<(), rithmic_host::Error> {
+pub(crate) async fn reseat_order_plant_without_brackets<V: Venue + ?Sized + 'static>(
+    state: &HostState<V>,
+) -> Result<()> {
     let Some(session) = &state.session else {
         return Ok(());
     };
@@ -526,10 +525,10 @@ pub(in crate::server) async fn reseat_order_plant_without_brackets(
     // Order events in the window between the disconnect and the new subscription
     // were not delivered: every order peer reconciles on this gap (the count of
     // missed events is unknown, hence 0).
-    crate::server::publish_plant_event(
+    crate::fanout::publish_plant_event(
         &state.hub,
-        rithmic_host::dto::PlantEvent::Gap(rithmic_host::GapDto {
-            stream: rithmic_host::Stream::Order,
+        crate::dto::PlantEvent::Gap(crate::GapDto {
+            stream: crate::Stream::Order,
             skipped: 0,
         }),
     )
@@ -539,33 +538,32 @@ pub(in crate::server) async fn reseat_order_plant_without_brackets(
 
 /// Drop this client's brackets flag/intent. Returns whether this was the last
 /// brackets peer (caller may need [`reseat_order_plant_without_brackets`]).
-pub(in crate::server) async fn clear_client_brackets(
-    state: &GatewayState,
-    client: &mut ClientCtx,
+pub(super) async fn clear_client_brackets<V: Venue + ?Sized + 'static>(
+    state: &HostState<V>,
+    client: &mut SessionCtx,
 ) -> bool {
     if !client.brackets {
         return false;
     }
     client.brackets = false;
-    client.sync_kinds(&crate::convert::order_key());
+    client.sync_kinds(&crate::fanout::order_key());
     state.reconnect.forget_brackets().await
 }
 
-pub(super) async fn subscribe_order_plant_stream(
-    state: &GatewayState,
-    client: &mut ClientCtx,
-    request_id: u64,
+pub(super) async fn subscribe_order_plant_stream<V: Venue + ?Sized + 'static>(
+    state: &HostState<V>,
+    client: &mut SessionCtx,
     denied_msg: &str,
     want_brackets: bool,
-) -> Frame {
+) -> Result<()> {
     if !state.gates.trading_enabled {
-        return error_frame(request_id, "trading_disabled", denied_msg);
+        return Err(gate_error("trading_disabled", denied_msg));
     }
 
     let need_order = !client.order;
     let need_brackets = want_brackets && !client.brackets;
     if !need_order && !need_brackets {
-        return ack_frame(request_id);
+        return Ok(());
     }
 
     let key = order_key();
@@ -589,7 +587,7 @@ pub(super) async fn subscribe_order_plant_stream(
     }
     if need_brackets {
         client.brackets = true;
-        client.sync_kinds(&crate::convert::order_key());
+        client.sync_kinds(&crate::fanout::order_key());
     }
 
     let Some(session) = &state.session else {
@@ -600,12 +598,12 @@ pub(super) async fn subscribe_order_plant_stream(
             had_forwarder,
             need_order,
             need_brackets,
-            no_session_frame(request_id),
+            Err(no_venue()),
         )
         .await;
     };
     if !first_order && !first_brackets {
-        return ack_frame(request_id);
+        return Ok(());
     }
 
     let session_guard = session.lock().await;
@@ -619,7 +617,7 @@ pub(super) async fn subscribe_order_plant_stream(
                 had_forwarder,
                 need_order,
                 need_brackets,
-                err_to_frame(request_id, "subscribe_order_updates_failed", e),
+                Err(coded_error("subscribe_order_updates_failed", e)),
             )
             .await;
         }
@@ -634,13 +632,13 @@ pub(super) async fn subscribe_order_plant_stream(
                 had_forwarder,
                 need_order,
                 need_brackets,
-                err_to_frame(request_id, "subscribe_bracket_updates_failed", e),
+                Err(coded_error("subscribe_bracket_updates_failed", e)),
             )
             .await;
         }
     }
 
-    ack_frame(request_id)
+    Ok(())
 }
 
 /// Release `client`'s order and bracket intents. Brackets and order share one
@@ -648,11 +646,11 @@ pub(super) async fn subscribe_order_plant_stream(
 /// brackets holder leaves while order holders remain, the plant is re-seated
 /// order-only (the venue has no brackets unsubscribe). `rollback` as for
 /// [`leave_pnl`]. A failed re-seat drops readiness and asks for a full rebuild.
-pub(in crate::server) async fn leave_order(
-    state: &GatewayState,
-    client: &mut ClientCtx,
+pub(super) async fn leave_order<V: Venue + ?Sized + 'static>(
+    state: &HostState<V>,
+    client: &mut SessionCtx,
     rollback: bool,
-) -> Result<(), (&'static str, rithmic_host::Error)> {
+) -> std::result::Result<(), (&'static str, crate::Error)> {
     if !client.order && !client.brackets {
         return Ok(());
     }
@@ -675,7 +673,7 @@ pub(in crate::server) async fn leave_order(
                         if had_brackets {
                             state.reconnect.note_brackets().await;
                             client.brackets = true;
-                            client.sync_kinds(&crate::convert::order_key());
+                            client.sync_kinds(&crate::fanout::order_key());
                         }
                     }
                     return Err(("disconnect_order_failed", e));
@@ -693,29 +691,30 @@ pub(in crate::server) async fn leave_order(
     Ok(())
 }
 
-pub(super) async fn disconnect_order(
-    state: &GatewayState,
-    client: &mut ClientCtx,
-    request_id: u64,
-) -> Frame {
+pub(super) async fn disconnect_order<V: Venue + ?Sized + 'static>(
+    state: &HostState<V>,
+    client: &mut SessionCtx,
+) -> Result<()> {
     if let Err((code, e)) = leave_order(state, client, true).await {
-        return err_to_frame(request_id, code, e);
+        return Err(coded_error(code, e));
     }
     let key = order_key();
     if client.subscribed.contains(&key) {
         client.drop_forwarder(&key);
         state.reconnect.remove_hub_interest(&key).await;
     }
-    ack_frame(request_id)
+    Ok(())
 }
 
-pub(super) async fn reset_ticker_plant(state: &GatewayState, request_id: u64) -> Frame {
+pub(super) async fn reset_ticker_plant<V: Venue + ?Sized + 'static>(
+    state: &HostState<V>,
+) -> Result<()> {
     let Some(session) = &state.session else {
-        return no_session_frame(request_id);
+        return Err(no_venue());
     };
     let guard = session.lock().await;
     if let Err(e) = guard.reset_ticker().await {
-        return err_to_frame(request_id, "reset_ticker_plant_failed", e);
+        return Err(coded_error("reset_ticker_plant_failed", e));
     }
     // The recreated ticker plant carries no subscriptions: re-issue every
     // remembered market-data intent through the same pass a plant rebuild uses
@@ -723,19 +722,18 @@ pub(super) async fn reset_ticker_plant(state: &GatewayState, request_id: u64) ->
     // order ride their own plants and are untouched. On any failure fall back
     // to the full rebuild, which re-issues every intent, rather than leave the
     // stream dark.
-    let pass = crate::server::pump::restore_pass(&*guard, &state.reconnect, None, false).await;
+    let pass = crate::pump::restore_pass(&*guard, &state.reconnect, None, false).await;
     if !pass.failed_md.is_empty() {
         drop(guard);
         state.request_reconnect();
-        return error_frame(
-            request_id,
+        return Err(gate_error(
             "reset_ticker_plant_restore_failed",
             &format!(
                 "{} of {} market-data joins failed after the ticker reset",
                 pass.failed_md.len(),
                 pass.attempted
             ),
-        );
+        ));
     }
-    ack_frame(request_id)
+    Ok(())
 }

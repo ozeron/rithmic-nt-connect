@@ -1,4 +1,4 @@
-//! `FakeVenue`: a scripted in-memory [`Session`] for testing the gateway layer
+//! `FakeVenue`: a scripted in-memory [`Venue`] for testing the gateway layer
 //! without Rithmic (feature `testing`; never part of the shipped wheel).
 //!
 //! It models only what the gateway layer depends on: events delivered per
@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::backend::{AccountTriple, ModifyOrder, PlaceBracketOrder, PlaceOrder, Session};
+use crate::backend::{AccountTriple, ModifyOrder, PlaceBracketOrder, PlaceOrder, Venue};
 use crate::dto::{
     AccountRmsInfoDto, FillHistoryDto, FrontMonthDto, HistoryBarDto, HistoryTickDto,
     OrderNotificationDto, PlantEvent, ProductRmsInfoDto, ReferenceDataDto, TimeBarProbeRow,
@@ -281,7 +281,7 @@ impl FakeVenue {
 }
 
 #[async_trait]
-impl Session for FakeVenue {
+impl Venue for FakeVenue {
     async fn connect(&self) -> Result<()> {
         let mut state = self.enter("connect", "")?;
         state.connected = true;
@@ -335,6 +335,7 @@ impl Session for FakeVenue {
     }
 
     async fn disconnect_order_plant(&self) -> Result<()> {
+        self.delay("disconnect_order_plant").await;
         let mut state = self.enter("disconnect_order_plant", "")?;
         state.order_plant = false;
         state.order_closed = true;

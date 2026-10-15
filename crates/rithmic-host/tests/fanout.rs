@@ -1,15 +1,12 @@
 //! Integration tests: refcounted fan-out + bounded overflow.
 
 use bytes::Bytes;
-use rithmic_gateway::subscriptions::{
-    ClientId, ClientQueue, ClientQueueError, Fan, FanoutHub, Kind, SubKey,
+use rithmic_host::fanout::{
+    ClientQueue, ClientQueueError, Fan, FanoutHub, Kind, SessionId, SubKey,
 };
 
 fn fan(bytes: Bytes) -> Fan {
-    Fan {
-        kind: Kind::Any,
-        bytes,
-    }
+    Fan::encoded(Kind::Any, bytes)
 }
 
 #[tokio::test]
@@ -34,11 +31,11 @@ async fn publish_reaches_subscriber() {
     };
     assert!(hub.add_interest(key.clone()).await);
     let rx = hub.subscribe_receiver(&key).await.expect("rx");
-    let mut q = ClientQueue::from_receiver(ClientId::new(), rx);
+    let mut q = ClientQueue::from_receiver(SessionId::new(), rx);
     let n = hub.publish(&key, fan(Bytes::from_static(b"tick"))).await;
     assert_eq!(n, 1);
     let got = q.recv().await.expect("msg");
-    assert_eq!(&got.bytes[..], b"tick");
+    assert_eq!(&got.encoded_with(|_| unreachable!())[..], b"tick");
 }
 
 #[tokio::test]
@@ -50,7 +47,7 @@ async fn lagging_client_gets_overflow() {
     };
     assert!(hub.add_interest(key.clone()).await);
     let rx = hub.subscribe_receiver(&key).await.expect("rx");
-    let mut q = ClientQueue::from_receiver(ClientId::new(), rx);
+    let mut q = ClientQueue::from_receiver(SessionId::new(), rx);
     // Flood beyond capacity without receiving.
     for i in 0..16u8 {
         let _ = hub.publish(&key, fan(Bytes::from(vec![i]))).await;
@@ -104,14 +101,28 @@ async fn gap_frames_reach_every_symbol_topic_but_not_sentinels() {
     let mut queues = Vec::new();
     for k in [&nq, &ym, &pnl] {
         let rx = hub.subscribe_receiver(k).await.expect("rx");
-        queues.push(ClientQueue::from_receiver(ClientId::new(), rx));
+        queues.push(ClientQueue::from_receiver(SessionId::new(), rx));
     }
     assert_eq!(
         hub.publish_symbols(fan(Bytes::from_static(b"gap"))).await,
         2
     );
-    assert_eq!(&queues[0].recv().await.unwrap().bytes[..], b"gap");
-    assert_eq!(&queues[1].recv().await.unwrap().bytes[..], b"gap");
+    assert_eq!(
+        &queues[0]
+            .recv()
+            .await
+            .unwrap()
+            .encoded_with(|_| unreachable!())[..],
+        b"gap"
+    );
+    assert_eq!(
+        &queues[1]
+            .recv()
+            .await
+            .unwrap()
+            .encoded_with(|_| unreachable!())[..],
+        b"gap"
+    );
     let sentinel =
         tokio::time::timeout(std::time::Duration::from_millis(50), queues[2].recv()).await;
     assert!(

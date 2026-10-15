@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use rithmic_gateway::reconnect::{ReconnectController, TimeBarIntent};
-use rithmic_gateway::subscriptions::{FanoutHub, SubKey};
+use rithmic_host::fanout::{FanoutHub, SubKey};
+use rithmic_host::intents::{ReconnectController, TimeBarIntent};
 
 #[tokio::test]
 async fn restore_after_drop_replays_keys() {

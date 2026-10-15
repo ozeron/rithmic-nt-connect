@@ -1,6 +1,8 @@
 //! `rithmic-gateway` — own one Rithmic login; serve plant-semantic IPC on a
 //! unix socket. See `docs/references/ops-runbook.md`.
 
+mod root_config;
+
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -9,7 +11,6 @@ use rithmic_gateway::idle_exit::parse_idle_exit_sec;
 use rithmic_gateway::listen::{bind_unix, default_unix_path, ListenEndpoint};
 use rithmic_gateway::server::{run_gateway, Fingerprint, GatewayParams, SessionHandle};
 use rithmic_gateway::singleton::{SessionLock, STARTUP_LOCK_GRACE};
-use rithmic_gateway::subscriptions::ParentGates;
 use rithmic_host::Env;
 use rithmic_host::{PlantSet, Session};
 use rithmic_plants::{RithmicVenue, SessionConfig};
@@ -130,7 +131,7 @@ async fn run() -> Result<(), String> {
 
     // The parent's own gates, enforced in the session as well as at dispatch, so
     // no caller of this session can bypass them.
-    let gates = ParentGates::from_env();
+    let gates = root_config::gates();
     let session = Arc::new(
         RithmicVenue::new(cfg, plants).with_gates(gates.trading_enabled, gates.cancel_all_enabled),
     );
@@ -156,9 +157,12 @@ async fn run() -> Result<(), String> {
         },
         expected_auth_token,
         idle_policy,
-        gates,
-        session: SessionHandle::new(session),
-        timing: rithmic_gateway::server::pump::PumpTiming::default(),
+        host: rithmic_host::SessionHost::from_connected(
+            SessionHandle::new(session),
+            gates,
+            root_config::timing(),
+            rithmic_host::HistoryPolicy::RefuseUnderLiveMd,
+        ),
     })
     .await
 }

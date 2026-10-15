@@ -1,4 +1,4 @@
-//! `RithmicVenue`: in-process plants behind the [`Session`] trait.
+//! `RithmicVenue`: in-process plants behind the [`Venue`] trait.
 //!
 //! Wraps one [`Plants`] and owns the order-operation safety that used
 //! to live in the PyO3 class: an in-flight order op blocks `disconnect`, an
@@ -21,7 +21,7 @@ use crate::session::{
     load_product_rms_info_on, modify_order_on, place_bracket_order_on, place_order_on, BracketLeg,
     Handles, Plants,
 };
-use rithmic_host::backend::{AccountTriple, ModifyOrder, PlaceBracketOrder, PlaceOrder, Session};
+use rithmic_host::backend::{AccountTriple, ModifyOrder, PlaceBracketOrder, PlaceOrder, Venue};
 use rithmic_host::dto::{
     AccountRmsInfoDto, FillHistoryDto, FrontMonthDto, HistoryBarDto, HistoryTickDto,
     OrderNotificationDto, PlantEvent, ProductRmsInfoDto, ReferenceDataDto, TimeBarProbeRow,
@@ -250,7 +250,7 @@ fn account_triple(a: &rithmic_rs::RithmicAccount) -> AccountTriple {
 }
 
 #[async_trait]
-impl Session for RithmicVenue {
+impl Venue for RithmicVenue {
     async fn connect(&self) -> Result<()> {
         let (_reset, mut inner) = self.bring_up().await;
         let result = inner.connect().await;

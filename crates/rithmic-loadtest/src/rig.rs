@@ -68,12 +68,15 @@ impl Rig {
             },
             expected_auth_token: String::new(),
             idle_policy: IdleExitPolicy::Never,
-            gates: ParentGates {
-                trading_enabled: trading,
-                cancel_all_enabled: false,
-            },
-            session: SessionHandle::new(fake.clone()),
-            timing: rithmic_gateway::server::pump::PumpTiming::default(),
+            host: rithmic_host::SessionHost::from_connected(
+                SessionHandle::new(fake.clone()),
+                ParentGates {
+                    trading_enabled: trading,
+                    cancel_all_enabled: false,
+                },
+                Default::default(),
+                rithmic_host::HistoryPolicy::RefuseUnderLiveMd,
+            ),
         };
         let server = tokio::spawn(async move {
             let _ = run_gateway(params).await;

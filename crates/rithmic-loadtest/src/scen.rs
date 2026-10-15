@@ -577,6 +577,7 @@ pub async fn run_rpc_isolation(slow_secs: f64) -> Report {
 /// publish), with `receivers` attached but not reading.
 pub async fn run_alloc(receivers: usize) -> Report {
     let hub = Arc::new(FanoutHub::new(1024));
+    hub.set_encoder(rithmic_gateway::server::encode_plant_event);
     let key = SubKey {
         symbol: SYMBOL.into(),
         exchange: EXCHANGE.into(),
