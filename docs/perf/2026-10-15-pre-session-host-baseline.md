@@ -167,3 +167,16 @@ JSON object per line, with all fields preserved.
 {"scenario":"alloc_publish_1sub","params":{"events":100000,"receivers":1},"duration_s":0.0,"sent":100000,"conns":[],"min_delivered_ratio":0.0,"min_throughput_eps":0.0,"latency":{"count":0,"p50_us":0,"p99_us":0,"p999_us":0,"max_us":0},"order_latency":null,"order_idle_latency":null,"peak_rss_kb":67152,"rss_samples_kb":[],"unsignalled_loss":0,"allocs_per_event":1.0,"alloc_bytes_per_event":51.83488,"notes":[]}
 {"scenario":"alloc_publish_4sub","params":{"events":100000,"receivers":4},"duration_s":0.0,"sent":100000,"conns":[],"min_delivered_ratio":0.0,"min_throughput_eps":0.0,"latency":{"count":0,"p50_us":0,"p99_us":0,"p999_us":0,"max_us":0},"order_latency":null,"order_idle_latency":null,"peak_rss_kb":67152,"rss_samples_kb":[],"unsignalled_loss":0,"allocs_per_event":1.0,"alloc_bytes_per_event":51.83488,"notes":[]}
 ```
+
+## Group 2 interleaved A/B (2026-10-15)
+
+Track A reported loaded-order p99 0.94–1.02 ms against this baseline's 0.621 ms. That baseline was taken under different machine load, so both release binaries were built and run alternately: `orders_flood_slow_rpc` and `stalled_consumer`, 3 rounds each, base = `878443b`, A = `3207699`, load average 4.6–10.5. Medians of p99:
+
+| Scenario / metric | base | group 2 | ratio |
+|---|---:|---:|---:|
+| orders_flood_slow_rpc `order_latency.p99_us` | 924 | 931 | 1.01 |
+| orders_flood_slow_rpc `order_idle_latency.p99_us` | 212 | 199 | 0.94 |
+| orders_flood_slow_rpc `latency.p99_us` | 1284 | 1190 | 0.93 |
+| stalled_consumer `latency.p99_us` | 1257 | 518 | 0.41 |
+
+No regression from group 2. The earlier gap was machine noise between the two runs. Comparisons should always be interleaved runs.
