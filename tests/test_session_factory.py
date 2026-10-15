@@ -255,23 +255,14 @@ def test_flocked_session_disconnect_is_refcounted() -> None:
     assert inner.disconnects == 1
 
 
-def test_flocked_session_reset_ticker_is_refcount_blind() -> None:
-    """The data resync must actually recreate the ticker plant while others
-    hold the session (a refcounted disconnect would be a no-op)."""
+def test_flocked_session_forwards_host_gates() -> None:
     from rithmic_nt_connect.session import _FlockedDirectSession
 
-    class _Inner(WireSessionStub):
-        def __init__(self) -> None:
-            self.resets = 0
-
-        def reset_ticker(self) -> None:
-            self.resets += 1
-
-    inner = _Inner()
+    inner = WireSessionStub()
     wrapped = _FlockedDirectSession(inner, lock=object())
-    wrapped.acquire()
-    wrapped.reset_ticker()
-    assert inner.resets == 1
+    gates = wrapped.open_gates(trading=False, cancel_all=True)
+    assert not gates.trading
+    assert gates.cancel_all
 
 
 def test_flocked_session_last_disconnect_releases_flock(

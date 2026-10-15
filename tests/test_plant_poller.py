@@ -4,6 +4,7 @@ import asyncio
 from typing import Any
 from unittest.mock import Mock
 
+import pytest
 from rithmic_nt_connect.polling import PlantPoller
 
 
@@ -177,3 +178,108 @@ def test_many_unreadable_events_in_one_batch_recover_once() -> None:
     assert asyncio.run(poller.poll_iteration(0.05, 0)) is not None
     assert handled == ["open"]
     assert recoveries == [["open"]], "one recovery, after the batch was handled"
+
+
+def test_closed_exec_stream_stops_cleanly_without_resync() -> None:
+    from rithmic_nt_connect.errors import ChannelClosedError
+
+    read = Mock(side_effect=ChannelClosedError("order"))
+    resync = Mock()
+    disarm = Mock()
+    log = Mock()
+    poller = PlantPoller(
+        name="order",
+        poll_fn=read,
+        on_event=Mock(),
+        on_resync=resync,
+        on_resync_failed=disarm,
+        log=log,
+    )
+    asyncio.run(poller.run())
+    read.assert_called_once()
+    resync.assert_not_called()
+    disarm.assert_called_once()
+    log.error.assert_called_once()
+
+
+def test_exec_transient_poll_error_continues_to_next_event() -> None:
+    from rithmic_nt_connect.errors import ChannelClosedError
+
+    event = {"type": "order_notification", "status": "open"}
+    read = Mock(
+        side_effect=[ValueError("decode failed"), event, ChannelClosedError("order")]
+    )
+    dispatch = Mock()
+    log = Mock()
+    poller = PlantPoller(
+        name="order",
+        poll_fn=read,
+        on_event=dispatch,
+        on_resync=Mock(),
+        log=log,
+    )
+    asyncio.run(poller.run())
+    dispatch.assert_called_once_with(event)
+    log.warning.assert_called_once()
+    log.error.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["not_connected", "eof", "shutting_down", "transport_reset", "frame_too_large"],
+)
+def test_gateway_connection_loss_retries_without_resync_or_latching(
+    code: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from rithmic_nt_connect.errors import (
+        ChannelClosedError,
+        GatewayError,
+        is_terminal_poll_error,
+    )
+
+    # Match to_py_err: PyO3's exception constructor does not populate attributes.
+    error = GatewayError(f"{code}: connection closed; not connected")
+    error.code = code
+    error.message = "connection closed; not connected"
+    assert not is_terminal_poll_error(error)
+
+    event = {"type": "order_notification", "status": "open"}
+    read = Mock(side_effect=[error] * 8 + [event, ChannelClosedError("order")])
+    dispatch = Mock()
+    resync = Mock()
+    latch = Mock()
+    log = Mock()
+    delays: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    poller = PlantPoller(
+        name="order",
+        poll_fn=read,
+        on_event=dispatch,
+        on_resync=resync,
+        on_latch=latch,
+        log=log,
+    )
+    asyncio.run(poller.run())
+    dispatch.assert_called_once_with(event)
+    resync.assert_not_called()
+    latch.assert_not_called()
+    assert log.warning.call_count == 8
+    log.error.assert_called_once()
+    assert delays == [0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 2.0, 2.0]
+
+
+def test_lag_and_generic_channel_errors_are_not_terminal() -> None:
+    from rithmic_nt_connect.errors import (
+        ChannelError,
+        ChannelLaggedError,
+        is_terminal_poll_error,
+    )
+
+    assert not is_terminal_poll_error(ChannelLaggedError("ticker:3"))
+    assert not is_terminal_poll_error(ChannelError("channel dropped"))
+    assert not is_terminal_poll_error(RuntimeError("channel lagged: ticker"))
+    assert not is_terminal_poll_error(ValueError("decode failed"))

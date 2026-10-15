@@ -46,7 +46,7 @@ from nautilus_trader.model.identifiers import ClientId, InstrumentId, TradeId, V
 from nautilus_trader.model.objects import Quantity
 
 if TYPE_CHECKING:
-    from rithmic_nt_connect.transport import RecoveryFailed, TransportDown
+    from rithmic_nt_connect.transport import Interrupted, RecoveryFailed
 
 from rithmic_nt_connect._convert import (
     ConvertError,
@@ -58,7 +58,10 @@ from rithmic_nt_connect._convert import (
 from rithmic_nt_connect._prices import price_from_wire
 from rithmic_nt_connect.config import RithmicDataClientConfig
 from rithmic_nt_connect.constants import ADAPTER_NAME, VENUE
-from rithmic_nt_connect.errors import is_reconnectable_poll_error
+from rithmic_nt_connect.errors import (
+    is_reconnectable_poll_error,
+    is_terminal_poll_error,
+)
 from rithmic_nt_connect.providers import RithmicInstrumentProvider
 from rithmic_nt_connect.recovery_bridge import TransportRecoveryBridge
 from rithmic_nt_connect.session import WireSession
@@ -560,23 +563,8 @@ async def resync_ticker_session(
     subscriptions: set[tuple[str, str]],
     book_subscriptions: set[tuple[str, str]],
     bar_subscriptions: set[tuple[str, str, int, int]] | None = None,
-    *,
-    reset: bool = True,
 ) -> None:
-    """Reset the ticker plant (direct only), then replay ticker/book/bar intent.
-
-    ``session.reset_ticker`` is refcount-blind: a channel-error resync must
-    actually recreate the ticker plant even when the session is shared with
-    the exec client, where ``disconnect`` alone is a holder-refcounted no-op.
-    Only a direct session resets: it owns its plants, and the reset touches the
-    ticker plant alone (PnL/order untouched). A gateway client never does, since
-    the parent plant is shared by every attached client and the parent restores
-    its own intents when it reconnects; a client-side reset would re-subscribe
-    for everyone. ``reset=False`` is the gap path: the stream dropped events for
-    this consumer but the plant is healthy, so only the intent is replayed.
-    """
-    if reset and getattr(session, "is_direct", True):
-        await asyncio.to_thread(session.reset_ticker)
+    """Replay only this consumer's ticker, book and bar intents after a gap."""
     await replay_subscription_intent(
         session, subscriptions, book_subscriptions, bar_subscriptions
     )
@@ -831,7 +819,6 @@ class RithmicDataClient(LiveMarketDataClient):
         self._history_poll_task: asyncio.Task | None = None
         self._resync_lock = asyncio.Lock()
         self._resync_generation = 0
-        self._reset_generation = 0
         self._recovery = self._build_recovery()
         # One-sided BestBidOffer merge state, keyed by symbol[:exchange].
         self._bbo_state: dict[str, dict[str, Any]] = {}
@@ -914,37 +901,36 @@ class RithmicDataClient(LiveMarketDataClient):
 
     def _build_recovery(self) -> TransportRecoveryBridge:
         return TransportRecoveryBridge(
-            label="L3 MD replay",
-            task_name="rithmic_l3_md_replay",
+            label="MD reconciliation",
+            task_name="rithmic_md_reconcile",
             log=lambda: self._log,
             get_loop=lambda: getattr(self, "_loop", None),
             spawn=lambda loop, coro, name: loop.create_task(coro, name=name),
-            restore=self._replay_md_after_transport_up,
+            restore=self._reconcile_md_after_resumed,
             on_down=self._on_transport_down,
             on_failed=self._on_transport_recovery_failed,
         )
 
-    def _on_transport_down(self, event: TransportDown) -> None:
+    def _on_transport_down(self, event: Interrupted) -> None:
         self._log.warning(
-            f"gateway TRANSPORT_DOWN gen={event.gen} "
-            f"fault={event.fault.kind.value}; pausing MD trust"
+            f"session Interrupted generation={event.generation} "
+            f"cause={event.cause}; pausing MD trust"
         )
 
     def _on_transport_recovery_failed(self, event: RecoveryFailed) -> None:
         self._log.error(
-            f"gateway TRANSPORT recovery failed gen={event.gen} "
+            f"session recovery failed gen={event.generation} "
             f"attempts={event.attempts}: {event.cause}"
         )
 
-    async def _replay_md_after_transport_up(
-        self, generation: int, attempt: int
-    ) -> None:
-        """Transport is LIVE; replay ticker/book/bar intents (L0-L2)."""
-        await self._resync_ticker_subscription()
+    async def _reconcile_md_after_resumed(self, generation: int, attempt: int) -> None:
+        """Intents are live again; discard stale local market-data state only."""
+        self._bbo_state.clear()
+        self._books.reset()
         if self._bar_types:
             self._ensure_history_poll_task()
         self._log.warning(
-            f"L3 MD replayed subscriptions (generation={generation}, attempt={attempt})"
+            f"MD reconciled local state (generation={generation}, attempt={attempt})"
         )
 
     async def _disconnect(self) -> None:
@@ -959,26 +945,13 @@ class RithmicDataClient(LiveMarketDataClient):
                 setattr(self, attr, None)
         await asyncio.to_thread(self._session.disconnect)
 
-    async def _resync_ticker_subscription(self, *, reset: bool = True) -> None:
+    async def _resync_ticker_subscription(self) -> None:
         start_gen = self._resync_generation
-        start_resets = getattr(self, "_reset_generation", 0)
         async with self._resync_lock:
-            # Another resync finished while this waited: skip, unless this one needs a
-            # plant reset and that one did not (a gap resync must not stand in for a
-            # channel-error reset).
-            if self._resync_generation != start_gen and (
-                not reset or getattr(self, "_reset_generation", 0) != start_resets
-            ):
+            if self._resync_generation != start_gen:
                 return
-            # Drop one-sided BBO accumulators: after a plant reset the venue
-            # re-sends fresh bid/ask sides, and merging them with pre-reset
-            # state would publish a QuoteTick mixing stale + fresh sides. A
-            # half-received book update will not be completed either.
             self._bbo_state.clear()
             self._books.reset()
-            ensure = getattr(self._session, "ensure_transport_live", None)
-            if callable(ensure):
-                await asyncio.to_thread(ensure)
             ticker_keys = set(getattr(self, "_ticker_intents", {}).keys())
             if not ticker_keys:
                 ticker_keys = set(getattr(self, "_subscriptions", set()))
@@ -987,11 +960,8 @@ class RithmicDataClient(LiveMarketDataClient):
                 ticker_keys,
                 set(self._book_subscriptions),
                 bar_resync_subscriptions(self._bar_types),
-                reset=reset,
             )
             self._resync_generation += 1
-            if reset:
-                self._reset_generation = getattr(self, "_reset_generation", 0) + 1
 
     async def _poll_channel_loop(
         self,
@@ -1006,7 +976,8 @@ class RithmicDataClient(LiveMarketDataClient):
         ``next_events`` blocks inside the extension (GIL released) until an event
         arrives or the wait elapses, so there is no idle sleep and a tick is handled
         the moment it lands. A ``gap`` event (the stream dropped events for a slow
-        consumer) is handled exactly like a channel error: resync the subscription.
+        consumer) replays only this client's intent. Closed sessions stop cleanly;
+        other poll errors retry with bounded backoff.
         """
         backoff = 0.05
         while True:
@@ -1018,30 +989,29 @@ class RithmicDataClient(LiveMarketDataClient):
                     self._session.next_events, stream, _POLL_BATCH, _POLL_WAIT_MS
                 )
             except Exception as exc:
-                if not _reconnectable_poll_error(exc):
-                    self._log.exception(f"{label} poll transient error", exc)
-                    await asyncio.sleep(0.1)
-                    continue
-                self._log.warning(f"{label} poll reconnect: {exc}")
-                backoff = await self._resync_channel(label, backoff)
+                if is_terminal_poll_error(exc):
+                    self._log.error(f"{label} stream failed or session closed: {exc}")
+                    return
+                self._log.warning(f"{label} poll transient error: {exc}")
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 2.0)
                 continue
+            backoff = 0.05
             for event in events:
                 if event.get("type") == "gap":
                     self._log.warning(
                         f"{label} stream dropped {event.get('skipped')} events; "
                         "resyncing"
                     )
-                    backoff = await self._resync_channel(label, backoff, reset=False)
+                    backoff = await self._resync_channel(label, backoff)
                     continue
                 self._dispatch_event(event)
 
-    async def _resync_channel(
-        self, label: str, backoff: float, *, reset: bool = True
-    ) -> float:
-        """Resubscribe after a channel error or a gap; returns the next backoff."""
+    async def _resync_channel(self, label: str, backoff: float) -> float:
+        """Replay consumer intent after a gap; returns the next backoff."""
         try:
-            await self._resync_ticker_subscription(reset=reset)
-            self._log.warning(f"{label} subscription resynced after channel error")
+            await self._resync_ticker_subscription()
+            self._log.warning(f"{label} subscription resynced after gap")
             backoff = 0.05
         except Exception as resync_exc:
             self._log.warning(f"{label} subscription resync failed: {resync_exc}")
