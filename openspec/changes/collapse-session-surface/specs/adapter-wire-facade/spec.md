@@ -3,7 +3,7 @@
 ### Requirement: One PyO3 session class for both modes
 The extension SHALL expose a single `Session` class that fronts either backend according to `connect_mode`. `create_session` SHALL return that extension object directly, with no Python wrapper class around it. `WireSession` SHALL be an alias of the extension `Session` type, not a hand-maintained protocol. The PyO3 forwards for uniform RPCs and the `Session` section of `_lib.pyi` SHALL be generated from one list in the extension. A test SHALL fail when the checked-in stub differs from a fresh generation.
 
-Transport-event subscription SHALL accept multiple listeners per session, each cancellable on its own. Listeners SHALL be invoked on the extension's dedicated delivery thread, never on a runtime worker. They SHALL be held until cancelled, and every listener SHALL be cancelled when the session's last holder disconnects.
+Session-event subscription (`subscribe_session_events`) SHALL accept multiple listeners per session, each cancellable on its own, in both modes, with no Python-side fan-out. Listeners SHALL be invoked on the extension's dedicated delivery thread, never on a runtime worker. They SHALL be held until cancelled, and every listener SHALL be cancelled when the session disconnects.
 
 #### Scenario: Data client unchanged across modes
 - **WHEN** `RithmicDataClient` runs against a direct session and against a gateway session
@@ -15,15 +15,15 @@ Transport-event subscription SHALL accept multiple listeners per session, each c
 
 #### Scenario: No Python session wrapper
 - **WHEN** the change is complete
-- **THEN** `_FlockedDirectSession`, `_RustGatewaySession` and `ensure_connected` SHALL NOT exist, and `create_session` SHALL return an instance of `rithmic_nt_connect._lib.Session`
+- **THEN** `_FlockedDirectSession`, `_RustGatewaySession`, `ensure_connected` and `_connect_once` SHALL NOT exist, and `create_session` SHALL return an instance of `rithmic_nt_connect._lib.Session`
 
 #### Scenario: Stale generated stub
 - **WHEN** an entry is added to the extension's forward list and `_lib.pyi` is not regenerated
 - **THEN** the stub-freshness test SHALL fail
 
-#### Scenario: Two clients listen for transport events
-- **WHEN** the data and exec clients both subscribe to transport events on one gateway session and the data client cancels its subscription
-- **THEN** the exec client SHALL keep receiving `down` / `up` / `recovery_failed` events
+#### Scenario: Two clients listen for session events
+- **WHEN** the data and exec clients both subscribe to session events on one session and the data client cancels its subscription
+- **THEN** the exec client SHALL keep receiving `Interrupted` / `Resumed` / `RecoveryFailed` events
 
 #### Scenario: Listener may block on the session
 - **WHEN** a transport listener makes a blocking session call

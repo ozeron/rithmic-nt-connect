@@ -1,5 +1,7 @@
 ## Context
 
+> **Rebased onto `unify-session-host` (2026-10-15).** The extension-owned registry, holders and flock (D2), multi-listener session events (D3, now `subscribe_session_events`) and `Session.fake` landed there. This change keeps D1 (delete the wrappers, which are now forwarding only), D4 (`next_events` only), D5 (one argument name), D6 (typed records) and D7 (generated forwards and stub). Type names in the text below predate the rename: `DirectSession` → `RithmicVenue`, `FakeSession` → `FakeVenue`, `GatewaySession` → `RemoteSession`.
+
 An independent review (2026-10-15) checked the first draft of this change against the code. It found that only part of the "13 copies" is mechanical:
 
 - **Real behaviour (stays hand-written):**

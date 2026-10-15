@@ -107,5 +107,5 @@ Agents run in the shared checkout on branch `feat/unify-session-host`. Each agen
   - recovery: the host restores, consumers only reconcile
 - [x] 7.3 Update `crates/README.md`: the crate table, the dependency graph and an old → new name table.
 - [ ] 7.4 Update `docs/STATUS.md`: the direct-mode reconnect recovery mark and the gateway notes. Then run `python scripts/status_progress.py` and `--check`.
-- [ ] 7.5 Rebase `collapse-session-surface` onto this change: group 1 becomes "delete Python wrappers" (registry, holders and listeners now come from the host), and remove its `reset_ticker` and `configure_gates` mentions.
+- [x] 7.5 Rebase `collapse-session-surface` onto this change: group 1 becomes "delete Python wrappers" (registry, holders and listeners now come from the host), and remove its `reset_ticker` and `configure_gates` mentions.
 - [ ] 7.6 Run the full verify gate from AGENTS.md, including `qlty check --fail-level=medium`.

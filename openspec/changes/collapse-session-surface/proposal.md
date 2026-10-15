@@ -1,4 +1,4 @@
-> **Depends on `unify-session-host`**, which lands first. That change moves the session registry, holders, flock, gates and recovery events into `SessionHost` and removes `reset_ticker` / `is_direct`. Once it lands, group 1 here shrinks to deleting the Python wrappers, and the names follow it (`Venue` / `RithmicVenue` / `FakeVenue`, `Session` / `LocalSession` / `RemoteSession`).
+> **Depends on `unify-session-host`** (landed on `feat/unify-session-host`). That change moves the session registry, holders, flock, gates and recovery events into `SessionHost` and removes `reset_ticker` / `is_direct`. Once it lands, group 1 here shrinks to deleting the Python wrappers, and the names follow it (`Venue` / `RithmicVenue` / `FakeVenue`, `Session` / `LocalSession` / `RemoteSession`).
 
 ## Why
 
