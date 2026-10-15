@@ -129,7 +129,7 @@ def test_direct_ticker_failure_restores_intent(
     from rithmic_nt_connect import _lib
 
     session = direct_reconnect_session
-    _, symbol, exchange = request.getfixturevalue("live_front_month")
+    symbol, exchange = request.getfixturevalue("live_contract")
     interrupted_type = getattr(_lib, "Interrupted", None)
     resumed_type = getattr(_lib, "Resumed", None)
     failed_type = getattr(_lib, "RecoveryFailed", None)
