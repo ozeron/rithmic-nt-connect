@@ -85,7 +85,7 @@ def parent_ctx(test_env, require_test_plant, credentials_available) -> ParentCtx
     return (
         session_cfg,
         gateway_config_from_session(session_cfg),
-        str((test_env or {}).get("RITHMIC_PASSWORD") or ""),
+        (test_env or {}).get("RITHMIC_PASSWORD") or "",
         parent_trading_env(test_env),
     )
 

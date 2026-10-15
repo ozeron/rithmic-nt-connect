@@ -29,7 +29,7 @@ async fn main() {
             println!("rithmic-gateway {}", env!("CARGO_PKG_VERSION"));
             return;
         }
-        eprintln!("unknown argument: {arg}");
+        eprintln!("unknown argument (configuration uses environment variables; see --help)");
         print_help();
         std::process::exit(2);
     }

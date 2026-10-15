@@ -15,6 +15,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from rithmic_nt_connect._redact import RedactedEnv, SecretStr
 from rithmic_nt_connect.constants import (
     DEFAULT_APP_NAME,
     DEFAULT_APP_VERSION,
@@ -133,7 +134,7 @@ def _parse_dotenv(path: str | Path) -> dict[str, str]:
             continue
         key, value = line.split("=", 1)
         values[key.strip()] = value.strip().strip("'").strip('"')
-    return values
+    return RedactedEnv(values)
 
 
 def load_dotenv(path: str | Path) -> bool:
@@ -356,7 +357,7 @@ class SessionConfig:
     # Required: how this process opens Rithmic (no silent default).
     connect_mode: ConnectMode
     #: Required in direct mode; never held in gateway mode (only the parent has it).
-    password: str | None = field(default=None, kw_only=True)
+    password: str | None = field(default=None, kw_only=True, repr=False)
     system_name: str = DEFAULT_SYSTEM_NAME
     url: str = DEFAULT_GATEWAY_URL
     app_name: str = DEFAULT_APP_NAME
@@ -369,13 +370,14 @@ class SessionConfig:
     symbol: str | None = None
     exchange: str | None = None
     gateway_listen: str | None = None
-    gateway_auth_token: str = ""
+    gateway_auth_token: str = field(default="", repr=False)
 
     def __post_init__(self) -> None:
+        self.gateway_auth_token = SecretStr(self.gateway_auth_token)
         self.user = _require_nonempty("user", self.user)
         self.connect_mode = parse_connect_mode(self.connect_mode)
         if self.connect_mode == ConnectMode.DIRECT:
-            self.password = _require_nonempty("password", self.password)
+            self.password = SecretStr(_require_nonempty("password", self.password))
         else:
             # The gateway parent owns the Rithmic login; a client never holds,
             # logs, or sends the password.

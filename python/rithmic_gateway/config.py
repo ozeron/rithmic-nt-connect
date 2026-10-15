@@ -10,6 +10,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+class _SecretStr(str):
+    """Keep token repr safe in dataclass copies without altering wire strings."""
+
+    def __repr__(self) -> str:
+        return "'***'"
+
+
 class GatewayConfigError(ValueError):
     """Invalid gateway client / listen configuration."""
 
@@ -184,6 +191,7 @@ class GatewayConfig:
     attest_flock: bool = True
 
     def __post_init__(self) -> None:
+        self.auth_token = _SecretStr(self.auth_token)
         self.user = _require("user", self.user)
         self.system_name = _require("system_name", self.system_name)
         self.url = _require("url", self.url)
