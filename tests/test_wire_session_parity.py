@@ -151,7 +151,7 @@ def test_test_double_matches_protocol() -> None:
     [
         WireSessionStub(),
         _rust_gateway(),
-        _FlockedDirectSession(WireSessionStub(), object()),
+        _FlockedDirectSession(WireSessionStub()),
     ],
     ids=["stub", "rust-gateway", "direct"],
 )
@@ -183,6 +183,11 @@ def _pyi_session_methods() -> dict[str, list[Param]]:
         first_default = len(args) - n_default
         out[node.name] = [
             Param(name, i >= first_default) for i, name in enumerate(args)
+        ] + [
+            Param(arg.arg, default is not None)
+            for arg, default in zip(
+                node.args.kwonlyargs, node.args.kw_defaults, strict=True
+            )
         ]
     return out
 
@@ -222,6 +227,8 @@ def test_pyi_matches_built_extension(rust_session: Any) -> None:
         for name, fn in inspect.getmembers(rust_session, inspect.isroutine)
         if not name.startswith("_")
     }
+    if not hasattr(rust_session, "fake"):
+        stub.pop("fake", None)
     assert set(stub) - {"__init__"} == set(runtime), (
         "undeclared or stale methods: "
         f"{sorted((set(stub) - {'__init__'}) ^ set(runtime))}"

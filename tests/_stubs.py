@@ -43,11 +43,7 @@ class WireSessionStub:
     the code under test reaches one it does not stub.
     """
 
-    # Shared-session internals that ``ensure_connected`` / ``_connect_once``
-    # read via ``getattr``: absence means "no flock gate / no inner session".
-    # (``_inner`` is deliberately NOT defaulted here: ``_connect_once`` treats
-    # a missing ``_inner`` as "the session itself".)
-    _connect_gate = None
+    # ``_inner`` is deliberately absent: connect helpers then call this session.
     # Parent-gateway trading gate read via ``getattr(..., default=True)``.
     trading_enabled = True
 

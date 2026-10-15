@@ -14,8 +14,8 @@ Read that file (or the sections you are touching) before implementing or reviewi
 ### Direct ↔ gateway plant-surface parity (hard)
 
 Direct and gateway are two implementations of one Rust trait, `Session`
-(`crates/rithmic-host/src/backend.rs`): `RithmicVenue` (in-process plants, owns
-the order-op gate) and `RemoteSession` (`crates/rithmic-gateway/src/client`,
+(`crates/rithmic-host/src/backend.rs`): `LocalSession` (an attachment to the
+in-process `SessionHost`) and `RemoteSession` (`crates/rithmic-gateway/src/client`,
 attach-only, one socket per fingerprint). The PyO3 `Session` and the gateway
 **server** (`crates/rithmic-gateway/src/server`) are both generic over that trait,
 so the adapter has one call surface in either mode, including the read-only
@@ -23,7 +23,7 @@ fill-history and order-history queries (one-shot, trading-gated reads).
 
 When you add or change a plant RPC (place / cancel / modify / brackets / ensure / subscribe / …):
 
-1. Add it to the `Session` trait, with `RithmicVenue` and `FakeVenue` (feature `testing`) implementations.
+1. Add it to the `Session` trait, with `LocalSession` and `RemoteSession` implementations. Plant operations also belong on `Venue`, implemented by `RithmicVenue` and `FakeVenue` (feature `testing`).
 2. Add its row to the RPC table (`crates/rithmic-host/src/rpc_table.rs`: kind + gate; gateway table: Body mapping), then the `session.proto` message, the server dispatch, the `RemoteSession` call (with its call mode: Read / Command / Intent), and the PyO3 method plus `_lib.pyi`.
 3. Keep request field names and semantics aligned (e.g. bracket `localid` / `stop_ticks` / `target_ticks`).
 4. Tests that fail on drift: `tests/rpc_table.rs` (proto ↔ trait ↔ table ↔ `RestorePlan`), `tests/client_scenarios.rs` + `tests/test_gateway_scenarios.py` (same scenarios through every client), `tests/test_wire_trait_parity.py` (PyO3 ↔ `WireSession`).
@@ -48,7 +48,7 @@ Gateway plant RPCs are **not** all the same shape. Shipping a new stream as a ba
 
 Every RPC also declares a **lane** in the table. A connection reads requests on its own task and serves them on two lanes: the **command** lane (subscriptions and every state-changing request) runs one request at a time in arrival order; the **slow** lane (history, order-history and fill-history loads, plus reference-data, front-month and resolved-account reads) runs a few at a time and replies as each finishes, so a slow read can never hold up a place or cancel on the same socket. New RPCs default to the command lane; a read that can take seconds is marked `slow(...)` in its table row, which is the only place lanes are declared (`rpc_table::lane_of` reads the table; `tests/lanes.rs` guards it). Never put a request that mutates the connection's `ClientCtx` on the slow lane.
 
-**Recovery.** After a plant reconnect the parent re-issues every intent itself and keeps clients attached, sending each a `TransportResumed` event; clients must not re-subscribe or reset the shared plant. A gateway client never calls `reset_ticker` (only a direct session does); a stream `gap` is a resync of that consumer's intent with no reset. A new subscription intent needs its `RestorePlan` / `restore_intents` entry, and a market-data one a degraded-set path (`MdIntent`).
+**Recovery.** After a plant reconnect the parent re-issues every intent itself and keeps clients attached, sending each a `TransportResumed` event; clients must not re-subscribe or reset the shared plant. Consumer sessions never reset plants. A stream `gap` re-joins only that consumer's intent; `ResetTickerPlantRequest` remains a compatibility RPC for legacy wire clients. A new subscription intent needs its `RestorePlan` / `restore_intents` entry, and a market-data one a degraded-set path (`MdIntent`).
 
 Bracket notifications ride the **order-plant** stream. Use `subscribe_order_plant_stream` in `server/dispatch/subscriptions.rs` (order and/or brackets flags) — never a one-shot plant call. Extend `RestorePlan` + `restore_intents` and the table row; `intent_rows_cover_exactly_the_restore_plan_fields` and `every_subscription_intent_is_reissued_by_restore_intents` fail otherwise. Proto string greps alone are not enough.
 
@@ -151,13 +151,13 @@ Gateway client / wire tests need the plants/gateway crates, a system `protoc`
 the protobuf Python package (core dep):
 
 ```bash
-uv sync --extra dev
+uv sync --extra dev  # editable extension includes testing; release maturin features do not
 # Rust: fmt (hk pre-commit/check only) + clippy (-D warnings) + tests (hk check
 # + CI). clippy is the Rust analog of `ruff check`; `cargo fmt --check` runs
 # locally via the hk hooks but is NOT a CI gate (the pre-commit hook enforces it).
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test -p rithmic-plants -p rithmic-gateway -p rithmic-exec -p rithmic-nt-connect
+cargo test -p rithmic-host -p rithmic-plants -p rithmic-gateway -p rithmic-exec -p rithmic-nt-connect --features rithmic-gateway/testing,rithmic-host/testing
 uv run ruff check .
 uv run ruff format --check .
 uv run ty check python/rithmic_nt_connect python/rithmic_gateway tests

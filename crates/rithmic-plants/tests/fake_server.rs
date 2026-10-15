@@ -1,6 +1,6 @@
 //! The unmodified direct session against the fake Rithmic venue.
 
-use rithmic_host::{PlantSet, Session};
+use rithmic_host::{PlantSet, Venue};
 use rithmic_plants::fake_server::{template, FakeRithmicServer, Plant};
 use rithmic_plants::RithmicVenue;
 

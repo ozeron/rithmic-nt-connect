@@ -112,21 +112,6 @@ async fn one_shot_commands_register_no_intent() {
 }
 
 #[tokio::test]
-async fn ticker_reset_reissues_ticker_intents() {
-    let parent = FakeParent::start(Opts::default()).await;
-    let s = session_for(&parent).await;
-    s.subscribe(NQ, CME).await.unwrap();
-    parent.clear_calls().await;
-    s.reset_ticker().await.unwrap();
-    let calls = parent.calls().await;
-    assert_eq!(calls[0], "reset_ticker", "{calls:?}");
-    assert!(
-        calls.contains(&format!("subscribe {NQ} {CME}")),
-        "{calls:?}"
-    );
-}
-
-#[tokio::test]
 async fn the_client_recovers_after_the_parent_restarts() {
     let mut parent = unix::UnixParent::start(Opts::default()).await;
     let s = RemoteSession::new(parent.config());
@@ -152,11 +137,11 @@ async fn the_client_recovers_after_the_parent_restarts() {
 }
 
 #[tokio::test]
-async fn the_adapter_is_told_with_the_same_down_and_up_events_a_redial_produces() {
+async fn the_adapter_receives_interrupted_and_resumed_for_plant_recovery() {
     let parent = FakeParent::start(Opts::default()).await;
     let s = session_for(&parent).await;
     s.subscribe(NQ, CME).await.unwrap();
-    let mut events = s.subscribe_transport();
+    let mut events = s.session_events();
     parent.clear_calls().await;
     parent.command("drop_plants").await;
     let down = tokio::time::timeout(Duration::from_secs(10), events.recv())
@@ -170,15 +155,12 @@ async fn the_adapter_is_told_with_the_same_down_and_up_events_a_redial_produces(
     assert!(
         matches!(
             down,
-            rithmic_gateway::client::TransportEvent::Down { generation: 1 }
+            rithmic_host::SessionEvent::Interrupted { generation: 1, .. }
         ),
         "{down:?}"
     );
     assert!(
-        matches!(
-            up,
-            rithmic_gateway::client::TransportEvent::Up { generation: 2 }
-        ),
+        matches!(up, rithmic_host::SessionEvent::Resumed { generation: 2 }),
         "{up:?}"
     );
 }

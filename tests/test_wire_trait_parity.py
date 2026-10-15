@@ -47,18 +47,16 @@ def _extension_methods() -> set[str]:
     }
 
 
-# Gateway-mode hooks the extension adds on top of the trait; inert in direct mode.
+# Extension-only introspection and the feature-gated test composition root.
 GATEWAY_HOOKS = {
     "trading_enabled",
     "cancel_all_enabled",
     "transport_generation",
     "transport_connected",
     "ensure_transport_live",
-    "subscribe_transport_events",
-    # Direct-mode gate surface (the Rust session enforces the gates in both modes;
-    # only direct can be configured, a gateway client raises).
-    "is_direct",
-    "configure_gates",
+    "fake",
+    "script",
+    "subscribe_session_events",
 }
 
 
@@ -88,7 +86,7 @@ def test_extension_stub_exposes_exactly_the_trait_surface() -> None:
 
 def test_wire_session_protocol_is_exactly_the_session_trait() -> None:
     wire = _wire_methods()
-    trait = _session_trait()
+    trait = _session_trait() | {"subscribe_session_events"}
     assert wire - trait == set(), "WireSession methods with no Session trait method"
     assert trait - wire == set(), "Session trait methods missing from WireSession"
 

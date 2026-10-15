@@ -102,7 +102,7 @@ pub enum HistoryPolicy {
 }
 
 pub struct HostState<V: Venue + ?Sized + 'static = dyn Venue> {
-    pub gates: ParentGates,
+    pub gates: crate::gates::HostGates,
     pub hub: SharedFanout,
     pub ready: AtomicBool,
     pub force_reconnect: AtomicBool,
@@ -175,6 +175,13 @@ impl<V: Venue + ?Sized + 'static> HostState<V> {
 pub struct SessionHost<V: Venue + ?Sized + 'static = dyn Venue> {
     pub state: Arc<HostState<V>>,
     pump: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    credential_lock: std::sync::Mutex<Option<crate::SessionLock>>,
+    pub(crate) runtime: Option<tokio::runtime::Handle>,
+    pub(crate) attachments: std::sync::atomic::AtomicUsize,
+    attachment_gate: std::sync::Mutex<()>,
+    closing: AtomicBool,
+    shutdown_done: AtomicBool,
+    shutdown_gate: Mutex<()>,
 }
 
 impl<V: Venue + 'static> SessionHost<V> {
@@ -214,7 +221,7 @@ impl<V: Venue + ?Sized + 'static> SessionHost<V> {
         let hub = Arc::new(FanoutHub::new(capacity));
         let (transport_epoch, _) = watch::channel(1);
         let state = Arc::new(HostState {
-            gates,
+            gates: crate::gates::HostGates::new(gates),
             reconnect: Arc::new(ReconnectController::new(hub.clone())),
             hub,
             ready: AtomicBool::new(connected),
@@ -237,6 +244,13 @@ impl<V: Venue + ?Sized + 'static> SessionHost<V> {
         let host = Arc::new(Self {
             state,
             pump: std::sync::Mutex::new(None),
+            credential_lock: std::sync::Mutex::new(None),
+            runtime: tokio::runtime::Handle::try_current().ok(),
+            attachments: std::sync::atomic::AtomicUsize::new(0),
+            attachment_gate: std::sync::Mutex::new(()),
+            closing: AtomicBool::new(false),
+            shutdown_done: AtomicBool::new(false),
+            shutdown_gate: Mutex::new(()),
         });
         if host.state.session.is_some() {
             let state = host.state.clone();
@@ -247,13 +261,62 @@ impl<V: Venue + ?Sized + 'static> SessionHost<V> {
     }
 
     pub fn attach(self: &Arc<Self>) -> LocalSession<V> {
-        LocalSession::attach(self.clone())
+        let _attach = self
+            .attachment_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        LocalSession::attach(self.clone(), false)
+    }
+    /// Only the adapter composition root creates attachments that may open gates.
+    pub fn attach_owned(self: &Arc<Self>) -> Result<LocalSession<V>> {
+        let _attach = self
+            .attachment_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if self.is_terminal() {
+            return Err(Error::NotSent("host closed; start a new host".into()));
+        }
+        Ok(LocalSession::attach(self.clone(), true))
+    }
+    pub(crate) fn hold_lock(&self, lock: crate::SessionLock) {
+        *self
+            .credential_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(lock);
+    }
+    pub fn is_terminal(&self) -> bool {
+        self.closing.load(Ordering::SeqCst) || self.state.failed.load(Ordering::SeqCst)
+    }
+    pub(crate) async fn detached(&self) {
+        let last = {
+            let _attach = self
+                .attachment_gate
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let last = self.attachments.fetch_sub(1, Ordering::SeqCst) == 1
+                && self
+                    .credential_lock
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_some();
+            if last {
+                self.closing.store(true, Ordering::SeqCst);
+            }
+            last
+        };
+        if last {
+            self.shutdown().await;
+        }
     }
     pub fn generation(&self) -> u64 {
         self.state.transport_generation.load(Ordering::SeqCst)
     }
     pub fn subscribe_generation(&self) -> watch::Receiver<u64> {
         self.state.transport_epoch.subscribe()
+    }
+    /// Compatibility for pre-host gateway clients; new consumer sessions never reset plants.
+    pub async fn reset_ticker_for_legacy_client(&self) -> Result<()> {
+        crate::local::subscriptions::reset_ticker_plant(&self.state).await
     }
     pub async fn request_plants(&self, extra: PlantSet) -> Result<()> {
         self.state
@@ -274,7 +337,7 @@ impl<V: Venue + ?Sized + 'static> SessionHost<V> {
         loop {
             let mut generation = self.subscribe_generation();
             let guard = venue.lock_exclusive().await;
-            if self.state.failed.load(Ordering::SeqCst) {
+            if self.is_terminal() {
                 return Err(Error::Session(
                     "host recovery failed; start a new host".into(),
                 ));
@@ -307,6 +370,11 @@ impl<V: Venue + ?Sized + 'static> SessionHost<V> {
     }
 
     pub async fn shutdown(&self) {
+        let _shutdown = self.shutdown_gate.lock().await;
+        if self.shutdown_done.load(Ordering::SeqCst) {
+            return;
+        }
+        self.closing.store(true, Ordering::SeqCst);
         let pump = self.pump.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(pump) = pump {
             pump.abort();
@@ -327,6 +395,11 @@ impl<V: Venue + ?Sized + 'static> SessionHost<V> {
         if let Some(venue) = &self.state.session {
             let _ = venue.lock_exclusive().await.disconnect().await;
         }
+        self.credential_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        self.shutdown_done.store(true, Ordering::SeqCst);
     }
 }
 impl<V: Venue + ?Sized + 'static> Drop for SessionHost<V> {
@@ -338,6 +411,22 @@ impl<V: Venue + ?Sized + 'static> Drop for SessionHost<V> {
             .take()
         {
             pump.abort();
+        }
+        if !self.shutdown_done.load(Ordering::SeqCst) {
+            let state = self.state.clone();
+            let lock = self
+                .credential_lock
+                .get_mut()
+                .unwrap_or_else(|e| e.into_inner())
+                .take();
+            if let Some(runtime) = &self.runtime {
+                runtime.spawn(async move {
+                    if let Some(venue) = &state.session {
+                        let _ = venue.lock_exclusive().await.disconnect().await;
+                    }
+                    drop(lock);
+                });
+            }
         }
     }
 }

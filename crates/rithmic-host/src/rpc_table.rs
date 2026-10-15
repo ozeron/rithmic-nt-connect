@@ -169,7 +169,7 @@ pub const RPC_TABLE: &[Rpc] = &[
         restore: None,
     },
     Rpc {
-        method: "reset_ticker",
+        method: "open_gates",
         kind: Kind::OneShot,
         gate: Gate::None,
         lane: Lane::Command,

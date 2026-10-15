@@ -1,308 +1,227 @@
-"""Flock refuse behavior for direct sessions."""
+"""Direct factories and attachment lifetime on a real, credential-free Rust host."""
 
 from __future__ import annotations
 
-from typing import Any
+import fcntl
+import gc
+import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import Any, cast
 
 import pytest
-from _stubs import WireSessionStub
-from rithmic_nt_connect.config import SessionConfig
+from rithmic_nt_connect import _lib
+from rithmic_nt_connect.config import ConnectMode, SessionConfig
+from rithmic_nt_connect.session import _connect_once, create_session
 
 
-def test_flocked_session_connect_is_idempotent() -> None:
-    from rithmic_nt_connect.errors import AlreadyConnectedError
-    from rithmic_nt_connect.session import _FlockedDirectSession
-
-    class _Inner(WireSessionStub):
-        # Models the real Rust session: connect() is a safe no-op when already
-        # connected (it raises AlreadyConnectedError without reconnecting).
-        def __init__(self) -> None:
-            self.connected = False
-            self.calls = 0
-
-        def connect(self) -> None:
-            self.calls += 1
-            if self.connected:
-                raise AlreadyConnectedError("already connected")
-            self.connected = True
-
-        def disconnect(self) -> None:
-            self.connected = False
-
-        def request_plants(self, plants: str) -> None:
-            return None
-
-    inner = _Inner()
-    wrapped = _FlockedDirectSession(inner, lock=object())
-    wrapped.connect()
-    wrapped.connect()
-    # No parallel _connected flag: idempotency comes from the inner refusing a
-    # redundant connect (AlreadyConnectedError, swallowed). Still connected.
-    assert inner.connected
-    assert callable(wrapped.request_plants)
-
-    from concurrent.futures import ThreadPoolExecutor
-
-    inner2 = _Inner()
-    wrapped2 = _FlockedDirectSession(inner2, lock=object())
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        list(pool.map(lambda _: wrapped2.connect(), range(2)))
-    assert inner2.connected
+def _wait_for(check: Any) -> None:
+    deadline = time.monotonic() + 3
+    while not check():
+        assert time.monotonic() < deadline, "host did not finish background detach"
+        time.sleep(0.005)
 
 
-def test_flocked_session_reconnects_after_disconnect() -> None:
-    from rithmic_nt_connect.session import _FlockedDirectSession
-
-    class _Inner(WireSessionStub):
-        def __init__(self) -> None:
-            self.calls = 0
-            self.disconnects = 0
-
-        def connect(self) -> None:
-            self.calls += 1
-
-        def disconnect(self) -> None:
-            self.disconnects += 1
-
-    inner = _Inner()
-    wrapped = _FlockedDirectSession(inner, lock=object())
-    wrapped.connect()
-    assert inner.calls == 1
-    wrapped.disconnect()
-    assert inner.disconnects == 1
-    # A later connect() must not short-circuit on a stale _connected flag.
-    wrapped.connect()
-    assert inner.calls == 2
+def _fake(tmp_path: Path, **kwargs: Any) -> Any:
+    return _lib.Session.fake(lock_dir=str(tmp_path), **kwargs)
 
 
-def test_flocked_session_forwards_resolved_account() -> None:
-    from rithmic_nt_connect.session import _FlockedDirectSession
-
-    class _Inner(WireSessionStub):
-        def resolved_account(self) -> dict[str, object] | None:
-            return {"account_id": "A1", "fcm_id": "F1", "ib_id": "I1"}
-
-    wrapped = _FlockedDirectSession(_Inner(), lock=object())
-    assert wrapped.resolved_account() == {
-        "account_id": "A1",
-        "fcm_id": "F1",
-        "ib_id": "I1",
-    }
+def _count(script: Any, prefix: str) -> int:
+    return sum(c.startswith(prefix) for c in script.calls())
 
 
-def test_connect_once_swallows_only_typed_already_connected() -> None:
-    from rithmic_nt_connect.errors import AlreadyConnectedError
-    from rithmic_nt_connect.session import _connect_once
+def _factory(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    fake = _lib.Session.fake
 
-    class _OkInner:
-        def connect(self) -> None:
-            raise AlreadyConnectedError("already connected")
+    def construct(**kwargs: Any) -> Any:
+        for name in ("password", "connect_mode", "gateway_listen"):
+            kwargs.pop(name, None)
+        return fake(lock_dir=str(tmp_path), **kwargs)
 
-    class _BadInner:
-        def connect(self) -> None:
-            raise RuntimeError("already connected was the last line of a real failure")
-
-    _connect_once(_OkInner())  # typed error: idempotent, swallowed
-    with pytest.raises(RuntimeError, match="already connected"):
-        _connect_once(_BadInner())  # same text, different type: must propagate
+    monkeypatch.setattr(_lib, "Session", construct)
 
 
-def test_second_flock_acquire_fails() -> None:
-    _lib = pytest.importorskip("rithmic_nt_connect._lib")
-    user = f"flock-test-{id(object())}"
-    system = "LucidTrading"
-    url = "wss://rprotocol.rithmic.com:443"
-    first = _lib.SessionLock.try_acquire(user, system, url)
-    with pytest.raises(_lib.SessionLockError, match="already held"):
-        _lib.SessionLock.try_acquire(user, system, url)
-    first.close()
-    second = _lib.SessionLock.try_acquire(user, system, url)
-    second.close()
-
-
-def test_the_extension_flock_is_the_one_the_python_lake_client_probes() -> None:
-    """Direct mode (Rust lock) and the lake client's probe must agree on the file."""
-    from pathlib import Path
-
-    from rithmic_gateway.flock import lock_path
-
-    _lib = pytest.importorskip("rithmic_nt_connect._lib")
-    user = f"flock-path-{id(object())}"
-    system = "LucidTrading"
-    url = "wss://rprotocol.rithmic.com:443"
-    held = _lib.SessionLock.try_acquire(user, system, url, "Live")
-    try:
-        assert Path(held.path) == lock_path(user, system, url, "Live")
-    finally:
-        held.close()
-
-
-class _FakeSessionInner(WireSessionStub):
-    """Stand-in for the Rust ``Session`` (no extension module on CI)."""
-
-    def __init__(self, **kwargs: Any) -> None:
-        self.plant_requests: list[str] = []
-
-    def request_plants(self, plants: str) -> None:
-        self.plant_requests.append(plants)
-
-
-class _FakeLock:
-    """Stand-in for ``SessionLock``; counts acquisitions per test."""
-
-    acquired = 0
-
-    @classmethod
-    def try_acquire(cls, *args: Any, **kwargs: Any) -> _FakeLock:
-        return cls(*args, **kwargs)
-
-    def __init__(self, *args: Any) -> None:
-        _FakeLock.acquired += 1
-
-    def close(self) -> None:
-        pass  # Stub: pool tests don't exercise the release path.
-
-
-def _direct_session_config(*, env: str = "Demo") -> SessionConfig:
-    from rithmic_nt_connect.config import ConnectMode
-
+def _config(**kwargs: Any) -> SessionConfig:
     return SessionConfig(
-        user=f"singleton-{id(object())}",
-        password="p",
+        user="factory-test",
+        password="never-a-credential",
         connect_mode=ConnectMode.DIRECT,
-        system_name="TEST-SYS",
-        url="wss://rprotocol.rithmic.com:443",
-        env=env,
+        system_name="Fake",
+        url="wss://fake",
+        env="Test",
+        **kwargs,
     )
 
 
-def _fake_rust_session(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Point the lazy ``_lib`` import and flock at fakes."""
-    import sys
-    import types
-
-    import rithmic_nt_connect.session as session_mod
-
-    fake_lib = types.SimpleNamespace(Session=_FakeSessionInner)
-    monkeypatch.setitem(sys.modules, "rithmic_nt_connect._lib", fake_lib)
-    monkeypatch.setattr(session_mod, "_load_session_lock", lambda: _FakeLock)
-    monkeypatch.setattr(session_mod, "_SESSION_CACHE", {})
-    _FakeLock.acquired = 0
-
-
-def test_create_rust_session_is_process_singleton(
+def test_factories_share_one_login_and_union_execution_plants(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    """Direct: data factory, exec factory, and history path share ONE client.
-
-    A second ``create_rust_session`` for the same credentials must reuse the
-    cached session (acquiring a holder) instead of building a second Rithmic
-    login that would close the first — the flock also refuses a second one.
-    ``request_plants`` unions the execution plant set on the shared session;
-    the credential flock is taken exactly once.
-    """
-    from rithmic_nt_connect.session import _FlockedDirectSession, create_rust_session
-
-    _fake_rust_session(monkeypatch)
-    cfg = _direct_session_config()
-
-    data = create_rust_session(cfg, plants="market_data")
-    data_again = create_rust_session(cfg, plants="market_data")
-    exec_session = create_rust_session(cfg, plants="execution")
-
-    assert data is data_again is exec_session
-    assert isinstance(data, _FlockedDirectSession)
-    assert isinstance(data._inner, _FakeSessionInner)
-    # The execution hand-out unions the PnL plant into the shared session.
-    assert data._inner.plant_requests == ["execution"]
-    # Every hand-out holds the session; the flock was taken once (first build).
-    assert data._holders == 3
-    assert _FakeLock.acquired == 1
+    _factory(monkeypatch, tmp_path)
+    data = create_session(_config())
+    again = create_session(_config())
+    execution = create_session(_config(), plants="execution")
+    assert data is not again and again is not execution
+    script = cast(Any, data).script
+    assert _count(script, "connect") == 0, "construction does no plant I/O"
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        list(pool.map(lambda s: s.connect(), (data, again, execution)))
+    assert _count(script, "connect") == 1
+    assert any("request_plants" in c and "pnl: true" in c for c in script.calls())
+    data.disconnect()
+    again.disconnect()
+    assert _count(script, "disconnect") == 0
+    execution.disconnect()
+    assert _count(script, "disconnect") == 1
 
 
-def test_create_rust_session_env_partitions_cache(
-    monkeypatch: pytest.MonkeyPatch,
+def test_password_is_not_part_of_the_host_fingerprint() -> None:
+    user = f"password-key-{time.monotonic_ns()}"
+    a = _lib.Session(user=user, password="first", connect_mode="direct")
+    b = _lib.Session(user=user, password="changed", connect_mode="direct")
+    a.open_gates(True, False)
+    assert b.open_gates(False, False).trading
+    a.disconnect()
+    b.disconnect()
+
+
+def test_environment_partitions_hosts(tmp_path: Path) -> None:
+    demo = _fake(tmp_path, env="Demo")
+    test = _fake(tmp_path, env="Test")
+    demo.connect()
+    test.connect()
+    demo.disconnect()
+    assert _count(test.script, "disconnect") == 0
+    test.subscribe("NQU6", "CME")
+    test.disconnect()
+
+
+def test_session_intents_are_independent_and_repeated_subscribe_is_a_set(
+    tmp_path: Path,
 ) -> None:
-    """Live/Demo/Test are distinct login identities: never shared."""
-    from rithmic_nt_connect.session import create_rust_session
-
-    _fake_rust_session(monkeypatch)
-    demo = create_rust_session(_direct_session_config(env="Demo"))
-    test_env = create_rust_session(_direct_session_config(env="Test"))
-    assert demo is not test_env
-    assert _FakeLock.acquired == 2
-
-
-def test_flocked_session_disconnect_is_refcounted() -> None:
-    """One client's disconnect must not close plants the other still uses."""
-    from rithmic_nt_connect.session import _FlockedDirectSession
-
-    class _Inner(WireSessionStub):
-        def __init__(self) -> None:
-            self.disconnects = 0
-
-        def disconnect(self) -> None:
-            self.disconnects += 1
-
-    inner = _Inner()
-    wrapped = _FlockedDirectSession(inner, lock=object())
-    wrapped.acquire()  # second client (e.g. exec factory) joins the session
-    wrapped.disconnect()  # first client (data) leaves: plants stay up
-    assert inner.disconnects == 0
-    wrapped.disconnect()  # last client leaves: real teardown
-    assert inner.disconnects == 1
-    wrapped.disconnect()  # already torn down: no-op
-    assert inner.disconnects == 1
+    a = _fake(tmp_path)
+    b = _fake(tmp_path)
+    a.connect()
+    b.connect()
+    a.subscribe("NQU6", "CME")
+    a.subscribe("NQU6", "CME")
+    b.subscribe("NQU6", "CME")
+    assert _count(a.script, "subscribe NQU6 CME") == 1
+    a.unsubscribe("NQU6", "CME")
+    assert _count(a.script, "unsubscribe NQU6 CME") == 0
+    b.script.emit(
+        "ticker",
+        {
+            "type": "last_trade",
+            "symbol": "NQU6",
+            "exchange": "CME",
+            "trade_price": 21000.0,
+            "trade_size": 1,
+        },
+    )
+    assert b.next_events("ticker", timeout_ms=1000)[0]["trade_price"] == 21000.0
+    assert a.next_events("ticker", timeout_ms=10) == []
+    a.disconnect()
+    b.disconnect()
 
 
-def test_flocked_session_forwards_host_gates() -> None:
-    from rithmic_nt_connect.session import _FlockedDirectSession
-
-    inner = WireSessionStub()
-    wrapped = _FlockedDirectSession(inner, lock=object())
-    gates = wrapped.open_gates(trading=False, cancel_all=True)
-    assert not gates.trading
-    assert gates.cancel_all
-
-
-def test_flocked_session_last_disconnect_releases_flock(
-    monkeypatch: pytest.MonkeyPatch,
+def test_last_disconnect_releases_flock_even_while_facades_remain_alive(
+    tmp_path: Path,
 ) -> None:
-    """The credential flock lives as long as the owners: the last holder's
-    disconnect tears plants down, closes the flock, and evicts the session
-    from the singleton, so a stopped node no longer blocks a separate process.
-    """
-    import rithmic_nt_connect.session as session_mod
-    from rithmic_nt_connect.session import _FlockedDirectSession
+    a = _fake(tmp_path)
+    b = _fake(tmp_path)
+    a.connect()
+    path = next(tmp_path.glob("*.lock"))
+    with path.open("r+") as lock:
+        a.disconnect()
+        with pytest.raises(BlockingIOError):
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        b.disconnect()
+        b.disconnect()
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(_lib.SessionLockError):
+            _fake(tmp_path)
+        fcntl.flock(lock, fcntl.LOCK_UN)
+    replacement = _fake(tmp_path)
+    replacement.connect()
+    assert _count(replacement.script, "connect") == 1
+    replacement.disconnect()
 
-    class _Inner(WireSessionStub):
-        def __init__(self) -> None:
-            self.disconnects = 0
 
-        def disconnect(self) -> None:
-            self.disconnects += 1
+def test_dropping_a_session_outside_the_runtime_does_not_wait_for_the_venue(
+    tmp_path: Path,
+) -> None:
+    session = _fake(tmp_path)
+    session.connect()
+    script = session.script
+    script.set_delay("disconnect", 250)
+    started = time.monotonic()
+    del session
+    gc.collect()
+    assert time.monotonic() - started < 0.2
+    _wait_for(lambda: _count(script, "disconnect") == 1)
+    replacement = _fake(tmp_path)
+    replacement.disconnect()
 
-    class _RecordingLock:
-        def __init__(self) -> None:
-            self.closed = 0
 
-        def close(self) -> None:
-            self.closed += 1
+def test_dropping_one_attachment_preserves_another_sessions_intents(
+    tmp_path: Path,
+) -> None:
+    a = _fake(tmp_path)
+    b = _fake(tmp_path)
+    a.connect()
+    a.subscribe("NQU6", "CME")
+    b.connect()
+    b.subscribe("NQU6", "CME")
+    del a
+    gc.collect()
+    b.script.emit(
+        "ticker",
+        {
+            "type": "last_trade",
+            "symbol": "NQU6",
+            "exchange": "CME",
+            "trade_price": 42.0,
+        },
+    )
+    assert b.next_events("ticker", timeout_ms=1000)[0]["trade_price"] == 42.0
+    assert _count(b.script, "unsubscribe NQU6 CME") == 0
+    b.disconnect()
 
-    cache: dict[str, object] = {}
-    monkeypatch.setattr(session_mod, "_SESSION_CACHE", cache)
-    lock = _RecordingLock()
-    wrapped = _FlockedDirectSession(_Inner(), lock, cache_key="k")
-    cache["k"] = wrapped
-    wrapped.acquire()  # second client
 
-    wrapped.disconnect()  # first client leaves: plants + flock stay
-    assert lock.closed == 0
-    assert "k" in cache
+def test_script_rejects_a_request_without_a_venue_connection(tmp_path: Path) -> None:
+    session = _fake(tmp_path)
+    session.connect()
+    session.open_gates(True, False)
+    session.script.reject_next("cancel_order", "venue says no")
+    with pytest.raises(_lib.GatewayError, match="venue says no") as failure:
+        session.cancel_order("basket-1")
+    assert failure.value.code == "venue_rejected"
+    session.disconnect()
 
-    wrapped.disconnect()  # last client leaves: teardown + release + evict
-    assert lock.closed == 1
-    assert "k" not in cache
 
-    wrapped.disconnect()  # already gone: no-op
-    assert lock.closed == 1
+def test_connect_once_swallows_only_typed_already_connected() -> None:
+    class AlreadyUp:
+        def connect(self) -> None:
+            raise _lib.AlreadyConnectedError("already connected")
+
+    class Broken:
+        def connect(self) -> None:
+            raise RuntimeError("already connected was the last line of a real failure")
+
+    _connect_once(AlreadyUp())
+    with pytest.raises(RuntimeError, match="already connected"):
+        _connect_once(Broken())
+
+
+def test_the_extension_flock_is_the_one_the_python_lake_client_probes() -> None:
+    from rithmic_gateway.flock import lock_path
+
+    user = f"flock-path-{time.monotonic_ns()}"
+    held = _lib.SessionLock.try_acquire(user, "Fake", "wss://fake", "Test")
+    try:
+        assert Path(held.path) == lock_path(user, "Fake", "wss://fake", "Test")
+        with pytest.raises(_lib.SessionLockError, match="already held"):
+            _lib.SessionLock.try_acquire(user, "Fake", "wss://fake", "Test")
+    finally:
+        held.close()

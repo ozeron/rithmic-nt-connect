@@ -1,6 +1,6 @@
 //! Unit tests for the session facade (no live network).
 
-use rithmic_host::{Error, PlantSet, Session};
+use rithmic_host::{Error, PlantSet, Venue};
 use rithmic_plants::{RithmicVenue, SessionConfig};
 
 #[test]

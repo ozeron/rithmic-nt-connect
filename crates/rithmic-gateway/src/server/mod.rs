@@ -324,8 +324,8 @@ where
             request_id: 0,
             body: Some(Body::Ready(Ready {
                 scopes: state.gates.scopes(),
-                trading_enabled: state.gates.trading_enabled,
-                cancel_all_enabled: state.gates.cancel_all_enabled,
+                trading_enabled: state.gates.snapshot().trading,
+                cancel_all_enabled: state.gates.snapshot().cancel_all,
                 gateway_instance_id: state.gateway_instance_id,
                 transport_generation: state.transport_generation.load(Ordering::Relaxed),
             })),

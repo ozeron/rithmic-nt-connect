@@ -3,31 +3,51 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 from _stubs import WireSessionStub, _CaptureLog, _TestDataClient
+from rithmic_nt_connect import _lib
 from rithmic_nt_connect.data import BookAssembler
-from rithmic_nt_connect.transport import Resumed
 
 
-def test_resumed_reconciles_without_market_data_replay() -> None:
+def test_resumed_reconciles_without_market_data_replay(tmp_path: Path) -> None:
     async def run() -> None:
+        session: Any = _lib.Session.fake(lock_dir=str(tmp_path))
+        await asyncio.to_thread(session.connect)
+        await asyncio.to_thread(session.subscribe, "NQU6", "CME")
         client = _TestDataClient.__new__(_TestDataClient)
         client._loop = asyncio.get_running_loop()
         client._log = _CaptureLog()
-        # Any session call (including subscribe/reset) raises on this stub.
-        client._session = WireSessionStub()
+        client._session = session
         client._bar_types = {}
         client._bbo_state = {"NQU6:CME": {"bid_price": 100}}
         client._books = BookAssembler()
         client._recovery = client._build_recovery()
-        client._recovery.on_event(Resumed(generation=2))
-        await asyncio.sleep(0)
-        assert client._recovery.task is not None
-        await client._recovery.task
-        assert client._recovery.last_generation == 2
+        client._recovery.attach(session)
+        session.script.fail_stream("ticker")
+        async with asyncio.timeout(3):
+            while client._recovery.last_generation != 2:
+                await asyncio.sleep(0.005)
         assert client._bbo_state == {}
+        calls = session.script.calls()
+        assert calls.count("reset_ticker") == 1
+        # Original join plus the host's own restore, with no adapter replay.
+        assert calls.count("subscribe NQU6 CME") == 2
+        session.script.emit(
+            "ticker",
+            {
+                "type": "last_trade",
+                "symbol": "NQU6",
+                "exchange": "CME",
+                "trade_price": 42.0,
+            },
+        )
+        events = await asyncio.to_thread(session.next_events, "ticker", 1, 1000)
+        assert events[0]["trade_price"] == 42.0
+        await client._recovery.detach()
+        await asyncio.to_thread(session.disconnect)
 
     asyncio.run(run())
 

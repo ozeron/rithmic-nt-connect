@@ -109,7 +109,7 @@ pub(super) async fn dispatch(
         Body::DisconnectOrder(_) => ack!(client.disconnect_order_plant()),
         Body::EnsureOrder(_) => ack!(client.ensure_order_plant()),
         Body::EnsurePnl(_) => ack!(client.ensure_pnl_plant()),
-        Body::ResetTickerPlant(_) => ack!(client.reset_ticker()),
+        Body::ResetTickerPlant(_) => ack!(state.host.reset_ticker_for_legacy_client()),
         Body::RequestPlants(r) => match rithmic_host::PlantSet::parse(&r.plants) {
             Ok(extra) => ack!(client.request_plants(extra)),
             Err(e) => error_frame(id, "invalid_plants", &e.to_string()),

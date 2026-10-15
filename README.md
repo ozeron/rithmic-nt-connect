@@ -68,12 +68,11 @@ python scripts/verify_order_dry_run.py --seconds 5
 ## Quick start
 
 ```bash
-# Python deps (includes protobuf) + Rust extension
+# Python deps + editable Rust extension, including the test-only Session.fake
 uv sync --extra dev
-uv run maturin develop
 
 # Unit tests (no live credentials)
-cargo test -p rithmic-plants -p rithmic-gateway -p rithmic-exec -p rithmic-nt-connect
+cargo test -p rithmic-host -p rithmic-plants -p rithmic-gateway -p rithmic-exec -p rithmic-nt-connect
 uv run pytest -q
 
 # Live LucidTrading smoke (close MotiveWave first)

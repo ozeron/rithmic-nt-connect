@@ -4,43 +4,22 @@
 //! (OS closes the fd), so a second process can acquire after a crash without
 //! needing pid liveness heuristics.
 
-use std::fs::{File, OpenOptions};
-use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 
 use fs2::FileExt;
-use thiserror::Error;
 
-use crate::runtime_dir::{canon_env, runtime_base_dir};
+use crate::runtime_dir::runtime_base_dir;
+pub use rithmic_host::flock::{credential_key_hash, SingletonError};
 
-/// Errors acquiring the credential flock.
-#[derive(Debug, Error)]
-pub enum SingletonError {
-    #[error("session already held by another process at {path}")]
-    AlreadyHeld { path: PathBuf },
-    #[error("io error on flock {path}: {source}")]
-    Io {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-}
-
-/// Held exclusive flock for one credential set.
+/// Root-resolved lock location; the host owns the actual flock implementation.
 #[derive(Debug)]
-pub struct SessionLock {
-    _file: File,
-    path: PathBuf,
-}
+pub struct SessionLock(rithmic_host::SessionLock);
 
 impl SessionLock {
     /// Path to the lock file for this credential fingerprint.
     pub fn lock_path(user: &str, system_name: &str, url: &str, env: &str) -> PathBuf {
-        let base = runtime_base_dir();
-        let hash = credential_key_hash(user, system_name, url, env);
-        let path = base.join(format!("rgw-{hash}.lock"));
-        crate::runtime_dir::clamp_lock_path(path, hash)
+        rithmic_host::flock::credential_lock_path(&runtime_base_dir(), user, system_name, url, env)
     }
 
     /// Try to acquire exclusive flock. Fails if another live process holds it.
@@ -50,51 +29,12 @@ impl SessionLock {
         url: &str,
         env: &str,
     ) -> Result<Self, SingletonError> {
-        let path = Self::lock_path(user, system_name, url, env);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| SingletonError::Io {
-                path: path.clone(),
-                source,
-            })?;
-        }
-
-        let mut file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            // Never truncate here: a contender that loses the lock below must not
-            // wipe the holder's pid. The winner truncates once it holds it.
-            .truncate(false)
-            .open(&path)
-            .map_err(|source| SingletonError::Io {
-                path: path.clone(),
-                source,
-            })?;
-
-        let mut perms = file
-            .metadata()
-            .map(|m| m.permissions())
-            .unwrap_or_else(|_| std::fs::Permissions::from_mode(0o600));
-        perms.set_mode(0o600);
-        let _ = std::fs::set_permissions(&path, perms);
-
-        match file.try_lock_exclusive() {
-            Ok(()) => {
-                let pid = std::process::id();
-                file.set_len(0).ok();
-                write!(file, "{pid}").map_err(|source| SingletonError::Io {
-                    path: path.clone(),
-                    source,
-                })?;
-                file.sync_all().ok();
-                Ok(Self { _file: file, path })
-            }
-            Err(_) => Err(SingletonError::AlreadyHeld { path }),
-        }
+        rithmic_host::SessionLock::try_acquire_path(Self::lock_path(user, system_name, url, env))
+            .map(Self)
     }
 
     pub fn path(&self) -> &Path {
-        &self.path
+        self.0.path()
     }
 
     /// Like [`Self::try_acquire`], but retries `AlreadyHeld` for up to `grace`.
@@ -169,20 +109,6 @@ pub fn flock_held(user: &str, system_name: &str, url: &str, env: &str) -> bool {
         }
         Err(_) => true,
     }
-}
-
-fn simple_hash(s: &str) -> u64 {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for b in s.as_bytes() {
-        hash ^= u64::from(*b);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
-}
-
-/// FNV-1a over `user|system_name|url|canon_env` — shared by lock and unix listen paths.
-pub(crate) fn credential_key_hash(user: &str, system_name: &str, url: &str, env: &str) -> u64 {
-    simple_hash(&format!("{user}|{system_name}|{url}|{}", canon_env(env)))
 }
 
 #[cfg(test)]

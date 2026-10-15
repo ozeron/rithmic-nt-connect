@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import threading
 import weakref
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol, cast
@@ -14,13 +13,6 @@ from rithmic_nt_connect.errors import AlreadyConnectedError
 if TYPE_CHECKING:
     from rithmic_nt_connect.transport import SessionEvent
     from rithmic_nt_connect.wire_types import AccountRmsInfo, ProductRmsInfo
-
-
-def _load_session_lock() -> Any:
-    """The credential flock, from the extension (the gateway parent's own Rust code)."""
-    from rithmic_nt_connect._lib import SessionLock
-
-    return SessionLock
 
 
 class TickerSession(Protocol):
@@ -167,164 +159,48 @@ class WireSession(TickerSession, PnlSession, OrderSession, Protocol):
 PLANTS_MARKET_DATA = "market_data"
 PLANTS_EXECUTION = "execution"
 
-# Process-wide singleton for DIRECT sessions: one in-process Rithmic login per
-# credential fingerprint, whichever entry point asks first (data factory, exec
-# factory, or ``connect_market_data_session``). Gateway sessions are not cached
-# here: each client gets its own facade, and the Rust client runtime shares one
-# socket per credential fingerprint (refcounting intents per facade), while the
-# parent ``rithmic-gateway`` holds the single login. Values are always
-# ``_FlockedDirectSession`` (which owns ``acquire`` / the holder refcount);
-# ``create_rust_session`` casts on the way out.
-_SESSION_CACHE: dict[str, WireSession] = {}
-
-
-def _session_cache_key(session: SessionConfig) -> str:
-    """Credential fingerprint for the direct-session singleton.
-
-    Matches the flock identity (``user`` / ``system_name`` / ``url`` / ``env``)
-    plus the account triple and endpoint variants (``beta_url``, ``app_name``,
-    ``app_version``), so a Live node and a Demo history session can never
-    share, while data/exec factories built from the same env always do.
-    Password is deliberately absent: it is not part of the login identity and
-    must never appear in keys / reprs / logs.
-    """
-    return (
-        f"{session.connect_mode}:{session.user}:{session.system_name}:{session.url}:"
-        f"{session.env}:{session.account_id}:{session.fcm_id}:{session.ib_id}:"
-        f"{session.gateway_listen}:{session.beta_url}:{session.app_name}:{session.app_version}"
-    )
-
 
 def create_rust_session(
     session: SessionConfig,
     *,
     plants: str = PLANTS_MARKET_DATA,
 ) -> WireSession:
-    """Create (or reuse) the in-process PyO3 session for ``session``.
-
-    Direct mode is a process-wide singleton keyed by credential fingerprint
-    (``_SESSION_CACHE``): the data factory, exec factory, and
-    ``connect_market_data_session`` all share one Rithmic login, so
-    initializing both clients cannot open two logins that close each other.
-    Every hand-out takes a holder (``_FlockedDirectSession.acquire``) and
-    ``disconnect`` tears plants down only when the last holder leaves, so one
-    client's teardown cannot close a shared session out from under the other.
-
-    Takes the shared credential flock before constructing plants so legacy
-    callers cannot open a second Rithmic login alongside a gateway parent.
-
-    ``plants`` is ``market_data`` (ticker + history) or ``execution``
-    (also PnL when the account triple is set). Order plant stays lazy. A later
-    ``execution`` request on a cached ``market_data`` session unions the PnL
-    plant into the set (``request_plants`` attaches it even when already
-    connected).
-    """
+    """Attach to the Rust registry's host; each caller owns its own intents."""
     if session.password is None:
         raise ConfigError("direct mode requires a password (RITHMIC_PASSWORD)")
-    key = _session_cache_key(session)
-    existing = cast(_FlockedDirectSession | None, _SESSION_CACHE.get(key))
-    if existing is not None:
-        if plants == PLANTS_EXECUTION:
-            existing.request_plants(PLANTS_EXECUTION)
-        existing.acquire()
-        return existing
-
     from rithmic_nt_connect._lib import Session
 
-    session_lock = _load_session_lock()
-
-    lock = None
-    try:
-        lock = session_lock.try_acquire(
-            session.user, session.system_name, session.url, session.env
-        )
-        inner = Session(
-            user=session.user,
-            password=session.password,
-            system_name=session.system_name,
-            url=session.url,
-            app_name=session.app_name,
-            app_version=session.app_version,
-            env=session.env,
-            account_id=session.account_id,
-            fcm_id=session.fcm_id,
-            ib_id=session.ib_id,
-            beta_url=session.beta_url,
-            plants=plants,
-        )
-        # ``_FlockedDirectSession`` delegates the full facade via ``__getattr__``,
-        # so a checker cannot see its protocol conformance; the Rust ``Session``
-        # itself is verified against ``WireSession`` above (it is the ``inner``
-        # argument's declared type).
-        wrapped = _FlockedDirectSession(inner, lock, cache_key=key)
-        _SESSION_CACHE[key] = wrapped
-        return wrapped
-    except Exception:
-        if lock is not None:
-            with contextlib.suppress(Exception):
-                close = getattr(lock, "close", None)
-                if callable(close):
-                    close()
-        raise
+    inner = Session(
+        user=session.user,
+        password=session.password,
+        system_name=session.system_name,
+        url=session.url,
+        app_name=session.app_name,
+        app_version=session.app_version,
+        env=session.env,
+        account_id=session.account_id,
+        fcm_id=session.fcm_id,
+        ib_id=session.ib_id,
+        beta_url=session.beta_url,
+        connect_mode="direct",
+        gateway_listen=session.gateway_listen,
+    )
+    if plants == PLANTS_EXECUTION:
+        inner.request_plants(plants)
+    return _FlockedDirectSession(inner)
 
 
 class _FlockedDirectSession:
-    """Keep the credential flock for the life of a direct plant session.
+    """Forward the direct facade; Rust owns sharing, flock and detach."""
 
-    Data and exec clients share one instance. ``connect()`` is idempotent
-    because Nautilus starts both clients in parallel and each calls connect.
-    The full ``WireSession`` surface is forwarded explicitly so checkers see
-    the protocol conformance (a bare ``__getattr__`` delegate is invisible to
-    them); ``__getattr__`` remains as a safety net for future additions.
-    """
-
-    def __init__(
-        self,
-        inner: WireSession,
-        lock: Any,
-        cache_key: str | None = None,
-    ) -> None:
+    def __init__(self, inner: WireSession) -> None:
         self._inner = inner
-        self._lock = lock
-        self._cache_key = cache_key
-        self._connect_gate = threading.Lock()
-        # Holder refcount: the creator holds one; every additional factory /
-        # ``connect_market_data_session`` hand-out takes another via
-        # ``acquire``. ``disconnect`` tears the inner plants down only when the
-        # last holder leaves, so a data-client teardown cannot close a shared
-        # session that an exec client (or standalone history load) still uses.
-        self._holders = 1
-
-    def acquire(self) -> None:
-        """Take another holder on the shared session (factory hand-out)."""
-        with self._connect_gate:
-            self._holders += 1
 
     def connect(self) -> None:
         ensure_connected(self)
 
     def disconnect(self) -> None:
-        """Release this holder; tear plants down only when the last one leaves.
-
-        The last holder also releases the credential flock and evicts the
-        session from the process singleton, so a stopped node no longer blocks
-        a separate process from taking the login (the flock's lifetime is tied
-        to the owners, not to GC).
-        """
-        with self._connect_gate:
-            if self._holders <= 0:
-                return
-            self._holders -= 1
-            if self._holders == 0:
-                self._inner.disconnect()
-                self._release_credential_flock()
-
-    def _release_credential_flock(self) -> None:
-        if self._cache_key is not None and _SESSION_CACHE.get(self._cache_key) is self:
-            _SESSION_CACHE.pop(self._cache_key, None)
-        close = getattr(self._lock, "close", None)
-        if callable(close):
-            close()
+        self._inner.disconnect()
 
     def open_gates(self, trading: bool, cancel_all: bool) -> Gates:
         return self._inner.open_gates(trading, cancel_all)
@@ -559,20 +435,8 @@ class _FlockedDirectSession:
 
 
 def ensure_connected(session: Any) -> None:
-    """Connect once. Safe if the shared plant is already up.
-
-    There is no parallel ``_connected`` boolean: the inner plant session is the
-    source of truth for connection state, and ``_connect_once`` swallows the
-    typed ``AlreadyConnectedError`` it raises when already up. A stale parallel
-    flag drifting True across a delegated ``disconnect()`` is what previously
-    made reconnect short-circuit.
-    """
-    gate = getattr(session, "_connect_gate", None)
-    if gate is None:
-        _connect_once(session)
-        return
-    with gate:
-        _connect_once(session)
+    """Ensure the host is connected; concurrency is serialized in Rust."""
+    _connect_once(session)
 
 
 def _connect_once(session: Any) -> None:
@@ -679,9 +543,7 @@ def create_session(
 ) -> WireSession:
     """Create a WireSession for ``session.connect_mode`` (``direct`` or ``gateway``).
 
-    Direct is a process-wide singleton per credential fingerprint (see
-    ``create_rust_session``): the data factory, exec factory, and
-    ``connect_market_data_session`` share one in-process Rithmic login.
+    Direct attachments share one Rust host per credential fingerprint.
     Gateway attaches to an explicitly started ``rithmic-gateway`` parent (it
     never spawns one, never holds the password) and never opens plants locally.
     Each call returns a **fresh** facade; data and exec factories share one
@@ -697,10 +559,7 @@ def connect_market_data_session(
 ) -> WireSession:
     """Create and connect a ticker+history session.
 
-    Direct mode returns the process-wide singleton for these credentials (so a
-    standalone history load shares the node's login instead of opening a second
-    one that would close it); the session may already carry the PnL plant when
-    an exec client requested it first. Connect is idempotent.
+    The new attachment shares the node's Rust host and login. Connect is idempotent.
     """
     session = create_session(
         config if config is not None else SessionConfig.from_env(),

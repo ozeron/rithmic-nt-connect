@@ -1,6 +1,7 @@
 //! The system under test: the real gateway server over a fake plant, embedded
 //! in this process and served on a real unix socket, plus two client kinds.
 
+use rithmic_host::Venue;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

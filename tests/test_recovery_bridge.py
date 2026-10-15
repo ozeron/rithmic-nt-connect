@@ -208,7 +208,7 @@ def test_bridge_runs_in_both_modes(mode: str) -> None:
         rig = _Rig(asyncio.get_running_loop())
         session = _Session()
         wrapper = (
-            _FlockedDirectSession(session, object())
+            _FlockedDirectSession(session)
             if mode == "direct"
             else _RustGatewaySession(session)
         )

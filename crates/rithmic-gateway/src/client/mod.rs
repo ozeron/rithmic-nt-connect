@@ -668,14 +668,12 @@ impl Session for RemoteSession {
         .await
     }
 
-    async fn reset_ticker(&self) -> Result<()> {
-        self.ack(
-            Body::ResetTickerPlant(pb::ResetTickerPlantRequest {}),
-            Mode::Intent,
-        )
-        .await
+    async fn open_gates(&self, _trading: bool, _cancel_all: bool) -> rithmic_host::Gates {
+        rithmic_host::Gates {
+            trading: self.trading_enabled(),
+            cancel_all: self.cancel_all_enabled(),
+        }
     }
-
     async fn resolved_account(&self) -> Option<AccountTriple> {
         let frame = self
             .call(

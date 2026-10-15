@@ -8,7 +8,7 @@ use rithmic_host::{Error, Session};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::sync::{mpsc, oneshot};
 
-use super::{GatewayConfig, RemoteSession, TransportEvent};
+use super::{GatewayConfig, RemoteSession};
 use crate::pb::{self, frame::Body, Frame};
 
 const WAIT: Duration = Duration::from_secs(2);
@@ -125,7 +125,7 @@ async fn session_event(rx: &mut tokio::sync::broadcast::Receiver<SessionEvent>) 
 }
 
 #[tokio::test]
-async fn parent_frames_report_the_remote_generation_and_legacy_events() {
+async fn parent_frames_report_session_events_without_synthetic_transport_events() {
     let mut rig = Rig::new();
     let mut events = rig.session.session_events();
     let mut legacy = rig.session.subscribe_transport();
@@ -162,17 +162,10 @@ async fn parent_frames_report_the_remote_generation_and_legacy_events() {
             generation: generation + 1
         }
     );
-    assert_eq!(
-        legacy.recv().await.unwrap(),
-        TransportEvent::Down { generation }
+    assert!(
+        legacy.try_recv().is_err(),
+        "plant recovery is only a SessionEvent"
     );
-    assert_eq!(
-        legacy.recv().await.unwrap(),
-        TransportEvent::Up {
-            generation: generation + 1
-        }
-    );
-    assert!(legacy.try_recv().is_err(), "only the legacy Down/Up pair");
 }
 
 #[tokio::test]
@@ -447,7 +440,7 @@ async fn a_failed_intent_rejoin_never_publishes_resumed() {
 }
 
 #[tokio::test]
-async fn an_old_parent_keeps_the_legacy_synthetic_down_before_up() {
+async fn an_old_parent_reports_resumed_without_synthetic_transport_events() {
     let mut rig = Rig::new();
     let mut events = rig.session.session_events();
     let mut legacy = rig.session.subscribe_transport();
@@ -461,14 +454,7 @@ async fn an_old_parent_keeps_the_legacy_synthetic_down_before_up() {
         session_event(&mut events).await,
         SessionEvent::Resumed { generation: 2 }
     );
-    assert_eq!(
-        legacy.recv().await.unwrap(),
-        TransportEvent::Down { generation: 1 }
-    );
-    assert_eq!(
-        legacy.recv().await.unwrap(),
-        TransportEvent::Up { generation: 2 }
-    );
+    assert!(legacy.try_recv().is_err(), "no synthetic transport pair");
 }
 
 #[tokio::test]

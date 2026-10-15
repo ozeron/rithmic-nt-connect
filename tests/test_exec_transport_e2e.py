@@ -2568,7 +2568,7 @@ def test_exec_requests_gates_and_warns_when_trading_denied(
     inner = client._session
     client._session = cast(
         WireSession,
-        _FlockedDirectSession(inner, object())
+        _FlockedDirectSession(inner)
         if mode == "direct"
         else _RustGatewaySession(inner),
     )
