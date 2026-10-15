@@ -7,7 +7,8 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rithmic_plants::{Session, Stream};
+use rithmic_host::{Session, Stream};
+
 use tokio::task::JoinSet;
 
 use crate::reconnect::{MdIntent, ReconnectController};
@@ -49,16 +50,16 @@ impl Default for PumpTiming {
     }
 }
 
-/// True for the subset of `rithmic_plants::Error` that the session
+/// True for the subset of `rithmic_host::Error` that the session
 /// constructor maps `is_connection_issue()` errors onto (see
 /// `rithmic_plants::session::forward` / the stream lanes).
 ///
 /// A gap is a slow consumer of a live plant channel, not a transport failure:
 /// it is published to clients and must not tear plants down.
-fn is_connection_issue(e: &rithmic_plants::Error) -> bool {
+fn is_connection_issue(e: &rithmic_host::Error) -> bool {
     matches!(
         e,
-        rithmic_plants::Error::Rithmic(_) | rithmic_plants::Error::ChannelClosed { .. }
+        rithmic_host::Error::Rithmic(_) | rithmic_host::Error::ChannelClosed { .. }
     )
 }
 
@@ -356,22 +357,23 @@ mod tests {
     use super::*;
     use crate::reconnect::TimeBarIntent;
     use crate::subscriptions::{FanoutHub, SharedFanout, SubKey};
-    use rithmic_plants::{DirectSession, PlantSet};
+    use rithmic_host::PlantSet;
+    use rithmic_plants::RithmicVenue;
     use std::str::FromStr;
 
     /// An unconnected session: every venue call fails fast, so restore
     /// tallies are exercised without any network. The pump's log-and-
     /// continue policy means every attempt is counted and nothing restored.
-    fn offline_session() -> DirectSession {
+    fn offline_session() -> RithmicVenue {
         let cfg = rithmic_plants::SessionConfig::builder()
             .user("tally-test")
             .password("pw")
             .system_name("LucidTrading")
             .url("wss://rprotocol.rithmic.com:443")
-            .env(rithmic_rs::RithmicEnv::from_str("live").expect("env"))
+            .env(rithmic_host::Env::from_str("live").expect("env"))
             .build()
             .expect("config");
-        DirectSession::new(cfg, PlantSet::MARKET_DATA)
+        RithmicVenue::new(cfg, PlantSet::MARKET_DATA)
     }
 
     fn runtime() -> tokio::runtime::Runtime {

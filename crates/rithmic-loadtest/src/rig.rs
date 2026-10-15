@@ -13,9 +13,9 @@ use rithmic_gateway::listen::bind_unix;
 use rithmic_gateway::pb::{frame::Body, Frame, Handshake, SubscribeRequest};
 use rithmic_gateway::server::{run_gateway, Fingerprint, GatewayParams, SessionHandle};
 use rithmic_gateway::subscriptions::ParentGates;
-use rithmic_plants::dto::{LastTradeDto, PlantEvent};
-use rithmic_plants::fake::{FakeSession, Stream};
-use rithmic_plants::Session;
+use rithmic_host::dto::{LastTradeDto, PlantEvent};
+use rithmic_host::fake::{FakeVenue, Stream};
+use rithmic_host::Session;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::task::JoinHandle;
@@ -30,7 +30,7 @@ pub const EXCHANGE: &str = "CME";
 static N: AtomicU64 = AtomicU64::new(0);
 
 pub struct Rig {
-    pub fake: Arc<FakeSession>,
+    pub fake: Arc<FakeVenue>,
     pub listen: PathBuf,
     pub user: String,
     _dir: tempfile::TempDir,
@@ -52,7 +52,7 @@ impl Rig {
             N.fetch_add(1, Ordering::SeqCst)
         );
         let listener = bind_unix(&path).await.expect("bind");
-        let fake = Arc::new(FakeSession::new());
+        let fake = Arc::new(FakeVenue::new());
         fake.connect().await.expect("fake connect");
         let params = GatewayParams {
             listener,

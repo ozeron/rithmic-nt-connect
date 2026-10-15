@@ -4,7 +4,7 @@ use rithmic_rs::rti::messages::RithmicMessage;
 use rithmic_rs::RithmicAccount;
 use rithmic_rs::RithmicResponse;
 
-use crate::error::{Error, Result};
+use rithmic_host::{Error, Result};
 
 /// One row from `ResponseAccountList`.
 #[derive(Debug, Clone, PartialEq, Eq)]

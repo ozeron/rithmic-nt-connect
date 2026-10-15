@@ -1,4 +1,4 @@
-//! `FakeSession`: a scripted in-memory [`Session`] for testing the gateway layer
+//! `FakeVenue`: a scripted in-memory [`Session`] for testing the gateway layer
 //! without Rithmic (feature `testing`; never part of the shipped wheel).
 //!
 //! It models only what the gateway layer depends on: events delivered per
@@ -69,27 +69,27 @@ struct State {
     pending: HashMap<Stream, VecDeque<PlantEvent>>,
     calls: Vec<String>,
     failures: HashMap<String, VecDeque<FakeFailure>>,
-    /// Per-method artificial latency applied by [`FakeSession::delay`].
+    /// Per-method artificial latency applied by [`FakeVenue::delay`].
     delays: HashMap<String, Duration>,
     account: Option<AccountTriple>,
-    /// Gates, as on `DirectSession`; closed gates deny before anything else.
+    /// Gates, as on `RithmicVenue`; closed gates deny before anything else.
     trading_closed: bool,
     cancel_all_closed: bool,
     /// A `disconnect` is in progress (held for its scripted delay): order
-    /// operations started now fail as not sent, as on `DirectSession`.
+    /// operations started now fail as not sent, as on `RithmicVenue`.
     disconnecting: bool,
     /// The order plant was disconnected on request; commands are not sent until
-    /// it is ensured or subscribed again (as on `DirectSession`).
+    /// it is ensured or subscribed again (as on `RithmicVenue`).
     order_closed: bool,
 }
 
 /// Scripted in-memory plant session.
-pub struct FakeSession {
+pub struct FakeVenue {
     state: Mutex<State>,
     hub: Arc<StreamHub>,
 }
 
-impl Default for FakeSession {
+impl Default for FakeVenue {
     fn default() -> Self {
         Self {
             state: Mutex::new(State::default()),
@@ -98,13 +98,13 @@ impl Default for FakeSession {
     }
 }
 
-impl FakeSession {
+impl FakeVenue {
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Set the trading and cancel-all gates, with the same denials as
-    /// `DirectSession::with_gates`. A new fake has both open: gateway tests
+    /// `RithmicVenue::with_gates`. A new fake has both open: gateway tests
     /// exercise the parent's own gate in front of it.
     pub fn with_gates(self, trading_enabled: bool, cancel_all_enabled: bool) -> Self {
         {
@@ -115,7 +115,7 @@ impl FakeSession {
         self
     }
 
-    /// The trading gate check `DirectSession` makes before `what`.
+    /// The trading gate check `RithmicVenue` makes before `what`.
     fn require_trading(&self, what: &str) -> Result<()> {
         if self.lock().trading_closed {
             return Err(Error::Gateway {
@@ -133,10 +133,12 @@ impl FakeSession {
         {
             let state = self.lock();
             if state.disconnecting {
-                return Err(Error::NotSent(crate::direct::DISCONNECT_IN_PROGRESS.into()));
+                return Err(Error::NotSent(
+                    crate::backend::DISCONNECT_IN_PROGRESS.into(),
+                ));
             }
             if state.order_closed {
-                return Err(Error::NotSent(crate::direct::ORDER_PLANT_CLOSED.into()));
+                return Err(Error::NotSent(crate::backend::ORDER_PLANT_CLOSED.into()));
             }
         }
         self.enter_plant(method, detail, Stream::Order)
@@ -218,6 +220,16 @@ impl FakeSession {
             .push_back(failure);
     }
 
+    /// Inject a connection issue into only this attached stream. Other plants
+    /// stay up; the stream consumer sees `Error::Rithmic` after queued events.
+    pub fn fail_stream(&self, stream: Stream, message: &str) {
+        self.lock()
+            .txs
+            .get(&stream)
+            .expect("fake stream must be attached before failing it")
+            .fail(message.into());
+    }
+
     /// Simulate the plants dropping: polls fail with `ChannelClosed` until the
     /// next `connect`, exactly what the parent's event pump reacts to.
     pub fn drop_plants(&self) {
@@ -269,7 +281,7 @@ impl FakeSession {
 }
 
 #[async_trait]
-impl Session for FakeSession {
+impl Session for FakeVenue {
     async fn connect(&self) -> Result<()> {
         let mut state = self.enter("connect", "")?;
         state.connected = true;
@@ -588,7 +600,9 @@ impl Session for FakeSession {
             });
         }
         if self.lock().disconnecting {
-            return Err(Error::NotSent(crate::direct::DISCONNECT_IN_PROGRESS.into()));
+            return Err(Error::NotSent(
+                crate::backend::DISCONNECT_IN_PROGRESS.into(),
+            ));
         }
         self.enter_plant("cancel_all_orders", "", Stream::Order)
     }
@@ -640,7 +654,7 @@ mod tests {
 
     #[tokio::test]
     async fn records_calls_in_order() {
-        let fake = FakeSession::new();
+        let fake = FakeVenue::new();
         fake.connect().await.unwrap();
         fake.subscribe("NQH6", "CME").await.unwrap();
         fake.unsubscribe("NQH6", "CME").await.unwrap();
@@ -653,7 +667,7 @@ mod tests {
 
     #[tokio::test]
     async fn scripted_events_are_delivered_once_in_order() {
-        let fake = FakeSession::new();
+        let fake = FakeVenue::new();
         fake.connect().await.unwrap();
         fake.push_event(Stream::Ticker, last_trade("NQH6", 1.0));
         fake.push_event(Stream::Ticker, last_trade("NQH6", 2.0));
@@ -666,7 +680,7 @@ mod tests {
 
     #[tokio::test]
     async fn injected_failure_hits_exactly_the_next_call() {
-        let fake = FakeSession::new();
+        let fake = FakeVenue::new();
         fake.fail_next("subscribe", FakeFailure::Rithmic("boom".into()));
         assert!(fake.subscribe("NQH6", "CME").await.is_err());
         assert!(fake.subscribe("NQH6", "CME").await.is_ok());
@@ -679,7 +693,7 @@ mod tests {
 
     #[tokio::test]
     async fn dropped_plants_fail_polls_until_reconnect() {
-        let fake = FakeSession::new();
+        let fake = FakeVenue::new();
         fake.connect().await.unwrap();
         fake.drop_plants();
         let err = fake.poll_event(Duration::ZERO).await.unwrap_err();
@@ -690,8 +704,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failing_one_stream_leaves_the_other_plants_up() {
+        let fake = FakeVenue::new();
+        fake.connect().await.unwrap();
+        fake.ensure_pnl_plant().await.unwrap();
+        fake.ensure_order_plant().await.unwrap();
+        fake.clear_calls();
+
+        fake.fail_stream(Stream::Ticker, "ticker connection lost");
+        assert!(matches!(
+            fake.poll_event(Duration::ZERO).await,
+            Err(Error::Rithmic(message)) if message == "ticker connection lost"
+        ));
+        for stream in [Stream::History, Stream::Pnl, Stream::Order] {
+            assert!(fake.poll(stream, Duration::ZERO).await.unwrap().is_none());
+        }
+        assert!(fake.calls().is_empty(), "injection does not rebuild plants");
+    }
+
+    #[tokio::test]
     async fn order_poll_is_not_connected_until_the_order_plant_exists() {
-        let fake = FakeSession::new();
+        let fake = FakeVenue::new();
         fake.connect().await.unwrap();
         let err = fake.poll_order_event(Duration::ZERO).await.unwrap_err();
         assert!(matches!(err, Error::NotConnected { plant: "order" }));

@@ -9,7 +9,7 @@ use common::*;
 use rithmic_gateway::client::{GatewayConfig, GatewaySession};
 use rithmic_gateway::pb::frame::Body;
 use rithmic_gateway::singleton::SessionLock;
-use rithmic_plants::{Error, Session};
+use rithmic_host::{Error, Session};
 
 fn config_at(user: &str, path: &std::path::Path) -> GatewayConfig {
     GatewayConfig::new(user, SYSTEM, URL, "Live")

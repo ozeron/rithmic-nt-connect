@@ -1,5 +1,5 @@
 //! Accept loop: Handshake + Ready, gated RPC dispatch backed by
-//! [`rithmic_plants::RithmicSession`], and per-client fan-out of pushed
+//! [`rithmic_host::Session`], and per-client fan-out of pushed
 //! events. Client disconnect is detach-only (refcount decrement) while peers
 //! remain; optional idle-exit shuts down the parent after the last Ready
 //! peer leaves (see [`crate::idle_exit`]).
@@ -17,7 +17,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc, watch, Mutex as TokioMutex, RwLock};
 use tokio::task::JoinHandle;
 
-use rithmic_plants::Session;
+use rithmic_host::Session;
 
 use crate::codec;
 use crate::idle_exit::{IdleExit, IdleExitPolicy};
@@ -605,11 +605,11 @@ impl ClientCtx {
 }
 
 /// Which plant stream a topic's events come from, for a gap frame.
-fn stream_of_topic(key: &SubKey) -> rithmic_plants::Stream {
+fn stream_of_topic(key: &SubKey) -> rithmic_host::Stream {
     match key.symbol.as_str() {
-        "__pnl__" => rithmic_plants::Stream::Pnl,
-        "__order__" => rithmic_plants::Stream::Order,
-        _ => rithmic_plants::Stream::Ticker,
+        "__pnl__" => rithmic_host::Stream::Pnl,
+        "__order__" => rithmic_host::Stream::Order,
+        _ => rithmic_host::Stream::Ticker,
     }
 }
 
@@ -617,10 +617,10 @@ fn stream_of_topic(key: &SubKey) -> rithmic_plants::Stream {
 /// ticks, book and live bars, but bars are consumed from the history channel: a
 /// client that asked for bars is told on that channel too, so its bar consumer
 /// resyncs instead of continuing with a hole.
-fn overflow_gap_streams(stream: rithmic_plants::Stream, kinds: u8) -> Vec<rithmic_plants::Stream> {
+fn overflow_gap_streams(stream: rithmic_host::Stream, kinds: u8) -> Vec<rithmic_host::Stream> {
     let mut streams = vec![stream];
-    if stream == rithmic_plants::Stream::Ticker && kinds & Kind::Bars.bit() != 0 {
-        streams.push(rithmic_plants::Stream::History);
+    if stream == rithmic_host::Stream::Ticker && kinds & Kind::Bars.bit() != 0 {
+        streams.push(rithmic_host::Stream::History);
     }
     streams
 }
@@ -632,7 +632,7 @@ fn overflow_gap_streams(stream: rithmic_plants::Stream, kinds: u8) -> Vec<rithmi
 fn spawn_forwarder(
     rx: broadcast::Receiver<Fan>,
     out_tx: mpsc::Sender<OutMsg>,
-    stream: rithmic_plants::Stream,
+    stream: rithmic_host::Stream,
     kinds: Arc<AtomicU8>,
 ) -> JoinHandle<()> {
     let mut queue = crate::subscriptions::ClientQueue::from_receiver(ClientId::new(), rx);
@@ -1107,7 +1107,7 @@ async fn write_replies(
 /// symbol/exchange (or the internal pnl/order sentinel keys). Also feeds the
 /// [`ReconnectController`]-visible hub so late subscribers still see the
 /// venue-declared topic.
-pub async fn publish_plant_event(hub: &FanoutHub, event: rithmic_plants::dto::PlantEvent) {
+pub async fn publish_plant_event(hub: &FanoutHub, event: rithmic_host::dto::PlantEvent) {
     use crate::convert::{plant_event_to_pb, route_of, Route};
 
     match route_of(&event) {
@@ -1125,7 +1125,7 @@ pub async fn publish_plant_event(hub: &FanoutHub, event: rithmic_plants::dto::Pl
                 let _ = tx.send(fan);
             }
         }
-        Route::Gap(rithmic_plants::Stream::Ticker | rithmic_plants::Stream::History) => {
+        Route::Gap(rithmic_host::Stream::Ticker | rithmic_host::Stream::History) => {
             if let Some(fan) = encode_event(plant_event_to_pb(event), Kind::Any) {
                 hub.publish_symbols(fan).await;
             }
@@ -1135,7 +1135,7 @@ pub async fn publish_plant_event(hub: &FanoutHub, event: rithmic_plants::dto::Pl
         // subscribed to them.
         Route::Pnl | Route::Order | Route::Other | Route::Gap(_) => {
             let kind = match event {
-                rithmic_plants::dto::PlantEvent::BracketUpdate(_) => Kind::Brackets,
+                rithmic_host::dto::PlantEvent::BracketUpdate(_) => Kind::Brackets,
                 _ => Kind::Any,
             };
             let (key, wire_event) = crate::convert::plant_event_to_routed(event);
@@ -1147,7 +1147,7 @@ pub async fn publish_plant_event(hub: &FanoutHub, event: rithmic_plants::dto::Pl
 #[cfg(test)]
 mod overflow_gap_tests {
     use super::*;
-    use rithmic_plants::Stream;
+    use rithmic_host::Stream;
 
     #[test]
     fn a_bar_subscriber_hears_about_the_overflow_on_its_bar_channel() {

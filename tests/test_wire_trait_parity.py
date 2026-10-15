@@ -16,7 +16,7 @@ from pathlib import Path
 from rithmic_nt_connect.session import WireSession
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-BACKEND = REPO_ROOT / "crates" / "rithmic-plants" / "src" / "backend.rs"
+BACKEND = REPO_ROOT / "crates" / "rithmic-host" / "src" / "backend.rs"
 PYI = REPO_ROOT / "python" / "rithmic_nt_connect" / "_lib.pyi"
 
 

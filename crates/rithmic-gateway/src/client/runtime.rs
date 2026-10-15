@@ -15,8 +15,9 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::time::Duration;
 
 use prost::Message;
-use rithmic_plants::dto::PlantEvent;
-use rithmic_plants::{Error, Result};
+use rithmic_host::dto::PlantEvent;
+use rithmic_host::{Error, Result};
+
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;

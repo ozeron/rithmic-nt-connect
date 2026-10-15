@@ -170,7 +170,7 @@ RITHMIC_GATEWAY_BIN=$PWD/target/release/rithmic-gateway python -m rithmic_gatewa
 # --- History Ready ≠ plants connected (2026-08-31 MY043 / RC4) ---
 # History plant login can still leave Load* silent until rithmic-rs
 # DEFAULT_REQUEST_TIMEOUT (30s → `request timed out`). The parent now proves a
-# tiny 1m Load* inside `RithmicSession::connect` before advertising Ready /
+# tiny 1m Load* inside `Plants::connect` before advertising Ready /
 # "plants connected (...; history ready)". Production Load* also retries
 # RequestTimeout (transient). Override probe with
 # RITHMIC_HISTORY_READY_SYMBOL / RITHMIC_HISTORY_READY_EXCHANGE (else

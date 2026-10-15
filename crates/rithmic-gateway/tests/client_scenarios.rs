@@ -14,8 +14,9 @@ use common::*;
 use rithmic_gateway::client::{GatewayConfig, GatewaySession};
 use rithmic_gateway::pb::{self, frame::Body};
 use rithmic_gateway::testing as scripted;
-use rithmic_plants::dto::PlantEvent;
-use rithmic_plants::{Error, PlaceOrder, Session};
+use rithmic_host::dto::PlantEvent;
+use rithmic_host::{Error, PlaceOrder, Session};
+
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 
@@ -75,7 +76,7 @@ async fn drain(
 }
 
 type Fut<'a> = std::pin::Pin<
-    Box<dyn std::future::Future<Output = rithmic_plants::Result<Option<PlantEvent>>> + Send + 'a>,
+    Box<dyn std::future::Future<Output = rithmic_host::Result<Option<PlantEvent>>> + Send + 'a>,
 >;
 
 fn market(s: &GatewaySession, t: Duration) -> Fut<'_> {
@@ -560,7 +561,7 @@ async fn a_client_that_never_reads_is_dropped_without_hurting_its_peer() {
             Ok(None) => {}
             // A 20k burst can outrun this one-event-at-a-time consumer's own
             // bounded queue; that is reported (never silent) and it keeps going.
-            Err(rithmic_plants::Error::ChannelLagged { .. }) => {}
+            Err(rithmic_host::Error::ChannelLagged { .. }) => {}
             Err(e) => panic!("healthy peer poll failed: {e}"),
         }
     }
@@ -736,15 +737,15 @@ async fn concurrent_polls_and_rpcs_make_progress_without_deadlock() {
 /// The outcome of each poll, described so two backends can be compared.
 async fn describe_polls(
     s: &dyn Session,
-    stream: rithmic_plants::Stream,
+    stream: rithmic_host::Stream,
     polls: usize,
 ) -> Vec<String> {
     let mut out = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(10);
     while out.len() < polls && Instant::now() < deadline {
         let polled = match stream {
-            rithmic_plants::Stream::Ticker => s.poll_event(Duration::from_millis(100)).await,
-            rithmic_plants::Stream::Order => s.poll_order_event(Duration::from_millis(100)).await,
+            rithmic_host::Stream::Ticker => s.poll_event(Duration::from_millis(100)).await,
+            rithmic_host::Stream::Order => s.poll_order_event(Duration::from_millis(100)).await,
             other => panic!("not exercised: {other:?}"),
         };
         match polled {
@@ -770,7 +771,7 @@ async fn a_plant_lag_reaches_the_client_in_order_as_channel_lagged() {
     parent.command("push gap ticker 41").await;
     parent.push_last_trades(NQ, 1).await;
     assert_eq!(
-        describe_polls(&s, rithmic_plants::Stream::Ticker, 3).await,
+        describe_polls(&s, rithmic_host::Stream::Ticker, 3).await,
         ["trade", "lagged ticker 41", "trade"]
     );
 }
@@ -787,21 +788,17 @@ async fn the_next_events_batch_carries_the_gap_in_order() {
     let deadline = Instant::now() + Duration::from_secs(10);
     while got.len() < 3 && Instant::now() < deadline {
         got.extend(
-            s.next_events(
-                rithmic_plants::Stream::Ticker,
-                16,
-                Duration::from_millis(200),
-            )
-            .await
-            .unwrap(),
+            s.next_events(rithmic_host::Stream::Ticker, 16, Duration::from_millis(200))
+                .await
+                .unwrap(),
         );
     }
     assert_eq!(got.len(), 3, "{got:?}");
     assert!(matches!(got[0], PlantEvent::LastTrade(_)));
     assert!(matches!(
         got[1],
-        PlantEvent::Gap(rithmic_plants::GapDto {
-            stream: rithmic_plants::Stream::Ticker,
+        PlantEvent::Gap(rithmic_host::GapDto {
+            stream: rithmic_host::Stream::Ticker,
             skipped: 9
         })
     ));
@@ -819,34 +816,34 @@ async fn an_order_stream_gap_reaches_order_subscribers() {
     s.subscribe_order_updates().await.unwrap();
     parent.command("push gap order 7").await;
     assert_eq!(
-        describe_polls(&s, rithmic_plants::Stream::Order, 1).await,
+        describe_polls(&s, rithmic_host::Stream::Order, 1).await,
         ["lagged order 7"]
     );
 }
 
 /// Direct and gateway modes must read the same lag the same way: the fake
-/// session uses the same stream lanes as `DirectSession`, so running one script
+/// session uses the same stream lanes as `RithmicVenue`, so running one script
 /// through it and through a gateway client proves the two agree.
 #[tokio::test]
 async fn the_same_lag_reads_identically_through_direct_and_gateway() {
-    let direct = rithmic_plants::fake::FakeSession::new();
+    let direct = rithmic_host::fake::FakeVenue::new();
     direct.connect().await.unwrap();
     direct.push_event(
-        rithmic_plants::Stream::Ticker,
+        rithmic_host::Stream::Ticker,
         scripted::last_trade(NQ, CME, 1.0, 1),
     );
     direct.push_event(
-        rithmic_plants::Stream::Ticker,
-        PlantEvent::Gap(rithmic_plants::GapDto {
-            stream: rithmic_plants::Stream::Ticker,
+        rithmic_host::Stream::Ticker,
+        PlantEvent::Gap(rithmic_host::GapDto {
+            stream: rithmic_host::Stream::Ticker,
             skipped: 41,
         }),
     );
     direct.push_event(
-        rithmic_plants::Stream::Ticker,
+        rithmic_host::Stream::Ticker,
         scripted::last_trade(NQ, CME, 2.0, 1),
     );
-    let via_direct = describe_polls(&direct, rithmic_plants::Stream::Ticker, 3).await;
+    let via_direct = describe_polls(&direct, rithmic_host::Stream::Ticker, 3).await;
 
     let parent = FakeParent::start(Opts::default()).await;
     let s = session_for(&parent).await;
@@ -854,7 +851,7 @@ async fn the_same_lag_reads_identically_through_direct_and_gateway() {
     parent.push_last_trades(NQ, 1).await;
     parent.command("push gap ticker 41").await;
     parent.push_last_trades(NQ, 1).await;
-    let via_gateway = describe_polls(&s, rithmic_plants::Stream::Ticker, 3).await;
+    let via_gateway = describe_polls(&s, rithmic_host::Stream::Ticker, 3).await;
 
     assert_eq!(via_direct, ["trade", "lagged ticker 41", "trade"]);
     assert_eq!(via_direct, via_gateway);
@@ -878,22 +875,22 @@ async fn the_same_failure_class_reads_identically_through_direct_and_gateway() {
     for (kind, fail, want) in [
         (
             "rejected",
-            rithmic_plants::fake::FakeFailure::Rejected("price".into()),
+            rithmic_host::fake::FakeFailure::Rejected("price".into()),
             "rejected",
         ),
         (
             "not_sent",
-            rithmic_plants::fake::FakeFailure::NotSent("no route".into()),
+            rithmic_host::fake::FakeFailure::NotSent("no route".into()),
             "not_sent",
         ),
         (
             "unknown",
-            rithmic_plants::fake::FakeFailure::Unknown("write failed".into()),
+            rithmic_host::fake::FakeFailure::Unknown("write failed".into()),
             "unknown",
         ),
     ] {
-        // Direct: the fake session stands in for DirectSession's plant calls.
-        let direct = rithmic_plants::fake::FakeSession::new();
+        // Direct: the fake session stands in for RithmicVenue's plant calls.
+        let direct = rithmic_host::fake::FakeVenue::new();
         direct.connect().await.unwrap();
         direct.fail_next("place_order", fail);
         let via_direct = direct.place_order(&place("t")).await.unwrap_err();

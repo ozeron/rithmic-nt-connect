@@ -10,8 +10,9 @@ use rithmic_gateway::listen::{bind_unix, default_unix_path, ListenEndpoint};
 use rithmic_gateway::server::{run_gateway, Fingerprint, GatewayParams, SessionHandle};
 use rithmic_gateway::singleton::{SessionLock, STARTUP_LOCK_GRACE};
 use rithmic_gateway::subscriptions::ParentGates;
-use rithmic_plants::{DirectSession, PlantSet, Session, SessionConfig};
-use rithmic_rs::RithmicEnv;
+use rithmic_host::Env;
+use rithmic_host::{PlantSet, Session};
+use rithmic_plants::{RithmicVenue, SessionConfig};
 
 #[tokio::main]
 async fn main() {
@@ -62,8 +63,8 @@ async fn run() -> Result<(), String> {
         url,
         env_name,
     } = endpoint;
-    // rithmic-rs only parses lowercase env names ("live"/"demo"/"test").
-    let env = RithmicEnv::from_str(&env_name.to_lowercase())
+    // Preserve the lowercase venue environment parser ("live"/"demo"/"test").
+    let env = Env::from_str(&env_name.to_lowercase())
         .map_err(|e| format!("RITHMIC_ENV {env_name:?}: {e}"))?;
 
     let idle_policy = parse_idle_exit_sec(
@@ -131,7 +132,7 @@ async fn run() -> Result<(), String> {
     // no caller of this session can bypass them.
     let gates = ParentGates::from_env();
     let session = Arc::new(
-        DirectSession::new(cfg, plants).with_gates(gates.trading_enabled, gates.cancel_all_enabled),
+        RithmicVenue::new(cfg, plants).with_gates(gates.trading_enabled, gates.cancel_all_enabled),
     );
     if let Err(e) = session.connect().await {
         let _ = session.disconnect().await;

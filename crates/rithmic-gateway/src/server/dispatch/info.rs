@@ -1,7 +1,7 @@
 //! Reference-info reads: plant set requests, front month, reference data,
 //! resolved account. Read-only; no trading gate.
 
-use rithmic_plants::PlantSet;
+use rithmic_host::PlantSet;
 
 use crate::convert::{front_month_to_pb, reference_data_to_pb, resolved_account_to_pb};
 use crate::pb::{self, frame::Body, Frame};

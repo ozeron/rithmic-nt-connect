@@ -8,7 +8,7 @@
 //! that load can overlap until it finishes (see "Admission" below).
 //!
 //! Cold history plant after login can stay silent until rithmic-rs request
-//! timeout (RC4 / 2026-08-31): `RithmicSession::connect` proves a tiny Load*
+//! timeout (RC4 / 2026-08-31): `Plants::connect` proves a tiny Load*
 //! before Ready, and plant-side slice retries treat `request timed out` as
 //! transient. Do not weaken RC2.3 for hydrate retries.
 //!
@@ -21,7 +21,7 @@
 //! History no longer holds the session gate, so a live stream cannot be starved
 //! by a load that is already running.
 
-use rithmic_plants::history::parse_time_bar_type;
+use rithmic_host::history::parse_time_bar_type;
 
 use crate::convert::{history_bar_to_pb, history_tick_to_pb, time_bar_probe_row_to_pb};
 use crate::pb::{self, frame::Body, Frame};

@@ -23,8 +23,8 @@ use rithmic_gateway::server::{run_gateway, Fingerprint, GatewayParams, SessionHa
 use rithmic_gateway::singleton::{SessionLock, STARTUP_LOCK_GRACE};
 use rithmic_gateway::subscriptions::ParentGates;
 use rithmic_gateway::testing::serve_control;
-use rithmic_plants::fake::FakeSession;
-use rithmic_plants::Session;
+use rithmic_host::fake::FakeVenue;
+use rithmic_host::Session;
 use tokio::net::UnixListener;
 
 #[tokio::main]
@@ -69,7 +69,7 @@ async fn run() -> Result<(), String> {
     let control = UnixListener::bind(&control_path)
         .map_err(|e| format!("bind control {control_path}: {e}"))?;
 
-    let fake = Arc::new(FakeSession::new());
+    let fake = Arc::new(FakeVenue::new());
     fake.connect().await.map_err(|e| e.to_string())?;
     tokio::spawn(serve_control(control, Arc::clone(&fake)));
     eprintln!(

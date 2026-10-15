@@ -1,0 +1,15 @@
+[package]
+name = "rithmic-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Venue-independent Rithmic session contract and test venue"
+
+[features]
+testing = []
+
+[dependencies]
+rithmic-exec = { path = "../rithmic-exec" }
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+thiserror = "2"

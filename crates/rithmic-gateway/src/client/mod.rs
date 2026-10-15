@@ -19,14 +19,15 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use rithmic_plants::dto::{
+use rithmic_host::dto::{
     AccountRmsInfoDto, FillHistoryDto, FrontMonthDto, HistoryBarDto, HistoryTickDto,
     OrderNotificationDto, PlantEvent, ProductRmsInfoDto, ReferenceDataDto, TimeBarProbeRow,
 };
-use rithmic_plants::history::{bar_slice_secs, parse_time_bar_type, window_slices};
-use rithmic_plants::{
+use rithmic_host::history::{bar_slice_secs, parse_time_bar_type, window_slices};
+use rithmic_host::{
     AccountTriple, Error, ModifyOrder, PlaceBracketOrder, PlaceOrder, PlantSet, Result, Session,
 };
+
 use tokio::sync::broadcast;
 use tokio::time::Instant;
 
@@ -254,7 +255,7 @@ impl GatewaySession {
         let mut retried = false;
         loop {
             // A state-changing request that never left is a definitive local
-            // failure (`NotSent`), the same class `DirectSession` reports.
+            // failure (`NotSent`), the same class `RithmicVenue` reports.
             let conn = match self.runtime.ensure_live().await {
                 Ok(conn) => conn,
                 Err(err) if mode == Mode::Command => return Err(Error::NotSent(err.to_string())),
@@ -395,7 +396,7 @@ impl GatewaySession {
             match queue.take() {
                 Take::Event(event) => return Ok(Some(own(event))),
                 Take::Lagged(skipped) => {
-                    return Ok(Some(PlantEvent::Gap(rithmic_plants::GapDto {
+                    return Ok(Some(PlantEvent::Gap(rithmic_host::GapDto {
                         stream: channel.stream(),
                         skipped,
                     })))
@@ -1018,7 +1019,7 @@ impl Session for GatewaySession {
 
     async fn next_events(
         &self,
-        stream: rithmic_plants::Stream,
+        stream: rithmic_host::Stream,
         max: usize,
         timeout: Duration,
     ) -> Result<Vec<PlantEvent>> {
@@ -1032,7 +1033,7 @@ impl Session for GatewaySession {
             match queue.take() {
                 Take::Event(event) => out.push(own(event)),
                 Take::Lagged(skipped) => {
-                    out.push(PlantEvent::Gap(rithmic_plants::GapDto { stream, skipped }))
+                    out.push(PlantEvent::Gap(rithmic_host::GapDto { stream, skipped }))
                 }
                 Take::Empty => break,
             }

@@ -2,7 +2,7 @@
 //!
 //! It listens on `ws://127.0.0.1:<port>` and speaks the same frames as Rithmic:
 //! a 4-byte big-endian length followed by a protobuf message routed by its
-//! `template_id`. The unmodified [`crate::RithmicSession`] / [`crate::DirectSession`]
+//! `template_id`. The unmodified [`crate::Plants`] / [`crate::RithmicVenue`]
 //! and `rithmic-rs` connect to it, so tests run the whole direct path, including
 //! the venue decode, without credentials.
 //!
@@ -11,7 +11,7 @@
 //! the one seam that reaches it.
 //!
 //! Every request gets an ok reply (template `request + 1`, `rp_code = ["0"]`)
-//! unless a test scripts something else with [`FakeVenue::script`]. Replies echo
+//! unless a test scripts something else with [`FakeRithmicServer::script`]. Replies echo
 //! the request's `user_msg`, which is how `rithmic-rs` correlates them.
 
 use std::collections::{HashMap, VecDeque};
@@ -28,7 +28,7 @@ use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::config::SessionConfig;
-use crate::RithmicEnv;
+use rithmic_host::Env;
 
 const TEMPLATE_ID: u32 = 154_467;
 const USER_MSG: u32 = 132_760;
@@ -265,13 +265,13 @@ struct State {
 }
 
 /// A running fake venue. Dropping it stops the listener and every connection.
-pub struct FakeVenue {
+pub struct FakeRithmicServer {
     addr: SocketAddr,
     state: Arc<Mutex<State>>,
     accept: JoinHandle<()>,
 }
 
-impl Drop for FakeVenue {
+impl Drop for FakeRithmicServer {
     fn drop(&mut self) {
         self.accept.abort();
         let state = self.state.lock().expect("fake venue state");
@@ -281,7 +281,7 @@ impl Drop for FakeVenue {
     }
 }
 
-impl FakeVenue {
+impl FakeRithmicServer {
     /// Start listening on an ephemeral loopback port.
     pub async fn start() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -316,7 +316,7 @@ impl FakeVenue {
             .system_name("Rithmic Test")
             .url(self.url())
             .beta_url(self.url())
-            .env(RithmicEnv::Test)
+            .env(Env::Test)
             .fcm_id("FCM")
             .ib_id("IB")
             .account_id("ACCOUNT")

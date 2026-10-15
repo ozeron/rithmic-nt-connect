@@ -19,12 +19,12 @@ path = "src/bin/rithmic_gateway_fake.rs"
 required-features = ["testing"]
 
 [features]
-testing = ["rithmic-plants/testing"]
+testing = ["rithmic-host/testing"]
 
 [dependencies]
+rithmic-host = { path = "../rithmic-host" }
 async-trait = "0.1"
 rithmic-plants = { path = "../rithmic-plants" }
-rithmic-rs = "3"
 bytes = "1"
 futures-util = "0.3"
 prost = "0.14"

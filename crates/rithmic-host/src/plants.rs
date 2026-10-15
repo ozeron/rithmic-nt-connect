@@ -2,7 +2,7 @@
 
 use crate::error::{Error, Result};
 
-/// Plants to attach on [`crate::session::RithmicSession::connect`].
+/// Plants to attach on [`crate::Session::connect`].
 ///
 /// Order plant is never part of this set: it stays lazy via `ensure_order_plant`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

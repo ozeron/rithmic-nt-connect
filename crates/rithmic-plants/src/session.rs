@@ -1,7 +1,7 @@
 //! Multi-plant Rithmic session facade (Phase 2: MD + history + PnL + orders).
 //!
-//! [`PlantSet`] chooses ticker/history/PnL on [`RithmicSession::connect`].
-//! The order plant stays lazy via [`RithmicSession::ensure_order_plant`].
+//! [`PlantSet`] chooses ticker/history/PnL on [`Plants::connect`].
+//! The order plant stays lazy via [`Plants::ensure_order_plant`].
 
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
@@ -21,18 +21,18 @@ use tokio::sync::broadcast::error::RecvError;
 
 use crate::account::{pick_account, rows_from_account_list};
 use crate::config::SessionConfig;
-use crate::dto::{
-    AccountRmsInfoDto, FillHistoryDto, FrontMonthDto, HistoryBarDto, HistoryTickDto,
-    OrderNotificationDto, PlantEvent, ProductRmsInfoDto, ReferenceDataDto, TimeBarProbeRow,
-};
-use crate::error::{Error, Result};
 use crate::history::{
     bar_dedup_key, bar_replay_index, bar_slice_secs, history_ready_probe_enabled,
     history_ready_probe_root, load_sliced, looks_like_listed_contract, parse_time_bar_type,
     tick_dedup_key, DEFAULT_TICK_SLICE_SECS,
 };
-use crate::plants::PlantSet;
-use crate::streams::{Stream, StreamGuard, StreamHub};
+use rithmic_host::dto::{
+    AccountRmsInfoDto, FillHistoryDto, FrontMonthDto, HistoryBarDto, HistoryTickDto,
+    OrderNotificationDto, PlantEvent, ProductRmsInfoDto, ReferenceDataDto, TimeBarProbeRow,
+};
+use rithmic_host::plants::PlantSet;
+use rithmic_host::streams::{Stream, StreamGuard, StreamHub};
+use rithmic_host::{Error, Result};
 
 /// Silence window (ms) that ends the best-effort `load_orders` drain.
 const ORDER_DRAIN_SETTLE_MS: u64 = 1_000;
@@ -121,7 +121,7 @@ async fn connect_within_deadline<T>(
     connect: impl Future<Output = std::result::Result<T, rithmic_rs::RithmicError>>,
 ) -> Result<T> {
     match tokio::time::timeout(PLANT_CONNECT_DEADLINE, connect).await {
-        Ok(connected) => Ok(connected?),
+        Ok(connected) => Ok(connected.map_err(crate::error::rithmic_error)?),
         Err(_) => Err(Error::Session(format!(
             "{plant} plant connect timed out after {}s",
             PLANT_CONNECT_DEADLINE.as_secs()
@@ -174,7 +174,7 @@ fn forward<R: Feed + 'static>(
 }
 
 /// Connected multi-plant session used by the Python adapter.
-pub struct RithmicSession {
+pub(crate) struct Plants {
     config: SessionConfig,
     plants: PlantSet,
     ticker: Option<TickerPlant>,
@@ -190,7 +190,7 @@ pub struct RithmicSession {
     epoch: u64,
 }
 
-/// A ticker reconnect prepared under the session lock ([`RithmicSession::begin_ticker_reset`])
+/// A ticker reconnect prepared under the session lock ([`Plants::begin_ticker_reset`])
 /// and run without it ([`TickerReset::reconnect`]), so order calls and account
 /// lookups never wait behind the venue round trips.
 pub struct TickerReset {
@@ -201,7 +201,7 @@ pub struct TickerReset {
 }
 
 /// The outcome of [`TickerReset::reconnect`], installed by
-/// [`RithmicSession::finish_ticker_reset`].
+/// [`Plants::finish_ticker_reset`].
 pub struct ReconnectedTicker {
     plant: Option<TickerPlant>,
     epoch: u64,
@@ -226,9 +226,9 @@ impl TickerReset {
     }
 }
 
-impl std::fmt::Debug for RithmicSession {
+impl std::fmt::Debug for Plants {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RithmicSession")
+        f.debug_struct("Plants")
             .field("config", &self.config)
             .field("plants", &self.plants)
             .field("ticker_connected", &self.ticker.is_some())
@@ -274,14 +274,26 @@ impl Handles {
     /// Subscribe to LastTrade + BBO for `symbol` / `exchange`.
     pub async fn subscribe(&self, symbol: &str, exchange: &str) -> Result<()> {
         let handle = self.ticker_handle()?;
-        check_response(handle.subscribe(symbol, exchange).await?, "subscribe")?;
+        check_response(
+            handle
+                .subscribe(symbol, exchange)
+                .await
+                .map_err(crate::error::rithmic_error)?,
+            "subscribe",
+        )?;
         Ok(())
     }
 
     /// Unsubscribe LastTrade + BBO.
     pub async fn unsubscribe(&self, symbol: &str, exchange: &str) -> Result<()> {
         let handle = self.ticker_handle()?;
-        check_response(handle.unsubscribe(symbol, exchange).await?, "unsubscribe")?;
+        check_response(
+            handle
+                .unsubscribe(symbol, exchange)
+                .await
+                .map_err(crate::error::rithmic_error)?,
+            "unsubscribe",
+        )?;
         Ok(())
     }
 
@@ -290,9 +302,10 @@ impl Handles {
         let handle = self.ticker_handle()?;
         let resp = handle
             .get_front_month_contract(symbol, exchange, false)
-            .await?;
+            .await
+            .map_err(crate::error::rithmic_error)?;
         check_response_ref(&resp, "get_front_month")?;
-        FrontMonthDto::from_response(&resp)
+        crate::dto::front_month_from_response(&resp)
             .ok_or_else(|| Error::Protocol("unexpected front-month response variant".into()))
     }
 
@@ -302,7 +315,8 @@ impl Handles {
         check_response(
             handle
                 .subscribe_order_book_summary(symbol, exchange)
-                .await?,
+                .await
+                .map_err(crate::error::rithmic_error)?,
             "subscribe_order_book_summary",
         )?;
         Ok(())
@@ -314,7 +328,8 @@ impl Handles {
         check_response(
             handle
                 .unsubscribe_order_book_summary(symbol, exchange)
-                .await?,
+                .await
+                .map_err(crate::error::rithmic_error)?,
             "unsubscribe_order_book_summary",
         )?;
         Ok(())
@@ -327,9 +342,12 @@ impl Handles {
         exchange: &str,
     ) -> Result<ReferenceDataDto> {
         let handle = self.ticker_handle()?;
-        let resp = handle.get_reference_data(symbol, exchange).await?;
+        let resp = handle
+            .get_reference_data(symbol, exchange)
+            .await
+            .map_err(crate::error::rithmic_error)?;
         check_response_ref(&resp, "get_reference_data")?;
-        ReferenceDataDto::from_response(&resp).ok_or_else(|| {
+        crate::dto::reference_data_from_response(&resp).ok_or_else(|| {
             Error::Session(format!(
                 "get_reference_data: unexpected response {:?}",
                 resp.message
@@ -412,10 +430,11 @@ impl Handles {
                 start_time_sec,
                 end_time_sec,
             )
-            .await?;
+            .await
+            .map_err(crate::error::rithmic_error)?;
         Ok(responses
             .iter()
-            .map(TimeBarProbeRow::from_response)
+            .map(crate::dto::time_bar_probe_from_response)
             .collect())
     }
 
@@ -471,7 +490,8 @@ impl Handles {
         check_response(
             handle
                 .subscribe_time_bar_updates(symbol, exchange, bt, period, request)
-                .await?,
+                .await
+                .map_err(crate::error::rithmic_error)?,
             ctx,
         )
     }
@@ -479,13 +499,27 @@ impl Handles {
     /// Subscribe to PnL updates and request a snapshot when account is configured.
     pub async fn subscribe_pnl(&self) -> Result<()> {
         let handle = self.pnl_handle()?;
-        check_response(handle.subscribe_pnl_updates().await?, "subscribe_pnl")?;
-        check_response(handle.get_pnl_position_snapshot().await?, "pnl_snapshot")?;
+        check_response(
+            handle
+                .subscribe_pnl_updates()
+                .await
+                .map_err(crate::error::rithmic_error)?,
+            "subscribe_pnl",
+        )?;
+        check_response(
+            handle
+                .get_pnl_position_snapshot()
+                .await
+                .map_err(crate::error::rithmic_error)?,
+            "pnl_snapshot",
+        )?;
         Ok(())
     }
 }
 
-impl RithmicSession {
+// Retain the former public facade helpers unchanged during the contract move.
+#[allow(dead_code)]
+impl Plants {
     /// Create a disconnected **market-data** session (ticker + history).
     pub fn new(config: SessionConfig) -> Self {
         Self::with_plants(config, PlantSet::MARKET_DATA)
@@ -713,8 +747,17 @@ impl RithmicSession {
         let bootstrap_handle = order_plant.get_handle(&RithmicAccount::new("", "", ""));
 
         let outcome = async {
-            check_response(bootstrap_handle.login().await?, "order login (discover)")?;
-            let list = bootstrap_handle.get_account_list().await?;
+            check_response(
+                bootstrap_handle
+                    .login()
+                    .await
+                    .map_err(crate::error::rithmic_error)?,
+                "order login (discover)",
+            )?;
+            let list = bootstrap_handle
+                .get_account_list()
+                .await
+                .map_err(crate::error::rithmic_error)?;
             pick_account(
                 &rows_from_account_list(&list),
                 self.config.account_id_selector(),
@@ -769,7 +812,10 @@ impl RithmicSession {
         let result = async {
             let handle = self.order_handle()?;
             check_response(
-                handle.subscribe_order_updates().await?,
+                handle
+                    .subscribe_order_updates()
+                    .await
+                    .map_err(crate::error::rithmic_error)?,
                 "subscribe_order_updates",
             )
         }
@@ -832,7 +878,10 @@ impl RithmicSession {
         let result = async {
             let handle = self.order_handle()?;
             check_response(
-                handle.subscribe_bracket_updates().await?,
+                handle
+                    .subscribe_bracket_updates()
+                    .await
+                    .map_err(crate::error::rithmic_error)?,
                 "subscribe_bracket_updates",
             )
         }
@@ -1156,7 +1205,7 @@ impl OrderDrainSource for SubscriptionFilter {
                 return Err(Error::Rithmic(err.to_string()));
             }
         }
-        Ok(PlantEvent::from(&resp))
+        Ok(crate::dto::plant_event(&resp))
     }
 }
 
@@ -1196,7 +1245,7 @@ where
 /// flight on a plant opened by this call: its handle is published only after
 /// the call returns.
 async fn rollback_order_plant_subscribe(
-    session: &mut RithmicSession,
+    session: &mut Plants,
     result: Result<()>,
     disconnect_on_err: bool,
 ) -> Result<()> {
@@ -1226,7 +1275,13 @@ async fn rollback_order_plant_subscribe(
 pub async fn load_orders_on(handle: &RithmicOrderPlantHandle) -> Result<Vec<OrderNotificationDto>> {
     // A fresh receiver so the gateway event pump's own receiver is not consumed.
     let rx = handle.subscription_receiver.resubscribe();
-    check_response(handle.show_orders().await?, "show_orders")?;
+    check_response(
+        handle
+            .show_orders()
+            .await
+            .map_err(crate::error::rithmic_error)?,
+        "show_orders",
+    )?;
     drain_order_notifications(rx).await
 }
 
@@ -1241,11 +1296,14 @@ pub async fn load_order_history_on(
     date: &str,
 ) -> Result<Vec<OrderNotificationDto>> {
     let rx = handle.subscription_receiver.resubscribe();
-    let responses = handle.show_order_history_summary(date).await?;
+    let responses = handle
+        .show_order_history_summary(date)
+        .await
+        .map_err(crate::error::rithmic_error)?;
     check_responses(&responses, "show_order_history_summary")?;
     let mut out: Vec<OrderNotificationDto> = responses
         .iter()
-        .filter_map(|r| match PlantEvent::from(r) {
+        .filter_map(|r| match crate::dto::plant_event(r) {
             PlantEvent::OrderNotification(dto) => Some(dto),
             _ => None,
         })
@@ -1269,12 +1327,13 @@ pub async fn load_fill_history_on(
             FillHistoryRange::trade_date(start, finish),
             Some(FILL_HISTORY_MAX_RECORDS as i32),
         )
-        .await?;
+        .await
+        .map_err(crate::error::rithmic_error)?;
     // Recon must not act on a reply the venue abandoned part-way.
     let rows = collect_history_rows(
         responses,
         "load_fill_history",
-        FillHistoryDto::from_response,
+        crate::dto::fill_history_from_response,
     )
     .map_err(|e| {
         if is_partial_reply(&e) {
@@ -1302,7 +1361,10 @@ fn check_fill_history_cap(row_count: usize) -> Result<()> {
 /// Trade dates (CCYYMMDD) the venue keeps order history for, from an
 /// already-connected order-plant handle (no session lock). Read-only.
 pub async fn load_order_history_dates_on(handle: &RithmicOrderPlantHandle) -> Result<Vec<String>> {
-    let responses = handle.show_order_history_dates().await?;
+    let responses = handle
+        .show_order_history_dates()
+        .await
+        .map_err(crate::error::rithmic_error)?;
     let dates = collect_history_rows(responses, "load_order_history_dates", |resp| {
         match &resp.message {
             rithmic_rs::rti::messages::RithmicMessage::ResponseShowOrderHistoryDates(m) => {
@@ -1328,11 +1390,14 @@ fn normalize_history_dates(mut dates: Vec<String>) -> Vec<String> {
 pub async fn load_product_rms_info_on(
     handle: &RithmicOrderPlantHandle,
 ) -> Result<Vec<ProductRmsInfoDto>> {
-    let responses = handle.get_product_rms_info().await?;
+    let responses = handle
+        .get_product_rms_info()
+        .await
+        .map_err(crate::error::rithmic_error)?;
     collect_history_rows(
         responses,
         "load_product_rms_info",
-        ProductRmsInfoDto::from_response,
+        crate::dto::product_rms_info_from_response,
     )
 }
 
@@ -1341,11 +1406,14 @@ pub async fn load_product_rms_info_on(
 pub async fn load_account_rms_info_on(
     handle: &RithmicOrderPlantHandle,
 ) -> Result<Vec<AccountRmsInfoDto>> {
-    let responses = handle.get_account_rms_info().await?;
+    let responses = handle
+        .get_account_rms_info()
+        .await
+        .map_err(crate::error::rithmic_error)?;
     collect_history_rows(
         responses,
         "load_account_rms_info",
-        AccountRmsInfoDto::from_response,
+        crate::dto::account_rms_info_from_response,
     )
 }
 
@@ -1367,7 +1435,7 @@ fn login_result(
 ) -> Result<()> {
     match login {
         Ok(resp) => check_response(resp, ctx),
-        Err(e) => Err(Error::from(e)),
+        Err(e) => Err(crate::error::rithmic_error(e)),
     }
 }
 
@@ -1470,10 +1538,15 @@ async fn load_tick_slice(
             start_time_sec,
             end_time_sec,
         )
-        .await?;
+        .await
+        .map_err(crate::error::rithmic_error)?;
     // Multi-response replay: an error frame anywhere fails the slice, so the
     // sliced loader retries or fails it instead of leaving a silent gap.
-    collect_history_rows(responses, "load_ticks", HistoryTickDto::from_response)
+    collect_history_rows(
+        responses,
+        "load_ticks",
+        crate::dto::history_tick_from_response,
+    )
 }
 
 async fn load_bar_slice(
@@ -1496,8 +1569,13 @@ async fn load_bar_slice(
             start_index,
             finish_index,
         )
-        .await?;
-    collect_history_rows(responses, "load_time_bars", HistoryBarDto::from_response)
+        .await
+        .map_err(crate::error::rithmic_error)?;
+    collect_history_rows(
+        responses,
+        "load_time_bars",
+        crate::dto::history_bar_from_response,
+    )
 }
 
 /// Rows of a multi-frame reply. Any error frame fails the whole reply: an error
@@ -1562,7 +1640,7 @@ fn map_connection_response(resp: rithmic_rs::RithmicResponse) -> Result<Option<P
             return Err(Error::Rithmic(err.to_string()));
         }
     }
-    Ok(Some(PlantEvent::from(&resp)))
+    Ok(Some(crate::dto::plant_event(&resp)))
 }
 
 fn check_response(resp: rithmic_rs::RithmicResponse, ctx: &str) -> Result<()> {
@@ -1670,13 +1748,13 @@ mod login_disconnect_tests {
 mod order_subscribe_rollback_tests {
     use super::*;
 
-    fn disconnected_session() -> RithmicSession {
+    fn disconnected_session() -> Plants {
         let cfg = SessionConfig::builder()
             .user("alice")
             .password("pw")
             .build()
             .unwrap();
-        RithmicSession::new(cfg)
+        Plants::new(cfg)
     }
 
     #[tokio::test]
@@ -1838,7 +1916,7 @@ mod drain_tests {
 #[cfg(test)]
 mod forward_tests {
     use super::*;
-    use crate::dto::LastTradeDto;
+    use rithmic_host::dto::LastTradeDto;
     use std::time::Duration;
 
     fn to_event(seq: i32) -> Result<Option<PlantEvent>> {
@@ -1884,7 +1962,7 @@ mod forward_tests {
         assert!(
             matches!(
                 items[0],
-                PlantEvent::Gap(crate::dto::GapDto { skipped: 6, .. })
+                PlantEvent::Gap(rithmic_host::dto::GapDto { skipped: 6, .. })
             ),
             "{items:?}"
         );

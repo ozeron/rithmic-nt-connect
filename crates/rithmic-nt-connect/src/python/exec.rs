@@ -192,15 +192,15 @@ fn kind_from_notify(
 /// the Rust rule the pure-Python lake client mirrors (pinned by a parity test).
 #[pyfunction]
 fn history_bar_slice_secs(bar_type: i32, period: i32) -> PyResult<i32> {
-    let bar_type = rithmic_plants::history::parse_time_bar_type(bar_type)
+    let bar_type = rithmic_host::history::parse_time_bar_type(bar_type)
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(rithmic_plants::history::bar_slice_secs(bar_type, period))
+    Ok(rithmic_host::history::bar_slice_secs(bar_type, period))
 }
 
 /// Inclusive history slices of at most `step_secs` (see `history_bar_slice_secs`).
 #[pyfunction]
 fn history_window_slices(start: i32, end: i32, step_secs: i32) -> Vec<(i32, i32)> {
-    rithmic_plants::history::window_slices(start, end, step_secs)
+    rithmic_host::history::window_slices(start, end, step_secs)
 }
 
 /// The action a tracked order's notification asks for, and a refusal's reason

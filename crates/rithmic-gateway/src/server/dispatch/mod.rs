@@ -65,13 +65,13 @@ fn err_to_frame(request_id: u64, code: &str, err: impl std::fmt::Display) -> Fra
 /// gate's own denial (which keeps its code). Anything else may have reached the venue, so it is
 /// `venue_unknown`: the adapter must treat the order as in flight, never as
 /// rejected.
-pub(super) fn plant_err_frame(request_id: u64, e: rithmic_plants::Error) -> Frame {
+pub(super) fn plant_err_frame(request_id: u64, e: rithmic_host::Error) -> Frame {
     let code = command_error_code(&e);
     err_to_frame(request_id, &code, e)
 }
 
-pub(super) fn command_error_code(e: &rithmic_plants::Error) -> String {
-    use rithmic_plants::Error as E;
+pub(super) fn command_error_code(e: &rithmic_host::Error) -> String {
+    use rithmic_host::Error as E;
     match e {
         E::Rejected(_) => "venue_rejected".into(),
         // A plant that is not connected (or a connect refused as redundant) is
@@ -93,7 +93,7 @@ pub(super) fn command_error_code(e: &rithmic_plants::Error) -> String {
 
 /// Dispatch one request frame body to a response frame, applying parent
 /// gates and (when a session is attached) calling through to
-/// `rithmic_plants::RithmicSession`. Subscribe/unsubscribe bodies also
+/// `rithmic_host::Session`. Subscribe/unsubscribe bodies also
 /// update this client's fan-out registration in `client`.
 pub(super) async fn dispatch(
     state: &GatewayState,
@@ -349,7 +349,7 @@ pub fn history_rpc_with_live_ticker_intent_for_test(body: Body) -> Body {
 #[cfg(test)]
 mod command_error_tests {
     use super::command_error_code;
-    use rithmic_plants::Error as E;
+    use rithmic_host::Error as E;
 
     #[test]
     fn only_pre_send_failures_are_definitive() {

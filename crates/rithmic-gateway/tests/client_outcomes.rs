@@ -12,8 +12,8 @@ use std::time::Duration;
 use common::*;
 use rithmic_gateway::client::{GatewaySession, TransportEvent, EVENT_QUEUE_CAP};
 use rithmic_gateway::pb::{self, frame::Body};
-use rithmic_plants::dto::PlantEvent;
-use rithmic_plants::{Error, PlaceOrder, Session};
+use rithmic_host::dto::PlantEvent;
+use rithmic_host::{Error, PlaceOrder, Session};
 
 fn place_order() -> PlaceOrder {
     PlaceOrder {
@@ -586,7 +586,7 @@ async fn an_invalid_bar_type_fails_like_the_direct_path_before_any_rpc() {
         .load_time_bars(NQ, CME, 0, 10, 99, 1)
         .await
         .expect_err("bad bar type");
-    // The same error DirectSession raises (both go through parse_time_bar_type).
+    // The same error RithmicVenue raises (both go through parse_time_bar_type).
     assert!(matches!(err, Error::Protocol(_)), "{err:?}");
     assert_eq!(count_of(&mock, |b| matches!(b, Body::LoadTimeBars(_))), 0);
 }

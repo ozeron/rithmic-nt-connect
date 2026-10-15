@@ -1,8 +1,8 @@
-//! DTO ↔ protobuf mapping (the one convert boundary between `rithmic-plants`
+//! DTO ↔ protobuf mapping (the one convert boundary between `rithmic-host`
 //! DTOs and the wire `pb` types). No Nautilus types cross this boundary.
 
-use rithmic_plants::dto::{PlantEvent, ReferenceDataDto};
-use rithmic_plants::AccountTriple;
+use rithmic_host::dto::{PlantEvent, ReferenceDataDto};
+use rithmic_host::AccountTriple;
 
 pub use crate::mirror::{
     account_pnl_to_pb, account_rms_info_to_pb, bbo_to_pb, bracket_update_to_pb, fill_history_to_pb,
@@ -62,8 +62,8 @@ pub fn order_key() -> SubKey {
 pub const GAP_BROADCAST: &str = "__gap__";
 
 /// Routing key for a gap on `stream`.
-pub fn gap_key(stream: rithmic_plants::Stream) -> SubKey {
-    use rithmic_plants::Stream;
+pub fn gap_key(stream: rithmic_host::Stream) -> SubKey {
+    use rithmic_host::Stream;
     match stream {
         Stream::Pnl => pnl_key(),
         Stream::Order => order_key(),
@@ -98,7 +98,7 @@ pub enum Route<'a> {
     Order,
     Other,
     /// A gap on `stream`.
-    Gap(rithmic_plants::Stream),
+    Gap(rithmic_host::Stream),
 }
 
 fn text(field: &Option<String>) -> &str {

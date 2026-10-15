@@ -12,7 +12,7 @@ from typing import NotRequired, TypedDict
 class ProductRmsInfo(TypedDict):
     """One product-level RMS row: per-contract commission fill rate.
 
-    Mirrors ``rithmic_plants::dto::ProductRmsInfoDto``; unset fields are
+    Mirrors ``rithmic_host::dto::ProductRmsInfoDto``; unset fields are
     omitted from the wire dict (never ``None``).
     """
 
@@ -24,7 +24,7 @@ class ProductRmsInfo(TypedDict):
 class AccountRmsInfo(TypedDict):
     """One account-level RMS row: default commission rate.
 
-    Mirrors ``rithmic_plants::dto::AccountRmsInfoDto``; unset fields are
+    Mirrors ``rithmic_host::dto::AccountRmsInfoDto``; unset fields are
     omitted from the wire dict (never ``None``).
     """
 

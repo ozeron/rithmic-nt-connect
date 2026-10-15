@@ -4,23 +4,24 @@
 
 use std::time::Duration;
 
-use rithmic_plants::fake_venue::{frames, template, FakeVenue, Plant};
-use rithmic_plants::{DirectSession, PlantEvent, PlantSet, Session, Stream};
+use rithmic_host::{PlantEvent, PlantSet, Session, Stream};
+use rithmic_plants::fake_server::{frames, template, FakeRithmicServer, Plant};
+use rithmic_plants::RithmicVenue;
 use rithmic_rs::rti;
 
 const T: i32 = 1_790_000_000;
 const T_NS: u64 = 1_790_000_000_000_000_000;
 
-async fn session() -> (FakeVenue, DirectSession) {
-    let venue = FakeVenue::start().await;
+async fn session() -> (FakeRithmicServer, RithmicVenue) {
+    let venue = FakeRithmicServer::start().await;
     venue.front_month("ES", "CME", "ESZ6");
     let session =
-        DirectSession::new(venue.session_config(), PlantSet::EXECUTION).with_gates(true, false);
+        RithmicVenue::new(venue.session_config(), PlantSet::EXECUTION).with_gates(true, false);
     session.connect().await.unwrap();
     (venue, session)
 }
 
-async fn one(session: &DirectSession, stream: Stream) -> PlantEvent {
+async fn one(session: &RithmicVenue, stream: Stream) -> PlantEvent {
     session
         .next_events(stream, 1, Duration::from_secs(5))
         .await
@@ -249,7 +250,7 @@ fn bar_row(open: Option<f64>) -> rti::ResponseTimeBarReplay {
 async fn a_probe_row_is_parsed_exactly_when_the_load_keeps_the_bar() {
     let (venue, s) = session().await;
     let rows = [bar_row(Some(5000.0)), bar_row(None)];
-    let reply = rithmic_plants::fake_venue::Reply::rows(template::TIME_BAR_REPLAY + 1, &rows);
+    let reply = rithmic_plants::fake_server::Reply::rows(template::TIME_BAR_REPLAY + 1, &rows);
     venue.script(template::TIME_BAR_REPLAY, reply.clone());
     venue.script(template::TIME_BAR_REPLAY, reply);
     let probe = s

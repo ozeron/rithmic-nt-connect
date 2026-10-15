@@ -11,15 +11,16 @@ use tokio::runtime::Runtime;
 mod exec;
 
 use rithmic_gateway::client::{GatewayConfig, GatewaySession, TransportEvent};
-use rithmic_plants::config::{SessionConfig, DEFAULT_LUCID_URL};
-use rithmic_plants::dto::{
+use rithmic_host::dto::{
     AccountPnlDto, AccountRmsInfoDto, BboDto, BracketUpdateDto, FillHistoryDto, FrontMonthDto,
     HistoryBarDto, HistoryTickDto, InstrumentPnlDto, LastTradeDto, OrderBookDto,
     OrderNotificationDto, PlantEvent, ProductRmsInfoDto, ReferenceDataDto, TimeBarProbeRow,
 };
-use rithmic_plants::error::Error;
-use rithmic_plants::plants::PlantSet;
-use rithmic_plants::{DirectSession, ModifyOrder, PlaceBracketOrder, PlaceOrder, Session};
+use rithmic_host::error::Error;
+use rithmic_host::plants::PlantSet;
+use rithmic_host::{ModifyOrder, PlaceBracketOrder, PlaceOrder, Session};
+use rithmic_plants::config::{SessionConfig, DEFAULT_LUCID_URL};
+use rithmic_plants::RithmicVenue;
 
 pyo3::create_exception!(rithmic_nt_connect, ChannelLaggedError, PyRuntimeError);
 pyo3::create_exception!(rithmic_nt_connect, ChannelClosedError, PyRuntimeError);
@@ -548,14 +549,14 @@ fn time_bar_event_dict(py: Python<'_>, b: HistoryBarDto) -> PyResult<Py<PyDict>>
 /// A thin shell over the [`Session`] trait: every blocking call runs on the
 /// extension runtime with the GIL released, and records are converted to plain
 /// dicts in this module only. Order-op safety (disconnect gate, detached order
-/// handle) lives in `DirectSession`, not here.
+/// handle) lives in `RithmicVenue`, not here.
 #[pyclass(name = "Session")]
 pub struct PySession {
     session: Arc<dyn Session>,
     /// The gateway client, when `connect_mode` is `gateway` (transport hooks).
     gateway: Option<Arc<GatewaySession>>,
     /// The in-process session, when `connect_mode` is `direct` (it owns the gates).
-    direct: Option<Arc<DirectSession>>,
+    direct: Option<Arc<RithmicVenue>>,
 }
 
 impl PySession {
@@ -612,9 +613,9 @@ impl PySession {
         gateway_auth_token: Option<String>,
     ) -> PyResult<Self> {
         let (renv, env_name) = match env {
-            "Live" | "live" => (rithmic_rs::RithmicEnv::Live, "Live"),
-            "Demo" | "demo" => (rithmic_rs::RithmicEnv::Demo, "Demo"),
-            "Test" | "test" => (rithmic_rs::RithmicEnv::Test, "Test"),
+            "Live" | "live" => (rithmic_host::Env::Live, "Live"),
+            "Demo" | "demo" => (rithmic_host::Env::Demo, "Demo"),
+            "Test" | "test" => (rithmic_host::Env::Test, "Test"),
             other => {
                 return Err(PyValueError::new_err(format!(
                     "invalid env {other:?}; expected Live, Demo, or Test"
@@ -667,7 +668,7 @@ impl PySession {
                 }
                 let config = builder.build().map_err(to_py_err)?;
                 let plants = PlantSet::parse(plants).map_err(to_py_err)?;
-                let direct = Arc::new(DirectSession::new(config, plants));
+                let direct = Arc::new(RithmicVenue::new(config, plants));
                 Ok(Self {
                     session: direct.clone(),
                     gateway: None,
@@ -912,7 +913,7 @@ impl PySession {
         max_events: usize,
         timeout_ms: u64,
     ) -> PyResult<Vec<Py<PyDict>>> {
-        let parsed = rithmic_plants::Stream::from_plant(stream).ok_or_else(|| {
+        let parsed = rithmic_host::Stream::from_plant(stream).ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err(format!(
                 "unknown stream {stream:?}; expected ticker, history, pnl or order"
             ))

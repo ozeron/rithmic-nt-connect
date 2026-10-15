@@ -118,8 +118,8 @@ impl TopicIntent {
 
     pub(in crate::server) async fn venue_join(
         &self,
-        session: &dyn rithmic_plants::Session,
-    ) -> rithmic_plants::Result<()> {
+        session: &dyn rithmic_host::Session,
+    ) -> rithmic_host::Result<()> {
         match self {
             Self::Ticker(key) => session.subscribe(&key.symbol, &key.exchange).await,
             Self::Book(key) => {
@@ -142,8 +142,8 @@ impl TopicIntent {
 
     pub(in crate::server) async fn venue_leave(
         &self,
-        session: &dyn rithmic_plants::Session,
-    ) -> rithmic_plants::Result<()> {
+        session: &dyn rithmic_host::Session,
+    ) -> rithmic_host::Result<()> {
         match self {
             Self::Ticker(key) => session.unsubscribe(&key.symbol, &key.exchange).await,
             Self::Book(key) => {
@@ -183,7 +183,7 @@ impl TopicIntent {
     /// Log line for a failed pump-side restore; kept byte-identical to the
     /// pre-pump-relocation strings. (Pump policy is log-and-continue —
     /// dispatch's rollback policy lives in `subscribe_topic`/`fail_*`.)
-    pub(in crate::server) fn resubscribe_fail_log(&self, e: rithmic_plants::Error) -> String {
+    pub(in crate::server) fn resubscribe_fail_log(&self, e: rithmic_host::Error) -> String {
         match self {
             Self::Ticker(key) => format!(
                 "rithmic-gateway: resubscribe ticker {}/{} failed: {e}",
@@ -410,7 +410,7 @@ pub(in crate::server) async fn leave_pnl(
     state: &GatewayState,
     client: &mut ClientCtx,
     rollback: bool,
-) -> Result<(), (&'static str, rithmic_plants::Error)> {
+) -> Result<(), (&'static str, rithmic_host::Error)> {
     if !client.pnl {
         return Ok(());
     }
@@ -514,7 +514,7 @@ async fn fail_order_plant_stream(
 /// then tell the order peers with an order gap so they reconcile the window.
 pub(in crate::server) async fn reseat_order_plant_without_brackets(
     state: &GatewayState,
-) -> Result<(), rithmic_plants::Error> {
+) -> Result<(), rithmic_host::Error> {
     let Some(session) = &state.session else {
         return Ok(());
     };
@@ -528,8 +528,8 @@ pub(in crate::server) async fn reseat_order_plant_without_brackets(
     // missed events is unknown, hence 0).
     crate::server::publish_plant_event(
         &state.hub,
-        rithmic_plants::dto::PlantEvent::Gap(rithmic_plants::GapDto {
-            stream: rithmic_plants::Stream::Order,
+        rithmic_host::dto::PlantEvent::Gap(rithmic_host::GapDto {
+            stream: rithmic_host::Stream::Order,
             skipped: 0,
         }),
     )
@@ -652,7 +652,7 @@ pub(in crate::server) async fn leave_order(
     state: &GatewayState,
     client: &mut ClientCtx,
     rollback: bool,
-) -> Result<(), (&'static str, rithmic_plants::Error)> {
+) -> Result<(), (&'static str, rithmic_host::Error)> {
     if !client.order && !client.brackets {
         return Ok(());
     }

@@ -1,11 +1,12 @@
 //! The unmodified direct session against the fake Rithmic venue.
 
-use rithmic_plants::fake_venue::{template, FakeVenue, Plant};
-use rithmic_plants::{DirectSession, PlantSet, Session};
+use rithmic_host::{PlantSet, Session};
+use rithmic_plants::fake_server::{template, FakeRithmicServer, Plant};
+use rithmic_plants::RithmicVenue;
 
 /// A venue that answers the history readiness probe (front month + empty replay).
-async fn venue() -> FakeVenue {
-    let venue = FakeVenue::start().await;
+async fn venue() -> FakeRithmicServer {
+    let venue = FakeRithmicServer::start().await;
     venue.front_month("ES", "CME", "ESZ6");
     venue
 }
@@ -13,7 +14,7 @@ async fn venue() -> FakeVenue {
 #[tokio::test]
 async fn direct_session_connects_logs_in_and_disconnects() {
     let venue = venue().await;
-    let session = DirectSession::new(venue.session_config(), PlantSet::MARKET_DATA);
+    let session = RithmicVenue::new(venue.session_config(), PlantSet::MARKET_DATA);
 
     session
         .connect()
@@ -40,13 +41,13 @@ async fn direct_session_connects_logs_in_and_disconnects() {
 
 use std::time::Duration;
 
-use rithmic_plants::fake_venue::{frames, Reply};
-use rithmic_plants::{Error, PlaceOrder, PlantEvent, Stream};
+use rithmic_host::{Error, PlaceOrder, PlantEvent, Stream};
+use rithmic_plants::fake_server::{frames, Reply};
 
 const WAIT: Duration = Duration::from_secs(5);
 
-async fn connected(venue: &FakeVenue, plants: PlantSet) -> DirectSession {
-    let session = DirectSession::new(venue.session_config(), plants).with_gates(true, false);
+async fn connected(venue: &FakeRithmicServer, plants: PlantSet) -> RithmicVenue {
+    let session = RithmicVenue::new(venue.session_config(), plants).with_gates(true, false);
     session
         .connect()
         .await
@@ -54,7 +55,7 @@ async fn connected(venue: &FakeVenue, plants: PlantSet) -> DirectSession {
     session
 }
 
-async fn next_event(session: &DirectSession, stream: Stream) -> PlantEvent {
+async fn next_event(session: &RithmicVenue, stream: Stream) -> PlantEvent {
     let events = session
         .next_events(stream, 1, WAIT)
         .await
@@ -214,7 +215,7 @@ async fn ticker_drop_surfaces_as_a_stream_failure() {
 async fn partial_connect_logs_out_what_already_logged_in() {
     let venue = venue().await;
     venue.refuse_logins(Plant::History, 1);
-    let session = DirectSession::new(venue.session_config(), PlantSet::MARKET_DATA);
+    let session = RithmicVenue::new(venue.session_config(), PlantSet::MARKET_DATA);
 
     session.connect().await.expect_err("history login refused");
 
@@ -228,10 +229,10 @@ async fn partial_connect_logs_out_what_already_logged_in() {
 
 /// A ticker reconnect whose login takes `delay`, started in the background.
 fn slow_ticker_reset(
-    venue: &FakeVenue,
-    session: &std::sync::Arc<DirectSession>,
+    venue: &FakeRithmicServer,
+    session: &std::sync::Arc<RithmicVenue>,
     delay: Duration,
-) -> tokio::task::JoinHandle<rithmic_plants::Result<()>> {
+) -> tokio::task::JoinHandle<rithmic_host::Result<()>> {
     venue.script(template::LOGIN, Reply::ok(template::LOGIN).after(delay));
     let s = session.clone();
     tokio::spawn(async move { s.reset_ticker().await })
@@ -401,7 +402,7 @@ async fn concurrent_order_loads_do_not_collect_each_others_rows() {
         session.load_orders(0, 0),
         session.load_order_history("20261013")
     );
-    let ids = |rows: Vec<rithmic_plants::OrderNotificationDto>| -> Vec<String> {
+    let ids = |rows: Vec<rithmic_host::OrderNotificationDto>| -> Vec<String> {
         rows.into_iter().filter_map(|r| r.basket_id).collect()
     };
     assert_eq!(ids(working.unwrap()), vec!["WORKING-1".to_string()]);

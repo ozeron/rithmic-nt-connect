@@ -1,7 +1,7 @@
 //! The single Rust definition of the plant surface.
 //!
-//! [`Session`] lists every plant operation the adapter uses. `DirectSession`
-//! (this crate, in-process plants) and `GatewaySession` (`rithmic-gateway`, a
+//! [`Session`] lists every plant operation the adapter uses. `RithmicVenue`
+//! (`rithmic-plants`, in-process plants) and `GatewaySession` (`rithmic-gateway`, a
 //! client of the shared parent) are its only implementations, so adding or
 //! changing an RPC without implementing it in both modes fails to compile.
 //!
@@ -204,3 +204,9 @@ pub trait Session: Send + Sync {
         timeout: Duration,
     ) -> Result<Vec<PlantEvent>>;
 }
+
+/// Refusal texts shared with [`crate::fake::FakeVenue`], so the two sides of
+/// the session contract cannot drift.
+pub const DISCONNECT_IN_PROGRESS: &str = "session disconnect in progress; order operation rejected";
+pub const ORDER_PLANT_CLOSED: &str =
+    "order plant was disconnected; ensure it (or subscribe to order updates) first";

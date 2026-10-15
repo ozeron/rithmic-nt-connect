@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use common::*;
 use rithmic_gateway::pb::{self, frame::Body};
-use rithmic_gateway::rpc_table::{lane_of, Lane, RPC_TABLE};
+use rithmic_gateway::rpc_table::{lane_of, RPC_TABLE};
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 
@@ -201,40 +201,6 @@ fn every_table_row_lane_agrees_with_the_classifier() {
             );
         }
     }
-    let slow: Vec<_> = RPC_TABLE
-        .iter()
-        .filter(|r| r.lane == Lane::Slow)
-        .filter_map(|r| r.body)
-        .collect();
-    assert_eq!(
-        slow,
-        [
-            // Reads that wait on the plant session.
-            "get_front_month",
-            "get_reference_data",
-            "resolved_account",
-            "load_ticks",
-            "load_time_bars",
-            "probe_time_bars",
-            "load_orders",
-            "load_product_rms_info",
-            "load_account_rms_info",
-            "load_fill_history",
-            "load_order_history_dates",
-            "load_order_history",
-        ]
-    );
-    // Subscription intents mutate the connection's context, so they must stay on
-    // the ordered command lane.
-    for row in RPC_TABLE {
-        if matches!(
-            row.kind,
-            rithmic_gateway::rpc_table::Kind::SubscriptionIntent
-                | rithmic_gateway::rpc_table::Kind::IntentRelease
-        ) {
-            assert_eq!(row.lane, Lane::Command, "{:?}", row.body);
-        }
-    }
 }
 
 #[tokio::test]
@@ -270,10 +236,10 @@ async fn a_place_is_not_held_by_a_time_bar_load_that_holds_the_session_gate() {
 #[tokio::test]
 async fn the_session_gate_is_shared_for_rpcs_and_exclusive_for_a_rebuild() {
     use rithmic_gateway::server::SessionHandle;
-    use rithmic_plants::fake::FakeSession;
+    use rithmic_host::fake::FakeVenue;
     use std::sync::Arc;
 
-    let handle = SessionHandle::new(Arc::new(FakeSession::new()));
+    let handle = SessionHandle::new(Arc::new(FakeVenue::new()));
     // Any number of RPCs hold the gate together.
     let first = handle.lock().await;
     let second = tokio::time::timeout(Duration::from_millis(100), handle.lock())

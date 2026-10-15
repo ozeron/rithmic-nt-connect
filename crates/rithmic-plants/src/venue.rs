@@ -1,6 +1,6 @@
-//! `DirectSession`: in-process plants behind the [`Session`] trait.
+//! `RithmicVenue`: in-process plants behind the [`Session`] trait.
 //!
-//! Wraps one [`RithmicSession`] and owns the order-operation safety that used
+//! Wraps one [`Plants`] and owns the order-operation safety that used
 //! to live in the PyO3 class: an in-flight order op blocks `disconnect`, an
 //! order op started while a disconnect is in progress is rejected, and order
 //! I/O runs on a cloned plant handle outside the session lock so a blocking
@@ -13,29 +13,29 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use crate::backend::{AccountTriple, ModifyOrder, PlaceBracketOrder, PlaceOrder, Session};
 use crate::config::SessionConfig;
-use crate::dto::{
-    AccountRmsInfoDto, FillHistoryDto, FrontMonthDto, HistoryBarDto, HistoryTickDto,
-    OrderNotificationDto, PlantEvent, ProductRmsInfoDto, ReferenceDataDto, TimeBarProbeRow,
-};
-use crate::error::{Error, Result};
 use crate::history::parse_time_bar_type;
-use crate::plants::PlantSet;
 use crate::session::{
     adjust_bracket_on, cancel_all_orders_on, cancel_order_on, load_account_rms_info_on,
     load_fill_history_on, load_order_history_dates_on, load_order_history_on, load_orders_on,
     load_product_rms_info_on, modify_order_on, place_bracket_order_on, place_order_on, BracketLeg,
-    Handles, RithmicSession,
+    Handles, Plants,
 };
-use crate::streams::{Stream, StreamHub};
+use rithmic_host::backend::{AccountTriple, ModifyOrder, PlaceBracketOrder, PlaceOrder, Session};
+use rithmic_host::dto::{
+    AccountRmsInfoDto, FillHistoryDto, FrontMonthDto, HistoryBarDto, HistoryTickDto,
+    OrderNotificationDto, PlantEvent, ProductRmsInfoDto, ReferenceDataDto, TimeBarProbeRow,
+};
+use rithmic_host::plants::PlantSet;
+use rithmic_host::streams::{Stream, StreamHub};
+use rithmic_host::{Error, Result};
 
 /// How long `disconnect` waits for in-flight order operations to finish.
 const DISCONNECT_WAIT: Duration = Duration::from_secs(30);
 
 /// In-process plants for one credential set.
-pub struct DirectSession {
-    inner: Mutex<RithmicSession>,
+pub struct RithmicVenue {
+    inner: Mutex<Plants>,
     /// Event lanes: consumers read them without taking `inner`.
     streams: Arc<StreamHub>,
     /// Order operations hold it shared for their whole duration (they run
@@ -71,12 +71,7 @@ pub struct DirectSession {
     order_drain: Mutex<()>,
 }
 
-/// Refusal texts shared with [`crate::fake::FakeSession`], so the two sides of
-/// the session contract cannot drift.
-pub(crate) const DISCONNECT_IN_PROGRESS: &str =
-    "session disconnect in progress; order operation rejected";
-pub(crate) const ORDER_PLANT_CLOSED: &str =
-    "order plant was disconnected; ensure it (or subscribe to order updates) first";
+use rithmic_host::backend::{DISCONNECT_IN_PROGRESS, ORDER_PLANT_CLOSED};
 
 /// Marks a disconnect in progress for its lifetime (cleared on every exit path).
 struct DisconnectGate<'a>(&'a AtomicUsize);
@@ -94,9 +89,9 @@ impl Drop for DisconnectGate<'_> {
     }
 }
 
-impl DirectSession {
+impl RithmicVenue {
     pub fn new(config: SessionConfig, plants: PlantSet) -> Self {
-        let session = RithmicSession::with_plants(config, plants);
+        let session = Plants::with_plants(config, plants);
         let account = session.resolved_account().map(account_triple);
         Self {
             streams: session.streams(),
@@ -204,7 +199,7 @@ impl DirectSession {
     /// reset takes the ticker out of the session for its venue round trips and a
     /// bring-up would otherwise see no ticker. Lock order: `ticker_reset`, then
     /// `inner` (the same order `reset_ticker` uses).
-    async fn bring_up(&self) -> (MutexGuard<'_, ()>, MutexGuard<'_, RithmicSession>) {
+    async fn bring_up(&self) -> (MutexGuard<'_, ()>, MutexGuard<'_, Plants>) {
         let reset = self.ticker_reset.lock().await;
         (reset, self.inner.lock().await)
     }
@@ -224,7 +219,7 @@ impl DirectSession {
 
     /// Mirror the order handle and account from `inner` after a call that can
     /// change them (connect, disconnect, ensure, subscribe, rollback).
-    fn sync_caches(&self, inner: &RithmicSession) {
+    fn sync_caches(&self, inner: &Plants) {
         *self.order_cache.lock().expect("order cache") = inner.current_order_handle();
         if let Some(account) = inner.resolved_account() {
             *self.account_cache.lock().expect("account cache") = Some(account_triple(account));
@@ -255,7 +250,7 @@ fn account_triple(a: &rithmic_rs::RithmicAccount) -> AccountTriple {
 }
 
 #[async_trait]
-impl Session for DirectSession {
+impl Session for RithmicVenue {
     async fn connect(&self) -> Result<()> {
         let (_reset, mut inner) = self.bring_up().await;
         let result = inner.connect().await;
@@ -665,16 +660,16 @@ mod tests {
 
     use super::*;
 
-    fn offline() -> DirectSession {
+    fn offline() -> RithmicVenue {
         let cfg = SessionConfig::builder()
             .user("direct-test")
             .password("pw")
             .system_name("LucidTrading")
             .url("wss://rprotocol.rithmic.com:443")
-            .env(rithmic_rs::RithmicEnv::from_str("live").expect("env"))
+            .env(rithmic_host::Env::from_str("live").expect("env"))
             .build()
             .expect("config");
-        DirectSession::new(cfg, PlantSet::MARKET_DATA)
+        RithmicVenue::new(cfg, PlantSet::MARKET_DATA)
     }
 
     #[tokio::test]
@@ -703,8 +698,8 @@ mod tests {
         assert!(s.begin_order_op().await.is_ok());
     }
 
-    fn place() -> crate::backend::PlaceOrder {
-        crate::backend::PlaceOrder {
+    fn place() -> rithmic_host::backend::PlaceOrder {
+        rithmic_host::backend::PlaceOrder {
             symbol: "NQU6".into(),
             exchange: "CME".into(),
             side: "BUY".into(),
@@ -730,7 +725,7 @@ mod tests {
     async fn every_trading_rpc_is_denied_while_the_gate_is_closed_and_nothing_is_sent() {
         let s = offline();
         assert!(!s.trading_enabled() && !s.cancel_all_enabled());
-        let bracket = crate::backend::PlaceBracketOrder {
+        let bracket = rithmic_host::backend::PlaceBracketOrder {
             symbol: "NQU6".into(),
             exchange: "CME".into(),
             side: "BUY".into(),
@@ -743,7 +738,7 @@ mod tests {
             stop_ticks: Some(10),
             target_ticks: None,
         };
-        let modify = crate::backend::ModifyOrder {
+        let modify = rithmic_host::backend::ModifyOrder {
             basket_id: "B1".into(),
             symbol: "NQU6".into(),
             exchange: "CME".into(),

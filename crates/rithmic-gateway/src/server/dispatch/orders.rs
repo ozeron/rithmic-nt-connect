@@ -7,7 +7,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use rithmic_plants::{ModifyOrder, PlaceBracketOrder, PlaceOrder, Session};
+use rithmic_host::{ModifyOrder, PlaceBracketOrder, PlaceOrder, Session};
 
 use crate::convert::{
     account_rms_info_to_pb, fill_history_to_pb, order_notification_to_pb, product_rms_info_to_pb,
@@ -59,7 +59,7 @@ pub(super) async fn load_orders(state: &GatewayState, request_id: u64) -> Frame 
                 events: events.into_iter().map(order_notification_to_pb).collect(),
             })),
         },
-        Err(rithmic_plants::Error::ReconciliationUnavailable(msg)) => {
+        Err(rithmic_host::Error::ReconciliationUnavailable(msg)) => {
             error_frame(request_id, "reconciliation_unavailable", &msg)
         }
         Err(e) => err_to_frame(request_id, "load_orders_failed", e),
@@ -101,7 +101,7 @@ async fn load_rms_info(state: &GatewayState, request_id: u64, kind: RmsKind) -> 
         Ok(session) => session,
         Err(frame) => return *frame,
     };
-    let outcome: rithmic_plants::Result<Body> = match kind {
+    let outcome: rithmic_host::Result<Body> = match kind {
         RmsKind::Product => session.load_product_rms_info().await.map(|rows| {
             Body::LoadProductRmsInfoResponse(pb::LoadProductRmsInfoResponse {
                 rows: rows.into_iter().map(product_rms_info_to_pb).collect(),
@@ -129,9 +129,9 @@ async fn load_rms_info(state: &GatewayState, request_id: u64, kind: RmsKind) -> 
 /// Map a history-read failure: an unanswerable reconciliation (fill-history
 /// cap, or an order-history drain that cannot prove completeness) keeps its
 /// own code so callers fail closed instead of treating it as "venue empty".
-fn history_err_to_frame(request_id: u64, code: &str, e: rithmic_plants::Error) -> Frame {
+fn history_err_to_frame(request_id: u64, code: &str, e: rithmic_host::Error) -> Frame {
     match e {
-        rithmic_plants::Error::ReconciliationUnavailable(msg) => {
+        rithmic_host::Error::ReconciliationUnavailable(msg) => {
             error_frame(request_id, "reconciliation_unavailable", &msg)
         }
         other => err_to_frame(request_id, code, other),
@@ -274,7 +274,7 @@ async fn one_shot<F>(
 where
     F: for<'a> FnOnce(
         &'a dyn Session,
-    ) -> Pin<Box<dyn Future<Output = rithmic_plants::Result<()>> + Send + 'a>>,
+    ) -> Pin<Box<dyn Future<Output = rithmic_host::Result<()>> + Send + 'a>>,
 {
     if let Some(refused) = refused {
         return refused;

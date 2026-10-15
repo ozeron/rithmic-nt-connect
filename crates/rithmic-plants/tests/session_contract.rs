@@ -1,14 +1,15 @@
-//! One contract, two sessions: every scenario here runs against `FakeSession`
-//! and against the real `DirectSession` connected to the fake Rithmic venue, so
+//! One contract, two sessions: every scenario here runs against `FakeVenue`
+//! and against the real `RithmicVenue` connected to the fake Rithmic venue, so
 //! the fake the gateway tests rely on cannot drift from direct-mode behavior.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use rithmic_plants::fake::{FakeFailure, FakeSession};
-use rithmic_plants::fake_venue::{template, FakeVenue, Reply};
-use rithmic_plants::{DirectSession, Error, PlaceOrder, PlantSet, Session, Stream};
+use rithmic_host::fake::{FakeFailure, FakeVenue};
+use rithmic_host::{Error, PlaceOrder, PlantSet, Session, Stream};
+use rithmic_plants::fake_server::{template, FakeRithmicServer, Reply};
+use rithmic_plants::RithmicVenue;
 
 /// How a scenario drives one implementation.
 #[async_trait]
@@ -26,12 +27,12 @@ trait Harness: Send + Sync + Sized {
     fn places_sent(&self) -> usize;
 }
 
-struct Fake(Arc<FakeSession>);
+struct Fake(Arc<FakeVenue>);
 
 #[async_trait]
 impl Harness for Fake {
     async fn open(trading: bool) -> Self {
-        let fake = Arc::new(FakeSession::new().with_gates(trading, false));
+        let fake = Arc::new(FakeVenue::new().with_gates(trading, false));
         fake.connect().await.unwrap();
         Self(fake)
     }
@@ -58,17 +59,17 @@ impl Harness for Fake {
 }
 
 struct Direct {
-    venue: FakeVenue,
-    session: Arc<DirectSession>,
+    venue: FakeRithmicServer,
+    session: Arc<RithmicVenue>,
 }
 
 #[async_trait]
 impl Harness for Direct {
     async fn open(trading: bool) -> Self {
-        let venue = FakeVenue::start().await;
+        let venue = FakeRithmicServer::start().await;
         venue.front_month("ES", "CME", "ESZ6");
         let session = Arc::new(
-            DirectSession::new(venue.session_config(), PlantSet::MARKET_DATA)
+            RithmicVenue::new(venue.session_config(), PlantSet::MARKET_DATA)
                 .with_gates(trading, false),
         );
         session.connect().await.unwrap();
