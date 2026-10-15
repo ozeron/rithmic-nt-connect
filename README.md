@@ -28,7 +28,7 @@ Prebuilt wheels, the way NautilusTrader ships: CI builds them on every push to `
 | Wheel | Carries |
 | --- | --- |
 | `rithmic-gateway` | the `rithmic-gateway` parent binary (installed into the venv's `bin/`) + the pure-Python `rithmic_gateway` client; depends only on `protobuf` |
-| `rithmic-nt-connect` | the Nautilus adapter + Rust extension (cp312–cp314); `rithmic-nt-connect[gateway]` adds the gateway wheel |
+| `rithmic-nt-connect` | the Nautilus adapter + Rust extension (cp312–cp314); `rithmic-nt-connect[gateway]` adds the gateway wheel. On macOS it needs macOS 26, because that is the only macOS that `nautilus_trader` 1.231.0 ships wheels for |
 
 ```toml
 # pyproject.toml of the consuming project

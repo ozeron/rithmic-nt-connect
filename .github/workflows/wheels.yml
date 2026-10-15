@@ -75,7 +75,10 @@ jobs:
             runner: ubuntu-22.04-arm
             compat: --compatibility manylinux_2_35
           - name: macos-arm64
-            runner: macos-14
+            # nautilus_trader 1.231.0 ships macOS wheels for macOS 26 only, so the
+            # install smoke needs a macOS 26 host. The wheels themselves still
+            # target macOS 11 (MACOSX_DEPLOYMENT_TARGET).
+            runner: macos-26
             compat: ""
     runs-on: ${{ matrix.runner }}
     env:
