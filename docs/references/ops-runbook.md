@@ -51,6 +51,8 @@ The adapter prints a loud WARNING to stderr when the override is active.
 Set it only with MotiveWave / R|Trader closed — same one-login system.
 Unknown system names stay refused. Venue gaps: skipped-spec below.
 
+Book refresh contract (Rithmic Test, NQZ6/CME, 2026-10-15): repeat `subscribe_order_book_summary` is rejected (`[1029] update bit type already exists`); unsubscribe + subscribe resends the snapshot, so `Venue::refresh_book` uses that sequence ([design D8.10](../../openspec/changes/unify-session-host/design.md#d8-gaps-found-in-review-2026-10-15)).
+
 ## Skipped-spec register
 
 Known test skips that are venue/environment facts, not adapter bugs. Each

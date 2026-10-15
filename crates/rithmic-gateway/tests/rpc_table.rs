@@ -1,16 +1,12 @@
-//! The RPC table is the single classification of every gateway request and
-//! `Session` trait method. These tests fail when the proto, the trait, the
-//! restore plan, or the gates drift from it.
+//! Gateway request mapping and dispatch gates. Host trait classification and
+//! intent restore coverage live in rithmic-host/tests/rpc_table.rs.
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
 
 use rithmic_gateway::pb::frame::Body;
-use rithmic_gateway::reconnect::{ReconnectController, TimeBarIntent};
 use rithmic_gateway::rpc_table::{by_body, Gate, RPC_TABLE};
-use rithmic_gateway::server::{gate_rpc_for_test, pump::restore_intents};
-use rithmic_gateway::subscriptions::{FanoutHub, ParentGates, SubKey};
-use rithmic_host::fake::FakeVenue;
+use rithmic_gateway::server::gate_rpc_for_test;
+use rithmic_gateway::subscriptions::ParentGates;
 
 const PROTO: &str = include_str!("../../../proto/rithmic_gateway/v1/session.proto");
 
@@ -75,79 +71,6 @@ fn table_keys_are_unique() {
             assert!(methods.insert(m), "duplicate method row: {m}");
         }
     }
-}
-
-/// Note the intent a table row restores, by `RestorePlan` field. An unknown
-/// field fails the test so a new intent cannot ship without a note helper.
-async fn note_intent(ctl: &ReconnectController, plan_field: &str) {
-    let key = SubKey {
-        symbol: "NQH6".into(),
-        exchange: "CME".into(),
-    };
-    match plan_field {
-        "ticker" => {
-            ctl.note_ticker(key).await;
-        }
-        "book" => {
-            ctl.note_book(key).await;
-        }
-        "time_bars" => {
-            ctl.note_time_bar(TimeBarIntent {
-                symbol: "NQH6".into(),
-                exchange: "CME".into(),
-                bar_type: 2,
-                period: 1,
-            })
-            .await;
-        }
-        "pnl" => {
-            ctl.note_pnl().await;
-        }
-        "order" => {
-            ctl.note_order().await;
-        }
-        "brackets" => {
-            ctl.note_brackets().await;
-        }
-        other => panic!("no note helper for RestorePlan field {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn every_subscription_intent_is_reissued_by_restore_intents() {
-    for row in RPC_TABLE.iter().filter(|r| r.restore.is_some()) {
-        let restore = row.restore.expect("restore");
-        let ctl = ReconnectController::new(Arc::new(FanoutHub::new(8)));
-        note_intent(&ctl, restore.plan_field).await;
-
-        let fake = FakeVenue::new();
-        let (restored, attempted) = restore_intents(&fake, &ctl).await;
-
-        assert_eq!(
-            (restored, attempted),
-            (1, 1),
-            "{:?}: restore must attempt and succeed",
-            row.body
-        );
-        assert!(
-            fake.calls().iter().any(|c| c.starts_with(restore.call)),
-            "{:?}: restore_intents never issued `{}`; calls: {:?}",
-            row.body,
-            restore.call,
-            fake.calls()
-        );
-    }
-}
-
-#[tokio::test]
-async fn one_shot_commands_are_never_restored() {
-    // Nothing a one-shot does notes an intent, so a plan with only one-shot
-    // activity restores nothing.
-    let ctl = ReconnectController::new(Arc::new(FanoutHub::new(8)));
-    let fake = FakeVenue::new();
-    let (restored, attempted) = restore_intents(&fake, &ctl).await;
-    assert_eq!((restored, attempted), (0, 0));
-    assert!(fake.calls().is_empty());
 }
 
 fn code_of(body: Body) -> String {
