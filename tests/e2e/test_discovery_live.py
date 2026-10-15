@@ -12,7 +12,7 @@ from __future__ import annotations
 import contextlib
 
 import pytest
-from conftest import open_trading_gates_or_skip
+from live_gates import open_trading_gates_or_skip
 
 pytestmark = pytest.mark.live
 

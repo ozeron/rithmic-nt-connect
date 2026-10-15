@@ -63,7 +63,7 @@ def test_auto_id(value):
 """)
     env = {
         **os.environ,
-        "PYTHONPATH": str(root / "python"),
+        "PYTHONPATH": os.pathsep.join([str(root / "python"), str(root / "tests")]),
         "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
         "RITHMIC_TEST_DOTENV": str(source),
         "FAKE_PASSWORD": password,
@@ -75,6 +75,8 @@ def test_auto_id(value):
             "-m",
             "pytest",
             "-vv",
+            "-p",
+            "_pytest_redact",
             "--showlocals",
             "--tb=long",
             "--log-cli-level=WARNING",

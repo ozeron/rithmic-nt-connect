@@ -23,7 +23,7 @@ from typing import Any, Literal, Protocol, cast
 
 import pytest
 from _gateway_parent import gateway_config_from_session, start_parent, stop_parent
-from conftest import parent_trading_env
+from live_gates import parent_trading_env
 from rithmic_gateway import GatewayClient
 from rithmic_gateway.attach import config_flock_held
 from rithmic_gateway.config import GatewayConfig

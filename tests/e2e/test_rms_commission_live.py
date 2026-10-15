@@ -30,7 +30,7 @@ import os
 
 import pytest
 from _gateway_parent import gateway_config_from_session, running_parent
-from conftest import open_trading_gates_or_skip, parent_trading_env
+from live_gates import open_trading_gates_or_skip, parent_trading_env
 from rithmic_gateway import GatewayClient, GatewayError
 from rithmic_gateway.attach import config_flock_held
 from rithmic_nt_connect.config import env_truthy, session_config_from_explicit_test_env

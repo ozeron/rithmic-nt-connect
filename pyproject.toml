@@ -46,7 +46,6 @@ config-settings = { "build-args" = "--features python,extension-module,testing" 
 rithmic-gateway = { path = "python" }
 
 [tool.pytest.ini_options]
-addopts = "-p _pytest_redact"
 testpaths = ["tests"]
 pythonpath = ["python", "scripts"]
 markers = [
