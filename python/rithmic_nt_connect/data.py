@@ -58,7 +58,10 @@ from rithmic_nt_connect._convert import (
 from rithmic_nt_connect._prices import price_from_wire
 from rithmic_nt_connect.config import RithmicDataClientConfig
 from rithmic_nt_connect.constants import ADAPTER_NAME, VENUE
-from rithmic_nt_connect.errors import is_reconnectable_poll_error
+from rithmic_nt_connect.errors import (
+    is_reconnectable_poll_error,
+    is_terminal_poll_error,
+)
 from rithmic_nt_connect.providers import RithmicInstrumentProvider
 from rithmic_nt_connect.recovery_bridge import TransportRecoveryBridge
 from rithmic_nt_connect.session import WireSession
@@ -973,7 +976,8 @@ class RithmicDataClient(LiveMarketDataClient):
         ``next_events`` blocks inside the extension (GIL released) until an event
         arrives or the wait elapses, so there is no idle sleep and a tick is handled
         the moment it lands. A ``gap`` event (the stream dropped events for a slow
-        consumer) replays only this client's intent. Stream errors are terminal.
+        consumer) replays only this client's intent. Closed sessions stop cleanly;
+        other poll errors retry with bounded backoff.
         """
         backoff = 0.05
         while True:
@@ -985,8 +989,14 @@ class RithmicDataClient(LiveMarketDataClient):
                     self._session.next_events, stream, _POLL_BATCH, _POLL_WAIT_MS
                 )
             except Exception as exc:
-                self._log.error(f"{label} stream failed or session closed: {exc}")
-                raise
+                if is_terminal_poll_error(exc):
+                    self._log.error(f"{label} stream failed or session closed: {exc}")
+                    return
+                self._log.warning(f"{label} poll transient error: {exc}")
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 2.0)
+                continue
+            backoff = 0.05
             for event in events:
                 if event.get("type") == "gap":
                     self._log.warning(

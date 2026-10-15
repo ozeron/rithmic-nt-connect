@@ -264,7 +264,7 @@ def test_resync_ticker_session_replays_intent() -> None:
     assert ("bars", "NQU6", "CME", 2, 15) in calls
 
 
-def test_poll_loop_gap_replays_own_intent_and_stream_error_surfaces() -> None:
+def test_poll_loop_gap_replays_own_intent_and_closed_stream_stops() -> None:
     import asyncio
 
     from _stubs import _CaptureLog, _TestDataClient
@@ -303,10 +303,7 @@ def test_poll_loop_gap_replays_own_intent_and_stream_error_surfaces() -> None:
         client._books = BookAssembler()
         client._resync_generation = 0
         client._resync_lock = asyncio.Lock()
-        with pytest.raises(RuntimeError, match="channel closed"):
-            await client._poll_channel_loop(
-                label="ticker", stream="ticker", idle_sleep=0
-            )
+        await client._poll_channel_loop(label="ticker", stream="ticker", idle_sleep=0)
         assert any("channel closed" in m for m in log.messages)
 
     asyncio.run(run())
@@ -563,3 +560,82 @@ def test_connect_reissues_intent_and_resets_derived_state() -> None:
                     await task
 
     asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    "error", ["typed_closed", "typed_disconnected", "legacy_closed"]
+)
+def test_terminal_poll_error_stops_cleanly_and_logs_once(error: str) -> None:
+    import asyncio
+    from unittest.mock import Mock
+
+    from _stubs import _TestDataClient
+    from rithmic_nt_connect.errors import ChannelClosedError, NotConnectedError
+
+    failure = {
+        "typed_closed": ChannelClosedError("ticker"),
+        "typed_disconnected": NotConnectedError("ticker"),
+        "legacy_closed": RuntimeError("rithmic error: connection closed"),
+    }[error]
+    read = Mock(side_effect=failure)
+
+    class Sess(WireSessionStub):
+        def next_events(self, *args: Any, **kwargs: Any) -> list[Any]:
+            return read()
+
+    async def run() -> None:
+        client = _TestDataClient.__new__(_TestDataClient)
+        log = Mock()
+        client._log = log
+        client._session = Sess()
+        client._poll_closing = False
+        task = asyncio.create_task(client._poll_loop())
+        await task
+        assert task.exception() is None
+        client._on_poll_done(task, name="rithmic_poll")
+        log.error.assert_called_once()
+        log.warning.assert_not_called()
+        read.assert_called_once()
+
+    asyncio.run(run())
+
+
+def test_transient_poll_errors_back_off_and_deliver_later_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+    from unittest.mock import Mock
+
+    from _stubs import _TestDataClient
+    from rithmic_nt_connect.errors import ChannelClosedError
+
+    event = {"type": "last_trade"}
+    # A successful batch resets the delay before the next transient.
+    read = Mock(
+        side_effect=[ValueError("decode failed")] * 8
+        + [[event], ValueError("retry once more"), ChannelClosedError("ticker")]
+    )
+    delays: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+
+    class Sess(WireSessionStub):
+        def next_events(self, *args: Any, **kwargs: Any) -> list[Any]:
+            return read()
+
+    async def run() -> None:
+        client = _TestDataClient.__new__(_TestDataClient)
+        log = Mock()
+        client._log = log
+        client._session = Sess()
+        dispatch = Mock()
+        monkeypatch.setattr(client, "_dispatch_event", dispatch)
+        monkeypatch.setattr(asyncio, "sleep", sleep)
+        await client._poll_loop()
+        dispatch.assert_called_once_with(event)
+        assert log.warning.call_count == 9
+        log.error.assert_called_once()
+
+    asyncio.run(run())
+    assert delays == [0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 2.0, 2.0, 0.05]

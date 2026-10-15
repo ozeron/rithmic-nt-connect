@@ -551,6 +551,9 @@ class RithmicExecutionClient(LiveExecutionClient):
         (each failed attempt re-latches). Mid-session plant resync never clears
         a latch — only ``begin_connect`` + ``rearm`` after fresh observation.
         """
+        # unify-session-host design D8.10: joining/re-joining a live PnL intent
+        # requests a venue snapshot. Discard pre-Resumed evidence; re-arm must
+        # observe that fresh snapshot, never infer readiness from elapsed time.
         self._forget_pnl_state()
         if not self.enable_trading:
             # No order plant to restore, but the PnL stream (positions, account)

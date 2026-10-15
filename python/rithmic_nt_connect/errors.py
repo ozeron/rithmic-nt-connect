@@ -95,3 +95,35 @@ def is_reconnectable_poll_error(exc: BaseException) -> bool:
         or "channel closed" in text
         or "channel lagged" in text
     )
+
+
+def is_terminal_poll_error(exc: BaseException) -> bool:
+    """True when polling cannot continue on this session.
+
+    PyO3 maps host ChannelClosed/NotConnected to ChannelClosedError and
+    NotConnectedError (their messages can be just the plant name). Under D8.4,
+    stream closure is exposed only after RecoveryFailed or session close.
+    Gateway connection-loss codes use the existing reconnectable code set.
+    Legacy RuntimeError messages retain the closure/logout phrases below.
+    A lagged channel or generic ChannelError alone is not proof of closure.
+    """
+    if isinstance(exc, (ChannelClosedError, NotConnectedError)):
+        return True
+    if isinstance(exc, ChannelLaggedError):
+        return False
+    code = getattr(exc, "code", None)
+    if isinstance(code, str) and code.lower() in _RECONNECTABLE_GATEWAY_CODES:
+        return True
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in (
+            "forced logout",
+            "connection closed",
+            "not connected",
+            "not_connected",
+            "channel closed",
+            "session closed",
+            "session disconnected",
+        )
+    )

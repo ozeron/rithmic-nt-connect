@@ -11,6 +11,7 @@ from rithmic_nt_connect.errors import (
     CHANNEL_ERRORS,
     UnreadableEventError,
     is_reconnectable_poll_error,
+    is_terminal_poll_error,
 )
 
 logger = logging.getLogger(__name__)
@@ -72,7 +73,7 @@ class PlantPoller:
         except CHANNEL_ERRORS:
             raise
         except Exception as exc:
-            if is_reconnectable_poll_error(exc):
+            if is_terminal_poll_error(exc) or is_reconnectable_poll_error(exc):
                 raise
             self._log.warning(f"poll transient error: {exc}")
             raise PollTransientError(str(exc)) from exc
@@ -137,6 +138,11 @@ class PlantPoller:
             await asyncio.sleep(0.1)
             return backoff, transient_streak
         except Exception as exc:
+            if is_terminal_poll_error(exc):
+                self._log.error(f"{self.name} stream failed or session closed: {exc}")
+                if self.name == "order" and self.on_resync_failed is not None:
+                    self.on_resync_failed()
+                return None
             self._log.error(f"{self.name} poll channel error: {exc}")
             return await self._resync(backoff, transient_streak)
 
