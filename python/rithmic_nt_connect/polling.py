@@ -62,8 +62,8 @@ class PlantPoller:
     async def poll_session_events(self) -> list[dict[str, Any]]:
         """Wait for the next batch of events from the wire session.
 
-        Raises PollTransientError on non-channel failure; lets channel/reconnect
-        errors propagate for resync.
+        Raises PollTransientError on other non-channel failures; lets channel
+        and transport failures propagate for classification.
         """
         try:
             if self.batch_fn is not None:
@@ -143,6 +143,12 @@ class PlantPoller:
                 if self.name == "order" and self.on_resync_failed is not None:
                     self.on_resync_failed()
                 return None
+            if not isinstance(exc, CHANNEL_ERRORS):
+                # RemoteSession owns transport recovery. Keep polling without
+                # replaying intents or latching before RecoveryFailed closes it.
+                self._log.warning(f"poll transient error: {exc}")
+                await asyncio.sleep(backoff)
+                return min(backoff * 2, 2.0), transient_streak
             self._log.error(f"{self.name} poll channel error: {exc}")
             return await self._resync(backoff, transient_streak)
 

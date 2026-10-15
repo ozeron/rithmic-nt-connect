@@ -144,7 +144,8 @@ def test_reconnectable_poll_error() -> None:
     assert _reconnectable_poll_error(RuntimeError("rithmic error: connection closed"))
     assert not _reconnectable_poll_error(RuntimeError("parse failed"))
 
-    # RC2.1: GatewayError uses underscore code — must not stay transient.
+    # GatewayError uses underscore codes. Reconnectable does not mean terminal:
+    # the host restores transport while consumers keep polling.
     gw = GatewayError("not_connected", "call connect() first")
     assert is_reconnectable_poll_error(gw)
     assert _reconnectable_poll_error(gw)
@@ -268,11 +269,12 @@ def test_poll_loop_gap_replays_own_intent_and_closed_stream_stops() -> None:
     import asyncio
 
     from _stubs import _CaptureLog, _TestDataClient
+    from rithmic_nt_connect.errors import ChannelClosedError
 
     calls: list[tuple[str, str]] = []
     batches: list[Any] = [
         [{"type": "gap", "stream": "ticker", "skipped": 7}],
-        RuntimeError("channel closed"),
+        ChannelClosedError("ticker"),
     ]
 
     class Sess(WireSessionStub):
@@ -304,7 +306,7 @@ def test_poll_loop_gap_replays_own_intent_and_closed_stream_stops() -> None:
         client._resync_generation = 0
         client._resync_lock = asyncio.Lock()
         await client._poll_channel_loop(label="ticker", stream="ticker", idle_sleep=0)
-        assert any("channel closed" in m for m in log.messages)
+        assert any("stream failed or session closed" in m for m in log.messages)
 
     asyncio.run(run())
     assert calls == [("NQU6", "CME")]
@@ -563,7 +565,7 @@ def test_connect_reissues_intent_and_resets_derived_state() -> None:
 
 
 @pytest.mark.parametrize(
-    "error", ["typed_closed", "typed_disconnected", "legacy_closed"]
+    "error", ["typed_closed", "typed_disconnected", "session_closed", "forced_logout"]
 )
 def test_terminal_poll_error_stops_cleanly_and_logs_once(error: str) -> None:
     import asyncio
@@ -575,7 +577,8 @@ def test_terminal_poll_error_stops_cleanly_and_logs_once(error: str) -> None:
     failure = {
         "typed_closed": ChannelClosedError("ticker"),
         "typed_disconnected": NotConnectedError("ticker"),
-        "legacy_closed": RuntimeError("rithmic error: connection closed"),
+        "session_closed": RuntimeError("session closed"),
+        "forced_logout": RuntimeError("rithmic error: forced logout"),
     }[error]
     read = Mock(side_effect=failure)
 
@@ -600,19 +603,43 @@ def test_terminal_poll_error_stops_cleanly_and_logs_once(error: str) -> None:
     asyncio.run(run())
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        "decode",
+        "not_connected",
+        "eof",
+        "shutting_down",
+        "transport_reset",
+        "frame_too_large",
+        "not connected",
+        "connection closed",
+    ],
+)
 def test_transient_poll_errors_back_off_and_deliver_later_events(
+    error: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import asyncio
     from unittest.mock import Mock
 
     from _stubs import _TestDataClient
-    from rithmic_nt_connect.errors import ChannelClosedError
+    from rithmic_nt_connect.errors import ChannelClosedError, GatewayError
 
     event = {"type": "last_trade"}
+    failure: Exception
+    if error == "decode":
+        failure = ValueError("decode failed")
+    elif " " in error:
+        failure = RuntimeError(error)
+    else:
+        gateway_error = GatewayError(f"{error}: connection closed; not connected")
+        gateway_error.code = error
+        gateway_error.message = "connection closed; not connected"
+        failure = gateway_error
     # A successful batch resets the delay before the next transient.
     read = Mock(
-        side_effect=[ValueError("decode failed")] * 8
+        side_effect=[failure] * 8
         + [[event], ValueError("retry once more"), ChannelClosedError("ticker")]
     )
     delays: list[float] = []

@@ -61,8 +61,8 @@ CHANNEL_ERRORS: tuple[type[BaseException], ...] = (
     ChannelError,
 )
 
-# Gateway unix-client codes that mean the parent sock / session is gone or
-# not usable — must take the reconnect/resync path, not "transient" spam.
+# Gateway connection-loss codes: the host owns reconnecting; these alone do
+# not prove that a consumer's stream has ended.
 _RECONNECTABLE_GATEWAY_CODES = frozenset(
     {
         "not_connected",
@@ -75,11 +75,13 @@ _RECONNECTABLE_GATEWAY_CODES = frozenset(
 
 
 def is_reconnectable_poll_error(exc: BaseException) -> bool:
-    """True when a poll failure should resync / reconnect, not soft-retry.
+    """True when a poll failure indicates interrupted transport or a channel.
 
     ``GatewayError`` uses code ``not_connected`` (underscore). Matching only
     the spaced phrase ``not connected`` left gateway-mode clients in a
-    half-dead transient loop (2026-08-25 MY043 incident RC2.1).
+    half-dead transient loop (2026-08-25 MY043 incident RC2.1). Host recovery now
+    owns reconnecting; consumers use ``is_terminal_poll_error`` to decide when
+    polling must stop.
     """
     if isinstance(exc, CHANNEL_ERRORS):
         return True
@@ -103,27 +105,14 @@ def is_terminal_poll_error(exc: BaseException) -> bool:
     PyO3 maps host ChannelClosed/NotConnected to ChannelClosedError and
     NotConnectedError (their messages can be just the plant name). Under D8.4,
     stream closure is exposed only after RecoveryFailed or session close.
-    Gateway connection-loss codes use the existing reconnectable code set.
-    Legacy RuntimeError messages retain the closure/logout phrases below.
+    Gateway connection-loss errors remain transient while RemoteSession re-dials.
+    Legacy RuntimeError messages match only explicit session closure or forced
+    logout; generic connection-loss text does not prove that recovery has ended.
     A lagged channel or generic ChannelError alone is not proof of closure.
     """
     if isinstance(exc, (ChannelClosedError, NotConnectedError)):
         return True
     if isinstance(exc, ChannelLaggedError):
         return False
-    code = getattr(exc, "code", None)
-    if isinstance(code, str) and code.lower() in _RECONNECTABLE_GATEWAY_CODES:
-        return True
     text = str(exc).lower()
-    return any(
-        marker in text
-        for marker in (
-            "forced logout",
-            "connection closed",
-            "not connected",
-            "not_connected",
-            "channel closed",
-            "session closed",
-            "session disconnected",
-        )
-    )
+    return "forced logout" in text or "session closed" in text
