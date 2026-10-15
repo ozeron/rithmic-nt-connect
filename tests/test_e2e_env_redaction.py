@@ -2,12 +2,7 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent / "e2e"))
-
-from conftest import RedactedEnv
+from _redact import RedactedEnv
 
 
 def test_repr_hides_password_and_tokens() -> None:

@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from _gateway_parent import running_parent
+from _redact import RedactedEnv
 from rithmic_nt_connect.config import ConnectMode, env_truthy, system_kind
 
 if TYPE_CHECKING:
@@ -41,27 +42,6 @@ def _connected_data_session() -> Iterator[WireSession]:
         lock = getattr(session, "_lock", None)
         if lock is not None:
             lock.close()
-
-
-_SECRET_KEY_MARKERS = ("PASSWORD", "TOKEN", "SECRET")
-
-
-class RedactedEnv(dict[str, str]):
-    """Test env values whose repr never shows secrets.
-
-    pytest prints fixture values in failure tracebacks; a plain dict would put
-    ``RITHMIC_PASSWORD`` in the output (AGENTS.md: secrets stay out of errors
-    and logs).
-    """
-
-    def __repr__(self) -> str:
-        shown = {
-            key: "***" if any(m in key.upper() for m in _SECRET_KEY_MARKERS) else value
-            for key, value in self.items()
-        }
-        return f"RedactedEnv({shown!r})"
-
-    __str__ = __repr__
 
 
 def _test_env() -> dict[str, str] | None:
