@@ -364,8 +364,24 @@ impl RemoteSession {
         let (_barrier, conn) = self.runtime.intent_connection().await?;
         self.require_connected()?;
         let _ordered = self.runtime.intent_lock(&key).await;
+        let facade = self.facade();
         self.intent_ack(&conn, body).await?;
-        self.runtime.intents().hold(self.facade(), key);
+        if !self.runtime.hold_live_intent(facade, key.clone()) {
+            // Disconnect may have run before this Ack, so `leave` could not
+            // release the newly accepted intent. Balance it here unless a
+            // remaining facade holds it (order/brackets release as a group).
+            let shared = {
+                let intents = self.runtime.intents();
+                match key {
+                    IntentKey::Order | IntentKey::Brackets => intents.order_group_held(),
+                    _ => intents.is_held(&key),
+                }
+            };
+            if !shared {
+                self.intent_ack(&conn, key.release_body()).await?;
+            }
+            return Err(Error::NotConnected { plant: "gateway" });
+        }
         Ok(())
     }
 
@@ -435,8 +451,11 @@ impl RemoteSession {
         if id == 0 {
             return None;
         }
+        // Unregister first: a subscription Ack which races detach can no
+        // longer record a hold after we have removed this facade's holdings.
+        let last = self.runtime.unregister(id);
         let freed = self.runtime.intents().drop_facade(id);
-        Some((self.runtime.unregister(id), freed))
+        Some((last, freed))
     }
 
     /// Compatibility poll: a gap reads as [`Error::ChannelLagged`].

@@ -505,3 +505,36 @@ async fn disconnect_during_redial_closes_pollers_without_resuming() {
     );
     assert!(rig.dials.try_recv().is_err());
 }
+
+#[tokio::test]
+async fn a_departing_facades_pending_subscribe_cannot_become_a_rejoin_intent() {
+    let mut rig = Rig::new();
+    let mut events = rig.session.session_events();
+    let mut parent = rig.connected().await;
+    let departing = Arc::new(rig.session.as_ref().clone());
+    departing.connect().await.unwrap();
+    let subscriber = departing.clone();
+    let subscribe = tokio::spawn(async move { subscriber.subscribe("ESU6", "CME").await });
+    let request = parent.read().await;
+    assert!(matches!(request.body, Some(Body::Subscribe(_))));
+    departing.disconnect().await.unwrap();
+    parent.ack(request.request_id).await;
+    // A late Ack must be balanced by a release, not recorded for facade zero.
+    let release = parent.read().await;
+    assert!(matches!(release.body, Some(Body::Unsubscribe(_))));
+    parent.ack(release.request_id).await;
+    assert!(matches!(
+        subscribe.await.unwrap(),
+        Err(Error::NotConnected { .. })
+    ));
+    drop(parent);
+    assert!(matches!(
+        session_event(&mut events).await,
+        SessionEvent::Interrupted { .. }
+    ));
+    let _parent = rig.parent().await;
+    assert_eq!(
+        session_event(&mut events).await,
+        SessionEvent::Resumed { generation: 2 }
+    );
+}

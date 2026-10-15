@@ -689,6 +689,17 @@ impl Runtime {
         id
     }
 
+    /// A late Ack cannot resurrect a facade which detached during the RPC.
+    /// Pair this check with unregister-before-drop-holdings in `leave`.
+    pub(super) fn hold_live_intent(&self, facade: u64, key: IntentKey) -> bool {
+        let facades = self.facades.lock().expect("facades");
+        if !facades.contains_key(&facade) {
+            return false;
+        }
+        self.intents().hold(facade, key);
+        true
+    }
+
     /// The intent holdings (locked for an instant; never across an await).
     pub(super) fn intents(&self) -> std::sync::MutexGuard<'_, Intents> {
         self.intents.lock().expect("intents")
