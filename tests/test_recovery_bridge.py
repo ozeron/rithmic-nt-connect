@@ -5,36 +5,36 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from _stubs import _CaptureLog
+from _stubs import WireSessionStub, _CaptureLog
 from rithmic_nt_connect.recovery_bridge import TransportRecoveryBridge
+from rithmic_nt_connect.session import _FlockedDirectSession, _RustGatewaySession
 from rithmic_nt_connect.transport import (
     RecoveryFailed,
+    SessionEvent,
     TransportDown,
-    TransportFault,
-    TransportFaultKind,
     TransportUp,
 )
 
 
-class _Session:
-    """Gateway-like session: records listeners and unsubscribe calls."""
+class _Session(WireSessionStub):
+    """Session in either mode: records listeners and unsubscribe calls."""
 
     def __init__(self) -> None:
-        self.listeners: list[Callable[[object], None]] = []
+        self.listeners: list[Callable[[SessionEvent], None]] = []
         self.unsubscribed = 0
+        self.mode = "direct"
 
-    def subscribe_transport_events(
-        self, listener: Callable[[object], None]
-    ) -> Callable[[], None]:
+    def subscribe_session_events(self, listener: Callable[[SessionEvent], None]) -> Any:
         self.listeners.append(listener)
 
         def _unsubscribe() -> None:
             self.unsubscribed += 1
 
-        return _unsubscribe
+        return SimpleNamespace(cancel=_unsubscribe)
 
 
 class _Rig:
@@ -68,8 +68,8 @@ class _Rig:
 
 def _down(gen: int = 1) -> TransportDown:
     return TransportDown(
-        gen=gen,
-        fault=TransportFault(kind=TransportFaultKind.UNIX_EOF, observed_gen=gen),
+        generation=gen,
+        cause="socket closed",
     )
 
 
@@ -83,7 +83,7 @@ async def _settle(rig: _Rig) -> None:
 def test_up_restores_once_and_records_the_generation() -> None:
     async def _run() -> None:
         rig = _Rig(asyncio.get_running_loop())
-        rig.bridge.on_event(TransportUp(gen=2))
+        rig.bridge.on_event(TransportUp(generation=2))
         await _settle(rig)
         assert rig.calls == [(2, 1)]
         assert rig.bridge.last_generation == 2
@@ -94,10 +94,10 @@ def test_up_restores_once_and_records_the_generation() -> None:
 def test_duplicate_or_stale_generation_is_skipped() -> None:
     async def _run() -> None:
         rig = _Rig(asyncio.get_running_loop())
-        rig.bridge.on_event(TransportUp(gen=3))
+        rig.bridge.on_event(TransportUp(generation=3))
         await _settle(rig)
-        rig.bridge.on_event(TransportUp(gen=3))
-        rig.bridge.on_event(TransportUp(gen=2))
+        rig.bridge.on_event(TransportUp(generation=3))
+        rig.bridge.on_event(TransportUp(generation=2))
         await asyncio.sleep(0)
         assert rig.calls == [(3, 1)]
 
@@ -108,10 +108,10 @@ def test_newer_generation_during_a_restore_runs_after_it() -> None:
     async def _run() -> None:
         rig = _Rig(asyncio.get_running_loop())
         rig.gate = asyncio.Event()
-        rig.bridge.on_event(TransportUp(gen=2))
+        rig.bridge.on_event(TransportUp(generation=2))
         await asyncio.sleep(0)
-        rig.bridge.on_event(TransportUp(gen=3))
-        rig.bridge.on_event(TransportUp(gen=3))
+        rig.bridge.on_event(TransportUp(generation=3))
+        rig.bridge.on_event(TransportUp(generation=3))
         await asyncio.sleep(0)
         assert rig.calls == [(2, 1)]  # single-flight: gen 3 waits
         rig.gate.set()
@@ -139,7 +139,7 @@ def test_retry_backs_off_and_does_not_sleep_after_the_last_attempt(
         rig.fail_first = 99
         rig.bridge.max_attempts = 4
         monkeypatch.setattr(asyncio, "sleep", _sleep)
-        rig.bridge.on_event(TransportUp(gen=2))
+        rig.bridge.on_event(TransportUp(generation=2))
         await real_sleep(0)
         task = rig.bridge.task
         assert task is not None
@@ -156,7 +156,7 @@ def test_retry_backs_off_and_does_not_sleep_after_the_last_attempt(
 def test_down_and_failed_go_to_their_callbacks() -> None:
     async def _run() -> None:
         rig = _Rig(asyncio.get_running_loop())
-        event = RecoveryFailed(gen=2, attempts=3, cause=None)
+        event = RecoveryFailed(generation=2, attempts=3, cause=None)
         rig.bridge.on_event(_down())
         rig.bridge.on_event(event)
         await asyncio.sleep(0)
@@ -169,7 +169,7 @@ def test_down_and_failed_go_to_their_callbacks() -> None:
 
 def test_missing_loop_logs_instead_of_raising() -> None:
     rig = _Rig(None)
-    rig.bridge.on_event(TransportUp(gen=2))
+    rig.bridge.on_event(TransportUp(generation=2))
     assert any("loop missing" in m for m in rig.log.messages)
 
 
@@ -177,7 +177,7 @@ def test_up_from_a_foreign_thread_hops_onto_the_loop() -> None:
     async def _run() -> None:
         rig = _Rig(asyncio.get_running_loop())
         worker = threading.Thread(
-            target=rig.bridge.on_event, args=(TransportUp(gen=2),)
+            target=rig.bridge.on_event, args=(TransportUp(generation=2),)
         )
         worker.start()
         await asyncio.to_thread(worker.join)
@@ -202,10 +202,27 @@ def test_reattach_replaces_the_previous_listener() -> None:
     assert session.unsubscribed == 1  # only the latest subscription stays live
 
 
-def test_attach_ignores_sessions_without_transport_events() -> None:
-    rig = _Rig(None)
-    rig.bridge.attach(object())  # direct sessions have no transport events
-    rig.bridge.attach(object())
+@pytest.mark.parametrize("mode", ["direct", "gateway"])
+def test_bridge_runs_in_both_modes(mode: str) -> None:
+    async def run() -> None:
+        rig = _Rig(asyncio.get_running_loop())
+        session = _Session()
+        wrapper = (
+            _FlockedDirectSession(session, object())
+            if mode == "direct"
+            else _RustGatewaySession(session)
+        )
+        rig.bridge.attach(wrapper)
+        listener = session.listeners[0]
+        listener(_down())
+        listener(TransportUp(generation=2))
+        await _settle(rig)
+        assert rig.downs == [_down()]
+        assert rig.calls == [(2, 1)]
+        await rig.bridge.detach()
+        assert session.unsubscribed == 1
+
+    asyncio.run(run())
 
 
 def test_detach_unsubscribes_cancels_and_forgets_generations() -> None:
@@ -214,7 +231,7 @@ def test_detach_unsubscribes_cancels_and_forgets_generations() -> None:
         session = _Session()
         rig.bridge.attach(session)
         rig.gate = asyncio.Event()
-        rig.bridge.on_event(TransportUp(gen=2))
+        rig.bridge.on_event(TransportUp(generation=2))
         await asyncio.sleep(0)
         task = rig.bridge.task
         assert task is not None and not task.done()
@@ -227,7 +244,7 @@ def test_detach_unsubscribes_cancels_and_forgets_generations() -> None:
         assert rig.bridge.last_generation == 0
         # A new connection may restart generation numbering at a low value.
         rig.gate = None
-        rig.bridge.on_event(TransportUp(gen=1))
+        rig.bridge.on_event(TransportUp(generation=1))
         await asyncio.sleep(0)
         assert rig.bridge.task is not None
         await rig.bridge.task
@@ -237,12 +254,12 @@ def test_detach_unsubscribes_cancels_and_forgets_generations() -> None:
 
 
 def test_failing_unsubscribe_does_not_break_detach() -> None:
-    class _Bad:
-        def subscribe_transport_events(self, listener: Any) -> Callable[[], None]:
+    class _Bad(WireSessionStub):
+        def subscribe_session_events(self, listener: Any) -> Any:
             def _boom() -> None:
                 raise RuntimeError("gone")
 
-            return _boom
+            return SimpleNamespace(cancel=_boom)
 
     async def _run() -> None:
         rig = _Rig(asyncio.get_running_loop())
@@ -264,7 +281,7 @@ def test_down_and_failed_from_the_transport_thread_run_on_the_loop() -> None:
         rig.bridge._latch_now = lambda: latched.append(threading.get_ident())
         rig.bridge._on_down = lambda e: handler_threads.append(threading.get_ident())
         rig.bridge._on_failed = lambda e: handler_threads.append(threading.get_ident())
-        failed = RecoveryFailed(gen=2, attempts=3, cause=None)
+        failed = RecoveryFailed(generation=2, attempts=3, cause=None)
         for event in (_down(), failed):
             worker = threading.Thread(target=rig.bridge.on_event, args=(event,))
             worker.start()
@@ -277,3 +294,31 @@ def test_down_and_failed_from_the_transport_thread_run_on_the_loop() -> None:
         assert handler_threads == [loop_thread, loop_thread]
 
     asyncio.run(_run())
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_interruption_cancels_old_rearm_before_a_new_resume(failed: bool) -> None:
+    async def run() -> None:
+        rig = _Rig(asyncio.get_running_loop())
+        rig.gate = asyncio.Event()
+        rig.bridge.on_event(TransportUp(generation=2))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        old_task = rig.bridge.task
+        assert old_task is not None
+        event = (
+            RecoveryFailed(generation=2, attempts=3, cause="gone")
+            if failed
+            else _down(2)
+        )
+        rig.bridge.on_event(event)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert old_task.cancelled()
+        assert rig.bridge.last_generation == 0
+        rig.gate.set()
+        rig.bridge.on_event(TransportUp(generation=3))
+        await _settle(rig)
+        assert rig.bridge.last_generation == 3
+
+    asyncio.run(run())

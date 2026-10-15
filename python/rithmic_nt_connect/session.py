@@ -12,6 +12,7 @@ from rithmic_nt_connect.config import ConfigError, ConnectMode, SessionConfig
 from rithmic_nt_connect.errors import AlreadyConnectedError
 
 if TYPE_CHECKING:
+    from rithmic_nt_connect.transport import SessionEvent
     from rithmic_nt_connect.wire_types import AccountRmsInfo, ProductRmsInfo
 
 
@@ -25,7 +26,6 @@ def _load_session_lock() -> Any:
 class TickerSession(Protocol):
     def connect(self) -> None: ...
     def disconnect(self) -> None: ...
-    def reset_ticker(self) -> None: ...
     def subscribe(self, symbol: str, exchange: str) -> None: ...
     def unsubscribe(self, symbol: str, exchange: str) -> None: ...
     def subscribe_order_book_summary(self, symbol: str, exchange: str) -> None: ...
@@ -141,24 +141,27 @@ class OrderSession(Protocol):
     def poll_order_event(self) -> dict[str, Any] | None: ...
 
 
+class Gates(Protocol):
+    """Read-only effective host gates returned by the D9 extension API."""
+
+    @property
+    def trading(self) -> bool: ...
+    @property
+    def cancel_all(self) -> bool: ...
+
+
+class SessionEventSubscription(Protocol):
+    def cancel(self) -> None: ...
+
+
 class WireSession(TickerSession, PnlSession, OrderSession, Protocol):
-    """Full multi-plant session facade (composition of ticker / PnL / order)."""
+    """Full multi-plant session facade, identical in both connection modes."""
 
     def resolved_account(self) -> dict[str, Any] | None: ...
-
-
-class TransportAware(Protocol):
-    """Optional gateway transport surface (direct sessions have none).
-
-    ``subscribe_transport_events`` returns the unsubscribe callable. Clients
-    reach this through ``TransportRecoveryBridge``; direct sessions simply do
-    not implement it, so recovery wiring is a no-op there.
-    """
-
-    def subscribe_transport_events(
-        self, listener: Callable[[object], None]
-    ) -> Callable[[], None]: ...
-    def ensure_transport_live(self) -> int: ...
+    def open_gates(self, trading: bool, cancel_all: bool) -> Gates: ...
+    def subscribe_session_events(
+        self, listener: Callable[[SessionEvent], None]
+    ) -> SessionEventSubscription: ...
 
 
 PLANTS_MARKET_DATA = "market_data"
@@ -323,18 +326,13 @@ class _FlockedDirectSession:
         if callable(close):
             close()
 
-    def reset_ticker(self) -> None:
-        """Recreate ONLY the ticker plant, refcount-blind.
+    def open_gates(self, trading: bool, cancel_all: bool) -> Gates:
+        return self._inner.open_gates(trading, cancel_all)
 
-        Used by the data client's channel-error resync, which must actually
-        recreate the ticker plant even while other holders are live (a
-        refcounted ``disconnect`` would be a no-op and the broken stream would
-        never recover). Sibling plants (history/PnL/order) stay untouched, so
-        the exec client sharing this session is never disturbed. The re-issued
-        subscription intent follows in ``resync_ticker_session``.
-        """
-        with self._connect_gate:
-            self._inner.reset_ticker()
+    def subscribe_session_events(
+        self, listener: Callable[[SessionEvent], None]
+    ) -> SessionEventSubscription:
+        return self._inner.subscribe_session_events(listener)
 
     # -- TickerSession -----------------------------------------------------
     def subscribe(self, symbol: str, exchange: str) -> None:
@@ -592,15 +590,14 @@ class _RustGatewaySession:
     """The Rust gateway client (one shared socket per process) as a ``WireSession``.
 
     A thin shell over the extension's ``Session``: every call is the extension's.
-    It only adapts the extension's transport callback to the adapter's event
-    types, and fans one extension registration out to the clients' listeners so
+    It fans one extension session-event registration out to clients' listeners so
     a client can detach; the extension registration is cancelled when the last
     listener leaves and on disconnect.
     """
 
     def __init__(self, inner: Any) -> None:
         self._inner = inner
-        self._listeners: list[Callable[[object], None]] = []
+        self._listeners: list[Callable[[SessionEvent], None]] = []
         self._subscription: Any = None
 
     def __getattr__(self, name: str) -> Any:
@@ -609,43 +606,39 @@ class _RustGatewaySession:
             raise AttributeError(name)
         return getattr(self._inner, name)
 
-    def _fan_out(
-        self, kind: str, generation: int, attempts: int, cause: str | None
-    ) -> None:
-        from rithmic_nt_connect.transport import event_from_rust
+    def open_gates(self, trading: bool, cancel_all: bool) -> Gates:
+        return self._inner.open_gates(trading, cancel_all)
 
-        event = event_from_rust(kind, generation, attempts, cause)
-        if event is None:
-            return
+    def _fan_out(self, event: SessionEvent) -> None:
         for listener in tuple(self._listeners):
             listener(event)
 
-    def subscribe_transport_events(
-        self, listener: Callable[[object], None]
-    ) -> Callable[[], None]:
+    def subscribe_session_events(
+        self, listener: Callable[[SessionEvent], None]
+    ) -> SessionEventSubscription:
         if self._subscription is None and not self._listeners:
-            # The extension's task holds this callback for as long as it runs.
-            # It gets a weak relay, so the task never keeps this session alive,
-            # and it is cancelled below once nobody is listening.
             ref = weakref.ref(self)
 
-            def relay(
-                kind: str, generation: int, attempts: int, cause: str | None
-            ) -> None:
+            def relay(event: SessionEvent) -> None:
                 target = ref()
                 if target is not None:
-                    target._fan_out(kind, generation, attempts, cause)
+                    target._fan_out(event)
 
-            self._subscription = self._inner.subscribe_transport_events(relay)
+            self._subscription = self._inner.subscribe_session_events(relay)
         self._listeners.append(listener)
+        ref = weakref.ref(self)
 
-        def unsubscribe() -> None:
-            with contextlib.suppress(ValueError):
-                self._listeners.remove(listener)
-            if not self._listeners:
-                self._cancel_subscription()
+        class _Subscription:
+            def cancel(self) -> None:
+                target = ref()
+                if target is None:
+                    return
+                with contextlib.suppress(ValueError):
+                    target._listeners.remove(listener)
+                if not target._listeners:
+                    target._cancel_subscription()
 
-        return unsubscribe
+        return _Subscription()
 
     def _cancel_subscription(self) -> None:
         subscription, self._subscription = self._subscription, None

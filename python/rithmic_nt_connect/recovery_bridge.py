@@ -1,8 +1,8 @@
-"""Shared gateway transport-recovery wiring for the data and exec clients.
+"""Shared session-recovery policy wiring for the data and exec clients.
 
-The gateway runtime (Rust client) owns dialling and emits
-``TransportDown`` / ``TransportUp`` / ``RecoveryFailed``. What to restore after
-a re-dial is client policy (MD replay vs order-plant re-arm) and stays in the
+The session host owns recovery and emits
+``Interrupted`` / ``Resumed`` / ``RecoveryFailed``. What to restore after
+a recovery is client policy (data reconciliation and order-plant re-arm) in the
 client's ``restore`` callback; this module owns the rest: listener wiring, the
 hop from the transport thread onto the client's loop, single-flight, generation
 dedupe and bounded retry with backoff.
@@ -20,18 +20,15 @@ import contextlib
 from collections.abc import Callable, Coroutine
 from typing import Any
 
-from rithmic_nt_connect.transport import (
-    RecoveryFailed,
-    TransportDown,
-    TransportUp,
-)
+from rithmic_nt_connect.session import SessionEventSubscription
+from rithmic_nt_connect.transport import Interrupted, RecoveryFailed, Resumed
 
 _INITIAL_BACKOFF_S = 0.5
 _MAX_BACKOFF_S = 8.0
 
 
 class TransportRecoveryBridge:
-    """Run one client's ``restore(generation, attempt)`` after each TRANSPORT_UP."""
+    """Run one client's ``restore(generation, attempt)`` after each Resumed."""
 
     def __init__(
         self,
@@ -45,7 +42,7 @@ class TransportRecoveryBridge:
             asyncio.Task[Any],
         ],
         restore: Callable[[int, int], Coroutine[Any, Any, None]],
-        on_down: Callable[[TransportDown], None],
+        on_down: Callable[[Interrupted], None],
         on_failed: Callable[[RecoveryFailed], None],
         on_attempt_failed: Callable[[BaseException], None] | None = None,
         latch_now: Callable[[], None] | None = None,
@@ -65,23 +62,16 @@ class TransportRecoveryBridge:
         self._on_failed = on_failed
         self._on_attempt_failed = on_attempt_failed
         self._latch_now = latch_now
-        self._unsubscribe: Callable[[], None] | None = None
+        self._subscription: SessionEventSubscription | None = None
         self._pending_generation = 0
         self.max_attempts = max_attempts
         self.task: asyncio.Task[Any] | None = None
         self.last_generation = 0
 
     def attach(self, session: Any) -> None:
-        """Subscribe to the session's transport events (gateway sessions only).
-
-        Re-attaching (a reconnect) first drops the previous subscription so the
-        shared runtime never holds two listeners for one client.
-        """
+        """Attach in either mode, replacing any previous event subscription."""
         self._drop_listener()
-        subscribe = getattr(session, "subscribe_transport_events", None)
-        if callable(subscribe):
-            unsubscribe = subscribe(self.on_event)
-            self._unsubscribe = unsubscribe if callable(unsubscribe) else None
+        self._subscription = session.subscribe_session_events(self.on_event)
 
     async def detach(self) -> None:
         """Drop the listener, cancel an in-flight restore, forget generations."""
@@ -95,24 +85,33 @@ class TransportRecoveryBridge:
                 await task
 
     def _drop_listener(self) -> None:
-        unsubscribe, self._unsubscribe = self._unsubscribe, None
-        if unsubscribe is not None:
+        subscription, self._subscription = self._subscription, None
+        if subscription is not None:
             try:
-                unsubscribe()
+                subscription.cancel()
             except Exception as exc:
                 self._log().warning(f"{self._label} unsubscribe failed: {exc}")
 
     def on_event(self, event: object) -> None:
         """Called on the transport thread."""
-        if isinstance(event, TransportDown):
-            self._latch_and_hop(lambda: self._on_down(event))
-        elif isinstance(event, TransportUp):
+        if isinstance(event, Interrupted):
+            self._latch_and_hop(lambda: self._stop_restore(self._on_down, event))
+        elif isinstance(event, Resumed):
             self._log().warning(
-                f"gateway TRANSPORT_UP gen={event.gen}; scheduling {self._label}"
+                f"session Resumed gen={event.generation}; scheduling {self._label}"
             )
-            self.schedule(event.gen)
+            self.schedule(event.generation)
         elif isinstance(event, RecoveryFailed):
-            self._latch_and_hop(lambda: self._on_failed(event))
+            self._latch_and_hop(lambda: self._stop_restore(self._on_failed, event))
+
+    def _stop_restore(self, handler: Callable[[Any], None], event: object) -> None:
+        """A new break invalidates any older re-arm, even one still queued."""
+        task = self.task
+        self._pending_generation = 0
+        if task is not None and not task.done():
+            self.task = None
+            task.cancel()
+        handler(event)
 
     def _latch_and_hop(self, handler: Callable[[], None]) -> None:
         if self._latch_now is not None:
