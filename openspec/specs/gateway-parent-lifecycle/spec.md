@@ -51,7 +51,7 @@ In gateway mode the client configuration SHALL NOT require, read, log, or transm
 - **THEN** none SHALL contain a password value, and `repr` of the client config SHALL NOT contain one
 
 ### Requirement: Explicit parent launcher
-The package SHALL provide `python -m rithmic_gateway` and a `rithmic-gateway` console binary installed by the `rithmic-gateway` wheel. The launcher SHALL resolve the binary in the order `RITHMIC_GATEWAY_BIN`, the wheel's own binary, then `PATH`, and replace the launcher process with it, passing the caller's environment unchanged. It SHALL NOT scan cargo `target/` directories.
+The package SHALL provide `python -m rithmic_gateway` and a `rithmic-gateway` console binary installed by the `rithmic-gateway` wheel. The launcher SHALL resolve the binary in the order `RITHMIC_GATEWAY_BIN`, the wheel's own binary, `PATH`, then the `target/{release,debug}` (and `CARGO_TARGET_DIR`) of the source checkout the package was imported from, and replace the launcher process with it, passing the caller's environment unchanged. It SHALL NOT run `cargo build`.
 
 #### Scenario: Launch from an installed wheel
 - **WHEN** `python -m rithmic_gateway` is run in an environment with the wheel installed and parent credentials set

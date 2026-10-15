@@ -6,14 +6,14 @@ How the `rithmic-gateway` and `rithmic-nt-connect` wheels are built in CI, smoke
 ## Requirements
 
 ### Requirement: Prebuilt platform wheels on every push to main
-CI SHALL build `rithmic-gateway` and `rithmic-nt-connect` wheels on every push to `main` and on every tag, for Linux x86_64, Linux ARM64 and macOS ARM64. Dev builds SHALL be versioned `X.Y.Z.devYYYYMMDDNNNNN` (date, then the zero-padded run number; no `+local` segment because GitHub renames release assets with special characters). Every wheel SHALL carry a build provenance attestation.
+CI SHALL build `rithmic-gateway` and `rithmic-nt-connect` wheels on every push to `main` and on every `v*` tag, for Linux x86_64, Linux ARM64 and macOS ARM64. Dev builds SHALL be versioned `X.Y.Z.devYYYYMMDDNNNNN` (date, then the zero-padded run number; no `+local` segment because GitHub renames release assets with special characters). Every wheel SHALL carry a build provenance attestation.
 
 #### Scenario: Merge to main
 - **WHEN** a commit lands on `main`
 - **THEN** wheels for all three platforms SHALL be published under a new dev version
 
 ### Requirement: Wheels are installable from a package index
-Wheels SHALL be published to a rolling `main` GitHub prerelease (and to a fixed release for tags) and listed in a PEP 503 index on GitHub Pages with sha256 hashes. The index SHALL keep at least the 30 most recent dev builds. Nothing SHALL be published to PyPI.
+Wheels SHALL be published to the rolling `main-dev` GitHub prerelease (and to a fixed release for `v*` tags) and listed in a PEP 503 index on GitHub Pages with sha256 hashes. The index SHALL keep at least the 30 most recent dev builds. Nothing SHALL be published to PyPI.
 
 #### Scenario: Consumer install
 - **WHEN** a project configures the index and runs `uv add --prerelease allow rithmic-gateway`
