@@ -150,6 +150,7 @@ fn forward<R: Feed + 'static>(
                     Ok(Ok(Some(event))) => task_tx.event(event).await,
                     Ok(Ok(None)) => {}
                     Ok(Err(Error::Rithmic(text))) => task_tx.fail(text),
+                    Ok(Err(Error::Transport(text))) => task_tx.fail_login(text),
                     Ok(Err(other)) => task_tx.fail(other.to_string()),
                     Err(_) => {
                         // Fail, then close: the failure is reported once and
@@ -506,8 +507,12 @@ impl Handles {
                 .map_err(crate::error::rithmic_error)?,
             "subscribe_pnl",
         )?;
+        self.pnl_snapshot().await
+    }
+
+    pub async fn pnl_snapshot(&self) -> Result<()> {
         check_response(
-            handle
+            self.pnl_handle()?
                 .get_pnl_position_snapshot()
                 .await
                 .map_err(crate::error::rithmic_error)?,
@@ -835,6 +840,19 @@ impl Plants {
     pub async fn disconnect_pnl_plant(&mut self) -> Result<()> {
         if let Some(pnl) = self.pnl.take() {
             pnl.close().await;
+        }
+        Ok(())
+    }
+
+    /// Replace only history; sibling plants and their subscriptions stay live.
+    pub async fn reset_history(&mut self) -> Result<()> {
+        if let Some(old) = self.history.take() {
+            old.close().await;
+        }
+        if self.plants.history {
+            let rc = self.config.to_rithmic_config()?;
+            self.history = Some(connect_history(&rc, &self.streams).await?);
+            self.prove_history_ready().await?;
         }
         Ok(())
     }
@@ -1634,10 +1652,18 @@ fn update_bar_type(bar_type: i32) -> Result<request_time_bar_update::BarType> {
     })
 }
 
+fn connection_failure(error: &rithmic_rs::RithmicError) -> Option<Error> {
+    match error {
+        rithmic_rs::RithmicError::ForcedLogout(_) => Some(Error::Transport(error.to_string())),
+        error if error.is_connection_issue() => Some(Error::Rithmic(error.to_string())),
+        _ => None,
+    }
+}
+
 fn map_connection_response(resp: rithmic_rs::RithmicResponse) -> Result<Option<PlantEvent>> {
     if let Some(err) = &resp.error {
-        if err.is_connection_issue() {
-            return Err(Error::Rithmic(err.to_string()));
+        if let Some(failure) = connection_failure(err) {
+            return Err(failure);
         }
     }
     Ok(Some(crate::dto::plant_event(&resp)))
@@ -2164,5 +2190,21 @@ mod forwarder_tests {
             let later = hub.poll(Stream::Ticker, wait).await.unwrap_err();
             assert!(matches!(later, Error::ChannelClosed { .. }), "{later}");
         }
+    }
+}
+
+#[cfg(test)]
+mod recovery_scope_tests {
+    use super::*;
+    #[test]
+    fn forced_logout_is_login_wide_but_socket_loss_is_plant_local() {
+        assert!(matches!(
+            connection_failure(&rithmic_rs::RithmicError::ForcedLogout("ended".into())),
+            Some(Error::Transport(_))
+        ));
+        assert!(matches!(
+            connection_failure(&rithmic_rs::RithmicError::ConnectionClosed),
+            Some(Error::Rithmic(_))
+        ));
     }
 }

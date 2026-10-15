@@ -89,7 +89,7 @@ pub enum Error {
     #[error("outcome unknown: {0}")]
     OutcomeUnknown(String),
 
-    /// Gateway transport failure (no request outcome to report).
+    /// Session-wide transport failure (login loss or a gateway socket failure).
     #[error("transport error: {0}")]
     Transport(String),
 }

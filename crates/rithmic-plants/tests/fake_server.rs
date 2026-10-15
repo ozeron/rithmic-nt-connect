@@ -548,3 +548,51 @@ async fn order_plant_reads_after_an_explicit_disconnect_do_not_reopen_it() {
         .await
         .expect("reads work once the plant is ensured");
 }
+
+#[tokio::test]
+async fn history_reset_logs_out_and_logs_in_only_history() {
+    let venue = venue().await;
+    let session = connected(&venue, PlantSet::EXECUTION).await;
+    session.subscribe_order_updates().await.unwrap();
+    let logins = venue.received_of(template::LOGIN).len();
+    let logouts = venue.received_of(template::LOGOUT).len();
+    rithmic_host::Venue::reset_history(&session).await.unwrap();
+    let new_logins = venue.received_of(template::LOGIN);
+    let new_logouts = venue.received_of(template::LOGOUT);
+    assert_eq!(new_logins.len(), logins + 1);
+    assert_eq!(new_logouts.len(), logouts + 1);
+    assert_eq!(new_logins.last().unwrap().plant, Some(Plant::History));
+    assert_eq!(new_logouts.last().unwrap().plant, Some(Plant::History));
+    session.cancel_order("B1").await.unwrap();
+    session.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn join_snapshot_requests_use_the_real_pnl_and_book_protocol() {
+    let venue = venue().await;
+    let session = connected(&venue, PlantSet::EXECUTION).await;
+    session.subscribe_pnl().await.unwrap();
+    rithmic_host::Venue::pnl_snapshot(&session).await.unwrap();
+    assert_eq!(venue.received_of(template::PNL_POSITION_UPDATES).len(), 1);
+    assert_eq!(venue.received_of(template::PNL_POSITION_SNAPSHOT).len(), 2);
+    session
+        .subscribe_order_book_summary("ESZ6", "CME")
+        .await
+        .unwrap();
+    rithmic_host::Venue::refresh_book(&session, "ESZ6", "CME")
+        .await
+        .unwrap();
+    let requests = venue.received_of(template::MARKET_DATA_UPDATE);
+    assert_eq!(requests.len(), 3);
+    use rithmic_rs::rti::{request_market_data_update::Request, RequestMarketDataUpdate};
+    let requests: Vec<RequestMarketDataUpdate> = requests.iter().map(|r| r.decode()).collect();
+    assert_eq!(
+        requests.iter().map(|r| r.request).collect::<Vec<_>>(),
+        [
+            Some(Request::Subscribe as i32),
+            Some(Request::Unsubscribe as i32),
+            Some(Request::Subscribe as i32)
+        ]
+    );
+    session.disconnect().await.unwrap();
+}

@@ -111,7 +111,7 @@ struct Lane {
     generation: AtomicU64,
     up: AtomicBool,
     closed: AtomicBool,
-    fail: StdMutex<Option<String>>,
+    fail: StdMutex<Option<Error>>,
     /// Items discarded because they belonged to a replaced attachment. They are
     /// reported as a gap rather than vanishing.
     stale: AtomicU64,
@@ -150,7 +150,7 @@ enum Taken {
     Timeout,
     Down,
     Closed,
-    Fail(String),
+    Fail(Error),
 }
 
 impl StreamHub {
@@ -327,7 +327,7 @@ impl StreamHub {
                 Ok(None)
             }
             Taken::Closed => Err(Error::ChannelClosed { plant }),
-            Taken::Fail(text) => Err(Error::Rithmic(text)),
+            Taken::Fail(error) => Err(error),
         }
     }
 
@@ -356,7 +356,7 @@ impl StreamHub {
                 }
                 Taken::Timeout => return Ok(Vec::new()),
                 Taken::Closed => return Err(Error::ChannelClosed { plant }),
-                Taken::Fail(text) => return Err(Error::Rithmic(text)),
+                Taken::Fail(error) => return Err(error),
                 Taken::Down => {
                     // Not attached yet: wait for an attach (or the deadline).
                     if !self.wait_up(stream, deadline).await {
@@ -474,7 +474,16 @@ impl StreamTx {
     /// Record a venue connection error; consumers see it after queued events.
     pub fn fail(&self, text: String) {
         if self.current() {
-            *self.lane().fail.lock().expect("stream fail") = Some(text);
+            *self.lane().fail.lock().expect("stream fail") = Some(Error::Rithmic(text));
+            self.lane().changed.notify_waiters();
+        }
+    }
+
+    /// A login-wide failure is typed at the venue boundary, rather than guessed
+    /// from an error string by the host. It is ordered after queued records.
+    pub fn fail_login(&self, text: String) {
+        if self.current() {
+            *self.lane().fail.lock().expect("stream fail") = Some(Error::Transport(text));
             self.lane().changed.notify_waiters();
         }
     }

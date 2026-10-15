@@ -101,12 +101,16 @@ pub enum HistoryPolicy {
     RefuseUnderLiveMd,
 }
 
-pub struct HostState<V: Venue + ?Sized = dyn Venue> {
+pub struct HostState<V: Venue + ?Sized + 'static = dyn Venue> {
     pub gates: ParentGates,
     pub hub: SharedFanout,
     pub ready: AtomicBool,
     pub force_reconnect: AtomicBool,
     pub recovering: AtomicBool,
+    pub failed: AtomicBool,
+    pub interruption: watch::Sender<u64>,
+    pub(crate) sessions:
+        std::sync::Mutex<HashMap<crate::SessionId, std::sync::Weak<crate::local::LocalInner<V>>>>,
     pub reconnect_wake: tokio::sync::Notify,
     pub session: Option<VenueHandle<V>>,
     pub reconnect: Arc<ReconnectController>,
@@ -120,8 +124,30 @@ pub struct HostState<V: Venue + ?Sized = dyn Venue> {
     pub history_policy: HistoryPolicy,
 }
 
-impl<V: Venue + ?Sized> HostState<V> {
+impl<V: Venue + ?Sized + 'static> HostState<V> {
+    pub(crate) async fn notify_sessions(&self, event: crate::SessionEvent) {
+        let sessions: Vec<_> = self
+            .sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .filter_map(std::sync::Weak::upgrade)
+            .collect();
+        let mut tasks = tokio::task::JoinSet::new();
+        for inner in sessions {
+            let event = event.clone();
+            tasks.spawn(async move {
+                crate::local::LocalSession::from_inner(inner)
+                    .notify_event(event)
+                    .await;
+            });
+        }
+        while tasks.join_next().await.is_some() {}
+    }
+
     pub fn request_reconnect(&self) {
+        self.recovering.store(true, Ordering::SeqCst);
+        self.ready.store(false, Ordering::SeqCst);
         self.force_reconnect.store(true, Ordering::SeqCst);
         self.reconnect_wake.notify_one();
     }
@@ -146,7 +172,7 @@ impl<V: Venue + ?Sized> HostState<V> {
     }
 }
 
-pub struct SessionHost<V: Venue + ?Sized = dyn Venue> {
+pub struct SessionHost<V: Venue + ?Sized + 'static = dyn Venue> {
     pub state: Arc<HostState<V>>,
     pump: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -194,6 +220,9 @@ impl<V: Venue + ?Sized + 'static> SessionHost<V> {
             ready: AtomicBool::new(connected),
             force_reconnect: AtomicBool::new(false),
             recovering: AtomicBool::new(false),
+            failed: AtomicBool::new(false),
+            interruption: watch::channel(0).0,
+            sessions: std::sync::Mutex::new(HashMap::new()),
             reconnect_wake: tokio::sync::Notify::new(),
             session: venue,
             topic_locks: Mutex::new(HashMap::new()),
@@ -245,6 +274,11 @@ impl<V: Venue + ?Sized + 'static> SessionHost<V> {
         loop {
             let mut generation = self.subscribe_generation();
             let guard = venue.lock_exclusive().await;
+            if self.state.failed.load(Ordering::SeqCst) {
+                return Err(Error::Session(
+                    "host recovery failed; start a new host".into(),
+                ));
+            }
             if self.state.ready.load(Ordering::SeqCst) {
                 return Ok(());
             }
@@ -279,12 +313,23 @@ impl<V: Venue + ?Sized + 'static> SessionHost<V> {
             let _ = pump.await;
         }
         self.state.ready.store(false, Ordering::SeqCst);
+        let sessions: Vec<_> = self
+            .state
+            .sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .filter_map(std::sync::Weak::upgrade)
+            .collect();
+        for inner in sessions {
+            crate::local::LocalSession::from_inner(inner).close_streams();
+        }
         if let Some(venue) = &self.state.session {
             let _ = venue.lock_exclusive().await.disconnect().await;
         }
     }
 }
-impl<V: Venue + ?Sized> Drop for SessionHost<V> {
+impl<V: Venue + ?Sized + 'static> Drop for SessionHost<V> {
     fn drop(&mut self) {
         if let Some(pump) = self
             .pump

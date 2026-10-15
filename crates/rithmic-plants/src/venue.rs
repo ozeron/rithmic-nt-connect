@@ -324,6 +324,22 @@ impl Venue for RithmicVenue {
         Ok(())
     }
 
+    async fn reset_history(&self) -> Result<()> {
+        self.inner.lock().await.reset_history().await
+    }
+
+    async fn pnl_snapshot(&self) -> Result<()> {
+        self.handles().await.pnl_snapshot().await
+    }
+
+    async fn refresh_book(&self, symbol: &str, exchange: &str) -> Result<()> {
+        let handles = self.ticker_handles().await;
+        handles
+            .unsubscribe_order_book_summary(symbol, exchange)
+            .await?;
+        handles.subscribe_order_book_summary(symbol, exchange).await
+    }
+
     async fn resolved_account(&self) -> Option<AccountTriple> {
         self.account_cache.lock().expect("account cache").clone()
     }

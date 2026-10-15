@@ -33,14 +33,17 @@ pub(crate) fn coded_error(code: &str, error: Error) -> Error {
         other => gate_error(code, &other.to_string()),
     }
 }
-async fn topic_lock<V: Venue + ?Sized>(state: &HostState<V>, key: &SubKey) -> Arc<Mutex<()>> {
+async fn topic_lock<V: Venue + ?Sized + 'static>(
+    state: &HostState<V>,
+    key: &SubKey,
+) -> Arc<Mutex<()>> {
     state.topic_lock(key).await
 }
 
 pub struct LocalSession<V: Venue + ?Sized + 'static = dyn Venue> {
     inner: Arc<LocalInner<V>>,
 }
-struct LocalInner<V: Venue + ?Sized + 'static> {
+pub(crate) struct LocalInner<V: Venue + ?Sized + 'static> {
     host: Arc<SessionHost<V>>,
     id: SessionId,
     client: Mutex<SessionCtx>,
@@ -52,13 +55,14 @@ struct LocalInner<V: Venue + ?Sized + 'static> {
     order_closed: AtomicBool,
     disconnecting_order: AtomicUsize,
     order_gate: RwLock<()>,
+    events: tokio::sync::broadcast::Sender<crate::SessionEvent>,
 }
 impl<V: Venue + ?Sized + 'static> LocalSession<V> {
     pub(crate) fn attach(host: Arc<SessionHost<V>>) -> Self {
         let (tx, rx) = mpsc::channel(host.state.hub.capacity());
         let id = SessionId::new();
         host.state.hub.native_attached();
-        Self {
+        let session = Self {
             inner: Arc::new(LocalInner {
                 host,
                 id,
@@ -71,7 +75,46 @@ impl<V: Venue + ?Sized + 'static> LocalSession<V> {
                 order_closed: AtomicBool::new(false),
                 disconnecting_order: AtomicUsize::new(0),
                 order_gate: RwLock::new(()),
+                events: tokio::sync::broadcast::channel(crate::events::SESSION_EVENT_CAPACITY).0,
             }),
+        };
+        session
+            .state()
+            .sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id, Arc::downgrade(&session.inner));
+        session
+    }
+    pub(crate) fn from_inner(inner: Arc<LocalInner<V>>) -> Self {
+        Self { inner }
+    }
+    pub(crate) async fn notify_event(&self, event: crate::SessionEvent) {
+        if self.inner.detached.load(Ordering::SeqCst) {
+            return;
+        }
+        if self.inner.native.load(Ordering::SeqCst) {
+            self.ensure_native_delivery();
+        }
+        self.inner
+            .client
+            .lock()
+            .await
+            .flush(&self.state().hub)
+            .await;
+        if self.inner.detached.load(Ordering::SeqCst) {
+            return;
+        }
+        let failed = matches!(event, crate::SessionEvent::RecoveryFailed { .. });
+        let _ = self.inner.events.send(event);
+        if failed {
+            self.close_streams();
+        }
+    }
+    pub(crate) fn close_streams(&self) {
+        self.ensure_native_delivery();
+        for stream in Stream::ALL {
+            self.inner.streams.close(stream);
         }
     }
     pub fn id(&self) -> SessionId {
@@ -195,6 +238,9 @@ impl<V: Venue + ?Sized + 'static> LocalSession<V> {
         let txs: Vec<_> = Stream::ALL.into_iter().map(|s| streams.attach(s)).collect();
         *delivery = Some(tokio::spawn(async move {
             while let Some(fan) = rx.recv().await {
+                if fan.acknowledge_flush() {
+                    continue;
+                }
                 let Some(event) = fan.event() else {
                     continue;
                 };
@@ -218,6 +264,15 @@ impl<V: Venue + ?Sized + 'static> LocalSession<V> {
             }
         }));
     }
+    async fn command<T>(&self, call: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+        let mut interruption = self.state().interruption.subscribe();
+        self.active()?;
+        tokio::select! {
+            biased;
+            _ = interruption.changed() => Err(Error::OutcomeUnknown("venue interrupted during command; reconcile before acting".into())),
+            result = call => result,
+        }
+    }
     async fn history_admission(&self) -> Result<()> {
         let _gate = self.state().md_history_gate.lock().await;
         if self.state().history_policy == HistoryPolicy::RefuseUnderLiveMd
@@ -237,6 +292,12 @@ impl<V: Venue + ?Sized + 'static> Clone for LocalSession<V> {
 }
 impl<V: Venue + ?Sized + 'static> Drop for LocalInner<V> {
     fn drop(&mut self) {
+        self.host
+            .state
+            .sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.id);
         if self.native.swap(false, Ordering::SeqCst) {
             self.host.state.hub.native_detached();
         }
@@ -598,12 +659,14 @@ impl<V: Venue + ?Sized + 'static> Session for LocalSession<V> {
     async fn place_order(&self, order: &PlaceOrder) -> Result<()> {
         let _op = self.command_guard("place_order").await?;
         let venue = self.state().session.as_ref().ok_or_else(no_venue)?;
-        venue.lock().await.place_order(order).await
+        let guard = venue.lock().await;
+        self.command(guard.place_order(order)).await
     }
     async fn place_bracket_order(&self, order: &PlaceBracketOrder) -> Result<()> {
         let _op = self.command_guard("place_bracket_order").await?;
         let venue = self.state().session.as_ref().ok_or_else(no_venue)?;
-        venue.lock().await.place_bracket_order(order).await
+        let guard = venue.lock().await;
+        self.command(guard.place_bracket_order(order)).await
     }
     async fn adjust_bracket_stop(
         &self,
@@ -613,10 +676,8 @@ impl<V: Venue + ?Sized + 'static> Session for LocalSession<V> {
     ) -> Result<()> {
         let _op = self.command_guard("adjust_bracket_stop").await?;
         let venue = self.state().session.as_ref().ok_or_else(no_venue)?;
-        venue
-            .lock()
-            .await
-            .adjust_bracket_stop(basket_id, ticks, level)
+        let guard = venue.lock().await;
+        self.command(guard.adjust_bracket_stop(basket_id, ticks, level))
             .await
     }
     async fn adjust_bracket_target(
@@ -627,26 +688,27 @@ impl<V: Venue + ?Sized + 'static> Session for LocalSession<V> {
     ) -> Result<()> {
         let _op = self.command_guard("adjust_bracket_target").await?;
         let venue = self.state().session.as_ref().ok_or_else(no_venue)?;
-        venue
-            .lock()
-            .await
-            .adjust_bracket_target(basket_id, ticks, level)
+        let guard = venue.lock().await;
+        self.command(guard.adjust_bracket_target(basket_id, ticks, level))
             .await
     }
     async fn cancel_order(&self, basket_id: &str) -> Result<()> {
         let _op = self.command_guard("cancel_order").await?;
         let venue = self.state().session.as_ref().ok_or_else(no_venue)?;
-        venue.lock().await.cancel_order(basket_id).await
+        let guard = venue.lock().await;
+        self.command(guard.cancel_order(basket_id)).await
     }
     async fn modify_order(&self, order: &ModifyOrder) -> Result<()> {
         let _op = self.command_guard("modify_order").await?;
         let venue = self.state().session.as_ref().ok_or_else(no_venue)?;
-        venue.lock().await.modify_order(order).await
+        let guard = venue.lock().await;
+        self.command(guard.modify_order(order)).await
     }
     async fn cancel_all_orders(&self) -> Result<()> {
         let _op = self.command_guard("cancel_all_orders").await?;
         let venue = self.state().session.as_ref().ok_or_else(no_venue)?;
-        venue.lock().await.cancel_all_orders().await
+        let guard = venue.lock().await;
+        self.command(guard.cancel_all_orders()).await
     }
     async fn poll_event(&self, timeout: Duration) -> Result<Option<PlantEvent>> {
         self.ensure_native_delivery();
@@ -663,6 +725,9 @@ impl<V: Venue + ?Sized + 'static> Session for LocalSession<V> {
     async fn poll_order_event(&self, timeout: Duration) -> Result<Option<PlantEvent>> {
         self.ensure_native_delivery();
         self.inner.streams.poll(Stream::Order, timeout).await
+    }
+    fn session_events(&self) -> tokio::sync::broadcast::Receiver<crate::SessionEvent> {
+        self.inner.events.subscribe()
     }
     async fn next_events(
         &self,

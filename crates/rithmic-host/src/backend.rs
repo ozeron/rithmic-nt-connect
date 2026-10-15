@@ -218,6 +218,12 @@ pub trait Venue: Send + Sync {
     /// Recreate only the ticker plant; sibling plants stay untouched. The
     /// caller re-issues its ticker / book / time-bar intent afterwards.
     async fn reset_ticker(&self) -> Result<()>;
+    /// Recreate only the history plant. Live time-bar intents are restored by the host.
+    async fn reset_history(&self) -> Result<()>;
+    /// Request fresh position rows without replacing the live PnL subscription.
+    async fn pnl_snapshot(&self) -> Result<()>;
+    /// Refresh a shared book key so every holder receives a new snapshot.
+    async fn refresh_book(&self, symbol: &str, exchange: &str) -> Result<()>;
     /// `None` until an override or order-plant discovery resolves it.
     async fn resolved_account(&self) -> Option<AccountTriple>;
 

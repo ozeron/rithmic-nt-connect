@@ -61,8 +61,6 @@ struct State {
     connected: bool,
     pnl_plant: bool,
     order_plant: bool,
-    /// Plants dropped by `drop_plants()`; polls fail until the next `connect`.
-    dropped: bool,
     /// Feeding side of each attached lane.
     txs: HashMap<Stream, StreamTx>,
     /// Events pushed while their plant was not attached; delivered on attach.
@@ -233,9 +231,9 @@ impl FakeVenue {
     /// Simulate the plants dropping: polls fail with `ChannelClosed` until the
     /// next `connect`, exactly what the parent's event pump reacts to.
     pub fn drop_plants(&self) {
-        self.lock().dropped = true;
-        for stream in [Stream::Ticker, Stream::History, Stream::Order] {
-            self.hub.close(stream);
+        for tx in self.lock().txs.values() {
+            tx.fail_login("login session lost".into());
+            tx.close();
         }
     }
 
@@ -286,7 +284,6 @@ impl Venue for FakeVenue {
         let mut state = self.enter("connect", "")?;
         state.connected = true;
         state.order_closed = false;
-        state.dropped = false;
         self.attach(&mut state, Stream::Ticker);
         self.attach(&mut state, Stream::History);
         Ok(())
@@ -351,8 +348,27 @@ impl Venue for FakeVenue {
     }
 
     async fn reset_ticker(&self) -> Result<()> {
-        self.note("reset_ticker", "")?;
+        self.delay("reset_ticker").await;
+        let mut state = self.enter("reset_ticker", "")?;
+        self.detach(&mut state, Stream::Ticker);
+        self.attach(&mut state, Stream::Ticker);
         Ok(())
+    }
+
+    async fn reset_history(&self) -> Result<()> {
+        self.delay("reset_history").await;
+        let mut state = self.enter("reset_history", "")?;
+        self.detach(&mut state, Stream::History);
+        self.attach(&mut state, Stream::History);
+        Ok(())
+    }
+
+    async fn pnl_snapshot(&self) -> Result<()> {
+        self.note("pnl_snapshot", "")
+    }
+
+    async fn refresh_book(&self, symbol: &str, exchange: &str) -> Result<()> {
+        self.note("refresh_book", &format!("{symbol} {exchange}"))
     }
 
     async fn resolved_account(&self) -> Option<AccountTriple> {
@@ -554,7 +570,9 @@ impl Venue for FakeVenue {
     }
 
     async fn place_order(&self, o: &PlaceOrder) -> Result<()> {
-        self.order_op("place_order", &o.user_tag)
+        self.order_op("place_order", &o.user_tag)?;
+        self.delay("place_order").await;
+        Ok(())
     }
 
     async fn place_bracket_order(&self, o: &PlaceBracketOrder) -> Result<()> {
@@ -698,7 +716,11 @@ mod tests {
         fake.connect().await.unwrap();
         fake.drop_plants();
         let err = fake.poll_event(Duration::ZERO).await.unwrap_err();
-        assert!(matches!(err, Error::ChannelClosed { plant: "ticker" }));
+        assert!(matches!(err, Error::Transport(_)));
+        assert!(matches!(
+            fake.poll_event(Duration::ZERO).await,
+            Err(Error::ChannelClosed { plant: "ticker" })
+        ));
         fake.disconnect().await.unwrap();
         fake.connect().await.unwrap();
         assert!(fake.poll_event(Duration::ZERO).await.unwrap().is_none());

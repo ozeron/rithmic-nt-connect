@@ -110,6 +110,23 @@ impl SessionCtx {
         }
     }
 
+    /// Flush each topic through this session's final delivery queue. A stopped
+    /// consumer cannot block plant recovery indefinitely.
+    pub(super) async fn flush(&self, hub: &FanoutHub) {
+        let mut acks = Vec::new();
+        for key in &self.subscribed {
+            let (done, ack) = tokio::sync::oneshot::channel();
+            hub.publish(key, Fan::flush(self.id, done)).await;
+            acks.push(ack);
+        }
+        let _ = tokio::time::timeout(Duration::from_secs(2), async {
+            for ack in acks {
+                let _ = ack.await;
+            }
+        })
+        .await;
+    }
+
     pub(super) fn drop_forwarder(&mut self, key: &SubKey) {
         if let Some(handle) = self.forwarders.remove(key) {
             handle.abort();
@@ -218,6 +235,9 @@ fn spawn_forwarder(
         loop {
             match queue.recv().await {
                 Ok(fan) => {
+                    if fan.flush_for(id) == Some(false) {
+                        continue;
+                    }
                     // A frame of a kind this client never asked for (a book
                     // update for a ticker-only client) is dropped here, before
                     // it costs a socket write or a decode on the far side.

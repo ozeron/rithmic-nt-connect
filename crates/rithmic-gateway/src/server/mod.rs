@@ -312,11 +312,11 @@ where
         return Err(format!("{code}: {msg}"));
     }
 
-    // Subscribe before the generation goes into Ready, so a rebuild that finishes
-    // in between is still reported (Ready carries the older generation) instead of
-    // being missed. Only later bumps are reacted to.
-    let mut epoch_rx = state.transport_epoch.subscribe();
-    epoch_rx.borrow_and_update();
+    // Attach and subscribe before Ready: a recovery during the handshake must
+    // still deliver its interruption and completed generation to this connection.
+    state.host.state.hub.set_encoder(encode_plant_event);
+    let client = state.host.attach();
+    let session_events = client.session_events();
 
     write_frame(
         &mut stream,
@@ -342,10 +342,8 @@ where
         return Err("shutting_down".into());
     }
 
-    state.host.state.hub.set_encoder(encode_plant_event);
-    let client = state.host.attach();
     let (read_half, write_half) = tokio::io::split(stream);
-    serve_connection_halves(read_half, write_half, state, client, epoch_rx).await
+    serve_connection_halves(read_half, write_half, state, client, session_events).await
 }
 
 async fn serve_connection_halves<R, W>(
@@ -353,7 +351,7 @@ async fn serve_connection_halves<R, W>(
     write_half: W,
     state: Arc<GatewayState>,
     client: rithmic_host::LocalSession,
-    mut epoch_rx: watch::Receiver<u64>,
+    mut session_events: tokio::sync::broadcast::Receiver<rithmic_host::SessionEvent>,
 ) -> Result<(), String>
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
@@ -413,21 +411,28 @@ where
                 let _ = stop_tx.send(true);
                 break (&mut commands).await.ok();
             }
-            // The plants were rebuilt and every client's subscriptions restored.
-            // The client stays attached and keeps its intents; it is told so it can
-            // resynchronize (events were missed while the plants were down).
-            _ = epoch_rx.changed() => {
-                let generation = *epoch_rx.borrow_and_update();
-                let resumed = Frame {
-                    request_id: 0,
-                    body: Some(Body::Event(pb::Event {
-                        body: Some(pb::event::Body::TransportResumed(pb::TransportResumed {
-                            generation,
-                        })),
-                    })),
+            event = session_events.recv() => {
+                use rithmic_host::SessionEvent;
+                let body = match event {
+                    Ok(SessionEvent::Interrupted { generation, .. }) => {
+                        pb::event::Body::TransportInterrupted(pb::TransportInterrupted { generation })
+                    }
+                    Ok(SessionEvent::Resumed { generation }) => {
+                        pb::event::Body::TransportResumed(pb::TransportResumed { generation })
+                    }
+                    // No failure frame was added to the protocol. Flush the
+                    // interruption and queued replies, then close this transport.
+                    Ok(SessionEvent::RecoveryFailed { .. }) | Err(_) => {
+                        reader.abort();
+                        let _ = stop_tx.send(true);
+                        break (&mut commands).await.ok();
+                    }
                 };
-                if resume_tx.send(resumed).await.is_err() {
-                    // The writer is gone: the connection is done.
+                let frame = Frame {
+                    request_id: 0,
+                    body: Some(Body::Event(pb::Event { body: Some(body) })),
+                };
+                if resume_tx.send(frame).await.is_err() {
                     let _ = stop_tx.send(true);
                     break (&mut commands).await.ok();
                 }
@@ -687,6 +692,7 @@ async fn write_replies<W: tokio::io::AsyncWrite + Unpin>(
                 }
             },
             msg = events.recv(), if events_open => match msg {
+                Some(fan) if fan.acknowledge_flush() => None,
                 Some(fan) => Some(fan.encoded_with(|event| {
                     encode_event(crate::convert::plant_event_to_pb(event.clone())).unwrap_or_default()
                 })),

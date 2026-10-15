@@ -7,7 +7,10 @@ fn trait_methods() -> BTreeSet<String> {
     let session = BACKEND
         .split("pub trait Session")
         .nth(1)
-        .expect("Session trait");
+        .expect("Session trait")
+        .split("pub trait Venue")
+        .next()
+        .expect("Session consumer surface");
     session
         .lines()
         .filter_map(|l| l.trim().strip_prefix("async fn "))

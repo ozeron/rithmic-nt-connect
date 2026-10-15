@@ -32,7 +32,7 @@ def _trait_methods(source: str, trait: str, until: str | None) -> set[str]:
 
 
 def _session_trait() -> set[str]:
-    return _trait_methods(BACKEND.read_text(), "Session", until=None)
+    return _trait_methods(BACKEND.read_text(), "Session", until="Venue")
 
 
 def _extension_methods() -> set[str]:
@@ -91,3 +91,9 @@ def test_wire_session_protocol_is_exactly_the_session_trait() -> None:
     trait = _session_trait()
     assert wire - trait == set(), "WireSession methods with no Session trait method"
     assert trait - wire == set(), "Session trait methods missing from WireSession"
+
+
+def test_venue_recovery_helpers_are_not_consumer_rpcs() -> None:
+    helpers = {"reset_history", "pnl_snapshot", "refresh_book"}
+    assert helpers <= _trait_methods(BACKEND.read_text(), "Venue", until=None)
+    assert not helpers & _session_trait()

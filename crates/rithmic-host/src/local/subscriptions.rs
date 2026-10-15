@@ -250,13 +250,23 @@ pub(super) async fn subscribe_topic<V: Venue + ?Sized + 'static>(
 ) -> Result<()> {
     let key = intent.key();
     if intent.client_has(client) {
-        // A repeat subscribe is normally a no-op. If a plant rebuild left this join
-        // degraded (the venue lost it and the restore could not bring it back), it
-        // is the client's cue to retry: do the venue join now.
-        if !state.reconnect.is_degraded(&intent.md_intent()).await {
-            return Ok(());
+        if state.reconnect.is_degraded(&intent.md_intent()).await {
+            return rejoin_degraded(state, intent).await;
         }
-        return rejoin_degraded(state, intent).await;
+        // A repeat book subscribe is the consumer's gap resync. Refcounts stay
+        // unchanged, but every holder must see a fresh venue snapshot.
+        if let TopicIntent::Book(key) = &intent {
+            let lock = topic_lock(state, key).await;
+            let _guard = lock.lock().await;
+            let venue = state.session.as_ref().ok_or_else(no_venue)?;
+            let guard = venue.lock().await;
+            state.check_ready()?;
+            if let Err(e) = guard.refresh_book(&key.symbol, &key.exchange).await {
+                state.reconnect.mark_degraded(intent.md_intent()).await;
+                return Err(coded_error(intent.subscribe_failed_code(), e));
+            }
+        }
+        return Ok(());
     }
     // Hold md_history_gate across note + venue join so a history load cannot
     // pass its live-MD check while this intent is being created (RC2.3). A load
@@ -275,7 +285,8 @@ pub(super) async fn subscribe_topic<V: Venue + ?Sized + 'static>(
     // A later client joining an intent a rebuild left degraded retries the venue
     // join too: the other holders' join is dark, so this one would get nothing.
     let degraded = !is_first && state.reconnect.is_degraded(&intent.md_intent()).await;
-    if is_first || degraded {
+    let refresh = !is_first && !degraded && matches!(intent, TopicIntent::Book(_));
+    if is_first || degraded || refresh {
         let Some(session) = &state.session else {
             intent.client_remove(client);
             intent.forget(&state.reconnect).await;
@@ -285,7 +296,15 @@ pub(super) async fn subscribe_topic<V: Venue + ?Sized + 'static>(
         // MD joins take `&self`; holding the guard only serializes against
         // plant reset / teardown.
         let session_guard = session.lock().await;
-        if let Err(e) = intent.venue_join(&*session_guard).await {
+        let joined = match state.check_ready() {
+            Err(e) => Err(e),
+            Ok(()) if refresh => session_guard.refresh_book(&key.symbol, &key.exchange).await,
+            Ok(()) => intent.venue_join(&*session_guard).await,
+        };
+        if let Err(e) = joined {
+            if refresh {
+                state.reconnect.mark_degraded(intent.md_intent()).await;
+            }
             drop(session_guard);
             intent.client_remove(client);
             intent.forget(&state.reconnect).await;
@@ -369,33 +388,34 @@ pub(super) async fn subscribe_pnl<V: Venue + ?Sized + 'static>(
     client: &mut SessionCtx,
 ) -> Result<()> {
     let key = pnl_key();
-    if client.pnl {
-        return Ok(());
-    }
     let lock = topic_lock(state, &key).await;
     let _guard = lock.lock().await;
+    let venue = state.session.as_ref().ok_or_else(no_venue)?;
+    let guard = venue.lock().await;
+    state.check_ready()?;
+    if client.pnl {
+        return guard
+            .pnl_snapshot()
+            .await
+            .map_err(|e| coded_error("subscribe_pnl_failed", e));
+    }
     let had_forwarder = attach_shared_topic(state, client, &key).await;
-    let is_first = state.reconnect.note_pnl().await;
+    let first = state.reconnect.note_pnl().await;
     client.pnl = true;
-    if is_first {
-        let Some(session) = &state.session else {
-            client.pnl = false;
-            state.reconnect.forget_pnl().await;
-            rollback_shared_topic(state, client, &key, had_forwarder).await;
-            return Err(no_venue());
-        };
-        let session_guard = session.lock().await;
-        let venue_err = match session_guard.ensure_pnl_plant().await {
-            Err(e) => Some(e),
-            Ok(()) => session_guard.subscribe_pnl().await.err(),
-        };
-        if let Some(e) = venue_err {
-            drop(session_guard);
-            client.pnl = false;
-            state.reconnect.forget_pnl().await;
-            rollback_shared_topic(state, client, &key, had_forwarder).await;
-            return Err(coded_error("subscribe_pnl_failed", e));
+    let joined = if first {
+        match guard.ensure_pnl_plant().await {
+            Ok(()) => guard.subscribe_pnl().await,
+            Err(e) => Err(e),
         }
+    } else {
+        guard.pnl_snapshot().await
+    };
+    if let Err(e) = joined {
+        drop(guard);
+        client.pnl = false;
+        state.reconnect.forget_pnl().await;
+        rollback_shared_topic(state, client, &key, had_forwarder).await;
+        return Err(coded_error("subscribe_pnl_failed", e));
     }
     Ok(())
 }

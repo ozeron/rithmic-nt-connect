@@ -78,6 +78,7 @@ pub struct Fan {
 
 #[derive(Debug, Clone)]
 enum FanPayload {
+    Flush(Arc<Flush>),
     Encoded {
         kind: Kind,
         bytes: bytes::Bytes,
@@ -86,6 +87,14 @@ enum FanPayload {
         kind: Kind,
         record: Arc<EventRecord>,
     },
+}
+
+/// Rare recovery barrier. It keeps lifecycle signals behind already-published
+/// records without changing event records or their shared encoding.
+#[derive(Debug)]
+struct Flush {
+    session: SessionId,
+    done: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
 
 /// A venue record is shared across sessions. A transport may memoize its wire
@@ -97,6 +106,31 @@ struct EventRecord {
 }
 
 impl Fan {
+    pub(crate) fn flush(session: SessionId, done: tokio::sync::oneshot::Sender<()>) -> Self {
+        Self {
+            payload: FanPayload::Flush(Arc::new(Flush {
+                session,
+                done: std::sync::Mutex::new(Some(done)),
+            })),
+        }
+    }
+    pub(crate) fn flush_for(&self, session: SessionId) -> Option<bool> {
+        match &self.payload {
+            FanPayload::Flush(flush) => Some(flush.session == session),
+            _ => None,
+        }
+    }
+    /// A transport acknowledges a recovery barrier after writing all preceding
+    /// records. Barriers have no wire representation.
+    pub fn acknowledge_flush(&self) -> bool {
+        if let FanPayload::Flush(flush) = &self.payload {
+            if let Some(done) = flush.done.lock().expect("flush barrier").take() {
+                let _ = done.send(());
+            }
+            return true;
+        }
+        false
+    }
     pub fn encoded(kind: Kind, bytes: bytes::Bytes) -> Self {
         Self {
             payload: FanPayload::Encoded { kind, bytes },
@@ -118,13 +152,14 @@ impl Fan {
     pub fn kind(&self) -> Kind {
         match &self.payload {
             FanPayload::Encoded { kind, .. } | FanPayload::Native { kind, .. } => *kind,
+            FanPayload::Flush(_) => Kind::Any,
         }
     }
 
     pub fn event(&self) -> Option<&PlantEvent> {
         match &self.payload {
             FanPayload::Native { record, .. } => Some(&record.event),
-            FanPayload::Encoded { .. } => None,
+            FanPayload::Encoded { .. } | FanPayload::Flush(_) => None,
         }
     }
 
@@ -135,6 +170,7 @@ impl Fan {
                 record.encoded.get_or_init(|| encode(&record.event)).clone()
             }
             FanPayload::Encoded { bytes, .. } => bytes.clone(),
+            FanPayload::Flush(_) => bytes::Bytes::new(),
         }
     }
 }

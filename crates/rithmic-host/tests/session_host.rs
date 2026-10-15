@@ -4,7 +4,7 @@ use rithmic_host::fanout::SubKey;
 use rithmic_host::intents::MdIntent;
 use rithmic_host::{
     Error, HistoryPolicy, LastTradeDto, LocalSession, ParentGates, PlaceOrder, PlantEvent, Session,
-    SessionHost, Stream, Timing, VenueHandle,
+    SessionEvent, SessionHost, Stream, Timing, VenueHandle,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -525,8 +525,8 @@ async fn a_slow_session_gets_an_exact_gap_without_losing_healthy_peers_events() 
     assert_eq!(received + skipped, 32);
     host.shutdown().await;
 }
-#[tokio::test]
-async fn a_ticker_failure_still_rebuilds_all_plants_and_restores_every_intent() {
+#[tokio::test(start_paused = true)]
+async fn ticker_failure_restores_only_ticker_and_book_once() {
     let (host, fake, a) = running().await;
     a.subscribe("NQU6", "CME").await.unwrap();
     a.subscribe_order_book_summary("NQU6", "CME").await.unwrap();
@@ -536,18 +536,14 @@ async fn a_ticker_failure_still_rebuilds_all_plants_and_restores_every_intent() 
     fake.clear_calls();
     fake.fail_stream(Stream::Ticker, "ticker dropped");
     until(|| host.generation() == 2).await;
-    for method in [
-        "disconnect",
-        "connect",
-        "subscribe NQU6",
-        "subscribe_book",
-        "subscribe_time_bars",
-        "subscribe_pnl",
-        "subscribe_order_updates",
-        "subscribe_bracket_updates",
-    ] {
-        assert_eq!(fake.count(method), 1, "{method}: {:?}", fake.calls());
-    }
+    assert_eq!(
+        fake.calls(),
+        [
+            "reset_ticker",
+            "subscribe NQU6 CME",
+            "subscribe_book NQU6 CME"
+        ]
+    );
     host.shutdown().await;
 }
 
@@ -569,7 +565,7 @@ async fn connect_during_restore_waits_for_the_host_without_an_extra_login() {
     assert!(!waiter.is_finished());
     tokio::time::advance(Duration::from_millis(2)).await;
     waiter.await.unwrap().unwrap();
-    assert_eq!(fake.count("connect"), 1);
+    assert_eq!(fake.count("connect"), 0);
     assert_eq!(host.generation(), 2);
     host.shutdown().await;
 }
@@ -602,7 +598,7 @@ async fn overlapping_order_disconnects_keep_commands_closed_until_both_finish() 
     host.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn restore_retries_only_the_failed_md_intent_and_then_degrades_it() {
     let (host, fake, a) = running().await;
     a.subscribe("NQU6", "CME").await.unwrap();
@@ -611,8 +607,9 @@ async fn restore_retries_only_the_failed_md_intent_and_then_degrades_it() {
     for _ in 0..3 {
         fake.fail_next("subscribe", FakeFailure::Config("expired contract".into()));
     }
+    let mut events = a.session_events();
     fake.fail_stream(Stream::Ticker, "lost ticker");
-    until(|| host.generation() == 2).await;
+    resumed(&mut events, 2).await;
     assert_eq!(fake.count("subscribe NQU6"), 3);
     assert_eq!(fake.count("subscribe_book"), 1);
     assert!(
@@ -627,8 +624,46 @@ async fn restore_retries_only_the_failed_md_intent_and_then_degrades_it() {
     host.shutdown().await;
 }
 
-#[tokio::test]
-async fn account_restore_failure_escalates_to_another_full_reconnect() {
+#[tokio::test(start_paused = true)]
+async fn restore_does_not_retry_intents_after_the_last_holder_detaches() {
+    for (stream, operation) in [
+        (Stream::Ticker, "subscribe NQU6"),
+        (Stream::Pnl, "subscribe_pnl"),
+    ] {
+        let (host, fake, a) = running().await;
+        let b = host.attach();
+        let mut events = b.session_events();
+        match stream {
+            Stream::Ticker => a.subscribe("NQU6", "CME").await.unwrap(),
+            Stream::Pnl => a.subscribe_pnl().await.unwrap(),
+            _ => unreachable!(),
+        }
+        fake.clear_calls();
+        fake.fail_next(
+            if stream == Stream::Ticker {
+                "subscribe"
+            } else {
+                operation
+            },
+            FakeFailure::Config("retry after backoff".into()),
+        );
+        fake.fail_stream(stream, "lost plant");
+        until(|| fake.count(operation) == 1).await;
+        a.disconnect().await.unwrap();
+        resumed(&mut events, 2).await;
+        assert_eq!(
+            fake.count(operation),
+            1,
+            "detached {stream:?} intent replayed"
+        );
+        assert_eq!(host.state.reconnect.remembered_count().await, 0);
+        assert_eq!(fake.count("connect"), 0);
+        host.shutdown().await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn account_restore_failure_escalates_to_full_reconnect() {
     let (host, fake, a) = running().await;
     a.subscribe_bracket_updates().await.unwrap();
     fake.clear_calls();
@@ -638,9 +673,10 @@ async fn account_restore_failure_escalates_to_another_full_reconnect() {
             FakeFailure::Config("order unavailable".into()),
         );
     }
-    fake.fail_stream(Stream::Ticker, "lost ticker");
-    until(|| host.generation() == 2).await;
-    assert_eq!(fake.count("connect"), 2);
+    let mut events = a.session_events();
+    fake.fail_stream(Stream::Order, "lost order");
+    resumed(&mut events, 2).await;
+    assert_eq!(fake.count("connect"), 1);
     assert_eq!(fake.count("subscribe_order_updates"), 4);
     assert_eq!(
         fake.count("subscribe_bracket_updates"),
@@ -667,5 +703,331 @@ async fn queued_events_drain_before_the_detached_session_closes() {
         a.poll_event(WAIT).await,
         Err(Error::ChannelClosed { .. })
     ));
+    host.shutdown().await;
+}
+
+async fn resumed(events: &mut tokio::sync::broadcast::Receiver<SessionEvent>, generation: u64) {
+    let interrupted = tokio::time::timeout(WAIT, events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(interrupted, SessionEvent::Interrupted { generation: g, .. } if g == generation - 1),
+        "{interrupted:?}"
+    );
+    assert_eq!(
+        tokio::time::timeout(WAIT, events.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        SessionEvent::Resumed { generation }
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn history_failure_recreates_only_history_and_restores_bars_once() {
+    let (host, fake, a) = running().await;
+    a.subscribe("NQU6", "CME").await.unwrap();
+    a.subscribe_time_bars("NQU6", "CME", 2, 1).await.unwrap();
+    a.subscribe_pnl().await.unwrap();
+    a.subscribe_bracket_updates().await.unwrap();
+    let mut events = a.session_events();
+    fake.clear_calls();
+    fake.fail_stream(Stream::History, "history lost");
+    resumed(&mut events, 2).await;
+    assert_eq!(
+        fake.calls(),
+        ["reset_history", "subscribe_time_bars NQU6 CME 2 1"]
+    );
+    host.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn pnl_failure_only_resubscribes_pnl() {
+    let (host, fake, a) = running().await;
+    a.subscribe_pnl().await.unwrap();
+    a.subscribe_bracket_updates().await.unwrap();
+    let mut events = a.session_events();
+    fake.clear_calls();
+    fake.fail_stream(Stream::Pnl, "pnl lost");
+    resumed(&mut events, 2).await;
+    assert_eq!(fake.calls(), ["ensure_pnl_plant", "subscribe_pnl"]);
+    host.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn order_failure_reseats_only_order_and_restores_orders_and_brackets_once() {
+    let (host, fake, a) = running().await;
+    a.subscribe_pnl().await.unwrap();
+    a.subscribe_bracket_updates().await.unwrap();
+    let mut events = a.session_events();
+    fake.clear_calls();
+    fake.fail_stream(Stream::Order, "order lost");
+    resumed(&mut events, 2).await;
+    assert_eq!(
+        fake.calls(),
+        [
+            "disconnect_order_plant",
+            "ensure_order_plant",
+            "subscribe_order_updates",
+            "subscribe_bracket_updates"
+        ]
+    );
+    host.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn login_failure_rebuilds_all_and_restores_each_intent_once() {
+    let (host, fake, a) = running().await;
+    a.subscribe("NQU6", "CME").await.unwrap();
+    a.subscribe_order_book_summary("NQU6", "CME").await.unwrap();
+    a.subscribe_time_bars("NQU6", "CME", 2, 1).await.unwrap();
+    a.subscribe_pnl().await.unwrap();
+    a.subscribe_bracket_updates().await.unwrap();
+    let mut events = a.session_events();
+    fake.clear_calls();
+    fake.drop_plants();
+    resumed(&mut events, 2).await;
+    assert_eq!(
+        fake.calls(),
+        [
+            "disconnect",
+            "connect",
+            "subscribe NQU6 CME",
+            "subscribe_book NQU6 CME",
+            "subscribe_time_bars NQU6 CME 2 1",
+            "ensure_pnl_plant",
+            "subscribe_pnl",
+            "subscribe_order_updates",
+            "subscribe_bracket_updates"
+        ]
+    );
+    host.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn every_session_including_an_idle_attachment_gets_ordered_generations() {
+    let (host, fake, a) = running().await;
+    let b = host.attach();
+    let mut ae = a.session_events();
+    let mut be = b.session_events();
+    for generation in [2, 3] {
+        fake.fail_stream(Stream::Ticker, "lost");
+        resumed(&mut ae, generation).await;
+        resumed(&mut be, generation).await;
+    }
+    host.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn queued_events_survive_and_next_events_is_empty_while_recovering() {
+    let (host, fake, a) = running().await;
+    a.subscribe("NQU6", "CME").await.unwrap();
+    let mut events = a.session_events();
+    fake.set_delay("reset_ticker", Duration::from_secs(10));
+    fake.push_event(Stream::Ticker, tick(42));
+    fake.fail_stream(Stream::Ticker, "ticker lost after tick");
+    assert!(matches!(
+        events.recv().await.unwrap(),
+        SessionEvent::Interrupted { .. }
+    ));
+    let batch = a
+        .next_events(Stream::Ticker, 100, Duration::ZERO)
+        .await
+        .unwrap();
+    assert_eq!(batch.len(), 1);
+    assert_eq!(format!("{:?}", batch[0]), format!("{:?}", tick(42)));
+    assert!(a
+        .next_events(Stream::Ticker, 100, Duration::from_secs(1))
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(host.generation(), 1);
+    assert_eq!(
+        events.recv().await.unwrap(),
+        SessionEvent::Resumed { generation: 2 }
+    );
+    host.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn bounded_recovery_failure_closes_streams_after_queued_events_and_wakes_connect() {
+    let (host, fake, a) = running().await;
+    a.subscribe("NQU6", "CME").await.unwrap();
+    let mut events = a.session_events();
+    for _ in 0..3 {
+        fake.fail_next("reset_ticker", FakeFailure::Config("offline".into()));
+    }
+    fake.push_event(Stream::Ticker, tick(7));
+    fake.fail_stream(Stream::Ticker, "lost");
+    assert!(matches!(
+        events.recv().await.unwrap(),
+        SessionEvent::Interrupted { generation: 1, .. }
+    ));
+    let b = a.clone();
+    let waiter = tokio::spawn(async move { b.connect().await });
+    assert!(matches!(
+        events.recv().await.unwrap(),
+        SessionEvent::RecoveryFailed {
+            generation: 1,
+            attempts: 3,
+            ..
+        }
+    ));
+    assert!(waiter.await.unwrap().is_err());
+    assert_eq!(fake.count("reset_ticker"), 3);
+    assert_eq!(host.generation(), 1);
+    assert_eq!(
+        a.next_events(Stream::Ticker, 10, Duration::ZERO)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(matches!(
+        a.next_events(Stream::Ticker, 10, Duration::ZERO).await,
+        Err(Error::ChannelClosed { .. })
+    ));
+    host.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn command_in_flight_at_break_is_unknown_and_never_retried() {
+    let (host, fake, a) = running().await;
+    a.subscribe_order_updates().await.unwrap();
+    fake.set_delay("place_order", Duration::from_secs(20));
+    let caller = a.clone();
+    let command = tokio::spawn(async move { caller.place_order(&order()).await });
+    until(|| fake.count("place_order") == 1).await;
+    let mut events = a.session_events();
+    fake.fail_stream(Stream::Order, "order lost before reply");
+    assert!(matches!(
+        command.await.unwrap(),
+        Err(Error::OutcomeUnknown(_))
+    ));
+    resumed(&mut events, 2).await;
+    assert_eq!(fake.count("place_order"), 1);
+    host.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn joining_and_rejoining_live_pnl_and_book_request_snapshots_without_new_holders() {
+    let (host, fake, a) = running().await;
+    let b = host.attach();
+    a.subscribe_pnl().await.unwrap();
+    a.subscribe_order_book_summary("NQU6", "CME").await.unwrap();
+    fake.clear_calls();
+    b.subscribe_pnl().await.unwrap();
+    b.subscribe_order_book_summary("NQU6", "CME").await.unwrap();
+    b.subscribe_order_book_summary("NQU6", "CME").await.unwrap(); // gap resync
+    b.subscribe_pnl().await.unwrap(); // exec re-arm barrier
+    assert_eq!(
+        fake.calls(),
+        [
+            "pnl_snapshot",
+            "refresh_book NQU6 CME",
+            "refresh_book NQU6 CME",
+            "pnl_snapshot"
+        ]
+    );
+    b.disconnect().await.unwrap();
+    assert_eq!(fake.count("disconnect_pnl"), 0);
+    assert_eq!(fake.count("unsubscribe_book"), 0);
+    a.disconnect().await.unwrap();
+    assert_eq!(fake.count("disconnect_pnl"), 1);
+    assert_eq!(fake.count("unsubscribe_book"), 1);
+    host.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn account_retry_does_not_repeat_successful_sibling_joins() {
+    let (host, fake, a) = running().await;
+    a.subscribe_pnl().await.unwrap();
+    a.subscribe_bracket_updates().await.unwrap();
+    let mut events = a.session_events();
+    fake.clear_calls();
+    fake.fail_next(
+        "subscribe_bracket_updates",
+        FakeFailure::Config("retry".into()),
+    );
+    fake.drop_plants();
+    resumed(&mut events, 2).await;
+    assert_eq!(fake.count("subscribe_pnl"), 1);
+    assert_eq!(fake.count("subscribe_order_updates"), 1);
+    assert_eq!(fake.count("subscribe_bracket_updates"), 2);
+    host.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn persistent_account_failure_escalates_then_gives_up_with_no_resume() {
+    let (host, fake, a) = running().await;
+    a.subscribe_pnl().await.unwrap();
+    let mut events = a.session_events();
+    fake.clear_calls();
+    for _ in 0..9 {
+        fake.fail_next("subscribe_pnl", FakeFailure::Config("offline".into()));
+    }
+    fake.fail_stream(Stream::Pnl, "lost pnl");
+    assert!(matches!(
+        events.recv().await.unwrap(),
+        SessionEvent::Interrupted { .. }
+    ));
+    assert!(matches!(
+        events.recv().await.unwrap(),
+        SessionEvent::RecoveryFailed { attempts: 3, .. }
+    ));
+    assert_eq!(host.generation(), 1);
+    assert_eq!(fake.count("connect"), 2);
+    assert_eq!(fake.count("subscribe_pnl"), 9);
+    assert!(events.try_recv().is_err());
+    host.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_join_snapshot_rolls_back_only_the_new_session() {
+    let (host, fake, a) = running().await;
+    let b = host.attach();
+    a.subscribe_pnl().await.unwrap();
+    a.subscribe_order_book_summary("NQU6", "CME").await.unwrap();
+    fake.fail_next(
+        "pnl_snapshot",
+        FakeFailure::Config("snapshot unavailable".into()),
+    );
+    assert!(b.subscribe_pnl().await.is_err());
+    fake.fail_next(
+        "refresh_book",
+        FakeFailure::Config("book unavailable".into()),
+    );
+    assert!(b.subscribe_order_book_summary("NQU6", "CME").await.is_err());
+    assert!(
+        host.state
+            .reconnect
+            .is_degraded(&MdIntent::Book(key()))
+            .await
+    );
+    b.disconnect().await.unwrap();
+    assert_eq!(fake.count("disconnect_pnl"), 0);
+    assert_eq!(fake.count("unsubscribe_book"), 0);
+    // The existing owner can heal a refresh that lost the shared book join.
+    a.subscribe_order_book_summary("NQU6", "CME").await.unwrap();
+    assert!(
+        !host
+            .state
+            .reconnect
+            .is_degraded(&MdIntent::Book(key()))
+            .await
+    );
+    host.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn requested_login_recovery_before_the_pump_starts_is_not_lost() {
+    let (host, fake, a) = running().await;
+    let mut events = a.session_events();
+    fake.clear_calls();
+    // No yield since connect: the pump may still be in its initial wait.
+    host.state.request_reconnect();
+    resumed(&mut events, 2).await;
+    assert_eq!(fake.calls(), ["disconnect", "connect"]);
     host.shutdown().await;
 }
