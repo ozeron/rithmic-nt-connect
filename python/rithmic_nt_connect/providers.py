@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 from nautilus_trader.common.providers import InstrumentProvider
@@ -64,6 +66,13 @@ def future_from_reference(
     exchange = ref.get("trading_exchange") or ref.get("exchange")
     tick_size = ref.get("tick_size")
     price_precision = ref.get("price_precision")
+    if price_precision is None and tick_size is not None:
+        # Some Test reference replies omit display precision. The venue tick
+        # still defines the exact decimal increment; never infer it from prices.
+        increment = Decimal(str(tick_size))
+        if not increment.is_finite() or increment <= 0:
+            raise InstrumentBuildError("tick_size must be finite and > 0")
+        price_precision = max(0, -int(increment.normalize().as_tuple().exponent))
     point_value = ref.get("point_value")
     currency_raw = ref.get("currency")
     expiration_raw = ref.get("expiration_date")
@@ -130,8 +139,10 @@ def future_from_reference(
 
 
 class RithmicInstrumentProvider(InstrumentProvider):
-    """Loads instruments for configured (symbol, exchange) pairs via
-    front-month + ref-data.
+    """Load configured (symbol, exchange) pairs.
+
+    Listed contracts use reference data directly; product roots resolve the
+    front month first. IDs use the adapter codec (``NQZ6-CME.RITHMIC``).
     """
 
     def __init__(
@@ -146,27 +157,20 @@ class RithmicInstrumentProvider(InstrumentProvider):
 
     async def load_all_async(self, filters: dict | None = None) -> None:
         _ = filters
-        for root, exchange in self._pairs:
-            front = self._session.get_front_month(root, exchange)
-            if not isinstance(front, dict):
-                raise InstrumentBuildError(
-                    f"front-month response must be a dict for {root}/{exchange}, got "
-                    f"{type(front)!r}"
+        from rithmic_nt_connect.exposure import product_root
+        from rithmic_nt_connect.historical import (
+            load_contract_instrument,
+            load_front_month_instrument,
+        )
+
+        for symbol, exchange in self._pairs:
+            symbol = symbol.strip().upper()
+            if product_root(symbol) != symbol:
+                instrument = await asyncio.to_thread(
+                    load_contract_instrument, self._session, symbol, exchange
                 )
-            trading_symbol = front.get("trading_symbol")
-            trading_exchange = front.get("trading_exchange")
-            if not trading_symbol or not trading_exchange:
-                raise InstrumentBuildError(
-                    f"front-month missing trading_symbol/trading_exchange for "
-                    f"{root}/{exchange}"
+            else:
+                instrument = await asyncio.to_thread(
+                    load_front_month_instrument, self._session, symbol, exchange
                 )
-            get_ref = getattr(self._session, "get_reference_data", None)
-            if not callable(get_ref):
-                raise InstrumentBuildError("session missing get_reference_data")
-            ref = get_ref(str(trading_symbol), str(trading_exchange))
-            if not isinstance(ref, dict):
-                raise InstrumentBuildError(
-                    f"reference data must be a dict for "
-                    f"{trading_symbol}/{trading_exchange}"
-                )
-            self.add(future_from_reference(ref))
+            self.add(instrument)

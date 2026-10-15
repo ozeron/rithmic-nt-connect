@@ -23,6 +23,28 @@ RITHMIC_ENABLE_TRADING=1 \
 uv run pytest tests/e2e/test_exec_client_live.py -v
 ```
 
+For Test plants whose front-month response is empty, select an exact listed
+contract with `RITHMIC_E2E_CONTRACT=NQZ6`; `RITHMIC_E2E_EXCHANGE` defaults to
+`CME`. The data and execution fixtures build it through the production
+reference-data loader. The adapter's instrument ID is `NQZ6-CME.RITHMIC`.
+Set `RITHMIC_HISTORY_READY_PROBE=0` when history is unavailable so the
+connect-time history readiness barrier does not block live ticker/book tests:
+
+```bash
+RITHMIC_TEST_DOTENV=/secure/local/rithmic-test.env \
+RITHMIC_E2E_CONTRACT=NQZ6 RITHMIC_E2E_EXCHANGE=CME \
+RITHMIC_HISTORY_READY_PROBE=0 \
+uv run pytest tests/e2e/test_data_client_live.py \
+  tests/e2e/test_data_internal_bars_live.py tests/e2e/test_reconnect_live.py -v -rs
+```
+
+History-dependent tests share one two-minute 1m replay probe per pytest session
+(five-second replay deadline, up to 45 seconds to connect and load the
+instrument). An unavailable history plant skips those tests with
+`history plant unavailable on this account: <reason>`. Live quotes, trades,
+books, internal-bar raw material, and ticker/book resync still run. Disabling
+the production readiness probe does not disable this test availability probe.
+
 The test file must contain the test credentials and `RITHMIC_SYSTEM_NAME` naming
 a test/demo system, plus `RITHMIC_CONNECT_MODE` (`direct` or `gateway`).
 `RITHMIC_GATEWAY` is required only for `gateway` mode. Keep the file outside

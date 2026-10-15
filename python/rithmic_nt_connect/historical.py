@@ -32,6 +32,33 @@ def _unix_sec(value: datetime | int | float) -> int:
     return int(value)
 
 
+def load_contract_instrument(
+    session: WireSession,
+    symbol: str,
+    exchange: str,
+    *,
+    activation_ns: int = 0,
+) -> FuturesContract:
+    """Build an explicitly named listed contract without a front-month RPC."""
+    from rithmic_nt_connect.exposure import product_root
+    from rithmic_nt_connect.providers import InstrumentBuildError
+
+    symbol, exchange = symbol.strip().upper(), exchange.strip()
+    if product_root(symbol) == symbol:
+        raise InstrumentBuildError(f"expected a listed contract, got {symbol!r}")
+    ref = session.get_reference_data(symbol, exchange)
+    if not isinstance(ref, dict):
+        raise TypeError(
+            f"reference data must be a dict for {symbol}/{exchange}, got {type(ref)!r}"
+        )
+    instrument = future_from_reference(ref, activation_ns=activation_ns)
+    if rithmic_route_from_info(instrument.info or {}) != (symbol, exchange):
+        raise InstrumentBuildError(
+            f"reference data identity does not match {symbol}/{exchange}"
+        )
+    return instrument
+
+
 def load_front_month_instrument(
     session: WireSession,
     root: str,
