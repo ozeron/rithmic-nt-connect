@@ -12,6 +12,8 @@ mod exec;
 mod session_events;
 #[cfg(feature = "testing")]
 mod testing;
+#[cfg(all(test, feature = "testing"))]
+mod tests;
 use session_events::*;
 
 use rithmic_gateway::client::{GatewayConfig, RemoteSession};
@@ -688,9 +690,7 @@ impl PySession {
                     builder = builder.ib_id(v);
                 }
                 let config = builder.build().map_err(to_py_err)?;
-                // Construction creates local paths only. Extra plants are requested
-                // separately, before or after the first idempotent connect.
-                PlantSet::parse(plants).map_err(to_py_err)?;
+                let plants = PlantSet::parse(plants).map_err(to_py_err)?;
                 static REGISTRY: OnceLock<HostRegistry<RithmicVenue>> = OnceLock::new();
                 let lock_path = rithmic_gateway::singleton::SessionLock::lock_path(
                     &key.user,
@@ -725,6 +725,7 @@ impl PySession {
                                 .await
                                 .map_err(|e| SessionLockError::new_err(e.to_string()))?;
                             if let Ok(session) = host.attach_owned() {
+                                host.request_plants_on_connect(plants);
                                 break Ok(Self {
                                     session: Arc::new(session),
                                     gateway: None,

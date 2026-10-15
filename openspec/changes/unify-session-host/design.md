@@ -164,7 +164,7 @@ So the `is_direct` check goes away, and a gateway client still can't elevate a g
 `HostRegistry` (in `rithmic-host`) maps a credential fingerprint (same fields as today, never the password) to `Weak<SessionHost<V>>`.
 
 - **`get_or_start(config, make_venue, lock_dir)`:** takes the flock and starts the host on a miss; returns the existing host on a hit.
-- **Plant requests:** extra plants (execution) are a host call (`request_plants`), never part of construction.
+- **Plant requests:** extra plants (execution) are a host call (`request_plants`). A direct constructor records its requested set on the host, including registry hits; the next `connect` applies their union even when the host is already connected. Construction performs no plant I/O.
 - **Shutdown:** when the last attached session detaches, the host disconnects the venue (in the background on `Drop`, inline on `disconnect`) and drops the flock. A pump task or the registry's `Weak` keeps nothing alive.
 - **The gateway binary** uses the same registry with a single host. Its process singleton (`singleton.rs`) still guards the socket path.
 
