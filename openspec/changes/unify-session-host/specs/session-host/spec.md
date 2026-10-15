@@ -11,6 +11,13 @@ The system SHALL run every Rithmic login through a `SessionHost`. A process SHAL
 - **WHEN** the shared scenario suite runs against a `LocalSession` and against a `RemoteSession` attached to the same kind of host
 - **THEN** every scenario SHALL produce the same results, events and errors in both
 
+#### Scenario: Recovery exhaustion releases the credential
+- **WHEN** bounded host recovery is exhausted while old facades remain alive
+- **THEN** `RecoveryFailed` SHALL be delivered and terminal teardown SHALL run outside the pump task, disconnecting all plants, releasing the flock and evicting the failed registry incarnation
+- **AND** old facades SHALL reject calls without waiting for teardown and SHALL remain terminal
+- **AND** another process SHALL be able to acquire the released flock, and a new facade SHALL obtain a fresh host
+- **AND** delayed cleanup of the old host SHALL NOT evict its replacement
+
 #### Scenario: Flock before login
 - **WHEN** a host is started while another process holds the credential flock
 - **THEN** starting SHALL fail with a session-lock error before any plant is opened
