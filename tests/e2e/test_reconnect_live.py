@@ -20,6 +20,7 @@ from rithmic_nt_connect.data import resync_ticker_session
 pytestmark = pytest.mark.live
 
 _EVENT_TIMEOUT_SEC = 45
+_TICKER_EVENTS = ("last_trade", "bbo")
 _BAR_POLL_TIMEOUT_SEC = 65
 
 
@@ -95,16 +96,23 @@ class TestResyncRestoresIntent:
         if include_bars:
             live_session.subscribe_time_bars(symbol, exchange, 2, 1)
 
+        def for_contract(event: dict) -> bool:
+            return event.get("symbol") == symbol and event.get("exchange") == exchange
+
         def wait_for_streams():
+            # Ticker delivery is proven by any ticker-stream event: trades on
+            # Test plants are sparse (2026-10-15: 3 trades, 6 BBO in 20 s on NQZ6).
             wait_for_any_event(
                 live_session.poll_event,
-                ("last_trade",),
+                _TICKER_EVENTS,
                 timeout_sec=_EVENT_TIMEOUT_SEC,
+                accept=for_contract,
             )
             wait_for_any_event(
                 live_session.poll_event,
-                ("bbo", "order_book"),
+                ("order_book",),
                 timeout_sec=_EVENT_TIMEOUT_SEC,
+                accept=for_contract,
             )
             if include_bars:
                 wait_for_any_event(
@@ -176,7 +184,7 @@ def test_direct_ticker_failure_restores_intent(
 
         wait_for_any_event(
             lambda: session.poll_event(timeout_ms=100),
-            ("last_trade",),
+            _TICKER_EVENTS,
             timeout_sec=_EVENT_TIMEOUT_SEC,
             accept=matching_contract,
         )
@@ -207,7 +215,7 @@ def test_direct_ticker_failure_restores_intent(
 
         wait_for_any_event(
             lambda: session.poll_event(timeout_ms=100),
-            ("last_trade",),
+            _TICKER_EVENTS,
             timeout_sec=_EVENT_TIMEOUT_SEC,
             accept=lambda event: (
                 matching_contract(event)

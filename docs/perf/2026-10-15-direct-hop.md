@@ -417,12 +417,16 @@ optimization are still needed; overlapping ranges alone do not close that gate.
 
 ## Rejoin and recovery investigation
 
-**The live regression reported after merge `f5ef7f0` remains unresolved.** No
-runtime fix is included in this follow-up on `ush/i2-rejoin-fix`. The new offline
-cases all pass on the unfixed merge, so they are characterization coverage, not
-red/green regression proof. The host delivery implementation on that merge is
-identical to `39d3dcf`; the tests have not demonstrated the reported failure.
-No live tests ran.
+**Resolved: no regression. The live failures were Test-plant trade sparsity.**
+After merge `f5ef7f0` the two reconnect tests failed twice in a row, waiting
+45 s for a `last_trade`. Interleaved live reruns (Rithmic Test, NQZ6,
+2026-10-15, 17:45–18:30 WEST) showed the resync test flaky on BOTH sides:
+7 of 12 passed with the host delivery change, 3 of 4 on the pre-change commit
+`6c4ea6b`, with the same failure. A 20 s sample of the ticker stream had only
+3 trades and 6 BBO updates. The tests now accept any fresh ticker-stream event
+(`last_trade` or `bbo`) as proof of ticker delivery, and `order_book` for the
+book. After that change, both tests passed 6 of 6 live, each in 7–11 s. The
+offline cases below stay as regression coverage for rejoin and recovery delivery.
 
 ### Offline evidence
 
@@ -507,6 +511,5 @@ in the failure report. Test acceptance, poll cadence and timeouts are unchanged.
 Three offline helper tests verify these diagnostics and successful fresh-record
 selection. They failed before the helper update (the old timeout had no counts;
 the old helper also lacked the explicit acceptance predicate), then passed.
-This red/green evidence applies only to the diagnostics, not to the unresolved
-runtime regression. The follow-up full check run passes 517 Rust and 877 Python
+This red/green evidence applies only to the diagnostics. The follow-up full check run passes 517 Rust and 877 Python
 tests, with 64 Python cases skipped and the same two shutdown warning instances.
