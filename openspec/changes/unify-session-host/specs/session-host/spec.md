@@ -80,6 +80,7 @@ Trading and cancel-all gates SHALL be state of the host, closed by default and i
 The host SHALL detect a plant failure through its event pump and SHALL recover the smallest unit that restores service:
 - a ticker or history failure SHALL recreate that plant only, leaving sibling plants untouched
 - an order-plant failure SHALL re-seat the order plant
+- a PnL-plant failure SHALL disconnect its dead handle and recreate only that plant before restoring PnL intent
 - a login-level failure SHALL reconnect all plants
 
 The host SHALL then re-issue every intent the recovered plants carry. A market-data intent that fails a bounded number of restore passes SHALL be left degraded, and the next subscribe for it SHALL retry it. An account intent (PnL, orders, brackets) that cannot be restored SHALL escalate to a full reconnect. Consumers SHALL NOT reset plants or re-issue intents in response to a host recovery. During recovery, `next_events` SHALL return empty batches rather than a stream error. A consumer SHALL see a stream error only after `RecoveryFailed` or after its session is closed.

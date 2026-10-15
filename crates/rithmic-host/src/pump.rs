@@ -60,9 +60,10 @@ impl Recovery {
         match self {
             Self::Plant(Stream::Ticker) => venue.reset_ticker().await,
             Self::Plant(Stream::History) => venue.reset_history().await,
-            // PnL reconnects its subscription on the existing handle. Account
-            // restore failure escalates to a login rebuild below.
-            Self::Plant(Stream::Pnl) => Ok(()),
+            Self::Plant(Stream::Pnl) => {
+                venue.disconnect_pnl_plant().await?;
+                venue.ensure_pnl_plant().await
+            }
             Self::Plant(Stream::Order) => {
                 venue.disconnect_order_plant().await?;
                 venue.ensure_order_plant().await

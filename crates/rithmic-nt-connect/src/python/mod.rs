@@ -794,15 +794,17 @@ impl PySession {
         let venue = self.fault_venue.as_ref().ok_or_else(|| {
             PyValueError::new_err("fault injection requires a real direct session; gateway and fake sessions are unsupported")
         })?;
-        if plant != "ticker" {
-            return Err(PyValueError::new_err(
-                "fault injection supports only ticker",
-            ));
-        }
-        self.run(
-            py,
-            venue.fault_inject_drop_plant(rithmic_host::Stream::Ticker),
-        )
+        let stream = match plant {
+            "ticker" => rithmic_host::Stream::Ticker,
+            "pnl" => rithmic_host::Stream::Pnl,
+            "order" => rithmic_host::Stream::Order,
+            _ => {
+                return Err(PyValueError::new_err(
+                    "fault injection supports ticker, pnl, or order",
+                ))
+            }
+        };
+        self.run(py, venue.fault_inject_drop_plant(stream))
     }
 
     #[getter]

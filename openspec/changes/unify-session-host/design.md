@@ -122,7 +122,7 @@ The read-specific locks (`recon_lock`, `history_load_lock`, refuse-history-under
 The host's reconnect loop is the only plant recovery, and it is the same in both modes.
 
 1. **Detect.** The pump's stream task reports a connection issue for a plant.
-2. **Recover the smallest unit.** A ticker or history failure recreates that plant only, which carries today's `reset_ticker` semantics into the host. A PnL failure re-subscribes PnL. An order-plant failure re-seats the order plant (the existing re-seat path). A login-level failure reconnects everything.
+2. **Recover the smallest unit.** A ticker or history failure recreates that plant only, which carries today's `reset_ticker` semantics into the host. A PnL failure disconnects the dead handle and recreates the PnL plant before restoring subscriptions. An order-plant failure re-seats the order plant (the existing re-seat path). A login-level failure reconnects everything.
 3. **Restore.** Re-issue every intent the restored plants carry. A market-data intent that keeps failing is left degraded, and the next subscribe retries it. An account intent that cannot be restored escalates to a full reconnect.
 4. **Notify.** Each attached session receives `Interrupted` at step 1, then `Resumed { generation }` after step 3, or `RecoveryFailed` after a bounded number of attempts.
 

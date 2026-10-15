@@ -743,7 +743,7 @@ async fn history_failure_recreates_only_history_and_restores_bars_once() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn pnl_failure_only_resubscribes_pnl() {
+async fn pnl_failure_recreates_only_pnl_before_restoring_its_intent() {
     let (host, fake, a) = running().await;
     a.subscribe_pnl().await.unwrap();
     a.subscribe_bracket_updates().await.unwrap();
@@ -751,7 +751,15 @@ async fn pnl_failure_only_resubscribes_pnl() {
     fake.clear_calls();
     fake.fail_stream(Stream::Pnl, "pnl lost");
     resumed(&mut events, 2).await;
-    assert_eq!(fake.calls(), ["ensure_pnl_plant", "subscribe_pnl"]);
+    assert_eq!(
+        fake.calls(),
+        [
+            "disconnect_pnl_plant",
+            "ensure_pnl_plant",
+            "ensure_pnl_plant",
+            "subscribe_pnl"
+        ]
+    );
     host.shutdown().await;
 }
 
