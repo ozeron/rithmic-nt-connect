@@ -80,8 +80,11 @@ Closed (kept for archaeology — do not re-open without new venue evidence):
 with `--no-build` and runs the python-client scenarios against the fake parent,
 then uploads them to the rolling `main-dev` prerelease (or the tag's release)
 and regenerates the PEP 503 index on GitHub Pages (`scripts/publish_index.py`,
-last 30 dev builds). Consumer setup: README "Install". One-time repo setting:
-Pages source = GitHub Actions.
+last 30 dev builds). Index URL: `https://alexlapchenko.com/rithmic-nt-connect/simple/`.
+The account's user site carries that custom domain, so the `ozeron.github.io`
+URL 301s to it over plain http; use the https custom-domain URL directly.
+Consumer setup: README "Install". One-time repo setting: Pages source = GitHub
+Actions.
 
 `rithmic-gateway` is a maturin bin wheel: the binary lands in the venv's `bin/`
 next to the client. Build one locally with `cd python && uvx maturin build --release`.
