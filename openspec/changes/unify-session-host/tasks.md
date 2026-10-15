@@ -96,6 +96,11 @@ Agents run in the shared checkout on branch `feat/unify-session-host`. Each agen
 - [x] 6.4 Remove the `recovery_bridge.py` direct-mode no-op and run the bridge on the session's events in both modes.
 - [x] 6.5 Remove `reset_ticker` from `WireSession`, `WireSessionStub` and `_lib.pyi`, and update `tests/test_data_transport_recovery.py`, `tests/test_recovery_bridge.py` and `tests/test_wire_session_parity.py`.
 - [ ] 6.6 Run the full suite. Run `RITHMIC_TEST_DOTENV=.env uv run pytest tests/e2e -v` on the test account (MotiveWave closed) in **both** modes, including a direct-mode plant-reconnect case. Re-run the 0.1 baselines and compare.
+  - **2026-10-15 live run on Rithmic Test** (overrides `RITHMIC_HISTORY_READY_PROBE=0`, `RITHMIC_E2E_CONTRACT=NQZ6`):
+    - **direct:** 10 passed, then 3 more after the gate fix; `test_direct_ticker_failure_restores_intent` passed (Interrupted → Resumed, ticks resumed)
+    - **gateway:** 7 passed, including the RMS round trip through both the Python and Rust clients
+    - **both modes:** 17 errors + 2 failures, all from the Test plant's front-month reply lacking `trading_symbol` (also on `main`); the data-client tests that need a `FuturesContract` cannot run on this account
+  - Still open: re-run after track I (hop optimization) lands; the data-client suite needs an account with reference data, or a contract-based instrument fixture.
 
 ## 7. Docs and follow-ups
 
