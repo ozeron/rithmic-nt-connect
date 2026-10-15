@@ -74,6 +74,20 @@ def parent_trading_env(test_env: dict[str, str] | None) -> dict[str, str]:
     return {"RITHMIC_ENABLE_TRADING": "1"} if trading else {}
 
 
+def open_trading_gates_or_skip(session, test_env: dict[str, str] | None) -> None:
+    """Open the session's trading gate, or skip when the run did not opt in.
+
+    Order-plant reads (account discovery, RMS) are trading-gated in both modes.
+    The exec client opens the gate in production; a raw test session must do
+    the same. In gateway mode the parent decides, and `open_gates` only reports.
+    """
+    if not parent_trading_env(test_env):
+        pytest.skip("needs RITHMIC_ENABLE_TRADING=1 (the order plant is trading-gated)")
+    gates = session.open_gates(trading=True, cancel_all=False)
+    if not gates.trading:
+        pytest.skip("trading not granted (gateway parent started without trading)")
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _gateway_parent(test_env) -> Iterator[None]:
     """In gateway mode, start the parent for the whole session.
