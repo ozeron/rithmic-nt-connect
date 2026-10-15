@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from _gateway_parent import running_parent
-from _redact import RedactedEnv
+from rithmic_nt_connect._redact import RedactedEnv
 from rithmic_nt_connect.config import ConnectMode, env_truthy, system_kind
 
 if TYPE_CHECKING:

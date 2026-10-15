@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from _redact import RedactedEnv
+from rithmic_nt_connect._redact import RedactedEnv
 
 
 def test_repr_hides_password_and_tokens() -> None:
