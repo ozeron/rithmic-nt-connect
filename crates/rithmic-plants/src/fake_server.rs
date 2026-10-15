@@ -645,6 +645,22 @@ pub mod frames {
         m
     }
 
+    /// A ticker-plant book snapshot with one level on each side.
+    pub fn order_book(symbol: &str, exchange: &str, price: f64) -> rti::OrderBook {
+        let mut m = rti::OrderBook::default();
+        m.template_id = ORDER_BOOK;
+        m.symbol = Some(symbol.into());
+        m.exchange = Some(exchange.into());
+        m.update_type = Some(1);
+        m.bid_price = vec![price];
+        m.bid_size = vec![3];
+        m.ask_price = vec![price + 0.25];
+        m.ask_size = vec![4];
+        m.ssboe = Some(1_790_000_000);
+        m.usecs = Some(0);
+        m
+    }
+
     /// A Rithmic-side order status notification (`notify_type`, `status` as the venue sends them).
     pub fn rithmic_order(
         basket_id: &str,

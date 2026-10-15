@@ -413,3 +413,100 @@ optimization are still needed; overlapping ranges alone do not close that gate.
   classification, command retry policy, config and credentials are untouched.
   The applicable stream isolation, typed-gap, ordered failure and recovery rows
   are exercised by the tests above. No advertised capability or STATUS mark changed.
+
+
+## Rejoin and recovery investigation
+
+**The live regression reported after merge `f5ef7f0` remains unresolved.** No
+runtime fix is included in this follow-up on `ush/i2-rejoin-fix`. The new offline
+cases all pass on the unfixed merge, so they are characterization coverage, not
+red/green regression proof. The host delivery implementation on that merge is
+identical to `39d3dcf`; the tests have not demonstrated the reported failure.
+No live tests ran.
+
+### Offline evidence
+
+`crates/rithmic-gateway/tests/rejoin_delivery.rs` runs twelve cases: the same
+three changes on FakeVenue and real RithmicVenue/FakeRithmicServer, each through
+LocalSession and RemoteSession over duplex through the gateway server:
+
+- Repeat ticker and book joins on the same attachment.
+- A second attachment joins and triggers book snapshot-on-join; both retain
+  ticker and book delivery.
+- Ticker plant failure, Interrupted, Resumed, then fresh ticker and book records.
+
+Each case consumes records through both `poll_event` and `next_events`, and
+checks fresh prices and FIFO order before and after the change. Real-venue
+recovery aborts the rithmic-rs ticker actor using the same fault hook as the live
+test. The fake server sends protobuf market records through the real websocket
+and venue conversion path; it does not model a live server's subscription state.
+
+Six additional cases in `tests/test_session_factory.py` exercise the actual
+Python direct factory and PyO3 polling surface with FakeVenue. These call
+`resync_ticker_session` (including its `asyncio.to_thread` replay), join a book-only
+peer, or recover the ticker with a Python lifecycle listener. Both zero-timeout
+and 100-ms `poll_event` calls retain fresh trade timestamps, symbol/exchange,
+and prices; `next_events` retains book records. All six pass before a runtime fix.
+
+The proposed lost-link cause is unconfirmed. `SessionCtx::ensure_delivery`
+(`local/context.rs:82`) retains an owned topic handle at line 95. Repeat book
+joins (`local/subscriptions.rs:264`) call `RithmicVenue::refresh_book`
+(`venue.rs:344`), which changes venue subscriptions without removing a host
+fanout topic. Recovery restores venue intents without replacing the hub.
+Reattaching links on these paths would therefore be speculative. Further live
+evidence must distinguish empty polls, continuing book/BBO records, and queued
+records with timestamps preceding the failure; that distinction was requested
+from the orchestrator.
+
+The existing slow-consumer exact-gap, peer-conservation, lifecycle enqueue
+barrier, queued-events-before-close and ticker-failure characterization tests
+also pass. No delivery semantics or advertised capabilities changed.
+
+### One direct-hop pair
+
+The requested single pair ran sequentially, venue then host, using the release
+binary built from `f5ef7f0` with test-only changes. Both delivered all 200,000
+records in order with zero gaps and zero unsignalled loss.
+
+| Path | Events/s | p50 µs | p99 µs | p99.9 µs | Allocs/event |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| venue | 4,183,513 | 142 | 279 | 321 | 2.038 |
+| host | 4,042,180 | 109 | 361 | 5,015 | 2.165 |
+
+Host/venue is 0.9662 in this pair. A single sample per path, with the visible
+host tail outlier and lower venue rate than the earlier series, does not
+establish equivalence or supersede the earlier failed performance gates. There
+is no runtime change to compare against an unfixed build in this follow-up.
+
+No builder was observed before, during (0.2-second process monitor), or after
+either sample. The 1/5/15-minute loads were 3.676 / 4.976 / 5.367 before and after
+both. Exact timestamps, binary hash, allocation counts and harness records are
+in [the pair JSON](2026-10-15-direct-hop-rejoin.json).
+
+### Checks
+
+The requested six-package Rust test command with gateway/host/extension testing
+features passes **517 tests**, including the twelve new cases. The extension
+was rebuilt with `uv sync --extra dev --reinstall-package rithmic-nt-connect`.
+`cargo fmt --all -- --check`, workspace/all-target clippy with `-D warnings`,
+`uv run ruff check .`, `uv run ruff format --check .` and the requested `ty check`
+pass. The full Python suite passes **874 tests**, with 64 live/optional cases
+skipped and two existing fake-server EOF-on-shutdown thread warnings. The first
+full run, before the six new Python cases, passed 868 tests with the same warning
+category.
+
+### Diagnostics for the next orchestrator live run
+
+The raw poll results from the failing live run are unavailable. The reconnect
+test now reports empty-poll counts, counts by event type, last-trade contract
+keys and timestamp range, and how many target events the instrument/freshness
+predicate rejected. It prints the required freshness cutoff before injecting
+the fault. Observation happens before filtering, so old trades remain visible
+in the failure report. Test acceptance, poll cadence and timeouts are unchanged.
+
+Three offline helper tests verify these diagnostics and successful fresh-record
+selection. They failed before the helper update (the old timeout had no counts;
+the old helper also lacked the explicit acceptance predicate), then passed.
+This red/green evidence applies only to the diagnostics, not to the unresolved
+runtime regression. The follow-up full check run passes 517 Rust and 877 Python
+tests, with 64 Python cases skipped and the same two shutdown warning instances.

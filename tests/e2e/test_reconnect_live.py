@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import Counter
 from collections.abc import Callable
 from typing import Protocol
 
@@ -28,14 +29,48 @@ def wait_for_any_event(
     *,
     timeout_sec: float,
     sleep_sec: float = 0.1,
+    accept: Callable[[dict], bool] | None = None,
 ) -> dict:
     deadline = time.monotonic() + timeout_sec
+    empty_polls = 0
+    by_type: Counter[str] = Counter()
+    trade_contracts: Counter[tuple[str | None, str | None]] = Counter()
+    filtered_target_events = 0
+    oldest_trade_ns: int | None = None
+    newest_trade_ns: int | None = None
     while time.monotonic() < deadline:
         ev = poll()
-        if ev and ev.get("type") in event_types:
-            return ev
+        if ev:
+            kind = str(ev.get("type", "<missing>"))
+            by_type[kind] += 1
+            timestamp = ev.get("ts_event_ns")
+            if kind == "last_trade":
+                trade_contracts[(ev.get("symbol"), ev.get("exchange"))] += 1
+                if isinstance(timestamp, int):
+                    oldest_trade_ns = (
+                        timestamp
+                        if oldest_trade_ns is None
+                        else min(oldest_trade_ns, timestamp)
+                    )
+                    newest_trade_ns = (
+                        timestamp
+                        if newest_trade_ns is None
+                        else max(newest_trade_ns, timestamp)
+                    )
+            if kind in event_types:
+                if accept is None or accept(ev):
+                    return ev
+                filtered_target_events += 1
+        else:
+            empty_polls += 1
         time.sleep(sleep_sec)
-    raise AssertionError(f"none of {event_types!r} arrived within {timeout_sec}s")
+    raise AssertionError(
+        f"none of {event_types!r} arrived within {timeout_sec}s; "
+        f"empty_polls={empty_polls}; event_types={dict(by_type)}; "
+        f"filtered_target_events={filtered_target_events}; "
+        f"last_trade_contracts={dict(trade_contracts)}; "
+        f"last_trade_ts_event_ns=[{oldest_trade_ns}, {newest_trade_ns}]"
+    )
 
 
 class TestResyncRestoresIntent:
@@ -136,21 +171,18 @@ def test_direct_ticker_failure_restores_intent(
     try:
         session.subscribe(symbol, exchange)
 
-        def matching_trade():
-            event = session.poll_event(timeout_ms=100)
-            if (
-                event
-                and event.get("symbol") == symbol
-                and event.get("exchange") == exchange
-            ):
-                return event
-            return None
+        def matching_contract(event: dict) -> bool:
+            return event.get("symbol") == symbol and event.get("exchange") == exchange
 
         wait_for_any_event(
-            matching_trade, ("last_trade",), timeout_sec=_EVENT_TIMEOUT_SEC
+            lambda: session.poll_event(timeout_ms=100),
+            ("last_trade",),
+            timeout_sec=_EVENT_TIMEOUT_SEC,
+            accept=matching_contract,
         )
         # Fresh venue time prevents a buffered pre-failure tick from passing.
         failure_time_ns = time.time_ns()
+        print(f"ticker recovery requires ts_event_ns > {failure_time_ns}")
         session._fault_drop_plant("ticker")
 
         interrupted = None
@@ -173,13 +205,15 @@ def test_direct_ticker_failure_restores_intent(
         assert interrupted is not None, "ticker failure never reported Interrupted"
         assert resumed is not None, "ticker recovery never reported Resumed within 60s"
 
-        def fresh_trade():
-            event = matching_trade()
-            if event and (event.get("ts_event_ns") or 0) > failure_time_ns:
-                return event
-            return None
-
-        wait_for_any_event(fresh_trade, ("last_trade",), timeout_sec=_EVENT_TIMEOUT_SEC)
+        wait_for_any_event(
+            lambda: session.poll_event(timeout_ms=100),
+            ("last_trade",),
+            timeout_sec=_EVENT_TIMEOUT_SEC,
+            accept=lambda event: (
+                matching_contract(event)
+                and (event.get("ts_event_ns") or 0) > failure_time_ns
+            ),
+        )
         print(
             "direct ticker recovery: Interrupted -> Resumed; "
             f"ticks resumed: {symbol}/{exchange}"
