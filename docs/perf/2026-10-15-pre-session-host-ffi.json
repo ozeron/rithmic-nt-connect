@@ -1,0 +1,41 @@
+[
+  {
+    "scenario": "py_blocking_poll_event",
+    "events": 2000,
+    "received": 2000,
+    "reported_skipped": 0,
+    "seconds": 0.002,
+    "events_per_sec": 957453.2
+  },
+  {
+    "scenario": "py_to_thread_poll_event",
+    "events": 2000,
+    "received": 2000,
+    "reported_skipped": 0,
+    "seconds": 0.064,
+    "events_per_sec": 31228.2
+  },
+  {
+    "scenario": "py_to_thread_next_events_batch",
+    "events": 2000,
+    "received": 2000,
+    "reported_skipped": 0,
+    "seconds": 0.002,
+    "events_per_sec": 1311977.0
+  },
+  {
+    "scenario": "py_empty_poll_cost",
+    "polls": 5000,
+    "seconds": 0.0012,
+    "us_per_poll": 0.2
+  },
+  {
+    "scenario": "py_to_thread_next_events_batch_field_access",
+    "events": 2000,
+    "received": 2000,
+    "reported_skipped": 0,
+    "seconds": 0.002,
+    "events_per_sec": 1164059.7,
+    "notional_checksum": 2199500.0
+  }
+]
