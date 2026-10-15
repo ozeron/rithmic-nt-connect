@@ -15,7 +15,7 @@ Read that file (or the sections you are touching) before implementing or reviewi
 
 Direct and gateway are two implementations of one Rust trait, `Session`
 (`crates/rithmic-host/src/backend.rs`): `RithmicVenue` (in-process plants, owns
-the order-op gate) and `GatewaySession` (`crates/rithmic-gateway/src/client`,
+the order-op gate) and `RemoteSession` (`crates/rithmic-gateway/src/client`,
 attach-only, one socket per fingerprint). The PyO3 `Session` and the gateway
 **server** (`crates/rithmic-gateway/src/server`) are both generic over that trait,
 so the adapter has one call surface in either mode, including the read-only
@@ -24,7 +24,7 @@ fill-history and order-history queries (one-shot, trading-gated reads).
 When you add or change a plant RPC (place / cancel / modify / brackets / ensure / subscribe / …):
 
 1. Add it to the `Session` trait, with `RithmicVenue` and `FakeVenue` (feature `testing`) implementations.
-2. Add its row to the RPC table (`crates/rithmic-host/src/rpc_table.rs`: kind + gate; gateway table: Body mapping), then the `session.proto` message, the server dispatch, the `GatewaySession` call (with its call mode: Read / Command / Intent), and the PyO3 method plus `_lib.pyi`.
+2. Add its row to the RPC table (`crates/rithmic-host/src/rpc_table.rs`: kind + gate; gateway table: Body mapping), then the `session.proto` message, the server dispatch, the `RemoteSession` call (with its call mode: Read / Command / Intent), and the PyO3 method plus `_lib.pyi`.
 3. Keep request field names and semantics aligned (e.g. bracket `localid` / `stop_ticks` / `target_ticks`).
 4. Tests that fail on drift: `tests/rpc_table.rs` (proto ↔ trait ↔ table ↔ `RestorePlan`), `tests/client_scenarios.rs` + `tests/test_gateway_scenarios.py` (same scenarios through every client), `tests/test_wire_trait_parity.py` (PyO3 ↔ `WireSession`).
 5. Do not ship “direct-only” for a new live capability unless STATUS marks gateway as deferred **and** book/runners refuse that mode.

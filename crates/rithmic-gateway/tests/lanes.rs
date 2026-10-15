@@ -11,15 +11,16 @@ use common::*;
 use rithmic_gateway::pb::{self, frame::Body};
 use rithmic_gateway::rpc_table::{lane_of, RPC_TABLE};
 use tokio::io::AsyncWriteExt;
-use tokio::net::UnixStream;
+use tokio::io::DuplexStream;
 
-async fn connect(parent: &FakeParent) -> UnixStream {
-    let mut stream = UnixStream::connect(&parent.listen).await.unwrap();
+async fn connect(parent: &FakeParent) -> DuplexStream {
+    let mut stream = parent.stream();
     write_body(
         &mut stream,
         0,
         Body::Handshake(pb::Handshake {
             user: parent.user.clone(),
+            auth_token: AUTH_TOKEN.into(),
             system_name: SYSTEM.into(),
             url: URL.into(),
             env: "Live".into(),
@@ -54,7 +55,7 @@ fn fill_history() -> Body {
 }
 
 /// Read replies until every id in `ids` has arrived; returns (id, arrival offset).
-async fn replies(stream: &mut UnixStream, ids: &[u64], started: Instant) -> Vec<(u64, Duration)> {
+async fn replies(stream: &mut DuplexStream, ids: &[u64], started: Instant) -> Vec<(u64, Duration)> {
     let mut out = Vec::new();
     while out.len() < ids.len() {
         let (frame, _) = tokio::time::timeout(Duration::from_secs(30), read_frame(stream))
@@ -385,7 +386,7 @@ async fn a_place_is_not_held_by_a_slow_reference_data_lookup() {
 #[tokio::test]
 async fn a_peer_that_never_handshakes_is_closed() {
     let parent = FakeParent::start(Opts::default()).await;
-    let mut silent = UnixStream::connect(&parent.listen).await.unwrap();
+    let mut silent = parent.stream();
     let mut buf = [0u8; 1];
     let read = tokio::time::timeout(
         Duration::from_secs(10),
@@ -399,7 +400,7 @@ async fn a_peer_that_never_handshakes_is_closed() {
 #[tokio::test]
 async fn an_oversized_frame_before_the_handshake_is_refused() {
     let parent = FakeParent::start(Opts::default()).await;
-    let mut peer = UnixStream::connect(&parent.listen).await.unwrap();
+    let mut peer = parent.stream();
     // Claim a 1 MiB handshake: refused without allocating or waiting for it.
     peer.write_all(&(1u32 << 20).to_be_bytes()).await.unwrap();
     let mut buf = [0u8; 1];

@@ -4,7 +4,7 @@
 //! dropped in either direction breaks equality. Combined with the fake-plant
 //! end-to-end test (`client_scenarios::events_arrive_equal_to_what_the_plant_emitted`)
 //! this pins that a scripted event stream yields the same records through
-//! `RithmicVenue`'s plant source and through `GatewaySession`.
+//! `RithmicVenue`'s plant source and through `RemoteSession`.
 
 use rithmic_gateway::client::convert::{self as from, Channel};
 use rithmic_gateway::convert as to;

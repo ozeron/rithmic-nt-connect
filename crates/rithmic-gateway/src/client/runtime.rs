@@ -18,15 +18,13 @@ use prost::Message;
 use rithmic_host::dto::PlantEvent;
 use rithmic_host::{Error, Result};
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::UnixStream;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::sync::{broadcast, oneshot, Mutex as TokioMutex, Notify};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
-use super::attach::{attach, parent_flock_held};
 use super::convert::{plant_event_from_pb, Channel};
+use super::transport::{Source, Stream};
 use super::GatewayConfig;
 use crate::framing::MAX_FRAME_LEN;
 use crate::pb::{self, frame::Body, Frame};
@@ -184,7 +182,7 @@ impl Queues {
 
 pub(super) struct Connection {
     id: u64,
-    writer: TokioMutex<OwnedWriteHalf>,
+    writer: TokioMutex<WriteHalf<Stream>>,
     pending: StdMutex<HashMap<u64, oneshot::Sender<Frame>>>,
     next_id: AtomicU64,
     closed: AtomicBool,
@@ -209,7 +207,7 @@ impl Connection {
     /// frame: no later frame may follow it. Fail every call, refuse new ones, and
     /// close the write half so the parent drops the connection and the reader's
     /// end-of-stream reports the loss (the normal re-dial path).
-    async fn break_connection(&self, writer: &mut OwnedWriteHalf) {
+    async fn break_connection(&self, writer: &mut WriteHalf<Stream>) {
         self.fail_all();
         let _ = tokio::time::timeout(DISCONNECT_GRACE, writer.shutdown()).await;
     }
@@ -306,8 +304,8 @@ async fn read_frame<R: AsyncRead + Unpin>(read: &mut R) -> std::io::Result<Frame
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
 }
 
-async fn write_frame(
-    stream: &mut UnixStream,
+async fn write_frame<W: AsyncWrite + Unpin>(
+    stream: &mut W,
     frame: &Frame,
     timeout: Duration,
 ) -> std::io::Result<()> {
@@ -318,7 +316,7 @@ async fn write_frame(
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "write timed out"))?
 }
 
-async fn reader_loop(conn: Arc<Connection>, mut read: OwnedReadHalf, runtime: Weak<Runtime>) {
+async fn reader_loop(conn: Arc<Connection>, mut read: ReadHalf<Stream>, runtime: Weak<Runtime>) {
     while let Ok(frame) = read_frame(&mut read).await {
         if frame.request_id != 0 {
             let waiter = conn
@@ -363,7 +361,7 @@ enum HandshakeError {
 }
 
 async fn handshake(
-    stream: &mut UnixStream,
+    stream: &mut Stream,
     cfg: &GatewayConfig,
 ) -> std::result::Result<ReadyInfo, HandshakeError> {
     // Identity only: fingerprint + auth token. The Rithmic password is never
@@ -385,8 +383,7 @@ async fn handshake(
         .await
         .map_err(|e| HandshakeError::Retry(transport(format!("handshake write failed: {e}"))))?;
 
-    let (mut read, _write) = stream.split();
-    let reply = read_frame(&mut read);
+    let reply = read_frame(stream);
     let frame = match tokio::time::timeout(cfg.rpc_timeout, reply).await {
         Err(_) => return Err(HandshakeError::Retry(transport("handshake timed out"))),
         Ok(Err(e)) => {
@@ -561,6 +558,7 @@ impl IntentKey {
 
 pub(super) struct Runtime {
     pub(super) cfg: GatewayConfig,
+    source: Source,
     conn: StdMutex<Option<Arc<Connection>>>,
     /// Serializes (re)dials: exactly one re-dial for all waiters.
     redial: TokioMutex<()>,
@@ -611,8 +609,16 @@ impl Runtime {
         if let Some(existing) = map.get(&key).and_then(Weak::upgrade) {
             return existing;
         }
-        let runtime = Arc::new_cyclic(|weak| Runtime {
-            cfg: cfg.clone(),
+        let runtime = Self::with_source(cfg.clone(), Source::Unix);
+        map.retain(|_, w| w.strong_count() > 0);
+        map.insert(key, Arc::downgrade(&runtime));
+        runtime
+    }
+
+    pub(super) fn with_source(cfg: GatewayConfig, source: Source) -> Arc<Self> {
+        Arc::new_cyclic(|weak| Runtime {
+            cfg,
+            source,
             conn: StdMutex::new(None),
             redial: TokioMutex::new(()),
             generation: AtomicU64::new(0),
@@ -627,10 +633,7 @@ impl Runtime {
             stopping: AtomicBool::new(false),
             recovering: AtomicBool::new(false),
             self_weak: weak.clone(),
-        });
-        map.retain(|_, w| w.strong_count() > 0);
-        map.insert(key, Arc::downgrade(&runtime));
-        runtime
+        })
     }
 
     pub(super) fn register(&self, queues: Arc<Queues>) -> u64 {
@@ -850,16 +853,8 @@ impl Runtime {
     async fn dial(&self) -> Result<Arc<Connection>> {
         let cfg = &self.cfg;
         let deadline = Instant::now() + cfg.attach_timeout;
-        let mut stream = attach(cfg).await?;
+        let mut stream = self.source.connect(cfg).await?;
         loop {
-            if cfg.attest_flock && !parent_flock_held(cfg) {
-                return Err(Error::Gateway {
-                    code: "parent_unattested".into(),
-                    message:
-                        "listen path is up but credential flock is free — refusing impostor parent"
-                            .into(),
-                });
-            }
             match handshake(&mut stream, cfg).await {
                 Ok(ready) => return Ok(self.start_connection(stream, ready)),
                 Err(HandshakeError::Fatal(e)) => return Err(e),
@@ -867,14 +862,14 @@ impl Runtime {
                 Err(HandshakeError::Retry(_)) => {
                     drop(stream);
                     tokio::time::sleep(HANDSHAKE_RETRY_PAUSE).await;
-                    stream = attach(cfg).await?;
+                    stream = self.source.connect(cfg).await?;
                 }
             }
         }
     }
 
-    fn start_connection(&self, stream: UnixStream, ready: ReadyInfo) -> Arc<Connection> {
-        let (read, write) = stream.into_split();
+    fn start_connection(&self, stream: Stream, ready: ReadyInfo) -> Arc<Connection> {
+        let (read, write) = tokio::io::split(stream);
         let conn = Arc::new(Connection {
             id: self.next_conn_id.fetch_add(1, Ordering::SeqCst),
             writer: TokioMutex::new(write),

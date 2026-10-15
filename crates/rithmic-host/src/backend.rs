@@ -1,7 +1,7 @@
 //! The single Rust definition of the plant surface.
 //!
 //! [`Session`] lists every plant operation the adapter uses. `RithmicVenue`
-//! (`rithmic-plants`, in-process plants) and `GatewaySession` (`rithmic-gateway`, a
+//! (`rithmic-plants`, in-process plants) and `RemoteSession` (`rithmic-gateway`, a
 //! client of the shared parent) are its only implementations, so adding or
 //! changing an RPC without implementing it in both modes fails to compile.
 //!

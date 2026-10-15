@@ -1,6 +1,6 @@
 //! pb → DTO: the exact inverse of `crate::convert` (the server's DTO → pb).
 //!
-//! `GatewaySession` hands out the same `rithmic_host` DTOs `RithmicVenue`
+//! `RemoteSession` hands out the same `rithmic_host` DTOs `RithmicVenue`
 //! does, so the extension converts them to dicts in exactly one place for both
 //! modes. A round-trip test (`tests/client_convert.rs`) pins `from(to(x)) == x`.
 

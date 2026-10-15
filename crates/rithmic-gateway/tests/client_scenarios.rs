@@ -11,14 +11,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::*;
-use rithmic_gateway::client::{GatewayConfig, GatewaySession};
+use rithmic_gateway::client::{GatewayConfig, RemoteSession};
 use rithmic_gateway::pb::{self, frame::Body};
 use rithmic_gateway::testing as scripted;
 use rithmic_host::dto::PlantEvent;
 use rithmic_host::{Error, PlaceOrder, Session};
 
 use tokio::io::AsyncWriteExt;
-use tokio::net::UnixStream;
 
 fn place(tag: &str) -> PlaceOrder {
     PlaceOrder {
@@ -36,31 +35,26 @@ fn place(tag: &str) -> PlaceOrder {
     }
 }
 
-async fn session_for(parent: &FakeParent) -> GatewaySession {
-    let session = GatewaySession::new(parent.config());
+async fn session_for(parent: &FakeParent) -> RemoteSession {
+    let session = parent.session();
     session.connect().await.expect("connect");
     session
 }
 
-/// A second, independent parent connection: a symlink gives the same socket a
-/// different path, hence a separate client runtime.
-async fn second_connection(parent: &FakeParent) -> GatewaySession {
-    let alias = parent.dir.path().join("alias.sock");
-    if !alias.exists() {
-        std::os::unix::fs::symlink(&parent.listen, &alias).expect("symlink");
-    }
-    let cfg = GatewayConfig::new(&parent.user, SYSTEM, URL, "Live")
-        .with_listen(&format!("unix://{}", alias.display()))
-        .expect("listen");
-    let session = GatewaySession::new(cfg);
+/// An independent transport to the same parent, bypassing the shared facade.
+async fn second_connection(parent: &FakeParent) -> RemoteSession {
+    let session = RemoteSession::over(
+        GatewayConfig::new(&parent.user, SYSTEM, URL, "Live").with_auth_token(AUTH_TOKEN),
+        parent.stream(),
+    );
     session.connect().await.expect("connect");
     session
 }
 
 async fn drain(
-    session: &GatewaySession,
+    session: &RemoteSession,
     want: usize,
-    channel: fn(&GatewaySession, Duration) -> Fut,
+    channel: fn(&RemoteSession, Duration) -> Fut,
 ) -> Vec<PlantEvent> {
     let mut got = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -79,16 +73,16 @@ type Fut<'a> = std::pin::Pin<
     Box<dyn std::future::Future<Output = rithmic_host::Result<Option<PlantEvent>>> + Send + 'a>,
 >;
 
-fn market(s: &GatewaySession, t: Duration) -> Fut<'_> {
+fn market(s: &RemoteSession, t: Duration) -> Fut<'_> {
     s.poll_event(t)
 }
-fn history(s: &GatewaySession, t: Duration) -> Fut<'_> {
+fn history(s: &RemoteSession, t: Duration) -> Fut<'_> {
     s.poll_history_event(t)
 }
-fn pnl(s: &GatewaySession, t: Duration) -> Fut<'_> {
+fn pnl(s: &RemoteSession, t: Duration) -> Fut<'_> {
     s.poll_pnl_event(t)
 }
-fn order(s: &GatewaySession, t: Duration) -> Fut<'_> {
+fn order(s: &RemoteSession, t: Duration) -> Fut<'_> {
     s.poll_order_event(t)
 }
 
@@ -523,11 +517,12 @@ async fn a_client_that_never_reads_is_dropped_without_hurting_its_peer() {
     fast.subscribe(NQ, CME).await.unwrap();
 
     // A raw client that handshakes, subscribes, and then never reads again.
-    let mut stuck = UnixStream::connect(&parent.listen).await.unwrap();
+    let mut stuck = parent.stream();
     let hello = pb::Frame {
         request_id: 0,
         body: Some(Body::Handshake(pb::Handshake {
             user: parent.user.clone(),
+            auth_token: AUTH_TOKEN.into(),
             system_name: SYSTEM.into(),
             url: URL.into(),
             env: "Live".into(),
@@ -579,8 +574,9 @@ async fn a_client_that_never_reads_is_dropped_without_hurting_its_peer() {
 
 #[tokio::test]
 async fn the_client_recovers_after_the_parent_restarts() {
-    let mut parent = FakeParent::start(Opts::default()).await;
-    let s = session_for(&parent).await;
+    let mut parent = unix::UnixParent::start(Opts::default()).await;
+    let s = RemoteSession::new(parent.config());
+    s.connect().await.unwrap();
     s.subscribe(NQ, CME).await.unwrap();
     let before = s.transport_generation();
     let mut events = s.subscribe_transport();
@@ -683,12 +679,12 @@ async fn bracket_updates_reach_only_connections_that_subscribed_to_them() {
 #[tokio::test]
 async fn a_fingerprint_for_a_different_credential_set_is_refused_quickly() {
     let parent = FakeParent::start(Opts::default()).await;
-    let mut cfg = GatewayConfig::new("someone-else", SYSTEM, URL, "Live")
-        .with_listen(&format!("unix://{}", parent.listen.display()))
-        .expect("listen");
-    cfg.attest_flock = false;
+    let cfg = GatewayConfig::new("someone-else", SYSTEM, URL, "Live").with_auth_token(AUTH_TOKEN);
     let started = Instant::now();
-    let err = GatewaySession::new(cfg).connect().await.unwrap_err();
+    let err = RemoteSession::over(cfg, parent.stream())
+        .connect()
+        .await
+        .unwrap_err();
     assert_eq!(code(&err), "fingerprint_mismatch");
     assert!(
         started.elapsed() < Duration::from_secs(5),

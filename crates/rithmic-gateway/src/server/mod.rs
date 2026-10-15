@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::FutureExt;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::UnixListener;
 use tokio::sync::{broadcast, mpsc, watch, Mutex as TokioMutex, RwLock};
 use tokio::task::JoinHandle;
 
@@ -27,10 +27,13 @@ use crate::subscriptions::{ClientId, Fan, FanoutHub, Kind, ParentGates, SharedFa
 
 mod dispatch;
 pub mod pump;
+mod transport;
 use dispatch::TopicIntent;
 pub use dispatch::{
     gate_rpc_for_test, history_rpc_with_live_ticker_intent_for_test, rpc_sequence_with_gates,
 };
+pub use transport::listen_unix;
+pub use transport::listen_unix as serve;
 
 /// Metadata advertised in every ``Ready`` frame for this parent process.
 ///
@@ -348,38 +351,6 @@ pub async fn run_gateway(params: GatewayParams) -> Result<(), String> {
     serve_result
 }
 
-/// Accept connections until idle-exit fires (or forever when policy is Never).
-pub async fn serve(listener: UnixListener, state: Arc<GatewayState>) -> std::io::Result<()> {
-    loop {
-        tokio::select! {
-            biased;
-            _ = state.idle.wait_until_should_exit() => {
-                match state.idle.policy() {
-                    IdleExitPolicy::After(grace) => {
-                        eprintln!(
-                            "rithmic-gateway: idle-exit after {}s with 0 peers",
-                            grace.as_secs()
-                        );
-                    }
-                    IdleExitPolicy::Never => {
-                        eprintln!("rithmic-gateway: idle-exit");
-                    }
-                }
-                return Ok(());
-            }
-            accepted = listener.accept() => {
-                let (stream, _) = accepted?;
-                let state = Arc::clone(&state);
-                tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, state).await {
-                        eprintln!("gateway client error: {e}");
-                    }
-                });
-            }
-        }
-    }
-}
-
 /// How long a new connection may take to send its handshake.
 const HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// Largest handshake frame accepted from a peer that has not authenticated yet.
@@ -423,25 +394,12 @@ async fn read_frame_bytes_max<R: tokio::io::AsyncRead + Unpin>(
     }
 }
 
-async fn write_frame(stream: &mut UnixStream, frame: &Frame) -> Result<(), String> {
+async fn write_frame<W: AsyncWrite + Unpin>(stream: &mut W, frame: &Frame) -> Result<(), String> {
     let wire = codec::encode(frame).map_err(|e| e.to_string())?;
     tokio::time::timeout(Duration::from_secs(5), stream.write_all(&wire))
         .await
         .map_err(|_| "write timeout".to_string())?
         .map_err(|e| format!("write: {e}"))
-}
-
-/// Same-UID check for the v1 local-unix empty-token trust policy (R15 /
-/// KTD16): unix `SO_PEERCRED` is a kernel fact, not client-supplied data.
-fn same_uid_peer(stream: &UnixStream) -> bool {
-    match stream.peer_cred() {
-        Ok(cred) => {
-            // SAFETY: getuid() has no preconditions and never fails.
-            let our_uid = unsafe { libc::getuid() };
-            cred.uid() == our_uid
-        }
-        Err(_) => false,
-    }
 }
 
 pub(super) enum OutMsg {
@@ -699,9 +657,23 @@ pub async fn publish_event(hub: &FanoutHub, key: &SubKey, event: pb::Event, kind
     hub.publish(key, fan).await
 }
 
-async fn handle_client(mut stream: UnixStream, state: Arc<GatewayState>) -> Result<(), String> {
-    let same_uid = same_uid_peer(&stream);
+/// Serve one already-connected transport. Generic transports require a non-empty
+/// auth token; only [`listen_unix`] can attest same-UID empty-token peers.
+pub async fn serve_connection<S>(stream: S, state: Arc<GatewayState>) -> Result<(), String>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    serve_connection_with_peer(stream, state, false).await
+}
 
+async fn serve_connection_with_peer<S>(
+    mut stream: S,
+    state: Arc<GatewayState>,
+    same_uid: bool,
+) -> Result<(), String>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     // Before it authenticates a peer gets a short deadline and a small frame
     // budget: an idle or hostile connection cannot hold a task or 16 MiB.
     let payload = tokio::time::timeout(
@@ -774,7 +746,7 @@ async fn handle_client(mut stream: UnixStream, state: Arc<GatewayState>) -> Resu
     let (cmd_tx, cmd_rx) = mpsc::channel::<Request>(COMMAND_QUEUE);
     let (slow_tx, slow_rx) = mpsc::channel::<Request>(SLOW_QUEUE);
     let (stop_tx, stop_rx) = watch::channel(false);
-    let (read_half, write_half) = stream.into_split();
+    let (read_half, write_half) = tokio::io::split(stream);
 
     let mut reader = tokio::spawn(read_requests(read_half, cmd_tx, slow_tx, reply_tx.clone()));
     // Detached: when the connection ends the slow lane drains on its own (each
@@ -885,8 +857,8 @@ fn request_id_of(payload: &[u8]) -> Option<u64> {
     decode_varint(&mut buf).ok().filter(|id| *id != 0)
 }
 
-async fn read_requests(
-    mut read: tokio::net::unix::OwnedReadHalf,
+async fn read_requests<R: AsyncRead + Unpin>(
+    mut read: R,
     commands: mpsc::Sender<Request>,
     slow: mpsc::Sender<Request>,
     replies: mpsc::Sender<Frame>,
@@ -1055,8 +1027,8 @@ async fn run_slow_lane(
 /// takes longer than [`WRITE_TIMEOUT`] means the client stopped draining, and
 /// the connection ends. The task ends once every reply sender is gone and the
 /// queue is flushed.
-async fn write_replies(
-    mut write: tokio::net::unix::OwnedWriteHalf,
+async fn write_replies<W: AsyncWrite + Unpin>(
+    mut write: W,
     mut replies: mpsc::Receiver<Frame>,
     mut events: mpsc::Receiver<OutMsg>,
 ) {

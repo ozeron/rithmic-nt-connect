@@ -10,7 +10,7 @@ use tokio::runtime::Runtime;
 
 mod exec;
 
-use rithmic_gateway::client::{GatewayConfig, GatewaySession, TransportEvent};
+use rithmic_gateway::client::{GatewayConfig, RemoteSession, TransportEvent};
 use rithmic_host::dto::{
     AccountPnlDto, AccountRmsInfoDto, BboDto, BracketUpdateDto, FillHistoryDto, FrontMonthDto,
     HistoryBarDto, HistoryTickDto, InstrumentPnlDto, LastTradeDto, OrderBookDto,
@@ -554,7 +554,7 @@ fn time_bar_event_dict(py: Python<'_>, b: HistoryBarDto) -> PyResult<Py<PyDict>>
 pub struct PySession {
     session: Arc<dyn Session>,
     /// The gateway client, when `connect_mode` is `gateway` (transport hooks).
-    gateway: Option<Arc<GatewaySession>>,
+    gateway: Option<Arc<RemoteSession>>,
     /// The in-process session, when `connect_mode` is `direct` (it owns the gates).
     direct: Option<Arc<RithmicVenue>>,
 }
@@ -636,7 +636,7 @@ impl PySession {
                 if let Some(token) = gateway_auth_token {
                     cfg = cfg.with_auth_token(&token);
                 }
-                let gateway = Arc::new(GatewaySession::new(cfg));
+                let gateway = Arc::new(RemoteSession::new(cfg));
                 Ok(Self {
                     session: gateway.clone(),
                     gateway: Some(gateway),

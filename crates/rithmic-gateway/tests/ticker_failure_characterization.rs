@@ -4,24 +4,18 @@
 
 mod common;
 
-use std::sync::Arc;
 use std::time::Duration;
 
-use common::{read_frame, short_dir, write_body, CME, NQ, SYSTEM, URL};
-use rithmic_gateway::idle_exit::IdleExitPolicy;
+use common::{read_frame, write_body, FakeParent, Opts, AUTH_TOKEN, CME, NQ, SYSTEM, URL};
 use rithmic_gateway::pb::{self, event, frame::Body, Frame};
-use rithmic_gateway::server::pump::PumpTiming;
-use rithmic_gateway::server::{run_gateway, Fingerprint, GatewayParams, SessionHandle};
-use rithmic_gateway::subscriptions::ParentGates;
 use rithmic_gateway::testing::{account_pnl, last_trade, order_notification};
-use rithmic_host::fake::FakeVenue;
-use rithmic_host::{Session, Stream};
+use rithmic_host::Stream;
 
-use tokio::net::{UnixListener, UnixStream};
+use tokio::io::DuplexStream;
 
 const DEADLINE: Duration = Duration::from_secs(5);
 
-async fn receive(client: &mut UnixStream) -> Frame {
+async fn receive(client: &mut DuplexStream) -> Frame {
     tokio::time::timeout(DEADLINE, read_frame(client))
         .await
         .expect("gateway frame deadline")
@@ -29,7 +23,7 @@ async fn receive(client: &mut UnixStream) -> Frame {
         .0
 }
 
-async fn request(client: &mut UnixStream, id: u64, body: Body) -> Frame {
+async fn request(client: &mut DuplexStream, id: u64, body: Body) -> Frame {
     write_body(client, id, body).await;
     let reply = receive(client).await;
     assert_eq!(
@@ -41,41 +35,22 @@ async fn request(client: &mut UnixStream, id: u64, body: Body) -> Frame {
 
 #[tokio::test]
 async fn ticker_only_failure_rebuilds_all_plants_and_restores_account_intents() {
-    let dir = short_dir();
-    let path = dir.path().join("ticker-failure.sock");
-    let listener = UnixListener::bind(&path).unwrap();
-    let fake = Arc::new(FakeVenue::new());
-    fake.connect().await.unwrap();
-    let parent = tokio::spawn(run_gateway(GatewayParams {
-        listener,
-        path: path.clone(),
-        fingerprint: Fingerprint {
-            user: "ticker-characterization".into(),
-            system_name: SYSTEM.into(),
-            url: URL.into(),
-            env: "Test".into(),
-            account_id: String::new(),
-            fcm_id: String::new(),
-            ib_id: String::new(),
-        },
-        expected_auth_token: String::new(),
-        idle_policy: IdleExitPolicy::After(Duration::ZERO),
-        gates: ParentGates {
-            trading_enabled: true,
-            cancel_all_enabled: false,
-        },
-        session: SessionHandle::new(fake.clone()),
-        timing: PumpTiming::default(),
-    }));
-    let mut client = UnixStream::connect(&path).await.unwrap();
+    let parent = FakeParent::start(Opts {
+        trading: true,
+        ..Default::default()
+    })
+    .await;
+    let fake = &parent.fake;
+    let mut client = parent.stream();
     let ready = request(
         &mut client,
         0,
         Body::Handshake(pb::Handshake {
-            user: "ticker-characterization".into(),
+            user: parent.user.clone(),
+            auth_token: AUTH_TOKEN.into(),
             system_name: SYSTEM.into(),
             url: URL.into(),
-            env: "Test".into(),
+            env: "Live".into(),
             ..Default::default()
         }),
     )
@@ -188,9 +163,4 @@ async fn ticker_only_failure_rebuilds_all_plants_and_restores_account_intents() 
     let disconnected = request(&mut client, 6, Body::Disconnect(pb::DisconnectRequest {})).await;
     assert!(matches!(disconnected.body, Some(Body::Ack(_))));
     drop(client);
-    tokio::time::timeout(DEADLINE, parent)
-        .await
-        .expect("parent exits after its last client detaches")
-        .expect("parent task")
-        .expect("parent shutdown");
 }

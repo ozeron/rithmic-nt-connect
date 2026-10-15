@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use prost::Message;
-use rithmic_gateway::client::{GatewayConfig, GatewaySession};
+use rithmic_gateway::client::{GatewayConfig, RemoteSession};
 use rithmic_gateway::idle_exit::IdleExitPolicy;
 use rithmic_gateway::listen::bind_unix;
 use rithmic_gateway::pb::{frame::Body, Frame, Handshake, SubscribeRequest};
@@ -97,8 +97,8 @@ impl Rig {
     }
 
     /// A real library client (one shared socket per process, per fingerprint).
-    pub async fn session(&self) -> GatewaySession {
-        let s = GatewaySession::new(self.config());
+    pub async fn session(&self) -> RemoteSession {
+        let s = RemoteSession::new(self.config());
         s.connect().await.expect("session connect");
         s
     }

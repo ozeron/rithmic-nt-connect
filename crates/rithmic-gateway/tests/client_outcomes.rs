@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::*;
-use rithmic_gateway::client::{GatewaySession, TransportEvent, EVENT_QUEUE_CAP};
+use rithmic_gateway::client::{RemoteSession, TransportEvent, EVENT_QUEUE_CAP};
 use rithmic_gateway::pb::{self, frame::Body};
 use rithmic_host::dto::PlantEvent;
 use rithmic_host::{Error, PlaceOrder, Session};
@@ -43,14 +43,13 @@ fn count_of(mock: &MockParent, pred: impl Fn(&Body) -> bool) -> usize {
 }
 
 async fn connected(
-    path: &std::path::Path,
     handler: impl Fn(&pb::Frame, usize) -> Action + Send + Sync + 'static,
     tune: impl FnOnce(&mut rithmic_gateway::client::GatewayConfig),
-) -> (MockParent, GatewaySession) {
-    let mock = MockParent::spawn(path, mock_ready(true, true), 0, handler).await;
-    let mut cfg = mock_config(path);
+) -> (MockParent, RemoteSession) {
+    let mock = MockParent::duplex(mock_ready(true, true), 0, handler);
+    let mut cfg = duplex_config();
     tune(&mut cfg);
-    let session = GatewaySession::new(cfg);
+    let session = mock.session(cfg);
     session.connect().await.expect("connect");
     (mock, session)
 }
@@ -59,10 +58,7 @@ async fn connected(
 
 #[tokio::test]
 async fn a_state_changing_rpc_lost_after_send_is_unknown_and_never_resent() {
-    let dir = short_dir();
-    let path = dir.path().join("gw.sock");
     let (mock, session) = connected(
-        &path,
         |frame, _| match frame.body {
             Some(Body::PlaceOrder(_)) => Action::Close,
             _ => Action::Ack,
@@ -86,10 +82,7 @@ async fn a_state_changing_rpc_lost_after_send_is_unknown_and_never_resent() {
 
 #[tokio::test]
 async fn every_state_changing_rpc_is_unknown_not_retried_when_the_reply_times_out() {
-    let dir = short_dir();
-    let path = dir.path().join("gw.sock");
     let (mock, session) = connected(
-        &path,
         |_, _| Action::Hang,
         |cfg| {
             cfg.rpc_timeout = Duration::from_millis(300);
@@ -110,10 +103,7 @@ async fn every_state_changing_rpc_is_unknown_not_retried_when_the_reply_times_ou
 
 #[tokio::test]
 async fn a_read_lost_after_send_is_retried_once_on_a_fresh_connection() {
-    let dir = short_dir();
-    let path = dir.path().join("gw.sock");
     let (mock, session) = connected(
-        &path,
         |frame, connection| match frame.body {
             Some(Body::GetFrontMonth(_)) if connection == 0 => Action::Close,
             Some(Body::GetFrontMonth(_)) => front_month_reply(),
@@ -131,10 +121,7 @@ async fn a_read_lost_after_send_is_retried_once_on_a_fresh_connection() {
 
 #[tokio::test]
 async fn a_read_is_retried_at_most_once() {
-    let dir = short_dir();
-    let path = dir.path().join("gw.sock");
     let (mock, session) = connected(
-        &path,
         |frame, _| match frame.body {
             Some(Body::GetFrontMonth(_)) => Action::Close,
             _ => Action::Ack,
@@ -150,10 +137,7 @@ async fn a_read_is_retried_at_most_once() {
 
 #[tokio::test]
 async fn a_silent_parent_times_out_instead_of_hanging() {
-    let dir = short_dir();
-    let path = dir.path().join("gw.sock");
     let (_mock, session) = connected(
-        &path,
         |_, _| Action::Hang,
         |cfg| {
             cfg.rpc_timeout = Duration::from_millis(250);
@@ -172,10 +156,7 @@ async fn a_silent_parent_times_out_instead_of_hanging() {
 
 #[tokio::test]
 async fn typed_gateway_errors_map_to_typed_errors() {
-    let dir = short_dir();
-    let path = dir.path().join("gw.sock");
     let (_mock, session) = connected(
-        &path,
         |frame, _| match frame.body {
             Some(Body::PlaceOrder(_)) => Action::Reply(Body::Error(pb::ErrorResponse {
                 code: "trading_disabled".into(),
@@ -205,10 +186,7 @@ async fn typed_gateway_errors_map_to_typed_errors() {
 
 #[tokio::test]
 async fn concurrent_callers_during_a_drop_share_one_redial() {
-    let dir = short_dir();
-    let path = dir.path().join("gw.sock");
     let (mock, session) = connected(
-        &path,
         |frame, connection| match frame.body {
             Some(Body::EnsurePnl(_)) if connection == 0 => Action::Close,
             Some(Body::GetFrontMonth(_)) => front_month_reply(),
@@ -254,9 +232,7 @@ async fn concurrent_callers_during_a_drop_share_one_redial() {
 
 #[tokio::test]
 async fn ensure_transport_live_is_a_no_op_while_the_socket_is_up() {
-    let dir = short_dir();
-    let path = dir.path().join("gw.sock");
-    let (mock, session) = connected(&path, |_, _| Action::Ack, |_| {}).await;
+    let (mock, session) = connected(|_, _| Action::Ack, |_| {}).await;
     assert_eq!(session.ensure_transport_live().await.unwrap(), 1);
     assert_eq!(session.ensure_transport_live().await.unwrap(), 1);
     assert_eq!(mock.connections.load(Ordering::SeqCst), 1);
@@ -264,26 +240,20 @@ async fn ensure_transport_live_is_a_no_op_while_the_socket_is_up() {
 
 #[tokio::test]
 async fn a_failed_redial_fails_the_rpc_instead_of_hanging() {
-    let dir = short_dir();
-    let path = dir.path().join("gw.sock");
     let user_cfg = {
-        let mut cfg = mock_config(&path);
+        let mut cfg = duplex_config();
         cfg.attach_timeout = Duration::from_millis(400);
         cfg
     };
-    let mock = MockParent::spawn(&path, mock_ready(false, false), 0, |frame, _| {
-        match frame.body {
-            Some(Body::GetFrontMonth(_)) => Action::Close,
-            _ => Action::Ack,
-        }
-    })
-    .await;
-    let session = GatewaySession::new(user_cfg);
+    let mock = MockParent::duplex(mock_ready(false, false), 0, |frame, _| match frame.body {
+        Some(Body::GetFrontMonth(_)) => Action::Close,
+        _ => Action::Ack,
+    });
+    let session = mock.session(user_cfg);
     session.connect().await.expect("connect");
 
-    // The parent goes away entirely: dropping the mock closes its listener.
+    // The parent goes away entirely: dropping the mock closes its transport factory.
     drop(mock);
-    std::fs::remove_file(&path).ok();
     let started = std::time::Instant::now();
     let err = session.get_front_month("NQ", CME).await.expect_err("down");
     assert!(
@@ -300,11 +270,11 @@ async fn one_socket_serves_every_facade_in_the_process() {
     let mock = MockParent::spawn(&path, mock_ready(true, true), 0, |_, _| Action::Ack).await;
     // One fingerprint: every facade built from it shares the process's socket.
     let cfg = mock_config(&path);
-    let first = GatewaySession::new(cfg.clone());
+    let first = RemoteSession::new(cfg.clone());
     first.connect().await.expect("first facade");
-    let second = GatewaySession::new(cfg.clone());
+    let second = RemoteSession::new(cfg.clone());
     second.connect().await.expect("second facade");
-    let third = GatewaySession::new(cfg.clone());
+    let third = RemoteSession::new(cfg.clone());
     third.connect().await.expect("third facade");
 
     assert_eq!(
@@ -333,7 +303,7 @@ async fn one_socket_serves_every_facade_in_the_process() {
     second.disconnect().await.unwrap();
     assert!(third.transport_connected());
     third.disconnect().await.unwrap();
-    let again = GatewaySession::new(cfg);
+    let again = RemoteSession::new(cfg);
     again.connect().await.expect("a new client can attach");
     assert_eq!(mock.connections.load(Ordering::SeqCst), 2);
 }
@@ -342,9 +312,7 @@ async fn one_socket_serves_every_facade_in_the_process() {
 
 #[tokio::test]
 async fn a_consumer_that_lags_past_capacity_gets_channel_lagged_not_silent_loss() {
-    let dir = short_dir();
-    let path = dir.path().join("gw.sock");
-    let (mock, session) = connected(&path, |_, _| Action::Ack, |_| {}).await;
+    let (mock, session) = connected(|_, _| Action::Ack, |_| {}).await;
 
     // Polling the channel arms its queue (a real consumer subscribes first).
     assert!(session.poll_event(Duration::ZERO).await.unwrap().is_none());
@@ -379,9 +347,7 @@ async fn a_consumer_that_lags_past_capacity_gets_channel_lagged_not_silent_loss(
 
 #[tokio::test]
 async fn a_busy_channel_does_not_block_another() {
-    let dir = short_dir();
-    let path = dir.path().join("gw.sock");
-    let (mock, session) = connected(&path, |_, _| Action::Ack, |_| {}).await;
+    let (mock, session) = connected(|_, _| Action::Ack, |_| {}).await;
 
     for i in 0..2_000 {
         mock.push_last_trade(NQ, i as f64);
@@ -404,10 +370,7 @@ async fn a_busy_channel_does_not_block_another() {
 
 #[tokio::test]
 async fn polling_a_dropped_transport_drains_queued_events_then_reports_the_close() {
-    let dir = short_dir();
-    let path = dir.path().join("gw.sock");
     let (mock, session) = connected(
-        &path,
         |frame, _| match frame.body {
             Some(Body::EnsurePnl(_)) => Action::Close,
             _ => Action::Ack,
@@ -434,9 +397,7 @@ async fn polling_a_dropped_transport_drains_queued_events_then_reports_the_close
 
 #[tokio::test]
 async fn a_blocked_poll_wakes_when_an_event_arrives() {
-    let dir = short_dir();
-    let path = dir.path().join("gw.sock");
-    let (mock, session) = connected(&path, |_, _| Action::Ack, |_| {}).await;
+    let (mock, session) = connected(|_, _| Action::Ack, |_| {}).await;
     let session = Arc::new(session);
     let poller = {
         let s = Arc::clone(&session);
@@ -468,10 +429,7 @@ fn bar(marker: i32) -> pb::HistoryBar {
 
 #[tokio::test]
 async fn a_wide_window_is_chunked_merged_sorted_and_deduplicated() {
-    let dir = short_dir();
-    let path = dir.path().join("gw.sock");
     let (mock, session) = connected(
-        &path,
         |frame, _| match &frame.body {
             Some(Body::LoadTimeBars(req)) => {
                 // Adjacent slices share their boundary second; return unsorted.
@@ -514,12 +472,9 @@ async fn a_wide_window_is_chunked_merged_sorted_and_deduplicated() {
 
 #[tokio::test]
 async fn a_transient_slice_timeout_is_retried_without_failing_the_request() {
-    let dir = short_dir();
-    let path = dir.path().join("gw.sock");
     let hung = Arc::new(AtomicUsize::new(0));
     let hung_in_handler = Arc::clone(&hung);
     let (mock, session) = connected(
-        &path,
         move |frame, _| match &frame.body {
             Some(Body::LoadTimeBars(req))
                 if req.start_time_sec == 40 * DAY
@@ -548,10 +503,7 @@ async fn a_transient_slice_timeout_is_retried_without_failing_the_request() {
 
 #[tokio::test]
 async fn a_slice_that_keeps_timing_out_fails_the_whole_request_boundedly() {
-    let dir = short_dir();
-    let path = dir.path().join("gw.sock");
     let (mock, session) = connected(
-        &path,
         |frame, _| match &frame.body {
             Some(Body::LoadTimeBars(req)) if req.start_time_sec == 40 * DAY => Action::Hang,
             Some(Body::LoadTimeBars(req)) => {
@@ -579,9 +531,7 @@ async fn a_slice_that_keeps_timing_out_fails_the_whole_request_boundedly() {
 
 #[tokio::test]
 async fn an_invalid_bar_type_fails_like_the_direct_path_before_any_rpc() {
-    let dir = short_dir();
-    let path = dir.path().join("gw.sock");
-    let (mock, session) = connected(&path, |_, _| Action::Ack, |_| {}).await;
+    let (mock, session) = connected(|_, _| Action::Ack, |_| {}).await;
     let err = session
         .load_time_bars(NQ, CME, 0, 10, 99, 1)
         .await
@@ -593,9 +543,7 @@ async fn an_invalid_bar_type_fails_like_the_direct_path_before_any_rpc() {
 
 #[tokio::test]
 async fn an_empty_or_inverted_window_makes_no_rpc() {
-    let dir = short_dir();
-    let path = dir.path().join("gw.sock");
-    let (mock, session) = connected(&path, |_, _| Action::Ack, |_| {}).await;
+    let (mock, session) = connected(|_, _| Action::Ack, |_| {}).await;
     assert!(session
         .load_time_bars(NQ, CME, 100, 10, 2, 1)
         .await
@@ -613,10 +561,8 @@ fn fast_recovery(cfg: &mut rithmic_gateway::client::GatewayConfig) {
 
 #[tokio::test]
 async fn the_first_connect_emits_no_up_event() {
-    let dir = short_dir();
-    let path = dir.path().join("gw.sock");
-    let mock = MockParent::spawn(&path, mock_ready(false, false), 0, |_, _| Action::Ack).await;
-    let session = GatewaySession::new(mock_config(&path));
+    let mock = MockParent::duplex(mock_ready(false, false), 0, |_, _| Action::Ack);
+    let session = mock.session(duplex_config());
     let mut events = session.subscribe_transport();
     session.connect().await.expect("connect");
     assert_eq!(session.transport_generation(), 1);
@@ -631,10 +577,7 @@ async fn the_first_connect_emits_no_up_event() {
 
 #[tokio::test]
 async fn a_lost_transport_recovers_automatically_without_any_caller() {
-    let dir = short_dir();
-    let path = dir.path().join("gw.sock");
     let (mock, session) = connected(
-        &path,
         |frame, connection| match frame.body {
             Some(Body::EnsurePnl(_)) if connection == 0 => Action::Close,
             _ => Action::Ack,
@@ -662,10 +605,7 @@ async fn a_lost_transport_recovers_automatically_without_any_caller() {
 
 #[tokio::test]
 async fn recovery_gives_up_with_recovery_failed_after_its_attempt_budget() {
-    let dir = short_dir();
-    let path = dir.path().join("gw.sock");
     let (mock, session) = connected(
-        &path,
         |frame, _| match frame.body {
             Some(Body::EnsurePnl(_)) => Action::Close,
             _ => Action::Ack,
@@ -681,7 +621,6 @@ async fn recovery_gives_up_with_recovery_failed_after_its_attempt_budget() {
 
     // The parent goes away for good, then the transport drops.
     drop(mock);
-    std::fs::remove_file(&path).ok();
     let _ = session.ensure_pnl_plant().await;
 
     let report = tokio::time::timeout(Duration::from_secs(10), failed.recv())
@@ -696,9 +635,7 @@ async fn recovery_gives_up_with_recovery_failed_after_its_attempt_budget() {
 
 #[tokio::test]
 async fn a_deliberate_disconnect_is_never_recovered() {
-    let dir = short_dir();
-    let path = dir.path().join("gw.sock");
-    let (mock, session) = connected(&path, |_, _| Action::Ack, fast_recovery).await;
+    let (mock, session) = connected(|_, _| Action::Ack, fast_recovery).await;
     let mut events = session.subscribe_transport();
     session.disconnect().await.unwrap();
 
@@ -713,10 +650,7 @@ async fn a_deliberate_disconnect_is_never_recovered() {
 
 #[tokio::test]
 async fn automatic_recovery_can_be_disabled() {
-    let dir = short_dir();
-    let path = dir.path().join("gw.sock");
     let (mock, session) = connected(
-        &path,
         |frame, _| match frame.body {
             Some(Body::EnsurePnl(_)) => Action::Close,
             _ => Action::Ack,
@@ -736,14 +670,12 @@ async fn automatic_recovery_can_be_disabled() {
 
 #[tokio::test]
 async fn a_channel_nobody_subscribed_or_polled_queues_nothing() {
-    let dir = short_dir();
-    let path = dir.path().join("gw.sock");
-    let mock = MockParent::spawn(&path, mock_ready(true, true), 0, |_, _| Action::Ack).await;
-    let cfg = mock_config(&path);
-    let reader = GatewaySession::new(cfg.clone());
+    let mock = MockParent::duplex(mock_ready(true, true), 0, |_, _| Action::Ack);
+    let cfg = duplex_config();
+    let reader = mock.session(cfg.clone());
     reader.connect().await.unwrap();
     reader.subscribe(NQ, CME).await.unwrap();
-    let idle = GatewaySession::new(cfg);
+    let idle = reader.clone();
     idle.connect().await.unwrap();
 
     mock.push_last_trade(NQ, 1.0);
@@ -758,9 +690,7 @@ async fn a_channel_nobody_subscribed_or_polled_queues_nothing() {
 
 #[tokio::test]
 async fn subscribing_arms_the_channel_before_the_first_event() {
-    let dir = short_dir();
-    let path = dir.path().join("gw.sock");
-    let (mock, session) = connected(&path, |_, _| Action::Ack, |_| {}).await;
+    let (mock, session) = connected(|_, _| Action::Ack, |_| {}).await;
     // No poll yet: the subscribe itself arms the queue, so an event that arrives
     // before the first poll is kept.
     session.subscribe(NQ, CME).await.unwrap();
@@ -774,10 +704,7 @@ async fn subscribing_arms_the_channel_before_the_first_event() {
 
 #[tokio::test]
 async fn a_timed_out_history_slice_costs_at_most_two_attempts() {
-    let dir = short_dir();
-    let path = dir.path().join("gw.sock");
     let (mock, session) = connected(
-        &path,
         |frame, _| match frame.body {
             Some(Body::LoadTimeBars(_)) => Action::Hang,
             _ => Action::Ack,

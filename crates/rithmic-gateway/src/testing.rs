@@ -167,14 +167,15 @@ async fn handle_control(stream: UnixStream, fake: Arc<FakeVenue>) -> std::io::Re
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
     while let Some(line) = lines.next_line().await? {
-        let reply = run_command(&fake, line.trim());
+        let reply = control_command(&fake, line.trim());
         write.write_all(reply.as_bytes()).await?;
         write.write_all(b"END\n").await?;
     }
     Ok(())
 }
 
-fn run_command(fake: &FakeVenue, line: &str) -> String {
+/// Apply one scripted control command without requiring a control socket.
+pub fn control_command(fake: &FakeVenue, line: &str) -> String {
     let parts: Vec<&str> = line.split_whitespace().collect();
     match parts.as_slice() {
         ["ping"] => "ok\n".into(),
@@ -313,20 +314,22 @@ mod tests {
     #[test]
     fn control_commands_script_the_fake() {
         let fake = FakeVenue::new();
-        assert_eq!(run_command(&fake, "ping"), "ok\n");
+        assert_eq!(control_command(&fake, "ping"), "ok\n");
         assert_eq!(
-            run_command(&fake, "push last_trade NQH6 CME 100.25 2"),
+            control_command(&fake, "push last_trade NQH6 CME 100.25 2"),
             "ok\n"
         );
         assert_eq!(
-            run_command(&fake, "push last_trade NQH6 CME x 2"),
+            control_command(&fake, "push last_trade NQH6 CME x 2"),
             "err bad number\n"
         );
-        assert_eq!(run_command(&fake, "set_account A F I"), "ok\n");
-        assert!(run_command(&fake, "nope").starts_with("err unknown command"));
-        assert!(run_command(&fake, "fail_next subscribe bogus").starts_with("err unknown failure"));
+        assert_eq!(control_command(&fake, "set_account A F I"), "ok\n");
+        assert!(control_command(&fake, "nope").starts_with("err unknown command"));
+        assert!(
+            control_command(&fake, "fail_next subscribe bogus").starts_with("err unknown failure")
+        );
         assert_eq!(
-            run_command(&fake, "fail_next subscribe rithmic boom now"),
+            control_command(&fake, "fail_next subscribe rithmic boom now"),
             "ok\n"
         );
     }
@@ -334,6 +337,6 @@ mod tests {
     #[test]
     fn calls_reply_lists_one_call_per_line() {
         let fake = FakeVenue::new();
-        assert_eq!(run_command(&fake, "calls"), "");
+        assert_eq!(control_command(&fake, "calls"), "");
     }
 }

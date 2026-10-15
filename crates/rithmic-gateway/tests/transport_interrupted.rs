@@ -7,7 +7,6 @@ use std::time::Duration;
 
 use common::*;
 use prost::Message;
-use rithmic_gateway::client::GatewaySession;
 use rithmic_gateway::framing::{decode_frame, encode_frame};
 use rithmic_gateway::pb::{self, frame::Body};
 use rithmic_host::{dto::PlantEvent, Session};
@@ -22,10 +21,8 @@ fn interrupted() -> pb::Event {
 
 #[tokio::test]
 async fn interruption_is_skipped_and_subscriptions_keep_serving() {
-    let dir = short_dir();
-    let path = dir.path().join("gw.sock");
-    let mock = MockParent::spawn(&path, mock_ready(false, false), 0, |_, _| Action::Ack).await;
-    let session = GatewaySession::new(mock_config(&path));
+    let mock = MockParent::duplex(mock_ready(false, false), 0, |_, _| Action::Ack);
+    let session = mock.session(duplex_config());
     session.connect().await.unwrap();
     let mut transport = session.subscribe_transport();
     session.subscribe(NQ, CME).await.unwrap();

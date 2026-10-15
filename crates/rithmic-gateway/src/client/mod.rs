@@ -1,9 +1,9 @@
-//! `GatewaySession`: the Rust gateway client behind the [`Session`] trait.
+//! `RemoteSession`: the Rust gateway client behind the [`Session`] trait.
 //!
 //! Attach-only (it never starts the parent) and credential-free (a client has
 //! an auth token and a fingerprint, never the Rithmic password). All sessions in
 //! a process for one fingerprint share one socket and one reader (`runtime`);
-//! each `GatewaySession` is a facade with its own event queues.
+//! each `RemoteSession` is a facade with its own event queues.
 //!
 //! Outcome classes: a failure before send is a plain error; a failure after a
 //! state-changing request was written is [`Error::OutcomeUnknown`] and is never
@@ -12,6 +12,7 @@
 mod attach;
 pub mod convert;
 mod runtime;
+mod transport;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -28,6 +29,7 @@ use rithmic_host::{
     AccountTriple, Error, ModifyOrder, PlaceBracketOrder, PlaceOrder, PlantSet, Result, Session,
 };
 
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::broadcast;
 use tokio::time::Instant;
 
@@ -164,7 +166,7 @@ enum Mode {
 }
 
 /// A facade over the shared gateway runtime.
-pub struct GatewaySession {
+pub struct RemoteSession {
     runtime: Arc<Runtime>,
     queues: Arc<Queues>,
     facade_id: AtomicU64,
@@ -174,11 +176,55 @@ pub struct GatewaySession {
     rt_handle: StdMutex<Option<tokio::runtime::Handle>>,
 }
 
-impl GatewaySession {
+/// A clone is a new, disconnected facade with independent queues and intent
+/// holdings over the same transport runtime.
+impl Clone for RemoteSession {
+    fn clone(&self) -> Self {
+        Self::from_runtime(Arc::clone(&self.runtime))
+    }
+}
+
+impl RemoteSession {
     /// Create a session facade. No I/O happens until [`Session::connect`].
     pub fn new(cfg: GatewayConfig) -> Self {
+        Self::from_runtime(Runtime::for_config(&cfg))
+    }
+
+    /// Use an owned stream without Unix dialing, flock attestation or registry
+    /// sharing. The caller authenticates the transport; the normal fingerprint
+    /// and token handshake still runs on `connect`. A consumed stream cannot be
+    /// redialed; use [`Self::with_connector`] when recovery is needed.
+    pub fn over<S>(mut cfg: GatewayConfig, stream: S) -> Self
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        cfg.recovery_attempts = 0;
+        Self::from_runtime(Runtime::with_source(
+            cfg,
+            transport::Source::Once(StdMutex::new(Some(Box::new(stream)))),
+        ))
+    }
+
+    /// Supply a fresh transport for each handshake/recovery attempt. The caller
+    /// owns dialing and transport authentication; no Unix paths or flock are used.
+    pub fn with_connector<S, F, Fut>(cfg: GatewayConfig, connect: F) -> Self
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<S>> + Send + 'static,
+    {
+        Self::from_runtime(Runtime::with_source(
+            cfg,
+            transport::Source::Connector(Box::new(move || {
+                let future = connect();
+                Box::pin(async move { Ok(Box::new(future.await?) as transport::Stream) })
+            })),
+        ))
+    }
+
+    fn from_runtime(runtime: Arc<Runtime>) -> Self {
         Self {
-            runtime: Runtime::for_config(&cfg),
+            runtime,
             queues: Arc::new(Queues::new()),
             facade_id: AtomicU64::new(0),
             connected: AtomicBool::new(false),
@@ -448,7 +494,7 @@ impl GatewaySession {
     }
 }
 
-impl Drop for GatewaySession {
+impl Drop for RemoteSession {
     /// A facade dropped without `disconnect` still releases what only it held,
     /// or the parent would keep those subscriptions (and keep fanning them to
     /// this socket) until the last facade closed it. The releases run on the
@@ -503,7 +549,7 @@ fn map_reply(frame: Frame) -> Result<Frame> {
 }
 
 #[async_trait]
-impl Session for GatewaySession {
+impl Session for RemoteSession {
     async fn connect(&self) -> Result<()> {
         if self.connected.load(Ordering::SeqCst) {
             return Err(Error::AlreadyConnected);
