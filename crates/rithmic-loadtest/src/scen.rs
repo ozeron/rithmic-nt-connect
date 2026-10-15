@@ -7,8 +7,9 @@ use std::time::{Duration, Instant};
 
 use rithmic_gateway::server::publish_plant_event;
 use rithmic_gateway::subscriptions::{FanoutHub, SubKey};
-use rithmic_plants::dto::PlantEvent;
-use rithmic_plants::{PlaceOrder, Session};
+use rithmic_host::dto::PlantEvent;
+use rithmic_host::{PlaceOrder, Session};
+
 use serde::Serialize;
 use tokio::task::JoinHandle;
 
@@ -173,7 +174,7 @@ async fn session_consumer(
                 counter.received.store(rep.received, Ordering::Relaxed);
             }
             Ok(_) => {}
-            Err(rithmic_plants::Error::ChannelLagged { skipped, .. }) => {
+            Err(rithmic_host::Error::ChannelLagged { skipped, .. }) => {
                 rep.gap_events += 1;
                 rep.gap_skipped += skipped;
             }
@@ -576,6 +577,7 @@ pub async fn run_rpc_isolation(slow_secs: f64) -> Report {
 /// publish), with `receivers` attached but not reading.
 pub async fn run_alloc(receivers: usize) -> Report {
     let hub = Arc::new(FanoutHub::new(1024));
+    hub.set_encoder(rithmic_gateway::server::encode_plant_event);
     let key = SubKey {
         symbol: SYMBOL.into(),
         exchange: EXCHANGE.into(),

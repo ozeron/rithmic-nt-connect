@@ -23,6 +23,28 @@ RITHMIC_ENABLE_TRADING=1 \
 uv run pytest tests/e2e/test_exec_client_live.py -v
 ```
 
+For Test plants whose front-month response is empty, select an exact listed
+contract with `RITHMIC_E2E_CONTRACT=NQZ6`; `RITHMIC_E2E_EXCHANGE` defaults to
+`CME`. The data and execution fixtures build it through the production
+reference-data loader. The adapter's instrument ID is `NQZ6-CME.RITHMIC`.
+Set `RITHMIC_HISTORY_READY_PROBE=0` when history is unavailable so the
+connect-time history readiness barrier does not block live ticker/book tests:
+
+```bash
+RITHMIC_TEST_DOTENV=/secure/local/rithmic-test.env \
+RITHMIC_E2E_CONTRACT=NQZ6 RITHMIC_E2E_EXCHANGE=CME \
+RITHMIC_HISTORY_READY_PROBE=0 \
+uv run pytest tests/e2e/test_data_client_live.py \
+  tests/e2e/test_data_internal_bars_live.py tests/e2e/test_reconnect_live.py -v -rs
+```
+
+History-dependent tests share one two-minute 1m replay probe per pytest session
+(five-second replay deadline, up to 45 seconds to connect and load the
+instrument). An unavailable history plant skips those tests with
+`history plant unavailable on this account: <reason>`. Live quotes, trades,
+books, internal-bar raw material, and ticker/book resync still run. Disabling
+the production readiness probe does not disable this test availability probe.
+
 The test file must contain the test credentials and `RITHMIC_SYSTEM_NAME` naming
 a test/demo system, plus `RITHMIC_CONNECT_MODE` (`direct` or `gateway`).
 `RITHMIC_GATEWAY` is required only for `gateway` mode. Keep the file outside
@@ -50,6 +72,8 @@ uv run pytest tests/e2e/test_data_client_live.py -k tc_d40 -v
 The adapter prints a loud WARNING to stderr when the override is active.
 Set it only with MotiveWave / R|Trader closed — same one-login system.
 Unknown system names stay refused. Venue gaps: skipped-spec below.
+
+Book refresh contract (Rithmic Test, NQZ6/CME, 2026-10-15): repeat `subscribe_order_book_summary` is rejected (`[1029] update bit type already exists`); unsubscribe + subscribe resends the snapshot, so `Venue::refresh_book` uses that sequence ([design D8.10](../../openspec/changes/unify-session-host/design.md#d8-gaps-found-in-review-2026-10-15)).
 
 ## Skipped-spec register
 
@@ -170,7 +194,7 @@ RITHMIC_GATEWAY_BIN=$PWD/target/release/rithmic-gateway python -m rithmic_gatewa
 # --- History Ready ≠ plants connected (2026-08-31 MY043 / RC4) ---
 # History plant login can still leave Load* silent until rithmic-rs
 # DEFAULT_REQUEST_TIMEOUT (30s → `request timed out`). The parent now proves a
-# tiny 1m Load* inside `RithmicSession::connect` before advertising Ready /
+# tiny 1m Load* inside `Plants::connect` before advertising Ready /
 # "plants connected (...; history ready)". Production Load* also retries
 # RequestTimeout (transient). Override probe with
 # RITHMIC_HISTORY_READY_SYMBOL / RITHMIC_HISTORY_READY_EXCHANGE (else

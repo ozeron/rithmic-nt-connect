@@ -1,367 +1,67 @@
 //! Venue DTOs converted from rithmic-rs plant messages.
 
 use rithmic_exec::{exchange_ts_ns, venue_ts_ns};
+use rithmic_host::dto::*;
 use rithmic_rs::rti::messages::RithmicMessage;
 use rithmic_rs::RithmicResponse;
 
-/// Events a plant stream dropped because its consumer lagged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GapDto {
-    pub stream: crate::streams::Stream,
-    pub skipped: u64,
-}
-
-/// Dict-friendly plant event for Python consumers (ticker, PnL, orders).
-///
-/// `OrderNotification` is the largest variant (~500 bytes) because a venue
-/// order notification carries many optional scalar fields. Boxing it would
-/// churn every construction/match site for a public DTO with no correctness
-/// benefit, so the size difference is allowed intentionally.
-#[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone, PartialEq)]
-pub enum PlantEvent {
-    /// Last trade update.
-    LastTrade(LastTradeDto),
-    /// Best bid / offer update.
-    Bbo(BboDto),
-    /// Aggregated order-book summary levels.
-    OrderBook(OrderBookDto),
-    /// Account-level PnL update.
-    AccountPnl(AccountPnlDto),
-    /// Instrument-level PnL / position update.
-    InstrumentPnl(InstrumentPnlDto),
-    /// Order plant notification (Rithmic or exchange).
-    OrderNotification(OrderNotificationDto),
-    /// A plant bracket's stop / target levels changed (order plant, template 353).
-    BracketUpdate(BracketUpdateDto),
-    /// Live or replay time bar (history plant).
-    TimeBar(HistoryBarDto),
-    /// A stream dropped events (a lagging consumer); carries the count so the
-    /// consumer can resynchronize instead of continuing as if nothing was lost.
-    Gap(GapDto),
-    /// Catch-all with type name for unhandled templates.
-    Other {
-        /// Discriminator / message variant name.
-        type_name: String,
-        /// Plant source name.
-        source: String,
-    },
-}
-
-/// Plant bracket state for one basket: stop and target distance in ticks and
-/// the quantities resting / released on each leg.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct BracketUpdateDto {
-    pub account_id: Option<String>,
-    pub fcm_id: Option<String>,
-    pub ib_id: Option<String>,
-    pub basket_id: Option<String>,
-    pub stop_ticks: Option<i32>,
-    pub stop_quantity: Option<i32>,
-    pub stop_quantity_released: Option<i32>,
-    pub target_ticks: Option<i32>,
-    pub target_quantity: Option<i32>,
-    pub target_quantity_released: Option<i32>,
-}
-
-/// Product-level RMS (Risk Management System) info — commission fill rate per
-/// product code, as published by the order plant. Read-only venue config.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ProductRmsInfoDto {
-    /// Product code (e.g. `"MNQ"`, `"ES"`).
-    pub product_code: Option<String>,
-    /// Per-contract commission fill rate in the account currency.
-    pub commission_fill_rate: Option<f64>,
-    /// Field-presence bitmask from the venue (see `ResponseProductRmsInfo`).
-    pub presence_bits: Option<u32>,
-}
-
-/// Account-level RMS info — default commission rate (fallback when a product
-/// has no specific fill rate). Read-only venue config.
-#[derive(Debug, Clone, PartialEq)]
-pub struct AccountRmsInfoDto {
-    pub account_id: Option<String>,
-    /// Default per-contract commission rate in the account currency.
-    pub default_commission: Option<f64>,
-    /// Field-presence bitmask from the venue (see `ResponseAccountRmsInfo`).
-    pub presence_bits: Option<u32>,
-}
-
-impl ProductRmsInfoDto {
-    pub(crate) fn from_response(resp: &RithmicResponse) -> Option<Self> {
-        match &resp.message {
-            RithmicMessage::ResponseProductRmsInfo(m) => Some(Self {
-                product_code: m.product_code.clone(),
-                commission_fill_rate: m.commission_fill_rate,
-                presence_bits: m.presence_bits,
-            }),
-            _ => None,
-        }
+pub(crate) fn product_rms_info_from_response(resp: &RithmicResponse) -> Option<ProductRmsInfoDto> {
+    match &resp.message {
+        RithmicMessage::ResponseProductRmsInfo(m) => Some(ProductRmsInfoDto {
+            product_code: m.product_code.clone(),
+            commission_fill_rate: m.commission_fill_rate,
+            presence_bits: m.presence_bits,
+        }),
+        _ => None,
     }
 }
 
-impl AccountRmsInfoDto {
-    pub(crate) fn from_response(resp: &RithmicResponse) -> Option<Self> {
-        match &resp.message {
-            RithmicMessage::ResponseAccountRmsInfo(m) => Some(Self {
-                account_id: m.account_id.clone(),
-                default_commission: m.default_commission,
-                presence_bits: m.presence_bits,
-            }),
-            _ => None,
-        }
-    }
-}
-
-/// One historical fill from the order plant (`RequestShowFillHistory`). Read-only.
-#[derive(Debug, Clone, PartialEq)]
-pub struct FillHistoryDto {
-    pub account_id: Option<String>,
-    pub basket_id: Option<String>,
-    pub symbol: Option<String>,
-    pub exchange: Option<String>,
-    /// `BUY` / `SELL`.
-    pub transaction_type: Option<String>,
-    pub price_type: Option<String>,
-    pub duration: Option<String>,
-    /// `MANUAL` / `AUTO` — who entered the order.
-    pub manual_or_auto: Option<String>,
-    pub fill_id: Option<String>,
-    pub fill_date: Option<String>,
-    pub fill_time: Option<String>,
-    pub fill_price: Option<f64>,
-    pub fill_size: Option<u64>,
-    pub price: Option<f64>,
-    pub trigger_price: Option<f64>,
-    pub ssboe: Option<i32>,
-    pub usecs: Option<i32>,
-}
-
-impl FillHistoryDto {
-    pub(crate) fn from_response(resp: &RithmicResponse) -> Option<Self> {
-        match &resp.message {
-            RithmicMessage::ResponseShowFillHistory(m) => Self::from_message(m),
-            _ => None,
-        }
-    }
-
-    /// The terminal response carries only rp_code; rows without a fill id are skipped.
-    fn from_message(m: &rithmic_rs::rti::ResponseShowFillHistory) -> Option<Self> {
-        m.fill_id.as_ref()?;
-        Some(Self {
+pub(crate) fn account_rms_info_from_response(resp: &RithmicResponse) -> Option<AccountRmsInfoDto> {
+    match &resp.message {
+        RithmicMessage::ResponseAccountRmsInfo(m) => Some(AccountRmsInfoDto {
             account_id: m.account_id.clone(),
-            basket_id: m.basket_id.clone(),
-            symbol: m.symbol.clone(),
-            exchange: m.exchange.clone(),
-            transaction_type: m.transaction_type.clone(),
-            price_type: m.price_type.clone(),
-            duration: m.duration.clone(),
-            manual_or_auto: m.manual_or_auto.clone(),
-            fill_id: m.fill_id.clone(),
-            fill_date: m.fill_date.clone(),
-            fill_time: m.fill_time.clone(),
-            fill_price: m.fill_price,
-            fill_size: m.fill_size,
-            price: m.price,
-            trigger_price: m.trigger_price,
-            ssboe: m.ssboe,
-            usecs: m.usecs,
-        })
+            default_commission: m.default_commission,
+            presence_bits: m.presence_bits,
+        }),
+        _ => None,
     }
 }
 
-/// Order notification fields from Rithmic or exchange plants.
-#[derive(Debug, Clone, PartialEq)]
-pub struct OrderNotificationDto {
-    /// `"rithmic"` or `"exchange"`.
-    pub source: String,
-    /// Canonical action kind (`accepted`, `filled`, …) classified at the DTO boundary.
-    pub kind: Option<String>,
-    pub notify_type: Option<i32>,
-    pub notify_type_name: Option<String>,
-    pub status: Option<String>,
-    pub basket_id: Option<String>,
-    pub exchange_order_id: Option<String>,
-    pub user_tag: Option<String>,
-    pub account_id: Option<String>,
-    pub symbol: Option<String>,
-    pub exchange: Option<String>,
-    pub quantity: Option<i32>,
-    pub total_fill_size: Option<i32>,
-    pub total_unfilled_size: Option<i32>,
-    pub fill_size: Option<i32>,
-    pub price: Option<f64>,
-    pub trigger_price: Option<f64>,
-    pub avg_fill_price: Option<f64>,
-    pub fill_price: Option<f64>,
-    pub transaction_type: Option<i32>,
-    pub price_type: Option<i32>,
-    pub duration: Option<i32>,
-    pub fill_id: Option<String>,
-    pub text: Option<String>,
-    pub report_text: Option<String>,
-    pub completion_reason: Option<String>,
-    pub ssboe: Option<i32>,
-    pub usecs: Option<i32>,
-    pub ts_event_ns: Option<u64>,
-    pub is_snapshot: Option<bool>,
+pub(crate) fn fill_history_from_response(resp: &RithmicResponse) -> Option<FillHistoryDto> {
+    match &resp.message {
+        RithmicMessage::ResponseShowFillHistory(m) => fill_history_from_message(m),
+        _ => None,
+    }
 }
 
-/// LastTrade fields needed by Python converters.
-#[derive(Debug, Clone, PartialEq)]
-pub struct LastTradeDto {
-    pub symbol: Option<String>,
-    pub exchange: Option<String>,
-    pub trade_price: Option<f64>,
-    pub trade_size: Option<i32>,
-    pub aggressor: Option<i32>,
-    pub ssboe: Option<i32>,
-    pub usecs: Option<i32>,
-    pub ts_event_ns: Option<u64>,
-    pub is_snapshot: Option<bool>,
-}
-
-/// BestBidOffer fields.
-#[derive(Debug, Clone, PartialEq)]
-pub struct BboDto {
-    pub symbol: Option<String>,
-    pub exchange: Option<String>,
-    pub bid_price: Option<f64>,
-    pub bid_size: Option<i32>,
-    pub ask_price: Option<f64>,
-    pub ask_size: Option<i32>,
-    pub ssboe: Option<i32>,
-    pub usecs: Option<i32>,
-    pub ts_event_ns: Option<u64>,
-    pub is_snapshot: Option<bool>,
-}
-
-/// Account PnL snapshot / update fields.
-#[derive(Debug, Clone, PartialEq)]
-pub struct AccountPnlDto {
-    pub account_id: Option<String>,
-    pub fcm_id: Option<String>,
-    pub ib_id: Option<String>,
-    pub account_balance: Option<String>,
-    pub cash_on_hand: Option<String>,
-    pub margin_balance: Option<String>,
-    pub day_pnl: Option<String>,
-    pub open_position_pnl: Option<String>,
-    pub closed_position_pnl: Option<String>,
-    pub available_buying_power: Option<String>,
-    pub used_buying_power: Option<String>,
-    pub is_snapshot: Option<bool>,
-    pub ssboe: Option<i32>,
-    pub usecs: Option<i32>,
-}
-
-/// Instrument PnL / position snapshot fields.
-#[derive(Debug, Clone, PartialEq)]
-pub struct InstrumentPnlDto {
-    pub account_id: Option<String>,
-    pub symbol: Option<String>,
-    pub exchange: Option<String>,
-    pub product_code: Option<String>,
-    pub instrument_type: Option<String>,
-    pub open_position_pnl: Option<String>,
-    pub closed_position_pnl: Option<String>,
-    pub mtm_security: Option<String>,
-    pub open_position_quantity: Option<i32>,
-    pub closed_position_quantity: Option<i32>,
-    pub net_quantity: Option<i32>,
-    pub avg_open_fill_price: Option<f64>,
-    pub is_snapshot: Option<bool>,
-    pub ssboe: Option<i32>,
-    pub usecs: Option<i32>,
-}
-
-/// Aggregated order-book summary (bid/ask level arrays).
-#[derive(Debug, Clone, PartialEq)]
-pub struct OrderBookDto {
-    pub symbol: Option<String>,
-    pub exchange: Option<String>,
-    pub update_type: Option<i32>,
-    pub bid_price: Vec<f64>,
-    pub bid_size: Vec<i32>,
-    pub ask_price: Vec<f64>,
-    pub ask_size: Vec<i32>,
-    pub ssboe: Option<i32>,
-    pub usecs: Option<i32>,
-    pub ts_event_ns: Option<u64>,
-}
-
-/// Reference-data fields used to build Nautilus instruments.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ReferenceDataDto {
-    pub symbol: Option<String>,
-    pub exchange: Option<String>,
-    pub trading_symbol: Option<String>,
-    pub trading_exchange: Option<String>,
-    pub symbol_name: Option<String>,
-    pub product_code: Option<String>,
-    pub instrument_type: Option<String>,
-    pub underlying: Option<String>,
-    pub currency: Option<String>,
-    pub expiration_date: Option<String>,
-    pub tick_size: Option<f64>,
-    pub point_value: Option<f64>,
-    pub price_precision: u8,
-    pub is_tradable: bool,
-}
-
-/// Front-month resolution result.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FrontMonthDto {
-    pub symbol: Option<String>,
-    pub exchange: Option<String>,
-    pub trading_symbol: Option<String>,
-    pub trading_exchange: Option<String>,
-    pub symbol_name: Option<String>,
-    pub is_front_month_symbol: Option<bool>,
-}
-
-/// Historical tick / bar row (tick-bar replay with bar_length=1).
-#[derive(Debug, Clone, PartialEq)]
-pub struct HistoryTickDto {
-    pub symbol: Option<String>,
-    pub exchange: Option<String>,
-    pub open_price: Option<f64>,
-    pub high_price: Option<f64>,
-    pub low_price: Option<f64>,
-    pub close_price: Option<f64>,
-    pub volume: Option<u64>,
-    pub num_trades: Option<u64>,
-    pub ssboe: Option<i32>,
-    pub usecs: Option<i32>,
-    pub ts_event_ns: Option<u64>,
-}
-
-/// One raw history-plant time-bar replay message (including rows we drop).
-#[derive(Debug, Clone, PartialEq)]
-pub struct TimeBarProbeRow {
-    pub variant: String,
-    pub source: String,
-    pub error: Option<String>,
-    pub rp_code: Vec<String>,
-    pub parsed: bool,
-    pub skip_reason: Option<String>,
-    pub symbol: Option<String>,
-    pub exchange: Option<String>,
-    pub bar_type: Option<i32>,
-    pub period: Option<String>,
-    pub marker: Option<i32>,
-    pub open_price: Option<f64>,
-    pub high_price: Option<f64>,
-    pub low_price: Option<f64>,
-    pub close_price: Option<f64>,
-    pub settlement_price: Option<f64>,
-    pub has_settlement_price: Option<bool>,
-    pub volume: Option<u64>,
-    pub num_trades: Option<u64>,
+/// The terminal response carries only rp_code; rows without a fill id are skipped.
+fn fill_history_from_message(
+    m: &rithmic_rs::rti::ResponseShowFillHistory,
+) -> Option<FillHistoryDto> {
+    m.fill_id.as_ref()?;
+    Some(FillHistoryDto {
+        account_id: m.account_id.clone(),
+        basket_id: m.basket_id.clone(),
+        symbol: m.symbol.clone(),
+        exchange: m.exchange.clone(),
+        transaction_type: m.transaction_type.clone(),
+        price_type: m.price_type.clone(),
+        duration: m.duration.clone(),
+        manual_or_auto: m.manual_or_auto.clone(),
+        fill_id: m.fill_id.clone(),
+        fill_date: m.fill_date.clone(),
+        fill_time: m.fill_time.clone(),
+        fill_price: m.fill_price,
+        fill_size: m.fill_size,
+        price: m.price,
+        trigger_price: m.trigger_price,
+        ssboe: m.ssboe,
+        usecs: m.usecs,
+    })
 }
 
 /// Why the bar parser drops this row, or `None` when it keeps it. The verdict is
-/// the parser's own ([`HistoryBarDto::from_response`]), so a probe row reads
+/// the parser's own ([`history_bar_from_response`]), so a probe row reads
 /// `parsed` exactly when the load would return the bar; the reason names the
 /// first missing piece.
 fn probe_skip_reason(
@@ -370,7 +70,7 @@ fn probe_skip_reason(
     marker: Option<i32>,
     open_high_low: [Option<f64>; 3],
 ) -> Option<String> {
-    if HistoryBarDto::from_response(resp).is_some() {
+    if history_bar_from_response(resp).is_some() {
         return None;
     }
     Some(
@@ -387,121 +87,97 @@ fn probe_skip_reason(
     )
 }
 
-impl TimeBarProbeRow {
-    pub(crate) fn from_response(resp: &RithmicResponse) -> Self {
-        let rp_code = resp
-            .rp_code()
-            .map(|codes| codes.to_vec())
-            .unwrap_or_default();
-        let error = resp.error.as_ref().map(ToString::to_string);
-        match &resp.message {
-            RithmicMessage::ResponseTimeBarReplay(m) => {
-                let skip_reason = probe_skip_reason(
-                    resp,
-                    m.close_price.or(m.settlement_price),
-                    m.marker,
-                    [m.open_price, m.high_price, m.low_price],
-                );
-                Self {
-                    variant: "ResponseTimeBarReplay".into(),
-                    source: resp.source.clone(),
-                    error,
-                    rp_code,
-                    parsed: skip_reason.is_none(),
-                    skip_reason,
-                    symbol: m.symbol.clone(),
-                    exchange: m.exchange.clone(),
-                    bar_type: m.r#type,
-                    period: m.period.clone(),
-                    marker: m.marker,
-                    open_price: m.open_price,
-                    high_price: m.high_price,
-                    low_price: m.low_price,
-                    close_price: m.close_price,
-                    settlement_price: m.settlement_price,
-                    has_settlement_price: m.has_settlement_price,
-                    volume: m.volume,
-                    num_trades: m.num_trades,
-                }
-            }
-            RithmicMessage::TimeBar(m) => {
-                let skip_reason = probe_skip_reason(
-                    resp,
-                    m.close_price,
-                    m.marker,
-                    [m.open_price, m.high_price, m.low_price],
-                );
-                Self {
-                    variant: "TimeBar".into(),
-                    source: resp.source.clone(),
-                    error,
-                    rp_code,
-                    parsed: skip_reason.is_none(),
-                    skip_reason,
-                    symbol: m.symbol.clone(),
-                    exchange: m.exchange.clone(),
-                    bar_type: m.r#type,
-                    period: m.period.clone(),
-                    marker: m.marker,
-                    open_price: m.open_price,
-                    high_price: m.high_price,
-                    low_price: m.low_price,
-                    close_price: m.close_price,
-                    settlement_price: None,
-                    has_settlement_price: None,
-                    volume: m.volume,
-                    num_trades: m.num_trades,
-                }
-            }
-            other => Self {
-                variant: format!("{other:?}")
-                    .split('(')
-                    .next()
-                    .unwrap_or("Unknown")
-                    .to_string(),
+pub(crate) fn time_bar_probe_from_response(resp: &RithmicResponse) -> TimeBarProbeRow {
+    let rp_code = resp
+        .rp_code()
+        .map(|codes| codes.to_vec())
+        .unwrap_or_default();
+    let error = resp.error.as_ref().map(ToString::to_string);
+    match &resp.message {
+        RithmicMessage::ResponseTimeBarReplay(m) => {
+            let skip_reason = probe_skip_reason(
+                resp,
+                m.close_price.or(m.settlement_price),
+                m.marker,
+                [m.open_price, m.high_price, m.low_price],
+            );
+            TimeBarProbeRow {
+                variant: "ResponseTimeBarReplay".into(),
                 source: resp.source.clone(),
                 error,
                 rp_code,
-                parsed: false,
-                skip_reason: Some("unhandled variant".into()),
-                symbol: None,
-                exchange: None,
-                bar_type: None,
-                period: None,
-                marker: None,
-                open_price: None,
-                high_price: None,
-                low_price: None,
-                close_price: None,
+                parsed: skip_reason.is_none(),
+                skip_reason,
+                symbol: m.symbol.clone(),
+                exchange: m.exchange.clone(),
+                bar_type: m.r#type,
+                period: m.period.clone(),
+                marker: m.marker,
+                open_price: m.open_price,
+                high_price: m.high_price,
+                low_price: m.low_price,
+                close_price: m.close_price,
+                settlement_price: m.settlement_price,
+                has_settlement_price: m.has_settlement_price,
+                volume: m.volume,
+                num_trades: m.num_trades,
+            }
+        }
+        RithmicMessage::TimeBar(m) => {
+            let skip_reason = probe_skip_reason(
+                resp,
+                m.close_price,
+                m.marker,
+                [m.open_price, m.high_price, m.low_price],
+            );
+            TimeBarProbeRow {
+                variant: "TimeBar".into(),
+                source: resp.source.clone(),
+                error,
+                rp_code,
+                parsed: skip_reason.is_none(),
+                skip_reason,
+                symbol: m.symbol.clone(),
+                exchange: m.exchange.clone(),
+                bar_type: m.r#type,
+                period: m.period.clone(),
+                marker: m.marker,
+                open_price: m.open_price,
+                high_price: m.high_price,
+                low_price: m.low_price,
+                close_price: m.close_price,
                 settlement_price: None,
                 has_settlement_price: None,
-                volume: None,
-                num_trades: None,
-            },
+                volume: m.volume,
+                num_trades: m.num_trades,
+            }
         }
+        other => TimeBarProbeRow {
+            variant: format!("{other:?}")
+                .split('(')
+                .next()
+                .unwrap_or("Unknown")
+                .to_string(),
+            source: resp.source.clone(),
+            error,
+            rp_code,
+            parsed: false,
+            skip_reason: Some("unhandled variant".into()),
+            symbol: None,
+            exchange: None,
+            bar_type: None,
+            period: None,
+            marker: None,
+            open_price: None,
+            high_price: None,
+            low_price: None,
+            close_price: None,
+            settlement_price: None,
+            has_settlement_price: None,
+            volume: None,
+            num_trades: None,
+        },
     }
-}
-
-/// Historical / replay time bar (OHLCV).
-#[derive(Debug, Clone, PartialEq)]
-pub struct HistoryBarDto {
-    pub symbol: Option<String>,
-    pub exchange: Option<String>,
-    /// Rithmic bar type enum value (1=second, 2=minute, 3=daily, 4=weekly).
-    pub bar_type: Option<i32>,
-    /// Period string from the plant (often the period count).
-    pub period: Option<String>,
-    /// Bar close marker in Unix seconds.
-    pub marker: Option<i32>,
-    pub open_price: Option<f64>,
-    pub high_price: Option<f64>,
-    pub low_price: Option<f64>,
-    pub close_price: Option<f64>,
-    pub volume: Option<u64>,
-    pub num_trades: Option<u64>,
-    pub bid_volume: Option<u64>,
-    pub ask_volume: Option<u64>,
-    pub ts_event_ns: Option<u64>,
 }
 
 fn ts_ns(ssboe: Option<i32>, usecs: Option<i32>) -> Option<u64> {
@@ -565,319 +241,309 @@ macro_rules! order_notification {
     }};
 }
 
-impl From<&RithmicResponse> for PlantEvent {
-    fn from(resp: &RithmicResponse) -> Self {
-        match &resp.message {
-            RithmicMessage::LastTrade(t) => Self::LastTrade(LastTradeDto {
-                symbol: t.symbol.clone(),
-                exchange: t.exchange.clone(),
-                trade_price: t.trade_price,
-                trade_size: t.trade_size,
-                aggressor: t.aggressor,
-                ssboe: t.ssboe,
-                usecs: t.usecs,
-                // The exchange's own trade time when sent; Rithmic's otherwise.
-                ts_event_ns: exchange_ts_ns(t.source_ssboe, t.source_usecs, t.source_nsecs)
-                    .or_else(|| ts_ns(t.ssboe, t.usecs)),
-                is_snapshot: t.is_snapshot,
-            }),
-            RithmicMessage::BestBidOffer(b) => Self::Bbo(BboDto {
-                symbol: b.symbol.clone(),
-                exchange: b.exchange.clone(),
-                bid_price: b.bid_price,
-                bid_size: b.bid_size,
-                ask_price: b.ask_price,
-                ask_size: b.ask_size,
-                ssboe: b.ssboe,
-                usecs: b.usecs,
-                ts_event_ns: ts_ns(b.ssboe, b.usecs),
-                is_snapshot: b.is_snapshot,
-            }),
-            RithmicMessage::OrderBook(o) => Self::OrderBook(OrderBookDto {
-                symbol: o.symbol.clone(),
-                exchange: o.exchange.clone(),
-                update_type: o.update_type,
-                bid_price: o.bid_price.clone(),
-                bid_size: o.bid_size.clone(),
-                ask_price: o.ask_price.clone(),
-                ask_size: o.ask_size.clone(),
-                ssboe: o.ssboe,
-                usecs: o.usecs,
-                ts_event_ns: ts_ns(o.ssboe, o.usecs),
-            }),
-            RithmicMessage::AccountPnLPositionUpdate(a) => Self::AccountPnl(AccountPnlDto {
-                account_id: a.account_id.clone(),
-                fcm_id: a.fcm_id.clone(),
-                ib_id: a.ib_id.clone(),
-                account_balance: a.account_balance.clone(),
-                cash_on_hand: a.cash_on_hand.clone(),
-                margin_balance: a.margin_balance.clone(),
-                day_pnl: a.day_pnl.clone(),
-                open_position_pnl: a.open_position_pnl.clone(),
-                closed_position_pnl: a.closed_position_pnl.clone(),
-                available_buying_power: a.available_buying_power.clone(),
-                used_buying_power: a.used_buying_power.clone(),
-                is_snapshot: a.is_snapshot,
-                ssboe: a.ssboe,
-                usecs: a.usecs,
-            }),
-            RithmicMessage::InstrumentPnLPositionUpdate(i) => {
-                Self::InstrumentPnl(InstrumentPnlDto {
-                    account_id: i.account_id.clone(),
-                    symbol: i.symbol.clone(),
-                    exchange: i.exchange.clone(),
-                    product_code: i.product_code.clone(),
-                    instrument_type: i.instrument_type.clone(),
-                    open_position_pnl: i.open_position_pnl.clone(),
-                    closed_position_pnl: i.closed_position_pnl.clone(),
-                    mtm_security: i.mtm_security.clone(),
-                    open_position_quantity: i.open_position_quantity,
-                    closed_position_quantity: i.closed_position_quantity,
-                    net_quantity: i.net_quantity,
-                    avg_open_fill_price: i.avg_open_fill_price,
-                    is_snapshot: i.is_snapshot,
-                    ssboe: i.ssboe,
-                    usecs: i.usecs,
-                })
-            }
-            RithmicMessage::RithmicOrderNotification(n) => order_notification!(
-                n,
-                "rithmic",
-                rithmic_order_notification,
-                // Rithmic-side status: no fill fields; completion reason is its own.
-                fill_size: None,
-                fill_price: None,
-                fill_id: None,
-                completion_reason: n.completion_reason.clone(),
-            ),
-            RithmicMessage::ExchangeOrderNotification(n) => order_notification!(
-                n,
-                "exchange",
-                exchange_order_notification,
-                fill_size: n.fill_size,
-                fill_price: n.fill_price,
-                fill_id: n.fill_id.clone(),
-                completion_reason: None,
-            ),
-            RithmicMessage::BracketUpdates(b) => Self::BracketUpdate(BracketUpdateDto {
-                account_id: b.account_id.clone(),
-                fcm_id: b.fcm_id.clone(),
-                ib_id: b.ib_id.clone(),
-                basket_id: b.basket_id.clone(),
-                stop_ticks: b.stop_ticks,
-                stop_quantity: b.stop_quantity,
-                stop_quantity_released: b.stop_quantity_released,
-                target_ticks: b.target_ticks,
-                target_quantity: b.target_quantity,
-                target_quantity_released: b.target_quantity_released,
-            }),
-            RithmicMessage::TimeBar(_) => match HistoryBarDto::from_response(resp) {
-                Some(bar) => Self::TimeBar(bar),
-                None => Self::Other {
-                    type_name: "TimeBar".into(),
-                    source: resp.source.clone(),
-                },
-            },
-            other => Self::Other {
-                type_name: format!("{other:?}")
-                    .split('(')
-                    .next()
-                    .unwrap_or("Unknown")
-                    .to_string(),
+pub(crate) fn plant_event(resp: &RithmicResponse) -> PlantEvent {
+    match &resp.message {
+        RithmicMessage::LastTrade(t) => PlantEvent::LastTrade(LastTradeDto {
+            symbol: t.symbol.clone(),
+            exchange: t.exchange.clone(),
+            trade_price: t.trade_price,
+            trade_size: t.trade_size,
+            aggressor: t.aggressor,
+            ssboe: t.ssboe,
+            usecs: t.usecs,
+            // The exchange's own trade time when sent; Rithmic's otherwise.
+            ts_event_ns: exchange_ts_ns(t.source_ssboe, t.source_usecs, t.source_nsecs)
+                .or_else(|| ts_ns(t.ssboe, t.usecs)),
+            is_snapshot: t.is_snapshot,
+        }),
+        RithmicMessage::BestBidOffer(b) => PlantEvent::Bbo(BboDto {
+            symbol: b.symbol.clone(),
+            exchange: b.exchange.clone(),
+            bid_price: b.bid_price,
+            bid_size: b.bid_size,
+            ask_price: b.ask_price,
+            ask_size: b.ask_size,
+            ssboe: b.ssboe,
+            usecs: b.usecs,
+            ts_event_ns: ts_ns(b.ssboe, b.usecs),
+            is_snapshot: b.is_snapshot,
+        }),
+        RithmicMessage::OrderBook(o) => PlantEvent::OrderBook(OrderBookDto {
+            symbol: o.symbol.clone(),
+            exchange: o.exchange.clone(),
+            update_type: o.update_type,
+            bid_price: o.bid_price.clone(),
+            bid_size: o.bid_size.clone(),
+            ask_price: o.ask_price.clone(),
+            ask_size: o.ask_size.clone(),
+            ssboe: o.ssboe,
+            usecs: o.usecs,
+            ts_event_ns: ts_ns(o.ssboe, o.usecs),
+        }),
+        RithmicMessage::AccountPnLPositionUpdate(a) => PlantEvent::AccountPnl(AccountPnlDto {
+            account_id: a.account_id.clone(),
+            fcm_id: a.fcm_id.clone(),
+            ib_id: a.ib_id.clone(),
+            account_balance: a.account_balance.clone(),
+            cash_on_hand: a.cash_on_hand.clone(),
+            margin_balance: a.margin_balance.clone(),
+            day_pnl: a.day_pnl.clone(),
+            open_position_pnl: a.open_position_pnl.clone(),
+            closed_position_pnl: a.closed_position_pnl.clone(),
+            available_buying_power: a.available_buying_power.clone(),
+            used_buying_power: a.used_buying_power.clone(),
+            is_snapshot: a.is_snapshot,
+            ssboe: a.ssboe,
+            usecs: a.usecs,
+        }),
+        RithmicMessage::InstrumentPnLPositionUpdate(i) => {
+            PlantEvent::InstrumentPnl(InstrumentPnlDto {
+                account_id: i.account_id.clone(),
+                symbol: i.symbol.clone(),
+                exchange: i.exchange.clone(),
+                product_code: i.product_code.clone(),
+                instrument_type: i.instrument_type.clone(),
+                open_position_pnl: i.open_position_pnl.clone(),
+                closed_position_pnl: i.closed_position_pnl.clone(),
+                mtm_security: i.mtm_security.clone(),
+                open_position_quantity: i.open_position_quantity,
+                closed_position_quantity: i.closed_position_quantity,
+                net_quantity: i.net_quantity,
+                avg_open_fill_price: i.avg_open_fill_price,
+                is_snapshot: i.is_snapshot,
+                ssboe: i.ssboe,
+                usecs: i.usecs,
+            })
+        }
+        RithmicMessage::RithmicOrderNotification(n) => order_notification!(
+            n,
+            "rithmic",
+            rithmic_order_notification,
+            // Rithmic-side status: no fill fields; completion reason is its own.
+            fill_size: None,
+            fill_price: None,
+            fill_id: None,
+            completion_reason: n.completion_reason.clone(),
+        ),
+        RithmicMessage::ExchangeOrderNotification(n) => order_notification!(
+            n,
+            "exchange",
+            exchange_order_notification,
+            fill_size: n.fill_size,
+            fill_price: n.fill_price,
+            fill_id: n.fill_id.clone(),
+            completion_reason: None,
+        ),
+        RithmicMessage::BracketUpdates(b) => PlantEvent::BracketUpdate(BracketUpdateDto {
+            account_id: b.account_id.clone(),
+            fcm_id: b.fcm_id.clone(),
+            ib_id: b.ib_id.clone(),
+            basket_id: b.basket_id.clone(),
+            stop_ticks: b.stop_ticks,
+            stop_quantity: b.stop_quantity,
+            stop_quantity_released: b.stop_quantity_released,
+            target_ticks: b.target_ticks,
+            target_quantity: b.target_quantity,
+            target_quantity_released: b.target_quantity_released,
+        }),
+        RithmicMessage::TimeBar(_) => match history_bar_from_response(resp) {
+            Some(bar) => PlantEvent::TimeBar(bar),
+            None => PlantEvent::Other {
+                type_name: "TimeBar".into(),
                 source: resp.source.clone(),
             },
-        }
+        },
+        other => PlantEvent::Other {
+            type_name: format!("{other:?}")
+                .split('(')
+                .next()
+                .unwrap_or("Unknown")
+                .to_string(),
+            source: resp.source.clone(),
+        },
     }
 }
 
-impl ReferenceDataDto {
-    pub(crate) fn from_response(resp: &RithmicResponse) -> Option<Self> {
-        use rithmic_rs::InstrumentInfo;
-        match &resp.message {
-            RithmicMessage::ResponseReferenceData(data) => {
-                let info = InstrumentInfo::try_from(data).ok()?;
-                let price_precision = info.price_precision();
-                Some(Self {
-                    symbol: Some(info.symbol),
-                    exchange: Some(info.exchange),
-                    trading_symbol: data.trading_symbol.clone(),
-                    trading_exchange: data.trading_exchange.clone(),
-                    symbol_name: info.name,
-                    product_code: info.product_code,
-                    instrument_type: info.instrument_type,
-                    underlying: info.underlying,
-                    currency: info.currency,
-                    expiration_date: info.expiration_date,
-                    tick_size: info.tick_size,
-                    point_value: info.point_value,
-                    price_precision,
-                    is_tradable: info.is_tradable,
-                })
-            }
-            _ => None,
+pub(crate) fn reference_data_from_response(resp: &RithmicResponse) -> Option<ReferenceDataDto> {
+    use rithmic_rs::InstrumentInfo;
+    match &resp.message {
+        RithmicMessage::ResponseReferenceData(data) => {
+            let info = InstrumentInfo::try_from(data).ok()?;
+            let price_precision = info.price_precision();
+            Some(ReferenceDataDto {
+                symbol: Some(info.symbol),
+                exchange: Some(info.exchange),
+                trading_symbol: data.trading_symbol.clone(),
+                trading_exchange: data.trading_exchange.clone(),
+                symbol_name: info.name,
+                product_code: info.product_code,
+                instrument_type: info.instrument_type,
+                underlying: info.underlying,
+                currency: info.currency,
+                expiration_date: info.expiration_date,
+                tick_size: info.tick_size,
+                point_value: info.point_value,
+                price_precision,
+                is_tradable: info.is_tradable,
+            })
         }
+        _ => None,
     }
 }
 
-impl FrontMonthDto {
-    pub(crate) fn from_response(resp: &RithmicResponse) -> Option<Self> {
-        match &resp.message {
-            RithmicMessage::ResponseFrontMonthContract(m) => Some(Self {
+pub(crate) fn front_month_from_response(resp: &RithmicResponse) -> Option<FrontMonthDto> {
+    match &resp.message {
+        RithmicMessage::ResponseFrontMonthContract(m) => Some(FrontMonthDto {
+            symbol: m.symbol.clone(),
+            exchange: m.exchange.clone(),
+            trading_symbol: m.trading_symbol.clone(),
+            trading_exchange: m.trading_exchange.clone(),
+            symbol_name: m.symbol_name.clone(),
+            is_front_month_symbol: m.is_front_month_symbol,
+        }),
+        RithmicMessage::FrontMonthContractUpdate(m) => Some(FrontMonthDto {
+            symbol: m.symbol.clone(),
+            exchange: m.exchange.clone(),
+            trading_symbol: m.trading_symbol.clone(),
+            trading_exchange: m.trading_exchange.clone(),
+            symbol_name: m.symbol_name.clone(),
+            is_front_month_symbol: m.is_front_month_symbol,
+        }),
+        _ => None,
+    }
+}
+
+pub(crate) fn history_tick_from_response(resp: &RithmicResponse) -> Option<HistoryTickDto> {
+    match &resp.message {
+        RithmicMessage::ResponseTickBarReplay(m) => {
+            // Incomplete tick bars are dropped (no invented OHLC / size).
+            // Prefer close time (index 1): rithmic-rs docs note the first
+            // record's open can be the request window start, not trade time.
+            let close_price = m.close_price?;
+            let num_trades = m.num_trades.filter(|n| *n > 0)?;
+            let ssboe = match m.data_bar_ssboe.as_slice() {
+                [_, close, ..] => *close,
+                [only] => *only,
+                [] => return None,
+            };
+            let usecs = match m.data_bar_usecs.as_slice() {
+                [_, close, ..] => Some(*close),
+                [only] => Some(*only),
+                [] => None,
+            };
+            Some(HistoryTickDto {
                 symbol: m.symbol.clone(),
                 exchange: m.exchange.clone(),
-                trading_symbol: m.trading_symbol.clone(),
-                trading_exchange: m.trading_exchange.clone(),
-                symbol_name: m.symbol_name.clone(),
-                is_front_month_symbol: m.is_front_month_symbol,
-            }),
-            RithmicMessage::FrontMonthContractUpdate(m) => Some(Self {
-                symbol: m.symbol.clone(),
-                exchange: m.exchange.clone(),
-                trading_symbol: m.trading_symbol.clone(),
-                trading_exchange: m.trading_exchange.clone(),
-                symbol_name: m.symbol_name.clone(),
-                is_front_month_symbol: m.is_front_month_symbol,
-            }),
-            _ => None,
+                open_price: m.open_price,
+                high_price: m.high_price,
+                low_price: m.low_price,
+                close_price: Some(close_price),
+                volume: m.volume,
+                num_trades: Some(num_trades),
+                ssboe: Some(ssboe),
+                usecs,
+                ts_event_ns: ts_ns(Some(ssboe), usecs),
+            })
         }
+        _ => None,
     }
 }
 
-impl HistoryTickDto {
-    pub(crate) fn from_response(resp: &RithmicResponse) -> Option<Self> {
-        match &resp.message {
-            RithmicMessage::ResponseTickBarReplay(m) => {
-                // Incomplete tick bars are dropped (no invented OHLC / size).
-                // Prefer close time (index 1): rithmic-rs docs note the first
-                // record's open can be the request window start, not trade time.
-                let close_price = m.close_price?;
-                let num_trades = m.num_trades.filter(|n| *n > 0)?;
-                let ssboe = match m.data_bar_ssboe.as_slice() {
-                    [_, close, ..] => *close,
-                    [only] => *only,
-                    [] => return None,
-                };
-                let usecs = match m.data_bar_usecs.as_slice() {
-                    [_, close, ..] => Some(*close),
-                    [only] => Some(*only),
-                    [] => None,
-                };
-                Some(Self {
-                    symbol: m.symbol.clone(),
-                    exchange: m.exchange.clone(),
-                    open_price: m.open_price,
-                    high_price: m.high_price,
-                    low_price: m.low_price,
-                    close_price: Some(close_price),
-                    volume: m.volume,
-                    num_trades: Some(num_trades),
-                    ssboe: Some(ssboe),
-                    usecs,
-                    ts_event_ns: ts_ns(Some(ssboe), usecs),
-                })
-            }
-            _ => None,
-        }
-    }
+/// Build a bar only when OHLC are present. Missing open/high/low are dropped
+/// (never filled from close). Missing volume is allowed only for settlement
+/// replay rows (`allow_missing_volume`); otherwise the row is dropped.
+// Flat field mapping from a venue bar record: every arg is a distinct scalar
+// field, so a struct wrapper would only relocate the same arity. Allowed.
+#[allow(clippy::too_many_arguments)]
+fn history_bar_from_ohlcv(
+    symbol: Option<String>,
+    exchange: Option<String>,
+    bar_type: Option<i32>,
+    period: Option<String>,
+    marker: i32,
+    close_price: f64,
+    open_price: Option<f64>,
+    high_price: Option<f64>,
+    low_price: Option<f64>,
+    volume: Option<u64>,
+    num_trades: Option<u64>,
+    bid_volume: Option<u64>,
+    ask_volume: Option<u64>,
+    allow_missing_volume: bool,
+) -> Option<HistoryBarDto> {
+    let open_price = open_price?;
+    let high_price = high_price?;
+    let low_price = low_price?;
+    let volume = match volume {
+        Some(v) => v,
+        None if allow_missing_volume => 0,
+        None => return None,
+    };
+    let ssboe = crate::history::marker_to_ssboe(marker)?;
+    Some(HistoryBarDto {
+        symbol,
+        exchange,
+        bar_type,
+        period,
+        marker: Some(marker),
+        open_price: Some(open_price),
+        high_price: Some(high_price),
+        low_price: Some(low_price),
+        close_price: Some(close_price),
+        volume: Some(volume),
+        num_trades,
+        bid_volume,
+        ask_volume,
+        ts_event_ns: venue_ts_ns(Some(ssboe), Some(0)),
+    })
 }
 
-impl HistoryBarDto {
-    /// Build a bar only when OHLC are present. Missing open/high/low are dropped
-    /// (never filled from close). Missing volume is allowed only for settlement
-    /// replay rows (`allow_missing_volume`); otherwise the row is dropped.
-    // Flat field mapping from a venue bar record: every arg is a distinct scalar
-    // field, so a struct wrapper would only relocate the same arity. Allowed.
-    #[allow(clippy::too_many_arguments)]
-    fn from_ohlcv(
-        symbol: Option<String>,
-        exchange: Option<String>,
-        bar_type: Option<i32>,
-        period: Option<String>,
-        marker: i32,
-        close_price: f64,
-        open_price: Option<f64>,
-        high_price: Option<f64>,
-        low_price: Option<f64>,
-        volume: Option<u64>,
-        num_trades: Option<u64>,
-        bid_volume: Option<u64>,
-        ask_volume: Option<u64>,
-        allow_missing_volume: bool,
-    ) -> Option<Self> {
-        let open_price = open_price?;
-        let high_price = high_price?;
-        let low_price = low_price?;
-        let volume = match volume {
-            Some(v) => v,
-            None if allow_missing_volume => 0,
-            None => return None,
-        };
-        let ssboe = crate::history::marker_to_ssboe(marker)?;
-        Some(Self {
-            symbol,
-            exchange,
-            bar_type,
-            period,
-            marker: Some(marker),
-            open_price: Some(open_price),
-            high_price: Some(high_price),
-            low_price: Some(low_price),
-            close_price: Some(close_price),
-            volume: Some(volume),
-            num_trades,
-            bid_volume,
-            ask_volume,
-            ts_event_ns: venue_ts_ns(Some(ssboe), Some(0)),
-        })
-    }
-
-    pub(crate) fn from_response(resp: &RithmicResponse) -> Option<Self> {
-        match &resp.message {
-            RithmicMessage::ResponseTimeBarReplay(m) => {
-                // End-of-replay markers have no price. Settlement may stand in
-                // for close; volume may be omitted only on that settlement path.
-                let used_settlement = m.close_price.is_none() && m.settlement_price.is_some();
-                let close_price = m.close_price.or(m.settlement_price)?;
-                let marker = m.marker?;
-                Self::from_ohlcv(
-                    m.symbol.clone(),
-                    m.exchange.clone(),
-                    m.r#type,
-                    m.period.clone(),
-                    marker,
-                    close_price,
-                    m.open_price,
-                    m.high_price,
-                    m.low_price,
-                    m.volume,
-                    m.num_trades,
-                    m.bid_volume,
-                    m.ask_volume,
-                    used_settlement,
-                )
-            }
-            RithmicMessage::TimeBar(m) => {
-                let close_price = m.close_price?;
-                let marker = m.marker?;
-                Self::from_ohlcv(
-                    m.symbol.clone(),
-                    m.exchange.clone(),
-                    m.r#type,
-                    m.period.clone(),
-                    marker,
-                    close_price,
-                    m.open_price,
-                    m.high_price,
-                    m.low_price,
-                    m.volume,
-                    m.num_trades,
-                    m.bid_volume,
-                    m.ask_volume,
-                    false,
-                )
-            }
-            _ => None,
+pub(crate) fn history_bar_from_response(resp: &RithmicResponse) -> Option<HistoryBarDto> {
+    match &resp.message {
+        RithmicMessage::ResponseTimeBarReplay(m) => {
+            // End-of-replay markers have no price. Settlement may stand in
+            // for close; volume may be omitted only on that settlement path.
+            let used_settlement = m.close_price.is_none() && m.settlement_price.is_some();
+            let close_price = m.close_price.or(m.settlement_price)?;
+            let marker = m.marker?;
+            history_bar_from_ohlcv(
+                m.symbol.clone(),
+                m.exchange.clone(),
+                m.r#type,
+                m.period.clone(),
+                marker,
+                close_price,
+                m.open_price,
+                m.high_price,
+                m.low_price,
+                m.volume,
+                m.num_trades,
+                m.bid_volume,
+                m.ask_volume,
+                used_settlement,
+            )
         }
+        RithmicMessage::TimeBar(m) => {
+            let close_price = m.close_price?;
+            let marker = m.marker?;
+            history_bar_from_ohlcv(
+                m.symbol.clone(),
+                m.exchange.clone(),
+                m.r#type,
+                m.period.clone(),
+                marker,
+                close_price,
+                m.open_price,
+                m.high_price,
+                m.low_price,
+                m.volume,
+                m.num_trades,
+                m.bid_volume,
+                m.ask_volume,
+                false,
+            )
+        }
+        _ => None,
     }
 }
 
@@ -934,11 +600,11 @@ mod order_kind_tests {
 
 #[cfg(test)]
 mod history_bar_tests {
-    use super::HistoryBarDto;
+    use super::history_bar_from_ohlcv;
 
     #[test]
     fn close_only_does_not_invent_ohl() {
-        assert!(HistoryBarDto::from_ohlcv(
+        assert!(history_bar_from_ohlcv(
             Some("NQU6".into()),
             Some("CME".into()),
             Some(3),
@@ -959,7 +625,7 @@ mod history_bar_tests {
 
     #[test]
     fn partial_ohl_is_dropped() {
-        assert!(HistoryBarDto::from_ohlcv(
+        assert!(history_bar_from_ohlcv(
             Some("NQU6".into()),
             Some("CME".into()),
             Some(2),
@@ -980,7 +646,7 @@ mod history_bar_tests {
 
     #[test]
     fn missing_volume_dropped_unless_settlement_path() {
-        assert!(HistoryBarDto::from_ohlcv(
+        assert!(history_bar_from_ohlcv(
             Some("NQU6".into()),
             Some("CME".into()),
             Some(2),
@@ -997,7 +663,7 @@ mod history_bar_tests {
             false,
         )
         .is_none());
-        let bar = HistoryBarDto::from_ohlcv(
+        let bar = history_bar_from_ohlcv(
             Some("NQU6".into()),
             Some("CME".into()),
             Some(3),
@@ -1019,7 +685,7 @@ mod history_bar_tests {
 
     #[test]
     fn full_ohlc_parses() {
-        let bar = HistoryBarDto::from_ohlcv(
+        let bar = history_bar_from_ohlcv(
             Some("NQU6".into()),
             Some("CME".into()),
             Some(2),
@@ -1046,7 +712,7 @@ mod history_bar_tests {
 
 #[cfg(test)]
 mod fill_history_tests {
-    use super::FillHistoryDto;
+    use super::fill_history_from_message;
     use rithmic_rs::rti::ResponseShowFillHistory;
 
     #[test]
@@ -1057,7 +723,7 @@ mod fill_history_tests {
         m.manual_or_auto = Some("AUTO".into());
         m.fill_price = Some(30666.0);
         m.fill_size = Some(1);
-        let row = FillHistoryDto::from_message(&m).expect("fill row");
+        let row = fill_history_from_message(&m).expect("fill row");
         assert_eq!(row.symbol.as_deref(), Some("MNQZ6"));
         assert_eq!(row.fill_price, Some(30666.0));
         assert_eq!(row.manual_or_auto.as_deref(), Some("AUTO"));
@@ -1065,6 +731,6 @@ mod fill_history_tests {
 
     #[test]
     fn terminal_response_without_fill_is_skipped() {
-        assert!(FillHistoryDto::from_message(&ResponseShowFillHistory::default()).is_none());
+        assert!(fill_history_from_message(&ResponseShowFillHistory::default()).is_none());
     }
 }

@@ -23,7 +23,7 @@ from typing import Any, Literal, Protocol, cast
 
 import pytest
 from _gateway_parent import gateway_config_from_session, start_parent, stop_parent
-from conftest import parent_trading_env
+from live_gates import parent_trading_env
 from rithmic_gateway import GatewayClient
 from rithmic_gateway.attach import config_flock_held
 from rithmic_gateway.config import GatewayConfig
@@ -34,7 +34,7 @@ from rithmic_nt_connect.config import (
 )
 from rithmic_nt_connect.errors import GatewayError as ExtensionGatewayError
 from rithmic_nt_connect.session import create_rust_gateway_session
-from rithmic_nt_connect.transport import TransportUp
+from rithmic_nt_connect.transport import Resumed
 
 pytestmark = pytest.mark.live
 
@@ -58,7 +58,7 @@ class _RustRecoveryClient(Protocol):
     def transport_generation(self) -> int: ...
     def transport_connected(self) -> bool: ...
     def ensure_transport_live(self) -> int: ...
-    def subscribe_transport_events(
+    def subscribe_session_events(
         self, callback: Callable[[object], None]
     ) -> object: ...
 
@@ -85,7 +85,7 @@ def parent_ctx(test_env, require_test_plant, credentials_available) -> ParentCtx
     return (
         session_cfg,
         gateway_config_from_session(session_cfg),
-        str((test_env or {}).get("RITHMIC_PASSWORD") or ""),
+        (test_env or {}).get("RITHMIC_PASSWORD") or "",
         parent_trading_env(test_env),
     )
 
@@ -146,13 +146,13 @@ def test_the_rust_client_recovers_after_the_parent_restarts(
         client.connect()
         try:
             before = client.transport_generation()
-            ups: list[TransportUp] = []
+            ups: list[Resumed] = []
 
             def _on_event(event: object) -> None:
-                if isinstance(event, TransportUp):
+                if isinstance(event, Resumed):
                     ups.append(event)
 
-            client.subscribe_transport_events(_on_event)
+            client.subscribe_session_events(_on_event)
 
             stop_parent(proc)
             proc = start_parent(gcfg, password=password, extra_env=trading_env)

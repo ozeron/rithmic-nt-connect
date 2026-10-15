@@ -6,10 +6,10 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::*;
-use rithmic_gateway::client::{GatewayConfig, GatewaySession};
+use rithmic_gateway::client::{GatewayConfig, RemoteSession};
 use rithmic_gateway::pb::frame::Body;
 use rithmic_gateway::singleton::SessionLock;
-use rithmic_plants::{Error, Session};
+use rithmic_host::{Error, Session};
 
 fn config_at(user: &str, path: &std::path::Path) -> GatewayConfig {
     GatewayConfig::new(user, SYSTEM, URL, "Live")
@@ -28,7 +28,7 @@ fn gateway_code(err: &Error) -> &str {
 async fn no_parent_and_no_flock_is_parent_not_running_and_starts_nothing() {
     let dir = short_dir();
     let path = dir.path().join("gw.sock");
-    let session = GatewaySession::new(config_at(&unique_user("none"), &path));
+    let session = RemoteSession::new(config_at(&unique_user("none"), &path));
 
     let err = session.connect().await.expect_err("no parent");
     assert_eq!(gateway_code(&err), "parent_not_running");
@@ -54,7 +54,7 @@ async fn flock_held_and_socket_appears_attaches() {
         drop(mock);
     });
 
-    let session = GatewaySession::new(config_at(&user, &path));
+    let session = RemoteSession::new(config_at(&user, &path));
     session
         .connect()
         .await
@@ -77,7 +77,7 @@ async fn flock_released_while_waiting_fails_fast_without_the_full_timeout() {
     let mut cfg = config_at(&user, &path);
     cfg.attach_timeout = Duration::from_secs(20);
     let started = Instant::now();
-    let err = GatewaySession::new(cfg)
+    let err = RemoteSession::new(cfg)
         .connect()
         .await
         .expect_err("no socket");
@@ -97,7 +97,7 @@ async fn flock_held_but_wrong_listen_path_is_listen_path_mismatch() {
 
     let mut cfg = config_at(&user, &path);
     cfg.attach_timeout = Duration::from_millis(300);
-    let err = GatewaySession::new(cfg)
+    let err = RemoteSession::new(cfg)
         .connect()
         .await
         .expect_err("mismatch");
@@ -112,7 +112,7 @@ async fn a_dialable_socket_without_the_credential_flock_is_refused_as_an_imposto
     let _mock = MockParent::spawn(&path, mock_ready(true, true), 0, |_, _| Action::Ack).await;
 
     // attest_flock stays on (the default): nobody holds the flock for this user.
-    let session = GatewaySession::new(config_at(&unique_user("impostor"), &path));
+    let session = RemoteSession::new(config_at(&unique_user("impostor"), &path));
     let err = session.connect().await.expect_err("impostor");
     assert_eq!(gateway_code(&err), "parent_unattested");
 }
@@ -131,12 +131,10 @@ async fn tcp_and_tls_listen_urls_are_not_implemented() {
 async fn handshake_carries_identity_and_never_a_password() {
     // SAFETY: tests in this binary do not read this variable concurrently.
     std::env::set_var("RITHMIC_PASSWORD", "sentinel-pw-7f3a91");
-    let dir = short_dir();
-    let path = dir.path().join("gw.sock");
-    let mock = MockParent::spawn(&path, mock_ready(false, false), 0, |_, _| Action::Ack).await;
-    let cfg = mock_config(&path).with_auth_token("tok-123");
+    let mock = MockParent::duplex(mock_ready(false, false), 0, |_, _| Action::Ack);
+    let cfg = duplex_config().with_auth_token("tok-123");
     let user = cfg.user.clone();
-    let session = GatewaySession::new(cfg);
+    let session = mock.session(cfg);
     session.connect().await.expect("connect");
     session.subscribe(NQ, CME).await.expect("rpc");
 
@@ -171,7 +169,7 @@ async fn handshake_carries_identity_and_never_a_password() {
             "password on the wire"
         );
     }
-    assert!(!format!("{:?}", config_at("u", &path)).contains("pw"));
+    assert!(!format!("{:?}", GatewayConfig::new("u", SYSTEM, URL, "Live")).contains("pw"));
     session.disconnect().await.unwrap();
 }
 
@@ -183,10 +181,8 @@ async fn a_config_never_prints_its_auth_token() {
 
 #[tokio::test]
 async fn ready_scopes_and_gates_are_exposed_read_only() {
-    let dir = short_dir();
-    let path = dir.path().join("gw.sock");
-    let _mock = MockParent::spawn(&path, mock_ready(true, false), 0, |_, _| Action::Ack).await;
-    let session = GatewaySession::new(mock_config(&path));
+    let mock = MockParent::duplex(mock_ready(true, false), 0, |_, _| Action::Ack);
+    let session = mock.session(duplex_config());
     session.connect().await.expect("connect");
     assert!(session.trading_enabled());
     assert!(!session.cancel_all_enabled());
@@ -198,10 +194,8 @@ async fn ready_scopes_and_gates_are_exposed_read_only() {
 
 #[tokio::test]
 async fn not_ready_is_retried_until_the_parent_is_ready() {
-    let dir = short_dir();
-    let path = dir.path().join("gw.sock");
-    let mock = MockParent::spawn(&path, mock_ready(false, false), 2, |_, _| Action::Ack).await;
-    let session = GatewaySession::new(mock_config(&path));
+    let mock = MockParent::duplex(mock_ready(false, false), 2, |_, _| Action::Ack);
+    let session = mock.session(duplex_config());
     session.connect().await.expect("ready after retries");
     assert_eq!(
         mock.connections.load(std::sync::atomic::Ordering::SeqCst),
@@ -212,9 +206,8 @@ async fn not_ready_is_retried_until_the_parent_is_ready() {
 
 #[tokio::test]
 async fn rpcs_before_connect_are_not_connected_errors() {
-    let dir = short_dir();
-    let path = dir.path().join("gw.sock");
-    let session = GatewaySession::new(config_at(&unique_user("early"), &path));
+    let (stream, _peer) = tokio::io::duplex(64);
+    let session = RemoteSession::over(GatewayConfig::new("early", SYSTEM, URL, "Live"), stream);
     let err = session.subscribe(NQ, CME).await.expect_err("not connected");
     assert!(matches!(err, Error::NotConnected { .. }), "{err:?}");
     let err = session
@@ -229,7 +222,7 @@ async fn a_failed_connect_leaves_the_session_reusable() {
     let dir = short_dir();
     let path = dir.path().join("gw.sock");
     let user = unique_user("retry");
-    let session = GatewaySession::new(config_at(&user, &path));
+    let session = RemoteSession::new(config_at(&user, &path));
     assert!(session.connect().await.is_err());
     assert!(matches!(
         session.subscribe(NQ, CME).await,
@@ -249,10 +242,8 @@ async fn a_failed_connect_leaves_the_session_reusable() {
 
 #[tokio::test]
 async fn connecting_twice_is_an_already_connected_error() {
-    let dir = short_dir();
-    let path = dir.path().join("gw.sock");
-    let _mock = MockParent::spawn(&path, mock_ready(false, false), 0, |_, _| Action::Ack).await;
-    let session = GatewaySession::new(mock_config(&path));
+    let mock = MockParent::duplex(mock_ready(false, false), 0, |_, _| Action::Ack);
+    let session = mock.session(duplex_config());
     session.connect().await.expect("first connect");
     assert!(matches!(
         session.connect().await,

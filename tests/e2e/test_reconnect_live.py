@@ -1,4 +1,4 @@
-"""Live proof: ``resync_ticker_session`` restores ticker, book, and EXTERNAL bars.
+"""Live proofs: gap resync and host recovery after a direct ticker failure.
 
 Markers: ``live`` (creds), ``slow`` (~65s bar poll).
 
@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import Counter
 from collections.abc import Callable
+from typing import Protocol
 
 import pytest
 from rithmic_nt_connect.data import resync_ticker_session
@@ -18,6 +20,7 @@ from rithmic_nt_connect.data import resync_ticker_session
 pytestmark = pytest.mark.live
 
 _EVENT_TIMEOUT_SEC = 45
+_TICKER_EVENTS = ("last_trade", "bbo")
 _BAR_POLL_TIMEOUT_SEC = 65
 
 
@@ -27,61 +30,208 @@ def wait_for_any_event(
     *,
     timeout_sec: float,
     sleep_sec: float = 0.1,
+    accept: Callable[[dict], bool] | None = None,
 ) -> dict:
     deadline = time.monotonic() + timeout_sec
+    empty_polls = 0
+    by_type: Counter[str] = Counter()
+    trade_contracts: Counter[tuple[str | None, str | None]] = Counter()
+    filtered_target_events = 0
+    oldest_trade_ns: int | None = None
+    newest_trade_ns: int | None = None
     while time.monotonic() < deadline:
         ev = poll()
-        if ev and ev.get("type") in event_types:
-            return ev
+        if ev:
+            kind = str(ev.get("type", "<missing>"))
+            by_type[kind] += 1
+            timestamp = ev.get("ts_event_ns")
+            if kind == "last_trade":
+                trade_contracts[(ev.get("symbol"), ev.get("exchange"))] += 1
+                if isinstance(timestamp, int):
+                    oldest_trade_ns = (
+                        timestamp
+                        if oldest_trade_ns is None
+                        else min(oldest_trade_ns, timestamp)
+                    )
+                    newest_trade_ns = (
+                        timestamp
+                        if newest_trade_ns is None
+                        else max(newest_trade_ns, timestamp)
+                    )
+            if kind in event_types:
+                if accept is None or accept(ev):
+                    return ev
+                filtered_target_events += 1
+        else:
+            empty_polls += 1
         time.sleep(sleep_sec)
-    raise AssertionError(f"none of {event_types!r} arrived within {timeout_sec}s")
+    raise AssertionError(
+        f"none of {event_types!r} arrived within {timeout_sec}s; "
+        f"empty_polls={empty_polls}; event_types={dict(by_type)}; "
+        f"filtered_target_events={filtered_target_events}; "
+        f"last_trade_contracts={dict(trade_contracts)}; "
+        f"last_trade_ts_event_ns=[{oldest_trade_ns}, {newest_trade_ns}]"
+    )
 
 
 class TestResyncRestoresIntent:
+    def test_resync_restores_ticker_and_book(self, live_session, live_front_month):
+        self._resync(live_session, live_front_month, include_bars=False)
+
     @pytest.mark.slow
+    @pytest.mark.usefixtures("live_history_available")
     def test_resync_restores_ticker_book_and_bars(self, live_session, live_front_month):
-        """Subscribe ticker, book, and 1m bars; resync; assert events resume."""
+        self._resync(live_session, live_front_month, include_bars=True)
+
+    @staticmethod
+    def _resync(live_session, live_front_month, *, include_bars: bool):
+        """Subscribe and resync; keep ticker/book coverage independent of history."""
         _, symbol, exchange = live_front_month
         ticker_subs = {(symbol, exchange)}
         book_subs = {(symbol, exchange)}
-        bar_subs = {(symbol, exchange, 2, 1)}  # 1-MINUTE-LAST-EXTERNAL
+        bar_subs = {(symbol, exchange, 2, 1)} if include_bars else set()
 
         live_session.subscribe(symbol, exchange)
         live_session.subscribe_order_book_summary(symbol, exchange)
-        live_session.subscribe_time_bars(symbol, exchange, 2, 1)
+        if include_bars:
+            live_session.subscribe_time_bars(symbol, exchange, 2, 1)
 
-        wait_for_any_event(
-            live_session.poll_event,
-            ("last_trade",),
-            timeout_sec=_EVENT_TIMEOUT_SEC,
-        )
-        wait_for_any_event(
-            live_session.poll_event,
-            ("bbo", "order_book"),
-            timeout_sec=_EVENT_TIMEOUT_SEC,
-        )
-        wait_for_any_event(
-            live_session.poll_history_event,
-            ("time_bar",),
-            timeout_sec=_BAR_POLL_TIMEOUT_SEC,
-        )
+        def for_contract(event: dict) -> bool:
+            return event.get("symbol") == symbol and event.get("exchange") == exchange
 
+        def wait_for_streams():
+            # Ticker delivery is proven by any ticker-stream event: trades on
+            # Test plants are sparse (2026-10-15: 3 trades, 6 BBO in 20 s on NQZ6).
+            wait_for_any_event(
+                live_session.poll_event,
+                _TICKER_EVENTS,
+                timeout_sec=_EVENT_TIMEOUT_SEC,
+                accept=for_contract,
+            )
+            wait_for_any_event(
+                live_session.poll_event,
+                ("order_book",),
+                timeout_sec=_EVENT_TIMEOUT_SEC,
+                accept=for_contract,
+            )
+            if include_bars:
+                wait_for_any_event(
+                    live_session.poll_history_event,
+                    ("time_bar",),
+                    timeout_sec=_BAR_POLL_TIMEOUT_SEC,
+                )
+
+        wait_for_streams()
         asyncio.run(
             resync_ticker_session(live_session, ticker_subs, book_subs, bar_subs)
         )
+        wait_for_streams()
+
+
+@pytest.fixture
+def direct_reconnect_session(test_env, require_test_plant, request):
+    """Check Test/direct/fault-injection prerequisites before opening a login."""
+    from rithmic_nt_connect.config import ConnectMode, parse_connect_mode
+
+    if parse_connect_mode(test_env["RITHMIC_CONNECT_MODE"]) != ConnectMode.DIRECT:
+        pytest.skip("direct plant recovery needs RITHMIC_CONNECT_MODE=direct")
+    return request.getfixturevalue("live_session")
+
+
+class _GenerationEvent(Protocol):
+    generation: int
+
+
+def _has_live_ticker_fault() -> bool:
+    from rithmic_nt_connect._lib import Session
+
+    return hasattr(Session, "_fault_drop_plant") and hasattr(
+        Session, "subscribe_session_events"
+    )
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(
+    not _has_live_ticker_fault(),
+    reason="requires testing-only Session._fault_drop_plant; absent in release wheels",
+)
+def test_direct_ticker_failure_restores_intent(
+    direct_reconnect_session, request
+) -> None:
+    """D9: observe Interrupted then Resumed and fresh ticks without re-subscribing.
+
+    The testing-only hook aborts the real rithmic-rs ticker websocket actor.
+    The market-data-only fixture never opens gates or starts order/PnL plants;
+    their reconnect counters cannot be observed with today's live hooks.
+    """
+    from queue import Empty, Queue
+
+    from rithmic_nt_connect import _lib
+
+    session = direct_reconnect_session
+    symbol, exchange = request.getfixturevalue("live_contract")
+    interrupted_type = getattr(_lib, "Interrupted", None)
+    resumed_type = getattr(_lib, "Resumed", None)
+    failed_type = getattr(_lib, "RecoveryFailed", None)
+    assert interrupted_type and resumed_type and failed_type, "incomplete D9 event API"
+    events: Queue[_GenerationEvent] = Queue()
+    listener = session.subscribe_session_events(events.put)
+    try:
+        session.subscribe(symbol, exchange)
+
+        def matching_contract(event: dict) -> bool:
+            return event.get("symbol") == symbol and event.get("exchange") == exchange
 
         wait_for_any_event(
-            live_session.poll_event,
-            ("last_trade",),
+            lambda: session.poll_event(timeout_ms=100),
+            _TICKER_EVENTS,
             timeout_sec=_EVENT_TIMEOUT_SEC,
+            accept=matching_contract,
         )
+        # Fresh venue time prevents a buffered pre-failure tick from passing.
+        failure_time_ns = time.time_ns()
+        print(f"ticker recovery requires ts_event_ns > {failure_time_ns}")
+        session._fault_drop_plant("ticker")
+
+        interrupted = None
+        resumed = None
+        deadline = time.monotonic() + 60
+        while resumed is None and time.monotonic() < deadline:
+            try:
+                event = events.get(
+                    timeout=min(0.2, max(0.001, deadline - time.monotonic()))
+                )
+            except Empty:
+                continue
+            assert not isinstance(event, failed_type), "ticker recovery gave up"
+            if isinstance(event, interrupted_type):
+                interrupted = event
+            elif isinstance(event, resumed_type):
+                assert interrupted is not None, "Resumed arrived before Interrupted"
+                assert event.generation > interrupted.generation
+                resumed = event
+        assert interrupted is not None, "ticker failure never reported Interrupted"
+        assert resumed is not None, "ticker recovery never reported Resumed within 60s"
+
         wait_for_any_event(
-            live_session.poll_event,
-            ("bbo", "order_book"),
+            lambda: session.poll_event(timeout_ms=100),
+            _TICKER_EVENTS,
             timeout_sec=_EVENT_TIMEOUT_SEC,
+            accept=lambda event: (
+                matching_contract(event)
+                and (event.get("ts_event_ns") or 0) > failure_time_ns
+            ),
         )
-        wait_for_any_event(
-            live_session.poll_history_event,
-            ("time_bar",),
-            timeout_sec=_BAR_POLL_TIMEOUT_SEC,
+        print(
+            "direct ticker recovery: Interrupted -> Resumed; "
+            f"ticks resumed: {symbol}/{exchange}"
         )
+        print(
+            "order/PnL reconnects: unobservable "
+            "(data-only session; no live counter hooks)"
+        )
+    finally:
+        try:
+            listener.cancel()
+        finally:
+            session.unsubscribe(symbol, exchange)

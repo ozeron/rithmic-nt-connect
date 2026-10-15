@@ -1,7 +1,7 @@
 """Plant-level wire row shapes the extension returns for the RMS loads.
 
 The extension returns plain dicts; unset fields are omitted (never ``None``).
-They mirror ``rithmic_plants::dto::{ProductRmsInfoDto, AccountRmsInfoDto}``.
+They mirror ``rithmic_host::dto::{ProductRmsInfoDto, AccountRmsInfoDto}``.
 """
 
 from __future__ import annotations

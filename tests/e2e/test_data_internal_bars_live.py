@@ -73,6 +73,7 @@ class TestInternalBars:
             assert max(prices) >= min(prices), "coherent OHLC range"
             assert volume >= len(ordered), "volume is summed trade size"
 
+    @pytest.mark.usefixtures("live_history_available")
     def test_tc_d51_external_vs_tick_replay_volume(
         self, live_session, live_front_month
     ):
@@ -120,6 +121,7 @@ class TestInternalBars:
 
         assert compared >= 1, "no minutes had both EXTERNAL bar and tick volume"
 
+    @pytest.mark.usefixtures("live_history_available")
     def test_tc_d53_live_trade_size_sums_to_external_volume(
         self, live_session, live_front_month
     ):
@@ -207,6 +209,7 @@ class TestInternalBars:
             f"last live price {last_px}"
         )
 
+    @pytest.mark.usefixtures("live_history_available")
     def test_tc_d52_external_cutover_no_partial_minute(
         self, live_session, live_front_month
     ):

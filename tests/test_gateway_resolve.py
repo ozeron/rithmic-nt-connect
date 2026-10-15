@@ -218,7 +218,7 @@ def test_load_time_bars_range_async(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_history_slicing_matches_the_rust_rule() -> None:
     """The pure-Python lake client slices history exactly like the Rust path
-    (``rithmic_plants::history``), so both send the same bounded RPCs."""
+    (``rithmic_host::history``), so both send the same bounded RPCs."""
     import pytest
 
     lib = pytest.importorskip("rithmic_nt_connect._lib")

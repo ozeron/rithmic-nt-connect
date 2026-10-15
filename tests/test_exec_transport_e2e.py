@@ -68,7 +68,12 @@ from rithmic_nt_connect.errors import (
 )
 from rithmic_nt_connect.execution import RithmicExecutionClient
 from rithmic_nt_connect.recon import drain_for
-from rithmic_nt_connect.session import WireSession
+from rithmic_nt_connect.session import (
+    WireSession,
+    _FlockedDirectSession,
+    _RustGatewaySession,
+)
+from rithmic_nt_connect.transport import Interrupted
 
 
 def _client() -> _TestClient:
@@ -92,6 +97,7 @@ def _trading_client(
     client._config_local = cast(
         Any, SimpleNamespace(enable_trading=enable_trading, soft_fail_pnl=False)
     )
+    client._cancel_all_requested = False
     client._order_plant = OrderPlantPolicy(plant_state)
     client._pnl_snapshot_observed = asyncio.Event()
     client._session = cast(WireSession, session or FaultInjectingSession())
@@ -717,19 +723,17 @@ def test_transport_generation_bump_schedules_l3_rearm(
         client._loop = loop  # type: ignore[attr-defined]
         from rithmic_nt_connect.transport import (
             TransportDown,
-            TransportFault,
-            TransportFaultKind,
             TransportUp,
         )
 
         client._recovery.on_event(
             TransportDown(
-                gen=1,
-                fault=TransportFault(kind=TransportFaultKind.UNIX_EOF, observed_gen=1),
+                generation=1,
+                cause="socket closed",
             )
         )
         assert client._order_plant.state is OrderPlantState.LATCHED
-        client._recovery.on_event(TransportUp(gen=2))
+        client._recovery.on_event(TransportUp(generation=2))
         await asyncio.sleep(0)
         task = client._recovery.task
         assert task is not None
@@ -742,6 +746,7 @@ def test_transport_generation_bump_schedules_l3_rearm(
     assert "load_orders" in session.calls
     # The parent restored the order intent: the shared venue plant is not torn down.
     assert "disconnect_order_plant" not in session.calls
+    assert "disconnect_pnl_plant" not in session.calls
 
 
 def test_order_gap_rereads_venue_state_without_tearing_the_plant_down(
@@ -797,13 +802,11 @@ def _restore_client(
 def _transport_down(gen: int = 1) -> Any:
     from rithmic_nt_connect.transport import (
         TransportDown,
-        TransportFault,
-        TransportFaultKind,
     )
 
     return TransportDown(
-        gen=gen,
-        fault=TransportFault(kind=TransportFaultKind.UNIX_EOF, observed_gen=gen),
+        generation=gen,
+        cause="socket closed",
     )
 
 
@@ -814,7 +817,7 @@ def test_recovery_failed_latches_the_order_plant(
 
     client = _restore_client(_ConnectSession(fail_load_orders=False), monkeypatch)
 
-    client._recovery.on_event(RecoveryFailed(gen=2, attempts=3, cause=None))
+    client._recovery.on_event(RecoveryFailed(generation=2, attempts=3, cause=None))
 
     assert client._order_plant.state is OrderPlantState.LATCHED
 
@@ -831,7 +834,7 @@ def test_up_while_a_restore_is_in_flight_is_dropped(
         client._loop = asyncio.get_running_loop()  # type: ignore[attr-defined]
         in_flight = asyncio.get_running_loop().create_future()
         client._recovery.task = cast(Any, in_flight)
-        client._recovery.on_event(TransportUp(gen=3))
+        client._recovery.on_event(TransportUp(generation=3))
         await asyncio.sleep(0)
         assert client._recovery.task is in_flight
 
@@ -857,7 +860,7 @@ def test_restore_exhaustion_leaves_the_plant_latched(
     async def _run() -> None:
         client._loop = asyncio.get_running_loop()  # type: ignore[attr-defined]
         client._recovery.on_event(_transport_down())
-        client._recovery.on_event(TransportUp(gen=2))
+        client._recovery.on_event(TransportUp(generation=2))
         await real_sleep(0)
         task = client._recovery.task
         assert task is not None
@@ -879,7 +882,7 @@ def test_restore_is_skipped_when_trading_is_disabled(
     async def _run() -> None:
         client._loop = asyncio.get_running_loop()  # type: ignore[attr-defined]
         client._recovery.on_event(_transport_down())
-        client._recovery.on_event(TransportUp(gen=2))
+        client._recovery.on_event(TransportUp(generation=2))
         await asyncio.sleep(0)
         task = client._recovery.task
         assert task is not None
@@ -907,7 +910,7 @@ def test_exec_restores_once_per_generation(
         client._loop = asyncio.get_running_loop()  # type: ignore[attr-defined]
         for gen in (2, 2, 3):
             client._recovery.on_event(_transport_down(gen - 1))
-            client._recovery.on_event(TransportUp(gen=gen))
+            client._recovery.on_event(TransportUp(generation=gen))
             await asyncio.sleep(0)
             task = client._recovery.task
             assert task is not None
@@ -924,11 +927,11 @@ class _UnsubscribeCounting(_ConnectSession):
         super().__init__(fail_load_orders=False)
         self.unsubscribed = 0
 
-    def subscribe_transport_events(self, listener: Any) -> Any:
+    def subscribe_session_events(self, listener: Any) -> Any:
         def _unsubscribe() -> None:
             self.unsubscribed += 1
 
-        return _unsubscribe
+        return SimpleNamespace(cancel=_unsubscribe)
 
     def disconnect(self) -> None:
         self.calls.append("disconnect")
@@ -2510,6 +2513,87 @@ def test_a_pnl_resync_resets_the_snapshot_barrier() -> None:
     assert not client._pnl_snapshot_observed.is_set()
 
 
+def test_inflight_pnl_before_interruption_cannot_rearm_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+
+    async def run() -> None:
+        loop = asyncio.get_running_loop()
+        started: asyncio.Queue[int] = asyncio.Queue()
+        release = [threading.Event() for _ in range(3)]
+
+        class _InflightPnl(_ConnectSession):
+            polls = 0
+
+            def next_events(
+                self, stream: str, max_events: int = 256, timeout_ms: int = 100
+            ) -> list[dict[str, Any]]:
+                assert stream == "pnl"
+                index = self.polls
+                self.polls += 1
+                loop.call_soon_threadsafe(started.put_nowait, index)
+                if not release[index].wait(5):
+                    raise TimeoutError("test did not release PnL batch")
+                return [
+                    {"type": "account_pnl", "account_id": "ACC1", "cash_on_hand": "100"}
+                ]
+
+        session = _InflightPnl(fail_load_orders=False)
+        client = _connect_client(session, monkeypatch, stub_snapshot_wait=False)
+        monkeypatch.setattr(client, "generate_account_state", lambda **kwargs: None)
+        client._pnl_connected = True
+        client._poll_task = client._make_poll_task("pnl")
+        # Keep a real, live task for the order re-arm without a second wire poller.
+        client._order_poll_task = asyncio.create_task(asyncio.Event().wait())
+        drained = asyncio.Event()
+
+        def note_drain() -> None:
+            loop.call_soon_threadsafe(drained.set)
+
+        session.on_load_orders = note_drain
+        restore: asyncio.Task[None] | None = None
+        try:
+            assert await asyncio.wait_for(started.get(), 2) == 0
+            client._on_transport_down(Interrupted(generation=1))
+            restore = asyncio.create_task(
+                client._restore_plants_after_transport_up(2, 1)
+            )
+            await asyncio.wait_for(drained.wait(), 2)
+            # This call started before Interrupted, but completes after recovery
+            # cleared the barrier and re-subscribed. It cannot prove freshness.
+            release[0].set()
+            assert await asyncio.wait_for(started.get(), 2) == 1
+            assert not client._pnl_snapshot_observed.is_set(), (
+                "pre-interruption PnL satisfied fresh barrier"
+            )
+            assert client._pnl_live_since_ns is None
+            assert not client._order_plant.allow_submit()
+            assert not restore.done()
+
+            release[1].set()
+            assert await asyncio.wait_for(started.get(), 2) == 2
+            await asyncio.wait_for(restore, 2)
+            assert client._pnl_snapshot_observed.is_set()
+            assert client._order_plant.allow_submit()
+        finally:
+            for gate in release:
+                gate.set()
+            for task in (restore, client._poll_task, client._order_poll_task):
+                if task is not None:
+                    task.cancel()
+            await asyncio.gather(
+                *(
+                    task
+                    for task in (restore, client._poll_task, client._order_poll_task)
+                    if task is not None
+                ),
+                return_exceptions=True,
+            )
+
+    asyncio.run(run())
+
+
 def test_a_failed_connect_leaves_no_poller_or_listener(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2538,3 +2622,41 @@ def test_a_failed_connect_leaves_no_poller_or_listener(
 
     asyncio.run(run())
     assert detached == [1]
+
+
+@pytest.mark.parametrize("mode", ["direct", "gateway"])
+@pytest.mark.parametrize("enable_trading", [False, True])
+@pytest.mark.parametrize("granted", [False, True])
+def test_exec_requests_gates_and_warns_when_trading_denied(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    enable_trading: bool,
+    granted: bool,
+) -> None:
+    calls: list[tuple[bool, bool]] = []
+
+    class Session(_ConnectSession):
+        def open_gates(self, trading: bool, cancel_all: bool) -> Any:
+            assert "connect" in self.calls, "gates require completed handshake"
+            calls.append((trading, cancel_all))
+            return SimpleNamespace(trading=granted, cancel_all=cancel_all)
+
+    client = _connect_client(Session(fail_load_orders=False), monkeypatch)
+    client._config_local = cast(
+        Any, SimpleNamespace(enable_trading=enable_trading, soft_fail_pnl=False)
+    )
+    client._cancel_all_requested = True
+    monkeypatch.setenv("RITHMIC_GATEWAY_CANCEL_ALL", "0")
+    inner = client._session
+    client._session = cast(
+        WireSession,
+        _FlockedDirectSession(inner)
+        if mode == "direct"
+        else _RustGatewaySession(inner),
+    )
+    log = _CaptureLog()
+    client._log = log
+    asyncio.run(client._connect())
+    assert calls == [(enable_trading, True)]
+    denied = [m for m in log.messages if "trading requested but not granted" in m]
+    assert bool(denied) is (enable_trading and not granted)

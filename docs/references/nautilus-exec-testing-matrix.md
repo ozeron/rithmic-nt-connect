@@ -25,10 +25,9 @@ is plant-wide; never use it to clean up a single smoke order.
 
 Last run: **2026-08-18** — CAN-set live on `Rithmic Test` (E01..E04, E06, E10..E16,
 E19, E20..E23, E40, E42, E44, E84). `TC-E41` / `TC-E43` (cancel-all / batch cancel on
-stop) are unit-tested per basket from the cache but not live-run: the live suite keeps
-them collection-skipped because the wire `cancel_all_orders` is plant-wide and would
-cancel unrelated orders. Scaffolds (Groups 4/6/7/8/9) and unsupported
-(`E05,E17,E18,E24..E27`) remain.
+stop) are unit-tested per basket from the cache but have no live test, because the wire
+`cancel_all_orders` is plant-wide and would cancel unrelated orders. Groups 4/6/7/8/9 have
+no live tests yet, and `E05,E17,E18,E24..E27` are unsupported; the rows below say why.
 
 ## Incident Replay Coverage
 
@@ -123,9 +122,9 @@ fail closed.
 | TC | Name | Status | Where verified / gap |
 |---|---|---|---|
 | TC-E40 | Cancel single limit | [x] | live-proven |
-| TC-E41 | Cancel all on stop | [~] | NT `CancelAllOrders` is handled by `_cancel_all_orders`: cancels per basket from the cache, scoped by instrument / strategy / side and this venue; never the plant-wide wire `cancel_all_orders` (`test_cancel_all_is_scoped_and_never_plant_wide`, unit). Live unproven: collection-skipped in `tests/e2e/test_exec_client_live.py`. Cache-scoped, so untracked / in-flight orders are not reached |
+| TC-E41 | Cancel all on stop | [~] | NT `CancelAllOrders` is handled by `_cancel_all_orders`: cancels per basket from the cache, scoped by instrument / strategy / side and this venue; never the plant-wide wire `cancel_all_orders` (`test_cancel_all_is_scoped_and_never_plant_wide`, unit). Live unproven: no live test. Cache-scoped, so untracked / in-flight orders are not reached |
 | TC-E42 | Individual cancels on stop | [x] | `test_tc_e42_individual_cancels_on_stop` — two resting orders individually canceled by `OrderDriver.on_stop`; live-proven |
-| TC-E43 | Batch cancel on stop | [~] | Rithmic has no batch-cancel RPC; NT `BatchCancelOrders` is handled by `_batch_cancel_orders`, a per-order `_cancel_order` loop (`test_batch_cancel_cancels_each_order`, unit). Live unproven: collection-skipped in `tests/e2e/test_exec_client_live.py` |
+| TC-E43 | Batch cancel on stop | [~] | Rithmic has no batch-cancel RPC; NT `BatchCancelOrders` is handled by `_batch_cancel_orders`, a per-order `_cancel_order` loop (`test_batch_cancel_cancels_each_order`, unit). Live unproven: no live test |
 | TC-E44 | Cancel already-canceled | [x] | `test_tc_e44_cancel_already_canceled` — second cancel of a CANCELED order is refused locally (no venue command, no events); live-proven |
 
 ## Group 6: Bracket orders
@@ -218,8 +217,7 @@ live-proven through `LiveExecutionEngine._check_orders_consistency` (the open-or
 consistency path) with a unit twin (`test_generate_order_status_reports_preserves_stop_trigger_type`)
 that proves the same code path in CI. `TC-E41` / `TC-E43` (cancel-all /
 batch cancel on stop) are `[~]`: unit-tested (`tests/test_cancel_scope.py`), not claimed
-live-proven, and collection-skipped in the live suite. Remaining groups (4/6/7/8/9) are
-scaffolded and await native modify / bracket / reduce-only / remaining reconciliation
+live-proven, and have no live test. Remaining groups (4/6/7/8/9) have no live tests and await native modify / bracket / reduce-only / remaining reconciliation
 confirmation, or are unsupported (`E05,E17,E18,E24..E27`) per this matrix.
 
 **Open gaps (venue/futures capability, not adapter code):**

@@ -1,6 +1,7 @@
 //! Unit tests for the session facade (no live network).
 
-use rithmic_plants::{DirectSession, Error, PlantSet, Session, SessionConfig};
+use rithmic_host::{Error, PlantSet, Venue};
+use rithmic_plants::{RithmicVenue, SessionConfig};
 
 #[test]
 fn config_rejects_incomplete_lucid_settings() {
@@ -23,7 +24,7 @@ async fn disconnected_order_poll_errors_without_network() {
         .ib_id("ib")
         .build()
         .unwrap();
-    let session = DirectSession::new(cfg, PlantSet::EXECUTION);
+    let session = RithmicVenue::new(cfg, PlantSet::EXECUTION);
 
     let err = session
         .poll_order_event(std::time::Duration::ZERO)

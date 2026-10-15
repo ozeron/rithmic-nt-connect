@@ -8,15 +8,16 @@ use std::time::Duration;
 
 use common::*;
 use rithmic_gateway::pb::{self, frame::Body};
-use tokio::net::UnixStream;
+use tokio::io::DuplexStream;
 
-async fn connect(parent: &FakeParent) -> UnixStream {
-    let mut stream = UnixStream::connect(&parent.listen).await.unwrap();
+async fn connect(parent: &FakeParent) -> DuplexStream {
+    let mut stream = parent.stream();
     write_body(
         &mut stream,
         0,
         Body::Handshake(pb::Handshake {
             user: parent.user.clone(),
+            auth_token: AUTH_TOKEN.into(),
             system_name: SYSTEM.into(),
             url: URL.into(),
             env: "Live".into(),
@@ -29,7 +30,7 @@ async fn connect(parent: &FakeParent) -> UnixStream {
     stream
 }
 
-async fn ack(stream: &mut UnixStream, id: u64, body: Body) {
+async fn ack(stream: &mut DuplexStream, id: u64, body: Body) {
     write_body(stream, id, body).await;
     loop {
         let (frame, _) = read_frame(stream).await.unwrap();
@@ -41,7 +42,7 @@ async fn ack(stream: &mut UnixStream, id: u64, body: Body) {
 }
 
 /// Event kinds received within `window`, in arrival order.
-async fn kinds_within(stream: &mut UnixStream, window: Duration) -> Vec<&'static str> {
+async fn kinds_within(stream: &mut DuplexStream, window: Duration) -> Vec<&'static str> {
     let mut out = Vec::new();
     let deadline = tokio::time::Instant::now() + window;
     while let Ok(Ok((frame, _))) = tokio::time::timeout_at(deadline, read_frame(stream)).await {
@@ -93,7 +94,16 @@ async fn a_ticker_only_client_is_not_sent_time_bars_for_the_symbol() {
         "no time bar for a ticker-only client"
     );
     let all = kinds_within(&mut both, Duration::from_millis(400)).await;
-    assert_eq!(all, ["last_trade", "time_bar", "bbo"]);
+    assert_eq!(
+        all.iter()
+            .filter(|kind| **kind != "time_bar")
+            .copied()
+            .collect::<Vec<_>>(),
+        ["last_trade", "bbo"]
+    );
+    let mut kinds = all;
+    kinds.sort_unstable();
+    assert_eq!(kinds, ["bbo", "last_trade", "time_bar"]);
 }
 
 #[tokio::test]

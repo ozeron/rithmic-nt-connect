@@ -26,7 +26,6 @@ import pytest
 from nautilus_trader.model.data import BarType
 from rithmic_nt_connect.data import payloads_to_bars
 from rithmic_nt_connect.historical import (
-    load_front_month_instrument,
     load_time_bars,
     load_trade_ticks,
 )
@@ -65,11 +64,11 @@ def wait_for_event(
 class TestInstruments:
     """TC-D01, D03 — instrument loading."""
 
-    def test_tc_d01_request_instruments(self, live_session):
+    def test_tc_d01_request_instruments(self, live_session, live_contract):
         """Load all instruments for the venue — at least one, valid fields."""
         import asyncio
 
-        provider = RithmicInstrumentProvider(live_session, [("NQ", "CME")])
+        provider = RithmicInstrumentProvider(live_session, [live_contract])
         asyncio.run(provider.load_all_async())
         all_instruments = provider.list_all()
         assert len(all_instruments) >= 1, "at least one instrument loaded"
@@ -78,9 +77,9 @@ class TestInstruments:
             assert inst.price_increment.as_double() > 0, f"{inst.id}: valid tick"
             assert inst.multiplier.as_double() > 0, f"{inst.id}: valid multiplier"
 
-    def test_tc_d03_load_specific_instrument(self, live_session):
-        """TC-D03 — load a single NQ front month by ID — valid fields."""
-        inst = load_front_month_instrument(live_session, "NQ", "CME")
+    def test_tc_d03_load_specific_instrument(self, live_front_month):
+        """TC-D03 — load the selected listed contract — valid fields."""
+        inst, *_ = live_front_month
         assert str(inst.id).endswith(".RITHMIC"), f"instrument_id: {inst.id}"
         assert inst.price_precision >= 1
         assert inst.price_increment.as_double() > 0
@@ -138,7 +137,8 @@ class TestOrderBook:
         while time.monotonic() < deadline and sum(seen.values()) < 200:
             ev = live_session.poll_event()
             if ev and ev.get("type") == "order_book":
-                order_book_to_fields(ev)  # rejects a value outside the set
+                # Snapshot images may omit venue time; use the receipt clock.
+                order_book_to_fields(ev, ts_init=time.time_ns())
                 seen[ev.get("update_type")] += 1
             elif ev is None:
                 time.sleep(0.05)
@@ -206,6 +206,7 @@ class TestTrades:
         assert int(ev["trade_size"]) >= 1, "positive trade size"
         assert ev.get("aggressor") in (1, 2, None), "valid aggressor"
 
+    @pytest.mark.usefixtures("live_history_available")
     def test_tc_d31_request_historical_trades(self, live_session, live_front_month):
         """TC-D31 — request historical trade ticks — valid timestamps, prices, sizes.
 
@@ -242,6 +243,7 @@ class TestBars:
 
     @pytest.mark.slow
     @pytest.mark.parametrize(("rtype", "period"), _BAR_PARAMS)
+    @pytest.mark.usefixtures("live_history_available")
     def test_tc_d40_subscribe_external_bars(
         self, live_session, live_front_month, rtype: int, period: int
     ):
@@ -266,6 +268,7 @@ class TestBars:
         assert float(ev["high_price"]) >= float(ev["low_price"]), "high >= low"
         assert int(ev["volume"]) >= 0, "valid volume"
 
+    @pytest.mark.usefixtures("live_history_available")
     def test_tc_d41_request_historical_bars(self, live_session, live_front_month):
         """TC-D41 — request historical bars — OHLCV, ascending, minute-grid stamps.
 
@@ -291,6 +294,7 @@ class TestBars:
             if i > 0:
                 assert b.ts_event >= bars[i - 1].ts_event, "ascending timestamps"
 
+    @pytest.mark.usefixtures("live_history_available")
     def test_tc_d42_historical_bars_close_to_open_shift(
         self, live_session, live_front_month
     ):

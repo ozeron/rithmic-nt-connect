@@ -10,7 +10,7 @@ use rithmic_rs::rti::messages::RithmicMessage;
 use rithmic_rs::{ConnectStrategy, RithmicConfig, RithmicEnv, RithmicTickerPlant};
 
 use crate::config::{DEFAULT_APP_NAME, DEFAULT_APP_VERSION, DEFAULT_LUCID_URL};
-use crate::error::{Error, Result};
+use rithmic_host::{Error, Result};
 
 /// Normalize a gateway host or URL into `wss://host:port`.
 pub fn normalize_gateway_url(raw: &str) -> String {
@@ -56,9 +56,14 @@ async fn probe_systems(url: &str) -> Result<Vec<String>> {
         .build()
         .map_err(|e| Error::Config(e.to_string()))?;
 
-    let plant = RithmicTickerPlant::connect(&rc, ConnectStrategy::Retry).await?;
+    let plant = RithmicTickerPlant::connect(&rc, ConnectStrategy::Retry)
+        .await
+        .map_err(crate::error::rithmic_error)?;
     let handle = plant.get_handle();
-    let resp = handle.get_system_info().await?;
+    let resp = handle
+        .get_system_info()
+        .await
+        .map_err(crate::error::rithmic_error)?;
     if let Some(err) = resp.error {
         let _ = handle.disconnect().await;
         return Err(Error::Rithmic(format!("system info: {err}")));

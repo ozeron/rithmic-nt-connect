@@ -15,15 +15,16 @@ crate-type = ["cdylib", "rlib"]
 # Empty Cargo default so `cargo test -p rithmic-nt-connect` does not link libpython.
 # Maturin builds enable `python` via pyproject.toml `[tool.maturin] features`.
 default = []
+testing = ["rithmic-host/testing", "rithmic-plants/testing"]
 python = ["dep:pyo3"]
 # Enabled automatically by maturin when building the extension module.
 extension-module = ["python", "pyo3/extension-module"]
 
 [dependencies]
+rithmic-host = { path = "../rithmic-host" }
 rithmic-gateway = { path = "../rithmic-gateway" }
 rithmic-exec = { path = "../rithmic-exec" }
 rithmic-plants = { path = "../rithmic-plants" }
-rithmic-rs = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 pyo3 = { version = "0.29", optional = true }
 

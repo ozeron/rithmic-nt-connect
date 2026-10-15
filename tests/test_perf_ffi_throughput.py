@@ -209,3 +209,48 @@ def test_ffi_empty_poll_cost(fake_bin) -> None:
         seconds=round(secs, 4),
         us_per_poll=round(secs / n * 1e6, 1),
     )
+
+
+def test_ffi_next_events_batch_field_access_throughput(fake_bin) -> None:
+    """Batch delivery plus reading each trade's identity, price and size."""
+
+    async def run(session: Any) -> tuple[int, int, float, float]:
+        got = gaps = 0
+        notional = 0.0
+        start = time.perf_counter()
+        deadline = start + DEADLINE_SEC
+        while got + gaps < EVENTS and time.perf_counter() < deadline:
+            batch = await asyncio.to_thread(session.next_events, "ticker", 256, 50)
+            for event in batch:
+                if event["type"] == "gap":
+                    gaps += int(event["skipped"])
+                    continue
+                assert event["type"] == "last_trade"
+                assert event["symbol"] == SYMBOL
+                assert event["exchange"] == EXCHANGE
+                notional += event["trade_price"] * event["trade_size"]
+                got += 1
+        return got, gaps, time.perf_counter() - start, notional
+
+    with running_fake(fake_bin) as parent:
+        session = _session(parent)
+        try:
+            session.subscribe(SYMBOL, EXCHANGE)
+            parent.push_last_trades(SYMBOL, EVENTS)
+            got, skipped, secs, notional = asyncio.run(run(session))
+        finally:
+            session.disconnect()
+    _record(
+        "py_to_thread_next_events_batch_field_access",
+        events=EVENTS,
+        received=got,
+        reported_skipped=skipped,
+        seconds=round(secs, 3),
+        events_per_sec=round(got / secs, 1) if secs else 0.0,
+        notional_checksum=notional,
+    )
+    assert got > 0, "field access must exercise at least one received trade"
+    assert notional > 0.0
+    assert got + skipped >= EVENTS, "every event is received or reported as skipped"
+    if skipped == 0:
+        assert notional == pytest.approx(EVENTS * 100.25 + EVENTS * (EVENTS - 1) / 2)

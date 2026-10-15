@@ -1,17 +1,21 @@
 //! `rithmic-gateway` — own one Rithmic login; serve plant-semantic IPC on a
 //! unix socket. See `docs/references/ops-runbook.md`.
 
+mod root_config;
+
 use std::str::FromStr;
 use std::sync::Arc;
 
 use rithmic_gateway::env_keys::{self, process_env_first};
 use rithmic_gateway::idle_exit::parse_idle_exit_sec;
 use rithmic_gateway::listen::{bind_unix, default_unix_path, ListenEndpoint};
-use rithmic_gateway::server::{run_gateway, Fingerprint, GatewayParams, SessionHandle};
-use rithmic_gateway::singleton::{SessionLock, STARTUP_LOCK_GRACE};
-use rithmic_gateway::subscriptions::ParentGates;
-use rithmic_plants::{DirectSession, PlantSet, Session, SessionConfig};
-use rithmic_rs::RithmicEnv;
+use rithmic_gateway::server::{run_gateway, Fingerprint, GatewayParams};
+use rithmic_gateway::singleton::SessionLock;
+use rithmic_host::Env;
+use rithmic_host::{
+    HistoryPolicy, HostFingerprint, HostOptions, HostRegistry, PlantSet, Session, Venue,
+};
+use rithmic_plants::{RithmicVenue, SessionConfig};
 
 #[tokio::main]
 async fn main() {
@@ -25,7 +29,7 @@ async fn main() {
             println!("rithmic-gateway {}", env!("CARGO_PKG_VERSION"));
             return;
         }
-        eprintln!("unknown argument: {arg}");
+        eprintln!("unknown argument (configuration uses environment variables; see --help)");
         print_help();
         std::process::exit(2);
     }
@@ -62,8 +66,8 @@ async fn run() -> Result<(), String> {
         url,
         env_name,
     } = endpoint;
-    // rithmic-rs only parses lowercase env names ("live"/"demo"/"test").
-    let env = RithmicEnv::from_str(&env_name.to_lowercase())
+    // Preserve the lowercase venue environment parser ("live"/"demo"/"test").
+    let env = Env::from_str(&env_name.to_lowercase())
         .map_err(|e| format!("RITHMIC_ENV {env_name:?}: {e}"))?;
 
     let idle_policy = parse_idle_exit_sec(
@@ -71,13 +75,6 @@ async fn run() -> Result<(), String> {
             .ok()
             .as_deref(),
     )?;
-
-    // Flock first (R10 / AGENTS.md single-login): refuse before ever
-    // touching Rithmic if a direct or parent process already holds it.
-    let _lock =
-        SessionLock::acquire_patient(&user, &system_name, &url, &env_name, STARTUP_LOCK_GRACE)
-            .await
-            .map_err(|e| format!("credential flock: {e}"))?;
 
     let listen_raw = std::env::var("RITHMIC_GATEWAY_LISTEN").unwrap_or_else(|_| {
         format!(
@@ -116,6 +113,40 @@ async fn run() -> Result<(), String> {
         PlantSet::MARKET_DATA
     };
 
+    // The parent's own gates, enforced in the session as well as at dispatch, so
+    // no caller of this session can bypass them.
+    let gates = root_config::gates();
+    let mut key = HostFingerprint::new(&user, &system_name, &url, &env_name);
+    key.account_id = Some(account_id.clone()).filter(|s| !s.is_empty());
+    key.fcm_id = Some(fcm_id.clone()).filter(|s| !s.is_empty());
+    key.ib_id = Some(ib_id.clone()).filter(|s| !s.is_empty());
+    key.app_name = cfg.app_name().into();
+    key.app_version = cfg.app_version().into();
+    let registry = HostRegistry::<dyn Venue>::default();
+    let lock_path = SessionLock::lock_path(&user, &system_name, &url, &env_name);
+    let lock_dir = lock_path.parent().expect("lock directory");
+    let host = registry
+        .get_or_start(
+            key,
+            || {
+                Arc::new(RithmicVenue::new(cfg, PlantSet::MARKET_DATA).with_gates(true, true))
+                    as Arc<dyn Venue>
+            },
+            lock_dir,
+            HostOptions {
+                gates,
+                timing: root_config::timing(),
+                history_policy: HistoryPolicy::RefuseUnderLiveMd,
+                lock_filename: lock_path.file_name().map(ToOwned::to_owned),
+            },
+        )
+        .await
+        .map_err(|e| format!("credential flock: {e}"))?;
+    let session = host.attach();
+    session
+        .request_plants(plants)
+        .await
+        .map_err(|e| e.to_string())?;
     // Claim the listen path before plants.connect (KTD5 Ready still means plants
     // up — Handshakes get not_ready until ready=true). Early bind stops impostors
     // from squatting the sock during the Rithmic connect window.
@@ -127,12 +158,6 @@ async fn run() -> Result<(), String> {
         path.display()
     );
 
-    // The parent's own gates, enforced in the session as well as at dispatch, so
-    // no caller of this session can bypass them.
-    let gates = ParentGates::from_env();
-    let session = Arc::new(
-        DirectSession::new(cfg, plants).with_gates(gates.trading_enabled, gates.cancel_all_enabled),
-    );
     if let Err(e) = session.connect().await {
         let _ = session.disconnect().await;
         drop(listener);
@@ -141,7 +166,7 @@ async fn run() -> Result<(), String> {
     }
     eprintln!("rithmic-gateway: plants connected ({plants:?}; history ready)");
 
-    run_gateway(GatewayParams {
+    let result = run_gateway(GatewayParams {
         listener,
         path,
         fingerprint: Fingerprint {
@@ -155,9 +180,9 @@ async fn run() -> Result<(), String> {
         },
         expected_auth_token,
         idle_policy,
-        gates,
-        session: SessionHandle::new(session),
-        timing: rithmic_gateway::server::pump::PumpTiming::default(),
+        host: host.clone(),
     })
-    .await
+    .await;
+    session.disconnect().await.map_err(|e| e.to_string())?;
+    result
 }

@@ -36,3 +36,17 @@ pub use framing::{decode_frame, encode_frame, FrameError, Result as FrameResult,
 
 /// Re-export plant façade for gateway consumers.
 pub use rithmic_plants;
+
+// Handshake is the only gateway protobuf containing a credential. Its enclosing
+// Frame/Body Debug implementations delegate here, including in panic messages.
+impl std::fmt::Debug for pb::Handshake {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Handshake")
+            .field("user", &self.user)
+            .field("system_name", &self.system_name)
+            .field("url", &self.url)
+            .field("env", &self.env)
+            .field("auth_token", &"***")
+            .finish_non_exhaustive()
+    }
+}

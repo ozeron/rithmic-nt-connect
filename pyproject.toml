@@ -38,6 +38,9 @@ module-name = "rithmic_nt_connect._lib"
 python-source = "python"
 features = ["python", "extension-module"]
 
+[tool.uv]
+config-settings = { "build-args" = "--features python,extension-module,testing" }
+
 [tool.uv.sources]
 # In-repo source for `--extra gateway`; consumers resolve it from the wheel index.
 rithmic-gateway = { path = "python" }

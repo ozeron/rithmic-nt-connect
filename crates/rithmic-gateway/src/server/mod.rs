@@ -1,36 +1,34 @@
 //! Accept loop: Handshake + Ready, gated RPC dispatch backed by
-//! [`rithmic_plants::RithmicSession`], and per-client fan-out of pushed
+//! [`rithmic_host::Session`], and per-client fan-out of pushed
 //! events. Client disconnect is detach-only (refcount decrement) while peers
 //! remain; optional idle-exit shuts down the parent after the last Ready
 //! peer leaves (see [`crate::idle_exit`]).
 
-use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::FutureExt;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{broadcast, mpsc, watch, Mutex as TokioMutex, RwLock};
-use tokio::task::JoinHandle;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::UnixListener;
+use tokio::sync::{mpsc, watch};
 
-use rithmic_plants::Session;
+use rithmic_host::Session;
 
 use crate::codec;
 use crate::idle_exit::{IdleExit, IdleExitPolicy};
 use crate::pb::{self, frame::Body, Frame, Handshake, Ready};
-use crate::reconnect::{ReconnectController, TimeBarIntent};
-use crate::subscriptions::{ClientId, Fan, FanoutHub, Kind, ParentGates, SharedFanout, SubKey};
 
 mod dispatch;
 pub mod pump;
-use dispatch::TopicIntent;
+mod transport;
 pub use dispatch::{
     gate_rpc_for_test, history_rpc_with_live_ticker_intent_for_test, rpc_sequence_with_gates,
 };
+pub use transport::listen_unix;
+pub use transport::listen_unix as serve;
 
 /// Metadata advertised in every ``Ready`` frame for this parent process.
 ///
@@ -48,139 +46,21 @@ pub fn boot_gateway_metadata() -> (u64, AtomicU64, watch::Sender<u64>) {
     (id, AtomicU64::new(1), epoch_tx)
 }
 
-/// The parent's plant session behind the [`Session`] trait, guarded by one gate.
-///
-/// The gate only separates *using* the plants from *rebuilding* them. RPCs take it
-/// shared ([`SessionHandle::lock`]) and run concurrently, so no call waits behind
-/// another; reconnect and shutdown take it exclusively
-/// ([`SessionHandle::lock_exclusive`]), which waits for in-flight calls and keeps
-/// new ones out. Waiting for events needs no gate at all: the pump uses
-/// [`SessionHandle::checkout`] once and then runs on the shared session.
-#[derive(Clone)]
-pub struct SessionHandle {
-    gate: Arc<RwLock<()>>,
-    session: Arc<dyn Session>,
-}
+/// Compatibility name for the venue rebuild gate. Host owns the gate.
+pub type SessionHandle = rithmic_host::VenueHandle;
 
-/// Shared guard returned by [`SessionHandle::lock`]; derefs to the session. Any
-/// number of RPCs hold it at once, so a slow call never queues the others.
-pub struct SessionGuard<'a> {
-    _gate: tokio::sync::RwLockReadGuard<'a, ()>,
-    session: &'a Arc<dyn Session>,
-}
-
-impl std::ops::Deref for SessionGuard<'_> {
-    type Target = dyn Session;
-
-    fn deref(&self) -> &Self::Target {
-        &**self.session
-    }
-}
-
-/// Exclusive guard for rebuilding the plants (reconnect, shutdown): it waits for
-/// in-flight RPCs to finish and keeps new ones out while it is held.
-pub struct ExclusiveSessionGuard<'a> {
-    _gate: tokio::sync::RwLockWriteGuard<'a, ()>,
-    session: &'a Arc<dyn Session>,
-}
-
-impl std::ops::Deref for ExclusiveSessionGuard<'_> {
-    type Target = dyn Session;
-
-    fn deref(&self) -> &Self::Target {
-        &**self.session
-    }
-}
-
-impl SessionHandle {
-    pub fn new(session: Arc<dyn Session>) -> Self {
-        Self {
-            gate: Arc::new(RwLock::new(())),
-            session,
-        }
-    }
-
-    /// Shared access: RPCs run concurrently and only wait while plants are being
-    /// rebuilt.
-    pub async fn lock(&self) -> SessionGuard<'_> {
-        SessionGuard {
-            _gate: self.gate.read().await,
-            session: &self.session,
-        }
-    }
-
-    /// Exclusive access, for disconnect / connect / restore.
-    pub async fn lock_exclusive(&self) -> ExclusiveSessionGuard<'_> {
-        ExclusiveSessionGuard {
-            _gate: self.gate.write().await,
-            session: &self.session,
-        }
-    }
-
-    /// Wait out any rebuild, then return the session without holding the gate.
-    pub async fn checkout(&self) -> Arc<dyn Session> {
-        drop(self.gate.read().await);
-        Arc::clone(&self.session)
-    }
-}
-
-/// Shared gateway runtime state, held for the process lifetime.
+/// Transport-owned state. All plant policy is behind `host`.
 pub struct GatewayState {
-    pub gates: ParentGates,
-    pub hub: SharedFanout,
+    pub host: Arc<rithmic_host::SessionHost>,
     pub fingerprint: Fingerprint,
-    /// Cleared while plants reconnect so new Handshakes get `not_ready`.
-    pub ready: AtomicBool,
-    /// Set when a plant must be rebuilt outside the poll path (e.g. failed
-    /// order-plant reseat). Event pump treats this like a connection issue.
-    pub force_reconnect: AtomicBool,
-    /// Wakes the event pump when `force_reconnect` is set (a stored permit, so
-    /// a wake raised while the pump is busy is not lost).
-    pub reconnect_wake: tokio::sync::Notify,
-    /// Parent secret for non-empty Handshake `auth_token` (from
-    /// `RITHMIC_GATEWAY_AUTH_TOKEN`). Empty means only same-UID empty-token
-    /// peers are accepted.
     pub expected_auth_token: String,
-    /// `None` only in gate / RPC-sequence unit tests without plants.
-    /// Plant RPCs return `Error(no_session)` — never Ack / empty success.
-    pub session: Option<SessionHandle>,
-    pub reconnect: Arc<ReconnectController>,
-    /// Serialize first venue-subscribe per topic so a failing peer cannot
-    /// leave concurrent Ack'd clients without a live venue join.
-    pub topic_locks: TokioMutex<HashMap<SubKey, Arc<TokioMutex<()>>>>,
-    /// Serialize the complete `show_orders` + bounded-drain reconciliation so
-    /// concurrent `LoadOrders` requests cannot interleave their replays on the
-    /// shared order-updates subscription channel (each drain would otherwise
-    /// observe the other's working-order replay and return a mixed snapshot).
-    /// Kept separate from the session lock so the drain can run without
-    /// blocking the event pump.
-    pub recon_lock: Arc<TokioMutex<()>>,
-    /// Serializes history admission vs live MD intent creation (ticker /
-    /// book / time bars): held for a load's live-MD check (only the check, never
-    /// the load) and across MD subscribe note + venue join, so a load cannot
-    /// start between a subscribe's check and its intent (RC2.3). The rule holds
-    /// when a load starts; a subscribe during a running load is admitted.
-    pub md_history_gate: Arc<TokioMutex<()>>,
-    /// History / probe loads run one at a time against the venue.
-    pub history_load_lock: Arc<TokioMutex<()>>,
-    /// Ready peer count + optional idle-exit after last client.
     pub idle: IdleExit,
-    /// Stable for the parent process lifetime (advertised in Ready).
     pub gateway_instance_id: u64,
-    /// Bumps when plants / transport epoch is recreated (advertised in Ready).
-    pub transport_generation: AtomicU64,
-    /// Notifies connected clients when [`Self::transport_generation`] bumps so
-    /// they drop and re-handshake (otherwise they keep a stale Ready frame).
-    pub transport_epoch: watch::Sender<u64>,
-    /// The event pump's pauses.
-    pub timing: pump::PumpTiming,
 }
-
-impl GatewayState {
-    /// Ask the event pump to rebuild the plants (outside the poll path).
-    pub fn request_reconnect(&self) {
-        self.force_reconnect.store(true, Ordering::SeqCst);
-        self.reconnect_wake.notify_one();
+impl std::ops::Deref for GatewayState {
+    type Target = rithmic_host::host::HostState;
+    fn deref(&self) -> &Self::Target {
+        &self.host.state
     }
 }
 
@@ -284,10 +164,7 @@ pub struct GatewayParams {
     pub fingerprint: Fingerprint,
     pub expected_auth_token: String,
     pub idle_policy: IdleExitPolicy,
-    pub gates: ParentGates,
-    pub session: SessionHandle,
-    /// The event pump's pauses ([`pump::PumpTiming::default`] in production).
-    pub timing: pump::PumpTiming,
+    pub host: Arc<rithmic_host::SessionHost>,
 }
 
 /// Serve the gateway over an already-connected session until the listener
@@ -301,83 +178,21 @@ pub async fn run_gateway(params: GatewayParams) -> Result<(), String> {
         fingerprint,
         expected_auth_token,
         idle_policy,
-        gates,
-        session,
-        timing,
+        host,
     } = params;
-    let hub = Arc::new(FanoutHub::new(crate::subscriptions::DEFAULT_QUEUE_CAP));
-    let reconnect = Arc::new(ReconnectController::new(hub.clone()));
-    let (gateway_instance_id, transport_generation, transport_epoch) = boot_gateway_metadata();
+    host.state.hub.set_encoder(encode_plant_event);
+    let (gateway_instance_id, _, _) = boot_gateway_metadata();
     let state = Arc::new(GatewayState {
-        gates,
-        hub: hub.clone(),
+        host: host.clone(),
         fingerprint,
-        // Ready only after plants are up (KTD5): the caller connected already.
-        ready: AtomicBool::new(true),
-        force_reconnect: AtomicBool::new(false),
-        reconnect_wake: tokio::sync::Notify::new(),
         expected_auth_token,
-        session: Some(session.clone()),
-        reconnect: reconnect.clone(),
-        topic_locks: TokioMutex::new(HashMap::new()),
-        recon_lock: Arc::new(TokioMutex::new(())),
-        md_history_gate: Arc::new(TokioMutex::new(())),
-        history_load_lock: Arc::new(TokioMutex::new(())),
         idle: IdleExit::new(idle_policy),
         gateway_instance_id,
-        transport_generation,
-        transport_epoch,
-        timing,
     });
-
-    let pump = tokio::spawn(pump::run_event_pump(
-        session.clone(),
-        hub,
-        reconnect,
-        Arc::clone(&state),
-    ));
-
     let serve_result = serve(listener, state).await.map_err(|e| e.to_string());
-    pump.abort();
-    let _ = pump.await;
-    {
-        let guard = session.lock_exclusive().await;
-        let _ = guard.disconnect().await;
-    }
+    host.shutdown().await;
     let _ = std::fs::remove_file(&path);
     serve_result
-}
-
-/// Accept connections until idle-exit fires (or forever when policy is Never).
-pub async fn serve(listener: UnixListener, state: Arc<GatewayState>) -> std::io::Result<()> {
-    loop {
-        tokio::select! {
-            biased;
-            _ = state.idle.wait_until_should_exit() => {
-                match state.idle.policy() {
-                    IdleExitPolicy::After(grace) => {
-                        eprintln!(
-                            "rithmic-gateway: idle-exit after {}s with 0 peers",
-                            grace.as_secs()
-                        );
-                    }
-                    IdleExitPolicy::Never => {
-                        eprintln!("rithmic-gateway: idle-exit");
-                    }
-                }
-                return Ok(());
-            }
-            accepted = listener.accept() => {
-                let (stream, _) = accepted?;
-                let state = Arc::clone(&state);
-                tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, state).await {
-                        eprintln!("gateway client error: {e}");
-                    }
-                });
-            }
-        }
-    }
 }
 
 /// How long a new connection may take to send its handshake.
@@ -423,7 +238,7 @@ async fn read_frame_bytes_max<R: tokio::io::AsyncRead + Unpin>(
     }
 }
 
-async fn write_frame(stream: &mut UnixStream, frame: &Frame) -> Result<(), String> {
+async fn write_frame<W: AsyncWrite + Unpin>(stream: &mut W, frame: &Frame) -> Result<(), String> {
     let wire = codec::encode(frame).map_err(|e| e.to_string())?;
     tokio::time::timeout(Duration::from_secs(5), stream.write_all(&wire))
         .await
@@ -431,277 +246,40 @@ async fn write_frame(stream: &mut UnixStream, frame: &Frame) -> Result<(), Strin
         .map_err(|e| format!("write: {e}"))
 }
 
-/// Same-UID check for the v1 local-unix empty-token trust policy (R15 /
-/// KTD16): unix `SO_PEERCRED` is a kernel fact, not client-supplied data.
-fn same_uid_peer(stream: &UnixStream) -> bool {
-    match stream.peer_cred() {
-        Ok(cred) => {
-            // SAFETY: getuid() has no preconditions and never fails.
-            let our_uid = unsafe { libc::getuid() };
-            cred.uid() == our_uid
-        }
-        Err(_) => false,
-    }
-}
-
-pub(super) enum OutMsg {
-    Frame(Bytes),
-}
-
-/// Per-connection fan-out bookkeeping: which topics this client forwards,
-/// typed venue joins this client asked for, and forwarder tasks.
-pub(super) struct ClientCtx {
-    subscribed: HashSet<SubKey>,
-    ticker: HashSet<SubKey>,
-    book: HashSet<SubKey>,
-    time_bars: HashSet<TimeBarIntent>,
-    pnl: bool,
-    order: bool,
-    brackets: bool,
-    forwarders: HashMap<SubKey, JoinHandle<()>>,
-    /// Per forwarded topic: which frame kinds this client asked for (bit mask of
-    /// [`Kind::bit`]). A forwarder drops frames of other kinds.
-    kinds: HashMap<SubKey, Arc<AtomicU8>>,
-    out_tx: mpsc::Sender<OutMsg>,
-}
-
-impl ClientCtx {
-    fn new(out_tx: mpsc::Sender<OutMsg>) -> Self {
-        Self {
-            subscribed: HashSet::new(),
-            ticker: HashSet::new(),
-            book: HashSet::new(),
-            time_bars: HashSet::new(),
-            pnl: false,
-            order: false,
-            brackets: false,
-            forwarders: HashMap::new(),
-            kinds: HashMap::new(),
-            out_tx,
-        }
-    }
-
-    /// Recompute and publish the frame kinds this client wants on `key`'s topic,
-    /// after one of its ticker / book / time-bar intents changed.
-    pub(super) fn sync_kinds(&mut self, key: &SubKey) {
-        let mut mask = 0u8;
-        if self.ticker.contains(key) {
-            mask |= Kind::Ticker.bit();
-        }
-        if self.book.contains(key) {
-            mask |= Kind::Book.bit();
-        }
-        if self
-            .time_bars
-            .iter()
-            .any(|tb| tb.symbol == key.symbol && tb.exchange == key.exchange)
-        {
-            mask |= Kind::Bars.bit();
-        }
-        if self.brackets && *key == crate::convert::order_key() {
-            mask |= Kind::Brackets.bit();
-        }
-        if mask == 0 && !self.forwarders.contains_key(key) {
-            // Nothing forwarded and nothing wanted: keep no empty entry around.
-            self.kinds.remove(key);
-            return;
-        }
-        self.kinds
-            .entry(key.clone())
-            .or_insert_with(|| Arc::new(AtomicU8::new(0)))
-            .store(mask, Ordering::SeqCst);
-    }
-
-    fn wants_md(&self, key: &SubKey) -> bool {
-        self.ticker.contains(key)
-            || self.book.contains(key)
-            || self
-                .time_bars
-                .iter()
-                .any(|tb| tb.symbol == key.symbol && tb.exchange == key.exchange)
-    }
-
-    /// Attach this client to `key`'s fan-out topic (idempotent). The topic
-    /// must already exist in the hub (caller subscribes hub interest first).
-    async fn ensure_forwarder(&mut self, hub: &FanoutHub, key: &SubKey) {
-        if self.subscribed.contains(key) {
-            return;
-        }
-        if let Some(rx) = hub.subscribe_receiver(key).await {
-            let kinds = Arc::clone(
-                self.kinds
-                    .entry(key.clone())
-                    .or_insert_with(|| Arc::new(AtomicU8::new(0))),
-            );
-            let handle = spawn_forwarder(rx, self.out_tx.clone(), stream_of_topic(key), kinds);
-            self.forwarders.insert(key.clone(), handle);
-            self.subscribed.insert(key.clone());
-        }
-    }
-
-    fn drop_forwarder(&mut self, key: &SubKey) {
-        if let Some(handle) = self.forwarders.remove(key) {
-            handle.abort();
-        }
-        self.kinds.remove(key);
-        self.subscribed.remove(key);
-    }
-
-    /// Forget one typed intent and leave the venue topic when this was the
-    /// last peer. Shared by all MD teardown drains via [`TopicIntent`].
-    async fn teardown_topic(state: &GatewayState, intent: dispatch::TopicIntent) {
-        let key = intent.key();
-        let lock = dispatch::topic_lock(state, &key).await;
-        let _guard = lock.lock().await;
-        if intent.forget(&state.reconnect).await {
-            if let Some(session) = &state.session {
-                let guard = session.lock().await;
-                let _ = intent.venue_leave(&*guard).await;
-            }
-        }
-    }
-
-    /// Detach-only disconnect: clear typed intents + hub interest; venue
-    /// unsubscribe only when the last peer of that typed join leaves.
-    async fn teardown(&mut self, state: &GatewayState) {
-        for handle in self.forwarders.values() {
-            handle.abort();
-        }
-        self.forwarders.clear();
-
-        // Fire-and-forget per topic: the client is dying, so unlike
-        // `unsubscribe_topic` there is no re-note on failure. The topic_lock
-        // is still held across forget + venue leave so a concurrent
-        // first-peer subscribe cannot have its join undone.
-        for key in self.ticker.drain() {
-            Self::teardown_topic(state, TopicIntent::Ticker(key)).await;
-        }
-        for key in self.book.drain() {
-            Self::teardown_topic(state, TopicIntent::Book(key)).await;
-        }
-        for intent in self.time_bars.drain() {
-            Self::teardown_topic(state, TopicIntent::TimeBars(intent)).await;
-        }
-        self.teardown_pnl(state).await;
-        self.teardown_order_plants(state).await;
-
-        for key in self.subscribed.drain() {
-            let _ = state.reconnect.remove_hub_interest(&key).await;
-        }
-    }
-
-    async fn teardown_pnl(&mut self, state: &GatewayState) {
-        // The client is gone: nothing to roll back to, nobody to tell.
-        if let Err((code, e)) = dispatch::leave_pnl(state, self, false).await {
-            eprintln!("rithmic-gateway: teardown {code}: {e}");
-        }
-    }
-
-    async fn teardown_order_plants(&mut self, state: &GatewayState) {
-        if let Err((code, e)) = dispatch::leave_order(state, self, false).await {
-            eprintln!("rithmic-gateway: teardown {code}: {e}");
-        }
-    }
-}
-
-/// Which plant stream a topic's events come from, for a gap frame.
-fn stream_of_topic(key: &SubKey) -> rithmic_plants::Stream {
-    match key.symbol.as_str() {
-        "__pnl__" => rithmic_plants::Stream::Pnl,
-        "__order__" => rithmic_plants::Stream::Order,
-        _ => rithmic_plants::Stream::Ticker,
-    }
-}
-
-/// The streams a forwarder overflow is reported on. A symbol topic carries
-/// ticks, book and live bars, but bars are consumed from the history channel: a
-/// client that asked for bars is told on that channel too, so its bar consumer
-/// resyncs instead of continuing with a hole.
-fn overflow_gap_streams(stream: rithmic_plants::Stream, kinds: u8) -> Vec<rithmic_plants::Stream> {
-    let mut streams = vec![stream];
-    if stream == rithmic_plants::Stream::Ticker && kinds & Kind::Bars.bit() != 0 {
-        streams.push(rithmic_plants::Stream::History);
-    }
-    streams
-}
-
-/// Forward one topic to one client. A receiver that falls behind the topic's
-/// ring is not disconnected: it is told exactly how many frames it missed (a
-/// `Gap` in order with the rest) and keeps going. A client that stops reading
-/// altogether is cut by the writer's timeout.
-fn spawn_forwarder(
-    rx: broadcast::Receiver<Fan>,
-    out_tx: mpsc::Sender<OutMsg>,
-    stream: rithmic_plants::Stream,
-    kinds: Arc<AtomicU8>,
-) -> JoinHandle<()> {
-    let mut queue = crate::subscriptions::ClientQueue::from_receiver(ClientId::new(), rx);
-    tokio::spawn(async move {
-        loop {
-            match queue.recv().await {
-                Ok(fan) => {
-                    // A frame of a kind this client never asked for (a book
-                    // update for a ticker-only client) is dropped here, before
-                    // it costs a socket write or a decode on the far side.
-                    let wanted = fan.kind == Kind::Any
-                        || kinds.load(Ordering::Relaxed) & fan.kind.bit() != 0;
-                    if wanted && out_tx.send(OutMsg::Frame(fan.bytes)).await.is_err() {
-                        return;
-                    }
-                }
-                Err(crate::subscriptions::ClientQueueError::Overflow { skipped }) => {
-                    for gap_stream in overflow_gap_streams(stream, kinds.load(Ordering::Relaxed)) {
-                        let gap = Frame {
-                            request_id: 0,
-                            body: Some(Body::Event(pb::Event {
-                                body: Some(pb::event::Body::Gap(pb::Gap {
-                                    stream: gap_stream.plant().into(),
-                                    skipped,
-                                })),
-                            })),
-                        };
-                        let Ok(wire) = codec::encode(&gap) else {
-                            return;
-                        };
-                        if out_tx.send(OutMsg::Frame(Bytes::from(wire))).await.is_err() {
-                            return;
-                        }
-                    }
-                }
-                Err(crate::subscriptions::ClientQueueError::Closed) => return,
-            }
-        }
-    })
-}
-
 /// Encode one event as a wire frame (a single allocation) ready to fan out.
-fn encode_event(event: pb::Event, kind: Kind) -> Option<Fan> {
+fn encode_event(event: pb::Event) -> Option<Bytes> {
     let frame = Frame {
         request_id: 0,
         body: Some(Body::Event(event)),
     };
     let wire = codec::encode(&frame).ok()?;
-    Some(Fan {
-        kind,
-        bytes: Bytes::from(wire),
-    })
+    Some(Bytes::from(wire))
 }
 
-/// Encode a wire event and publish it to `key`'s topic (a gap on the ticker or
-/// history stream goes to every symbol topic).
-pub async fn publish_event(hub: &FanoutHub, key: &SubKey, event: pb::Event, kind: Kind) -> usize {
-    let Some(fan) = encode_event(event, kind) else {
-        return 0;
-    };
-    if key.symbol == crate::convert::GAP_BROADCAST {
-        return hub.publish_symbols(fan).await;
-    }
-    hub.publish(key, fan).await
+/// The one protobuf encoding boundary, also used as the host's optional
+/// projection for hosts with exclusively remote consumers.
+pub fn encode_plant_event(event: rithmic_host::PlantEvent) -> Bytes {
+    encode_event(crate::convert::plant_event_to_pb(event)).unwrap_or_default()
+}
+pub use rithmic_host::fanout::publish_plant_event;
+
+/// Serve an authenticated session over an already-connected transport.
+/// Generic transports require a token; only `listen_unix` attests same-UID peers.
+pub async fn serve_connection<S>(stream: S, state: Arc<GatewayState>) -> Result<(), String>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    serve_connection_with_peer(stream, state, false).await
 }
 
-async fn handle_client(mut stream: UnixStream, state: Arc<GatewayState>) -> Result<(), String> {
-    let same_uid = same_uid_peer(&stream);
-
+async fn serve_connection_with_peer<S>(
+    mut stream: S,
+    state: Arc<GatewayState>,
+    same_uid: bool,
+) -> Result<(), String>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     // Before it authenticates a peer gets a short deadline and a small frame
     // budget: an idle or hostile connection cannot hold a task or 16 MiB.
     let payload = tokio::time::timeout(
@@ -733,11 +311,11 @@ async fn handle_client(mut stream: UnixStream, state: Arc<GatewayState>) -> Resu
         return Err(format!("{code}: {msg}"));
     }
 
-    // Subscribe before the generation goes into Ready, so a rebuild that finishes
-    // in between is still reported (Ready carries the older generation) instead of
-    // being missed. Only later bumps are reacted to.
-    let mut epoch_rx = state.transport_epoch.subscribe();
-    epoch_rx.borrow_and_update();
+    // Attach and subscribe before Ready: a recovery during the handshake must
+    // still deliver its interruption and completed generation to this connection.
+    state.host.state.hub.set_encoder(encode_plant_event);
+    let (client, out_rx) = state.host.attach_transport();
+    let session_events = client.session_events();
 
     write_frame(
         &mut stream,
@@ -745,8 +323,8 @@ async fn handle_client(mut stream: UnixStream, state: Arc<GatewayState>) -> Resu
             request_id: 0,
             body: Some(Body::Ready(Ready {
                 scopes: state.gates.scopes(),
-                trading_enabled: state.gates.trading_enabled,
-                cancel_all_enabled: state.gates.cancel_all_enabled,
+                trading_enabled: state.gates.snapshot().trading,
+                cancel_all_enabled: state.gates.snapshot().cancel_all,
                 gateway_instance_id: state.gateway_instance_id,
                 transport_generation: state.transport_generation.load(Ordering::Relaxed),
             })),
@@ -763,8 +341,22 @@ async fn handle_client(mut stream: UnixStream, state: Arc<GatewayState>) -> Resu
         return Err("shutting_down".into());
     }
 
-    let (out_tx, out_rx) = mpsc::channel::<OutMsg>(crate::subscriptions::DEFAULT_QUEUE_CAP);
-    let client = ClientCtx::new(out_tx);
+    let (read_half, write_half) = tokio::io::split(stream);
+    serve_connection_halves(read_half, write_half, state, client, out_rx, session_events).await
+}
+
+async fn serve_connection_halves<R, W>(
+    read_half: R,
+    write_half: W,
+    state: Arc<GatewayState>,
+    client: rithmic_host::LocalSession,
+    out_rx: rithmic_host::EventReceiver,
+    mut session_events: tokio::sync::broadcast::Receiver<rithmic_host::SessionEvent>,
+) -> Result<(), String>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     // One connection is four tasks so no request can hold up another:
     //   reader   owns the read half, decodes frames and hands each to a lane;
     //   commands runs state-changing / subscription requests in arrival order;
@@ -774,13 +366,17 @@ async fn handle_client(mut stream: UnixStream, state: Arc<GatewayState>) -> Resu
     let (cmd_tx, cmd_rx) = mpsc::channel::<Request>(COMMAND_QUEUE);
     let (slow_tx, slow_rx) = mpsc::channel::<Request>(SLOW_QUEUE);
     let (stop_tx, stop_rx) = watch::channel(false);
-    let (read_half, write_half) = stream.into_split();
 
     let mut reader = tokio::spawn(read_requests(read_half, cmd_tx, slow_tx, reply_tx.clone()));
     // Detached: when the connection ends the slow lane drains on its own (each
     // read is bounded by its own timeout). Aborting it mid-drain could leave an
     // order replay half-read on the plant, to be collected by the next drain.
-    tokio::spawn(run_slow_lane(Arc::clone(&state), slow_rx, reply_tx.clone()));
+    tokio::spawn(run_slow_lane(
+        Arc::clone(&state),
+        client.clone(),
+        slow_rx,
+        reply_tx.clone(),
+    ));
     // Kept to tell this client when the plants were rebuilt; dropped before the
     // writer is awaited so the reply channel can close.
     let resume_tx = reply_tx.clone();
@@ -814,21 +410,28 @@ async fn handle_client(mut stream: UnixStream, state: Arc<GatewayState>) -> Resu
                 let _ = stop_tx.send(true);
                 break (&mut commands).await.ok();
             }
-            // The plants were rebuilt and every client's subscriptions restored.
-            // The client stays attached and keeps its intents; it is told so it can
-            // resynchronize (events were missed while the plants were down).
-            _ = epoch_rx.changed() => {
-                let generation = *epoch_rx.borrow_and_update();
-                let resumed = Frame {
-                    request_id: 0,
-                    body: Some(Body::Event(pb::Event {
-                        body: Some(pb::event::Body::TransportResumed(pb::TransportResumed {
-                            generation,
-                        })),
-                    })),
+            event = session_events.recv() => {
+                use rithmic_host::SessionEvent;
+                let body = match event {
+                    Ok(SessionEvent::Interrupted { generation, .. }) => {
+                        pb::event::Body::TransportInterrupted(pb::TransportInterrupted { generation })
+                    }
+                    Ok(SessionEvent::Resumed { generation }) => {
+                        pb::event::Body::TransportResumed(pb::TransportResumed { generation })
+                    }
+                    // No failure frame was added to the protocol. Flush the
+                    // interruption and queued replies, then close this transport.
+                    Ok(SessionEvent::RecoveryFailed { .. }) | Err(_) => {
+                        reader.abort();
+                        let _ = stop_tx.send(true);
+                        break (&mut commands).await.ok();
+                    }
                 };
-                if resume_tx.send(resumed).await.is_err() {
-                    // The writer is gone: the connection is done.
+                let frame = Frame {
+                    request_id: 0,
+                    body: Some(Body::Event(pb::Event { body: Some(body) })),
+                };
+                if resume_tx.send(frame).await.is_err() {
                     let _ = stop_tx.send(true);
                     break (&mut commands).await.ok();
                 }
@@ -838,8 +441,8 @@ async fn handle_client(mut stream: UnixStream, state: Arc<GatewayState>) -> Resu
 
     drop(resume_tx);
     reader.abort();
-    if let Some(mut client) = client {
-        client.teardown(&state).await;
+    if let Some(client) = client {
+        let _ = client.disconnect().await;
     }
     // With every sender gone the writer flushes what is queued (a Disconnect
     // ack) and ends; bound the wait so a dead peer cannot hold the teardown.
@@ -885,8 +488,8 @@ fn request_id_of(payload: &[u8]) -> Option<u64> {
     decode_varint(&mut buf).ok().filter(|id| *id != 0)
 }
 
-async fn read_requests(
-    mut read: tokio::net::unix::OwnedReadHalf,
+async fn read_requests<R: tokio::io::AsyncRead + Unpin>(
+    mut read: R,
     commands: mpsc::Sender<Request>,
     slow: mpsc::Sender<Request>,
     replies: mpsc::Sender<Frame>,
@@ -967,11 +570,11 @@ async fn read_requests(
 /// the client context for teardown.
 async fn run_commands(
     state: Arc<GatewayState>,
-    mut client: ClientCtx,
+    client: rithmic_host::LocalSession,
     mut requests: mpsc::Receiver<Request>,
     replies: mpsc::Sender<Frame>,
     mut stop: watch::Receiver<bool>,
-) -> ClientCtx {
+) -> rithmic_host::LocalSession {
     loop {
         let req = tokio::select! {
             biased;
@@ -991,7 +594,7 @@ async fn run_commands(
             // ending it would skip the teardown that releases this connection's
             // intents, leaking venue subscriptions for the life of the parent.
             let id = req.id;
-            match AssertUnwindSafe(dispatch::dispatch(&state, &mut client, id, req.body))
+            match AssertUnwindSafe(dispatch::dispatch(&state, &client, id, req.body))
                 .catch_unwind()
                 .await
             {
@@ -1027,6 +630,7 @@ fn not_ready_frame(request_id: u64) -> Frame {
 /// Serve slow read RPCs concurrently (bounded), replying as each finishes.
 async fn run_slow_lane(
     state: Arc<GatewayState>,
+    client: rithmic_host::LocalSession,
     mut requests: mpsc::Receiver<Request>,
     replies: mpsc::Sender<Frame>,
 ) {
@@ -1036,13 +640,13 @@ async fn run_slow_lane(
         let Ok(permit) = Arc::clone(&permits).acquire_owned().await else {
             return;
         };
-        let (state, replies) = (Arc::clone(&state), replies.clone());
+        let (state, replies, client) = (Arc::clone(&state), replies.clone(), client.clone());
         running.spawn(async move {
             let _permit = permit;
             let resp = if !state.ready.load(Ordering::SeqCst) {
                 not_ready_frame(req.id)
             } else {
-                dispatch::dispatch_read(&state, req.id, req.body).await
+                dispatch::dispatch(&state, &client, req.id, req.body).await
             };
             let _ = replies.send(resp).await;
         });
@@ -1055,10 +659,10 @@ async fn run_slow_lane(
 /// takes longer than [`WRITE_TIMEOUT`] means the client stopped draining, and
 /// the connection ends. The task ends once every reply sender is gone and the
 /// queue is flushed.
-async fn write_replies(
-    mut write: tokio::net::unix::OwnedWriteHalf,
+async fn write_replies<W: tokio::io::AsyncWrite + Unpin>(
+    mut write: W,
     mut replies: mpsc::Receiver<Frame>,
-    mut events: mpsc::Receiver<OutMsg>,
+    mut events: rithmic_host::EventReceiver,
 ) {
     let mut events_open = true;
     // Ends when the reply channel has closed and drained (that flushes a final
@@ -1087,7 +691,10 @@ async fn write_replies(
                 }
             },
             msg = events.recv(), if events_open => match msg {
-                Some(OutMsg::Frame(bytes)) => Some(bytes),
+                Some(fan) if fan.acknowledge_flush() => None,
+                Some(fan) => Some(fan.encoded_with(|event| {
+                    encode_event(crate::convert::plant_event_to_pb(event.clone())).unwrap_or_default()
+                })),
                 None => {
                     events_open = false;
                     None
@@ -1103,83 +710,11 @@ async fn write_replies(
     }
 }
 
-/// Rebroadcast a plant event to all interested fan-out subscribers, keyed by
-/// symbol/exchange (or the internal pnl/order sentinel keys). Also feeds the
-/// [`ReconnectController`]-visible hub so late subscribers still see the
-/// venue-declared topic.
-pub async fn publish_plant_event(hub: &FanoutHub, event: rithmic_plants::dto::PlantEvent) {
-    use crate::convert::{plant_event_to_pb, route_of, Route};
-
-    match route_of(&event) {
-        // A symbol event: look the topic up from borrowed strings and, when nobody
-        // is attached to it, drop the event before converting or encoding it.
-        Route::Topic {
-            symbol,
-            exchange,
-            kind,
-        } => {
-            let Some(tx) = hub.live_sender(symbol, exchange).await else {
-                return;
-            };
-            if let Some(fan) = encode_event(plant_event_to_pb(event), kind) {
-                let _ = tx.send(fan);
-            }
-        }
-        Route::Gap(rithmic_plants::Stream::Ticker | rithmic_plants::Stream::History) => {
-            if let Some(fan) = encode_event(plant_event_to_pb(event), Kind::Any) {
-                hub.publish_symbols(fan).await;
-            }
-        }
-        // Account-level events and order/PnL gaps ride their sentinel topics.
-        // Bracket updates share the order topic but reach only the clients that
-        // subscribed to them.
-        Route::Pnl | Route::Order | Route::Other | Route::Gap(_) => {
-            let kind = match event {
-                rithmic_plants::dto::PlantEvent::BracketUpdate(_) => Kind::Brackets,
-                _ => Kind::Any,
-            };
-            let (key, wire_event) = crate::convert::plant_event_to_routed(event);
-            publish_event(hub, &key, wire_event, kind).await;
-        }
-    }
-}
-
-#[cfg(test)]
-mod overflow_gap_tests {
-    use super::*;
-    use rithmic_plants::Stream;
-
-    #[test]
-    fn a_bar_subscriber_hears_about_the_overflow_on_its_bar_channel() {
-        let kinds = Kind::Ticker.bit() | Kind::Bars.bit();
-        assert_eq!(
-            overflow_gap_streams(Stream::Ticker, kinds),
-            vec![Stream::Ticker, Stream::History]
-        );
-    }
-
-    #[test]
-    fn a_ticker_only_subscriber_gets_one_gap() {
-        assert_eq!(
-            overflow_gap_streams(Stream::Ticker, Kind::Ticker.bit()),
-            vec![Stream::Ticker]
-        );
-    }
-
-    #[test]
-    fn account_topics_report_on_their_own_stream() {
-        assert_eq!(
-            overflow_gap_streams(Stream::Order, 0xff),
-            vec![Stream::Order]
-        );
-        assert_eq!(overflow_gap_streams(Stream::Pnl, 0xff), vec![Stream::Pnl]);
-    }
-}
-
 #[cfg(test)]
 mod auth_tests {
     use super::*;
     use crate::pb::Handshake;
+    use crate::subscriptions::{FanoutHub, ParentGates};
 
     // Test fixture builder: maps a `Handshake`'s fields 1:1, so the arity is
     // inherent to the wire type. Allowed rather than boxing the helper.
@@ -1258,7 +793,7 @@ mod auth_tests {
 
     #[test]
     fn authorize_handshake_matrix() {
-        let hub: SharedFanout = Arc::new(FanoutHub::new(8));
+        let hub = Arc::new(FanoutHub::new(8));
         let mut state = dispatch::test_state(ParentGates::default(), hub);
         state.expected_auth_token = "secret".into();
         state.ready.store(true, Ordering::SeqCst);

@@ -7,11 +7,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use rithmic_plants::dto::{
+use rithmic_host::dto::{
     AccountPnlDto, BboDto, HistoryBarDto, LastTradeDto, OrderNotificationDto, PlantEvent,
 };
-use rithmic_plants::fake::{FakeFailure, FakeSession, Stream};
-use rithmic_plants::AccountTriple;
+use rithmic_host::fake::{FakeFailure, FakeVenue, Stream};
+use rithmic_host::AccountTriple;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
@@ -90,7 +90,7 @@ pub fn account_pnl(account_id: &str, day_pnl: &str) -> PlantEvent {
 }
 
 pub fn bracket_update(basket_id: &str, stop_ticks: i32, target_ticks: i32) -> PlantEvent {
-    PlantEvent::BracketUpdate(rithmic_plants::BracketUpdateDto {
+    PlantEvent::BracketUpdate(rithmic_host::BracketUpdateDto {
         account_id: Some("ACCT".into()),
         fcm_id: Some("FCM".into()),
         ib_id: Some("IB".into()),
@@ -151,7 +151,7 @@ pub fn order_notification(kind: &str, basket_id: &str, user_tag: &str, symbol: &
 /// `push gap <ticker|history|pnl|order> <skipped>` (a scripted plant lag),
 /// `delay <method> <ms>` (a slow venue call: load_ticks, load_time_bars, load_fill_history),
 /// `set_account <account_id> <fcm_id> <ib_id>`.
-pub async fn serve_control(listener: UnixListener, fake: Arc<FakeSession>) {
+pub async fn serve_control(listener: UnixListener, fake: Arc<FakeVenue>) {
     loop {
         let Ok((stream, _)) = listener.accept().await else {
             return;
@@ -163,18 +163,19 @@ pub async fn serve_control(listener: UnixListener, fake: Arc<FakeSession>) {
     }
 }
 
-async fn handle_control(stream: UnixStream, fake: Arc<FakeSession>) -> std::io::Result<()> {
+async fn handle_control(stream: UnixStream, fake: Arc<FakeVenue>) -> std::io::Result<()> {
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
     while let Some(line) = lines.next_line().await? {
-        let reply = run_command(&fake, line.trim());
+        let reply = control_command(&fake, line.trim());
         write.write_all(reply.as_bytes()).await?;
         write.write_all(b"END\n").await?;
     }
     Ok(())
 }
 
-fn run_command(fake: &FakeSession, line: &str) -> String {
+/// Apply one scripted control command without requiring a control socket.
+pub fn control_command(fake: &FakeVenue, line: &str) -> String {
     let parts: Vec<&str> = line.split_whitespace().collect();
     match parts.as_slice() {
         ["ping"] => "ok\n".into(),
@@ -255,13 +256,13 @@ fn run_command(fake: &FakeSession, line: &str) -> String {
         },
         ["push", "gap", stream, skipped] => {
             match (
-                rithmic_plants::Stream::from_plant(stream),
+                rithmic_host::Stream::from_plant(stream),
                 skipped.parse::<u64>(),
             ) {
                 (Some(stream), Ok(skipped)) => {
                     fake.push_event(
                         stream,
-                        PlantEvent::Gap(rithmic_plants::GapDto { stream, skipped }),
+                        PlantEvent::Gap(rithmic_host::GapDto { stream, skipped }),
                     );
                     "ok\n".into()
                 }
@@ -284,7 +285,7 @@ fn parse2(a: &str, b: &str) -> Option<(f64, f64)> {
     Some((a.parse().ok()?, b.parse().ok()?))
 }
 
-fn push(fake: &FakeSession, stream: Stream, event: Option<PlantEvent>) -> String {
+fn push(fake: &FakeVenue, stream: Stream, event: Option<PlantEvent>) -> String {
     match event {
         Some(event) => {
             fake.push_event(stream, event);
@@ -312,28 +313,30 @@ mod tests {
 
     #[test]
     fn control_commands_script_the_fake() {
-        let fake = FakeSession::new();
-        assert_eq!(run_command(&fake, "ping"), "ok\n");
+        let fake = FakeVenue::new();
+        assert_eq!(control_command(&fake, "ping"), "ok\n");
         assert_eq!(
-            run_command(&fake, "push last_trade NQH6 CME 100.25 2"),
+            control_command(&fake, "push last_trade NQH6 CME 100.25 2"),
             "ok\n"
         );
         assert_eq!(
-            run_command(&fake, "push last_trade NQH6 CME x 2"),
+            control_command(&fake, "push last_trade NQH6 CME x 2"),
             "err bad number\n"
         );
-        assert_eq!(run_command(&fake, "set_account A F I"), "ok\n");
-        assert!(run_command(&fake, "nope").starts_with("err unknown command"));
-        assert!(run_command(&fake, "fail_next subscribe bogus").starts_with("err unknown failure"));
+        assert_eq!(control_command(&fake, "set_account A F I"), "ok\n");
+        assert!(control_command(&fake, "nope").starts_with("err unknown command"));
+        assert!(
+            control_command(&fake, "fail_next subscribe bogus").starts_with("err unknown failure")
+        );
         assert_eq!(
-            run_command(&fake, "fail_next subscribe rithmic boom now"),
+            control_command(&fake, "fail_next subscribe rithmic boom now"),
             "ok\n"
         );
     }
 
     #[test]
     fn calls_reply_lists_one_call_per_line() {
-        let fake = FakeSession::new();
-        assert_eq!(run_command(&fake, "calls"), "");
+        let fake = FakeVenue::new();
+        assert_eq!(control_command(&fake, "calls"), "");
     }
 }

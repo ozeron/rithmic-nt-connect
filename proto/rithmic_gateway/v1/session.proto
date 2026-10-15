@@ -556,6 +556,13 @@ message TransportResumed {
   uint64 generation = 1;
 }
 
+// parent plant path interrupted; a TransportResumed follows on recovery.
+// `generation` is the current transport generation, before recovery completes.
+// Additive: older clients that do not know this body ignore it.
+message TransportInterrupted {
+  uint64 generation = 1;
+}
+
 // A plant bracket's stop / target state for one basket (order plant, rides the
 // order stream to clients holding a brackets intent). Additive: older clients
 // that do not know this body ignore it.
@@ -585,6 +592,7 @@ message Event {
     OtherEvent other = 8;
     Gap gap = 9;
     TransportResumed transport_resumed = 10;
+    TransportInterrupted transport_interrupted = 12;
     BracketUpdate bracket_update = 11;
   }
 }

@@ -30,7 +30,7 @@ import os
 
 import pytest
 from _gateway_parent import gateway_config_from_session, running_parent
-from conftest import parent_trading_env
+from live_gates import open_trading_gates_or_skip, parent_trading_env
 from rithmic_gateway import GatewayClient, GatewayError
 from rithmic_gateway.attach import config_flock_held
 from rithmic_nt_connect.config import env_truthy, session_config_from_explicit_test_env
@@ -59,8 +59,9 @@ def _assert_account_rows(rows: list[dict[str, object]]) -> None:
             assert isinstance(rate, float) and rate >= 0.0
 
 
-def test_direct_rms_round_trip(live_session, require_test_plant) -> None:
+def test_direct_rms_round_trip(live_session, require_test_plant, test_env) -> None:
     """The direct PyO3 session fetch round-trips typed rows (any rates)."""
+    open_trading_gates_or_skip(live_session, test_env)
     product = live_session.load_product_rms_info()
     _assert_product_rows(product)
     assert product, "expected at least one product RMS row on the test account"
@@ -118,7 +119,7 @@ def test_gateway_rms_round_trip(
         or (test_env or {}).get("RITHMIC_ENABLE_TRADING")
     )
     parent_extra_env = parent_trading_env(test_env)
-    password = str((test_env or {}).get("RITHMIC_PASSWORD") or "")
+    password = (test_env or {}).get("RITHMIC_PASSWORD") or ""
     if not password:
         pytest.skip("test env has no RITHMIC_PASSWORD for the gateway parent")
 

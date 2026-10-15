@@ -137,7 +137,7 @@ jobs:
           test -x /tmp/smoke/bin/rithmic-gateway
           /tmp/smoke/bin/rithmic-gateway --version
           /tmp/smoke/bin/python -m rithmic_gateway --help
-          /tmp/smoke/bin/python -c "from rithmic_gateway import GatewayClient; from rithmic_nt_connect import _lib"
+          /tmp/smoke/bin/python -c "from rithmic_gateway import GatewayClient; from rithmic_nt_connect import _lib; assert not hasattr(_lib.Session, 'fake'); assert not hasattr(_lib.Session, '_fault_drop_plant')"
           if unzip -l 'dist/*.whl' | grep -q rithmic-gateway-fake; then
             echo "a wheel ships the fake gateway" >&2; exit 1
           fi

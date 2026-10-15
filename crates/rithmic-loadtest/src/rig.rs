@@ -1,21 +1,22 @@
 //! The system under test: the real gateway server over a fake plant, embedded
 //! in this process and served on a real unix socket, plus two client kinds.
 
+use rithmic_host::Venue;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use prost::Message;
-use rithmic_gateway::client::{GatewayConfig, GatewaySession};
+use rithmic_gateway::client::{GatewayConfig, RemoteSession};
 use rithmic_gateway::idle_exit::IdleExitPolicy;
 use rithmic_gateway::listen::bind_unix;
 use rithmic_gateway::pb::{frame::Body, Frame, Handshake, SubscribeRequest};
 use rithmic_gateway::server::{run_gateway, Fingerprint, GatewayParams, SessionHandle};
 use rithmic_gateway::subscriptions::ParentGates;
-use rithmic_plants::dto::{LastTradeDto, PlantEvent};
-use rithmic_plants::fake::{FakeSession, Stream};
-use rithmic_plants::Session;
+use rithmic_host::dto::{LastTradeDto, PlantEvent};
+use rithmic_host::fake::{FakeVenue, Stream};
+use rithmic_host::Session;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::task::JoinHandle;
@@ -30,7 +31,7 @@ pub const EXCHANGE: &str = "CME";
 static N: AtomicU64 = AtomicU64::new(0);
 
 pub struct Rig {
-    pub fake: Arc<FakeSession>,
+    pub fake: Arc<FakeVenue>,
     pub listen: PathBuf,
     pub user: String,
     _dir: tempfile::TempDir,
@@ -52,7 +53,7 @@ impl Rig {
             N.fetch_add(1, Ordering::SeqCst)
         );
         let listener = bind_unix(&path).await.expect("bind");
-        let fake = Arc::new(FakeSession::new());
+        let fake = Arc::new(FakeVenue::new());
         fake.connect().await.expect("fake connect");
         let params = GatewayParams {
             listener,
@@ -68,12 +69,15 @@ impl Rig {
             },
             expected_auth_token: String::new(),
             idle_policy: IdleExitPolicy::Never,
-            gates: ParentGates {
-                trading_enabled: trading,
-                cancel_all_enabled: false,
-            },
-            session: SessionHandle::new(fake.clone()),
-            timing: rithmic_gateway::server::pump::PumpTiming::default(),
+            host: rithmic_host::SessionHost::from_connected(
+                SessionHandle::new(fake.clone()),
+                ParentGates {
+                    trading_enabled: trading,
+                    cancel_all_enabled: false,
+                },
+                Default::default(),
+                rithmic_host::HistoryPolicy::RefuseUnderLiveMd,
+            ),
         };
         let server = tokio::spawn(async move {
             let _ = run_gateway(params).await;
@@ -97,8 +101,8 @@ impl Rig {
     }
 
     /// A real library client (one shared socket per process, per fingerprint).
-    pub async fn session(&self) -> GatewaySession {
-        let s = GatewaySession::new(self.config());
+    pub async fn session(&self) -> RemoteSession {
+        let s = RemoteSession::new(self.config());
         s.connect().await.expect("session connect");
         s
     }

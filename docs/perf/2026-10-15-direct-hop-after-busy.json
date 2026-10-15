@@ -1,0 +1,842 @@
+[
+  {
+    "scenario": "direct_hop_venue",
+    "params": {
+      "batch": 1024,
+      "events": 200000,
+      "max_in_flight": 1024,
+      "path": "venue",
+      "timeout_s": 10,
+      "warmup_events": 8192,
+      "measurement": {
+        "round": 1,
+        "position": 1,
+        "variant": "candidate",
+        "attempt": 1,
+        "utc_start": "2026-10-15T15:32:18.879726+00:00",
+        "utc_end": "2026-10-15T15:32:19.450669+00:00",
+        "base_revision": "0eb0b177203d0ab970909805f6df633c57c8a520",
+        "candidate_rust_source_sha256": "d65c25ec71fa3dd64a990051a4cc7e13e1cfa7c61c56658317eefdf1c71e8455",
+        "binary": {
+          "path": "/private/mnt/DATA/code/rithmic-connect-wt/b-transport/target/release/rithmic-load",
+          "sha256": "2be72469aa5c19bb4b3b445a8ba474af85acb0838a4cceb42d1a9336670005a2"
+        },
+        "load_before": [
+          13.1376953125,
+          9.490234375,
+          7.88916015625
+        ],
+        "load_after": [
+          12.24560546875,
+          9.36572265625,
+          7.8544921875
+        ],
+        "build_processes_before": [],
+        "build_processes_during": [],
+        "build_processes_after": [],
+        "build_monitor_interval_s": 0.2
+      }
+    },
+    "duration_s": 0.052136291,
+    "sent": 200000,
+    "conns": [
+      {
+        "kind": "venue",
+        "received": 200000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 200000,
+          "p50_us": 151,
+          "p99_us": 339,
+          "p999_us": 409,
+          "max_us": 473
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 3836099.5031272937,
+    "latency": {
+      "count": 200000,
+      "p50_us": 151,
+      "p99_us": 339,
+      "p999_us": 409,
+      "max_us": 473
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 9024,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": 2.038105,
+    "alloc_bytes_per_event": 1479.26208,
+    "notes": [
+      "Rust-only direct-hop proxy; no Python/FFI, socket, credentials or live plants",
+      "unpaced 1024-event bursts, each fully drained before the next; setup and warmup excluded",
+      "throughput and process-global allocations include fixture creation, publish, delivery and histogram/sequence accounting",
+      "latency: fixture publish timestamp to next_events return, histogram resolution 1 us; RSS is process peak including setup/warmup"
+    ]
+  },
+  {
+    "scenario": "direct_hop_host",
+    "params": {
+      "batch": 1024,
+      "events": 200000,
+      "max_in_flight": 1024,
+      "path": "host",
+      "timeout_s": 10,
+      "warmup_events": 8192,
+      "measurement": {
+        "round": 1,
+        "position": 2,
+        "variant": "candidate",
+        "attempt": 1,
+        "utc_start": "2026-10-15T15:32:19.479947+00:00",
+        "utc_end": "2026-10-15T15:32:19.583539+00:00",
+        "base_revision": "0eb0b177203d0ab970909805f6df633c57c8a520",
+        "candidate_rust_source_sha256": "d65c25ec71fa3dd64a990051a4cc7e13e1cfa7c61c56658317eefdf1c71e8455",
+        "binary": {
+          "path": "/private/mnt/DATA/code/rithmic-connect-wt/b-transport/target/release/rithmic-load",
+          "sha256": "2be72469aa5c19bb4b3b445a8ba474af85acb0838a4cceb42d1a9336670005a2"
+        },
+        "load_before": [
+          12.24560546875,
+          9.36572265625,
+          7.8544921875
+        ],
+        "load_after": [
+          12.24560546875,
+          9.36572265625,
+          7.8544921875
+        ],
+        "build_processes_before": [],
+        "build_processes_during": [],
+        "build_processes_after": [],
+        "build_monitor_interval_s": 0.2
+      }
+    },
+    "duration_s": 0.045013,
+    "sent": 200000,
+    "conns": [
+      {
+        "kind": "host",
+        "received": 200000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 200000,
+          "p50_us": 110,
+          "p99_us": 205,
+          "p999_us": 211,
+          "max_us": 217
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 4443160.864639104,
+    "latency": {
+      "count": 200000,
+      "p50_us": 110,
+      "p99_us": 205,
+      "p999_us": 211,
+      "max_us": 217
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 9216,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": 2.209675,
+    "alloc_bytes_per_event": 2109.34592,
+    "notes": [
+      "Rust-only direct-hop proxy; no Python/FFI, socket, credentials or live plants",
+      "unpaced 1024-event bursts, each fully drained before the next; setup and warmup excluded",
+      "throughput and process-global allocations include fixture creation, publish, delivery and histogram/sequence accounting",
+      "latency: fixture publish timestamp to next_events return, histogram resolution 1 us; RSS is process peak including setup/warmup"
+    ]
+  },
+  {
+    "scenario": "direct_hop_host",
+    "params": {
+      "batch": 1024,
+      "events": 200000,
+      "max_in_flight": 1024,
+      "path": "host",
+      "timeout_s": 10,
+      "warmup_events": 8192,
+      "measurement": {
+        "round": 2,
+        "position": 1,
+        "variant": "candidate",
+        "attempt": 1,
+        "utc_start": "2026-10-15T15:32:19.609908+00:00",
+        "utc_end": "2026-10-15T15:32:19.713619+00:00",
+        "base_revision": "0eb0b177203d0ab970909805f6df633c57c8a520",
+        "candidate_rust_source_sha256": "d65c25ec71fa3dd64a990051a4cc7e13e1cfa7c61c56658317eefdf1c71e8455",
+        "binary": {
+          "path": "/private/mnt/DATA/code/rithmic-connect-wt/b-transport/target/release/rithmic-load",
+          "sha256": "2be72469aa5c19bb4b3b445a8ba474af85acb0838a4cceb42d1a9336670005a2"
+        },
+        "load_before": [
+          12.24560546875,
+          9.36572265625,
+          7.8544921875
+        ],
+        "load_after": [
+          12.24560546875,
+          9.36572265625,
+          7.8544921875
+        ],
+        "build_processes_before": [],
+        "build_processes_during": [],
+        "build_processes_after": [],
+        "build_monitor_interval_s": 0.2
+      }
+    },
+    "duration_s": 0.046252334,
+    "sent": 200000,
+    "conns": [
+      {
+        "kind": "host",
+        "received": 200000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 200000,
+          "p50_us": 113,
+          "p99_us": 210,
+          "p999_us": 217,
+          "max_us": 221
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 4324106.108893878,
+    "latency": {
+      "count": 200000,
+      "p50_us": 113,
+      "p99_us": 210,
+      "p999_us": 217,
+      "max_us": 221
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 9424,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": 2.225215,
+    "alloc_bytes_per_event": 2099.53124,
+    "notes": [
+      "Rust-only direct-hop proxy; no Python/FFI, socket, credentials or live plants",
+      "unpaced 1024-event bursts, each fully drained before the next; setup and warmup excluded",
+      "throughput and process-global allocations include fixture creation, publish, delivery and histogram/sequence accounting",
+      "latency: fixture publish timestamp to next_events return, histogram resolution 1 us; RSS is process peak including setup/warmup"
+    ]
+  },
+  {
+    "scenario": "direct_hop_venue",
+    "params": {
+      "batch": 1024,
+      "events": 200000,
+      "max_in_flight": 1024,
+      "path": "venue",
+      "timeout_s": 10,
+      "warmup_events": 8192,
+      "measurement": {
+        "round": 2,
+        "position": 2,
+        "variant": "candidate",
+        "attempt": 1,
+        "utc_start": "2026-10-15T15:32:19.740439+00:00",
+        "utc_end": "2026-10-15T15:32:19.845718+00:00",
+        "base_revision": "0eb0b177203d0ab970909805f6df633c57c8a520",
+        "candidate_rust_source_sha256": "d65c25ec71fa3dd64a990051a4cc7e13e1cfa7c61c56658317eefdf1c71e8455",
+        "binary": {
+          "path": "/private/mnt/DATA/code/rithmic-connect-wt/b-transport/target/release/rithmic-load",
+          "sha256": "2be72469aa5c19bb4b3b445a8ba474af85acb0838a4cceb42d1a9336670005a2"
+        },
+        "load_before": [
+          12.24560546875,
+          9.36572265625,
+          7.8544921875
+        ],
+        "load_after": [
+          12.24560546875,
+          9.36572265625,
+          7.8544921875
+        ],
+        "build_processes_before": [],
+        "build_processes_during": [],
+        "build_processes_after": [],
+        "build_monitor_interval_s": 0.2
+      }
+    },
+    "duration_s": 0.034236625,
+    "sent": 200000,
+    "conns": [
+      {
+        "kind": "venue",
+        "received": 200000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 200000,
+          "p50_us": 104,
+          "p99_us": 146,
+          "p999_us": 151,
+          "max_us": 159
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 5841697.305152012,
+    "latency": {
+      "count": 200000,
+      "p50_us": 104,
+      "p99_us": 146,
+      "p999_us": 151,
+      "max_us": 159
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 8560,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": 2.038105,
+    "alloc_bytes_per_event": 1479.26208,
+    "notes": [
+      "Rust-only direct-hop proxy; no Python/FFI, socket, credentials or live plants",
+      "unpaced 1024-event bursts, each fully drained before the next; setup and warmup excluded",
+      "throughput and process-global allocations include fixture creation, publish, delivery and histogram/sequence accounting",
+      "latency: fixture publish timestamp to next_events return, histogram resolution 1 us; RSS is process peak including setup/warmup"
+    ]
+  },
+  {
+    "scenario": "direct_hop_venue",
+    "params": {
+      "batch": 1024,
+      "events": 200000,
+      "max_in_flight": 1024,
+      "path": "venue",
+      "timeout_s": 10,
+      "warmup_events": 8192,
+      "measurement": {
+        "round": 3,
+        "position": 1,
+        "variant": "candidate",
+        "attempt": 1,
+        "utc_start": "2026-10-15T15:32:19.874637+00:00",
+        "utc_end": "2026-10-15T15:32:19.978638+00:00",
+        "base_revision": "0eb0b177203d0ab970909805f6df633c57c8a520",
+        "candidate_rust_source_sha256": "d65c25ec71fa3dd64a990051a4cc7e13e1cfa7c61c56658317eefdf1c71e8455",
+        "binary": {
+          "path": "/private/mnt/DATA/code/rithmic-connect-wt/b-transport/target/release/rithmic-load",
+          "sha256": "2be72469aa5c19bb4b3b445a8ba474af85acb0838a4cceb42d1a9336670005a2"
+        },
+        "load_before": [
+          12.24560546875,
+          9.36572265625,
+          7.8544921875
+        ],
+        "load_after": [
+          12.24560546875,
+          9.36572265625,
+          7.8544921875
+        ],
+        "build_processes_before": [],
+        "build_processes_during": [],
+        "build_processes_after": [],
+        "build_monitor_interval_s": 0.2
+      }
+    },
+    "duration_s": 0.036202958,
+    "sent": 200000,
+    "conns": [
+      {
+        "kind": "venue",
+        "received": 200000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 200000,
+          "p50_us": 110,
+          "p99_us": 216,
+          "p999_us": 263,
+          "max_us": 283
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 5524410.463918446,
+    "latency": {
+      "count": 200000,
+      "p50_us": 110,
+      "p99_us": 216,
+      "p999_us": 263,
+      "max_us": 283
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 9152,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": 2.038105,
+    "alloc_bytes_per_event": 1479.26208,
+    "notes": [
+      "Rust-only direct-hop proxy; no Python/FFI, socket, credentials or live plants",
+      "unpaced 1024-event bursts, each fully drained before the next; setup and warmup excluded",
+      "throughput and process-global allocations include fixture creation, publish, delivery and histogram/sequence accounting",
+      "latency: fixture publish timestamp to next_events return, histogram resolution 1 us; RSS is process peak including setup/warmup"
+    ]
+  },
+  {
+    "scenario": "direct_hop_host",
+    "params": {
+      "batch": 1024,
+      "events": 200000,
+      "max_in_flight": 1024,
+      "path": "host",
+      "timeout_s": 10,
+      "warmup_events": 8192,
+      "measurement": {
+        "round": 3,
+        "position": 2,
+        "variant": "candidate",
+        "attempt": 1,
+        "utc_start": "2026-10-15T15:32:20.006762+00:00",
+        "utc_end": "2026-10-15T15:32:20.115198+00:00",
+        "base_revision": "0eb0b177203d0ab970909805f6df633c57c8a520",
+        "candidate_rust_source_sha256": "d65c25ec71fa3dd64a990051a4cc7e13e1cfa7c61c56658317eefdf1c71e8455",
+        "binary": {
+          "path": "/private/mnt/DATA/code/rithmic-connect-wt/b-transport/target/release/rithmic-load",
+          "sha256": "2be72469aa5c19bb4b3b445a8ba474af85acb0838a4cceb42d1a9336670005a2"
+        },
+        "load_before": [
+          12.24560546875,
+          9.36572265625,
+          7.8544921875
+        ],
+        "load_after": [
+          12.24560546875,
+          9.36572265625,
+          7.8544921875
+        ],
+        "build_processes_before": [],
+        "build_processes_during": [],
+        "build_processes_after": [],
+        "build_monitor_interval_s": 0.2
+      }
+    },
+    "duration_s": 0.039606,
+    "sent": 200000,
+    "conns": [
+      {
+        "kind": "host",
+        "received": 200000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 200000,
+          "p50_us": 94,
+          "p99_us": 193,
+          "p999_us": 232,
+          "max_us": 263
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 5049739.938393173,
+    "latency": {
+      "count": 200000,
+      "p50_us": 94,
+      "p99_us": 193,
+      "p999_us": 232,
+      "max_us": 263
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 9968,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": 2.1949,
+    "alloc_bytes_per_event": 2299.58424,
+    "notes": [
+      "Rust-only direct-hop proxy; no Python/FFI, socket, credentials or live plants",
+      "unpaced 1024-event bursts, each fully drained before the next; setup and warmup excluded",
+      "throughput and process-global allocations include fixture creation, publish, delivery and histogram/sequence accounting",
+      "latency: fixture publish timestamp to next_events return, histogram resolution 1 us; RSS is process peak including setup/warmup"
+    ]
+  },
+  {
+    "scenario": "direct_hop_host",
+    "params": {
+      "batch": 1024,
+      "events": 200000,
+      "max_in_flight": 1024,
+      "path": "host",
+      "timeout_s": 10,
+      "warmup_events": 8192,
+      "measurement": {
+        "round": 4,
+        "position": 1,
+        "variant": "candidate",
+        "attempt": 1,
+        "utc_start": "2026-10-15T15:32:20.166241+00:00",
+        "utc_end": "2026-10-15T15:32:20.293260+00:00",
+        "base_revision": "0eb0b177203d0ab970909805f6df633c57c8a520",
+        "candidate_rust_source_sha256": "d65c25ec71fa3dd64a990051a4cc7e13e1cfa7c61c56658317eefdf1c71e8455",
+        "binary": {
+          "path": "/private/mnt/DATA/code/rithmic-connect-wt/b-transport/target/release/rithmic-load",
+          "sha256": "2be72469aa5c19bb4b3b445a8ba474af85acb0838a4cceb42d1a9336670005a2"
+        },
+        "load_before": [
+          12.24560546875,
+          9.36572265625,
+          7.8544921875
+        ],
+        "load_after": [
+          12.24560546875,
+          9.36572265625,
+          7.8544921875
+        ],
+        "build_processes_before": [],
+        "build_processes_during": [],
+        "build_processes_after": [],
+        "build_monitor_interval_s": 0.2
+      }
+    },
+    "duration_s": 0.047531542,
+    "sent": 200000,
+    "conns": [
+      {
+        "kind": "host",
+        "received": 200000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 200000,
+          "p50_us": 114,
+          "p99_us": 310,
+          "p999_us": 394,
+          "max_us": 454
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 4207732.204438055,
+    "latency": {
+      "count": 200000,
+      "p50_us": 114,
+      "p99_us": 310,
+      "p999_us": 394,
+      "max_us": 454
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 11392,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": 2.114855,
+    "alloc_bytes_per_event": 2085.44192,
+    "notes": [
+      "Rust-only direct-hop proxy; no Python/FFI, socket, credentials or live plants",
+      "unpaced 1024-event bursts, each fully drained before the next; setup and warmup excluded",
+      "throughput and process-global allocations include fixture creation, publish, delivery and histogram/sequence accounting",
+      "latency: fixture publish timestamp to next_events return, histogram resolution 1 us; RSS is process peak including setup/warmup"
+    ]
+  },
+  {
+    "scenario": "direct_hop_venue",
+    "params": {
+      "batch": 1024,
+      "events": 200000,
+      "max_in_flight": 1024,
+      "path": "venue",
+      "timeout_s": 10,
+      "warmup_events": 8192,
+      "measurement": {
+        "round": 4,
+        "position": 2,
+        "variant": "candidate",
+        "attempt": 1,
+        "utc_start": "2026-10-15T15:32:20.339980+00:00",
+        "utc_end": "2026-10-15T15:32:20.444198+00:00",
+        "base_revision": "0eb0b177203d0ab970909805f6df633c57c8a520",
+        "candidate_rust_source_sha256": "d65c25ec71fa3dd64a990051a4cc7e13e1cfa7c61c56658317eefdf1c71e8455",
+        "binary": {
+          "path": "/private/mnt/DATA/code/rithmic-connect-wt/b-transport/target/release/rithmic-load",
+          "sha256": "2be72469aa5c19bb4b3b445a8ba474af85acb0838a4cceb42d1a9336670005a2"
+        },
+        "load_before": [
+          12.24560546875,
+          9.36572265625,
+          7.8544921875
+        ],
+        "load_after": [
+          12.24560546875,
+          9.36572265625,
+          7.8544921875
+        ],
+        "build_processes_before": [],
+        "build_processes_during": [],
+        "build_processes_after": [],
+        "build_monitor_interval_s": 0.2
+      }
+    },
+    "duration_s": 0.044090792,
+    "sent": 200000,
+    "conns": [
+      {
+        "kind": "venue",
+        "received": 200000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 200000,
+          "p50_us": 121,
+          "p99_us": 350,
+          "p999_us": 520,
+          "max_us": 537
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 4536094.520597408,
+    "latency": {
+      "count": 200000,
+      "p50_us": 121,
+      "p99_us": 350,
+      "p999_us": 520,
+      "max_us": 537
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 9040,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": 2.03815,
+    "alloc_bytes_per_event": 1479.27472,
+    "notes": [
+      "Rust-only direct-hop proxy; no Python/FFI, socket, credentials or live plants",
+      "unpaced 1024-event bursts, each fully drained before the next; setup and warmup excluded",
+      "throughput and process-global allocations include fixture creation, publish, delivery and histogram/sequence accounting",
+      "latency: fixture publish timestamp to next_events return, histogram resolution 1 us; RSS is process peak including setup/warmup"
+    ]
+  },
+  {
+    "scenario": "direct_hop_venue",
+    "params": {
+      "batch": 1024,
+      "events": 200000,
+      "max_in_flight": 1024,
+      "path": "venue",
+      "timeout_s": 10,
+      "warmup_events": 8192,
+      "measurement": {
+        "round": 5,
+        "position": 1,
+        "variant": "candidate",
+        "attempt": 1,
+        "utc_start": "2026-10-15T15:32:20.471936+00:00",
+        "utc_end": "2026-10-15T15:32:20.570005+00:00",
+        "base_revision": "0eb0b177203d0ab970909805f6df633c57c8a520",
+        "candidate_rust_source_sha256": "d65c25ec71fa3dd64a990051a4cc7e13e1cfa7c61c56658317eefdf1c71e8455",
+        "binary": {
+          "path": "/private/mnt/DATA/code/rithmic-connect-wt/b-transport/target/release/rithmic-load",
+          "sha256": "2be72469aa5c19bb4b3b445a8ba474af85acb0838a4cceb42d1a9336670005a2"
+        },
+        "load_before": [
+          12.24560546875,
+          9.36572265625,
+          7.8544921875
+        ],
+        "load_after": [
+          12.24560546875,
+          9.36572265625,
+          7.8544921875
+        ],
+        "build_processes_before": [],
+        "build_processes_during": [],
+        "build_processes_after": [],
+        "build_monitor_interval_s": 0.2
+      }
+    },
+    "duration_s": 0.034538958,
+    "sent": 200000,
+    "conns": [
+      {
+        "kind": "venue",
+        "received": 200000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 200000,
+          "p50_us": 106,
+          "p99_us": 149,
+          "p999_us": 156,
+          "max_us": 163
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 5790562.64523093,
+    "latency": {
+      "count": 200000,
+      "p50_us": 106,
+      "p99_us": 149,
+      "p999_us": 156,
+      "max_us": 163
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 8432,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": 2.038105,
+    "alloc_bytes_per_event": 1479.26208,
+    "notes": [
+      "Rust-only direct-hop proxy; no Python/FFI, socket, credentials or live plants",
+      "unpaced 1024-event bursts, each fully drained before the next; setup and warmup excluded",
+      "throughput and process-global allocations include fixture creation, publish, delivery and histogram/sequence accounting",
+      "latency: fixture publish timestamp to next_events return, histogram resolution 1 us; RSS is process peak including setup/warmup"
+    ]
+  },
+  {
+    "scenario": "direct_hop_host",
+    "params": {
+      "batch": 1024,
+      "events": 200000,
+      "max_in_flight": 1024,
+      "path": "host",
+      "timeout_s": 10,
+      "warmup_events": 8192,
+      "measurement": {
+        "round": 5,
+        "position": 2,
+        "variant": "candidate",
+        "attempt": 1,
+        "utc_start": "2026-10-15T15:32:20.606858+00:00",
+        "utc_end": "2026-10-15T15:32:20.761726+00:00",
+        "base_revision": "0eb0b177203d0ab970909805f6df633c57c8a520",
+        "candidate_rust_source_sha256": "d65c25ec71fa3dd64a990051a4cc7e13e1cfa7c61c56658317eefdf1c71e8455",
+        "binary": {
+          "path": "/private/mnt/DATA/code/rithmic-connect-wt/b-transport/target/release/rithmic-load",
+          "sha256": "2be72469aa5c19bb4b3b445a8ba474af85acb0838a4cceb42d1a9336670005a2"
+        },
+        "load_before": [
+          12.24560546875,
+          9.36572265625,
+          7.8544921875
+        ],
+        "load_after": [
+          12.24560546875,
+          9.36572265625,
+          7.8544921875
+        ],
+        "build_processes_before": [],
+        "build_processes_during": [],
+        "build_processes_after": [],
+        "build_monitor_interval_s": 0.2
+      }
+    },
+    "duration_s": 0.071453334,
+    "sent": 200000,
+    "conns": [
+      {
+        "kind": "host",
+        "received": 200000,
+        "missing_in_stream": 0,
+        "reordered": 0,
+        "gap_events": 0,
+        "gap_skipped": 0,
+        "resumed": 0,
+        "reattaches": 0,
+        "max_outage_ms": 0,
+        "dropped_by_parent": false,
+        "latency": {
+          "count": 200000,
+          "p50_us": 135,
+          "p99_us": 2775,
+          "p999_us": 3251,
+          "max_us": 4207
+        }
+      }
+    ],
+    "min_delivered_ratio": 1.0,
+    "min_throughput_eps": 2799029.643599276,
+    "latency": {
+      "count": 200000,
+      "p50_us": 135,
+      "p99_us": 2775,
+      "p999_us": 3251,
+      "max_us": 4207
+    },
+    "order_latency": null,
+    "order_idle_latency": null,
+    "peak_rss_kb": 11216,
+    "rss_samples_kb": [],
+    "unsignalled_loss": 0,
+    "allocs_per_event": 2.142535,
+    "alloc_bytes_per_event": 2040.34544,
+    "notes": [
+      "Rust-only direct-hop proxy; no Python/FFI, socket, credentials or live plants",
+      "unpaced 1024-event bursts, each fully drained before the next; setup and warmup excluded",
+      "throughput and process-global allocations include fixture creation, publish, delivery and histogram/sequence accounting",
+      "latency: fixture publish timestamp to next_events return, histogram resolution 1 us; RSS is process peak including setup/warmup"
+    ]
+  }
+]

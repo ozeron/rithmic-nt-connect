@@ -8,7 +8,8 @@
 use std::path::Path;
 use std::time::Duration;
 
-use rithmic_plants::{Error, Result};
+use rithmic_host::{Error, Result};
+
 use tokio::net::UnixStream;
 use tokio::time::Instant;
 

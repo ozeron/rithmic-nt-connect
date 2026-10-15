@@ -19,6 +19,7 @@ from pathlib import Path
 from rithmic_gateway.attach import config_flock_held, socket_listening
 from rithmic_gateway.binary import resolve_gateway_bin
 from rithmic_gateway.config import GatewayConfig
+from rithmic_nt_connect._redact import RedactedEnv, redact_text, secret_key
 from rithmic_nt_connect.config import SessionConfig
 
 # Env forwarded to the parent. The parent's fingerprint comes only from the
@@ -93,6 +94,7 @@ def parent_env(
     env.update(
         RITHMIC_USER=config.user,
         RITHMIC_PASSWORD=password,
+        RITHMIC_GATEWAY_AUTH_TOKEN=config.auth_token,
         RITHMIC_SYSTEM_NAME=config.system_name,
         RITHMIC_URL=config.url,
         RITHMIC_ENV=config.env,
@@ -104,7 +106,7 @@ def parent_env(
     env.setdefault("RITHMIC_GATEWAY_IDLE_EXIT_SEC", HARNESS_IDLE_EXIT_SEC)
     if extra:
         env.update({str(k): str(v) for k, v in extra.items()})
-    return env
+    return RedactedEnv(env)
 
 
 def start_parent(
@@ -146,7 +148,10 @@ def start_parent(
                 return proc
             if proc.poll() is not None:
                 stderr_file.seek(0)
-                err = stderr_file.read().decode(errors="replace")
+                err = redact_text(
+                    stderr_file.read().decode(errors="replace"),
+                    (value for key, value in env.items() if secret_key(key)),
+                )
                 raise ParentStartError(
                     f"gateway exited early (code={proc.returncode}): {err}"
                 )

@@ -1,8 +1,9 @@
 //! Session configuration for the Phase 1 Rithmic facade.
 
-use rithmic_rs::{RithmicAccount, RithmicConfig, RithmicEnv};
+use rithmic_host::Env;
+use rithmic_rs::{RithmicAccount, RithmicConfig};
 
-use crate::error::{Error, Result};
+use rithmic_host::{Error, Result};
 
 /// LucidTrading production R|Protocol WebSocket URL.
 pub const DEFAULT_LUCID_URL: &str = "wss://rprotocol.rithmic.com:443";
@@ -23,7 +24,7 @@ pub struct SessionConfig {
     beta_url: String,
     app_name: String,
     app_version: String,
-    env: RithmicEnv,
+    env: Env,
     account_id: Option<String>,
     fcm_id: Option<String>,
     ib_id: Option<String>,
@@ -84,7 +85,7 @@ impl SessionConfig {
     }
 
     /// Environment (Live / Demo / Test).
-    pub fn env(&self) -> RithmicEnv {
+    pub fn env(&self) -> Env {
         self.env
     }
 
@@ -110,21 +111,25 @@ impl SessionConfig {
 
     /// Convert into a [`RithmicConfig`] for plant connect.
     pub fn to_rithmic_config(&self) -> Result<RithmicConfig> {
-        RithmicConfig::builder(self.env)
-            .user(self.user.clone())
-            .password(self.password.clone())
-            .system_name(self.system_name.clone())
-            .url(self.url.clone())
-            .beta_url(self.beta_url.clone())
-            .app_name(self.app_name.clone())
-            .app_version(self.app_version.clone())
-            .build()
-            .map_err(|e| Error::Config(e.to_string()))
+        RithmicConfig::builder(match self.env {
+            Env::Live => rithmic_rs::RithmicEnv::Live,
+            Env::Demo => rithmic_rs::RithmicEnv::Demo,
+            Env::Test => rithmic_rs::RithmicEnv::Test,
+        })
+        .user(self.user.clone())
+        .password(self.password.clone())
+        .system_name(self.system_name.clone())
+        .url(self.url.clone())
+        .beta_url(self.beta_url.clone())
+        .app_name(self.app_name.clone())
+        .app_version(self.app_version.clone())
+        .build()
+        .map_err(|e| Error::Config(e.to_string()))
     }
 }
 
 /// Builder for [`SessionConfig`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SessionConfigBuilder {
     user: Option<String>,
     password: Option<String>,
@@ -133,10 +138,22 @@ pub struct SessionConfigBuilder {
     beta_url: Option<String>,
     app_name: Option<String>,
     app_version: Option<String>,
-    env: RithmicEnv,
+    env: Env,
     account_id: Option<String>,
     fcm_id: Option<String>,
     ib_id: Option<String>,
+}
+
+impl std::fmt::Debug for SessionConfigBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionConfigBuilder")
+            .field("user", &self.user)
+            .field("password", &self.password.as_ref().map(|_| "***"))
+            .field("system_name", &self.system_name)
+            .field("url", &self.url)
+            .field("env", &self.env)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for SessionConfigBuilder {
@@ -149,7 +166,7 @@ impl Default for SessionConfigBuilder {
             beta_url: None,
             app_name: Some(DEFAULT_APP_NAME.to_string()),
             app_version: Some(DEFAULT_APP_VERSION.to_string()),
-            env: RithmicEnv::Live,
+            env: Env::Live,
             account_id: None,
             fcm_id: None,
             ib_id: None,
@@ -201,7 +218,7 @@ impl SessionConfigBuilder {
     }
 
     /// Set environment.
-    pub fn env(mut self, env: RithmicEnv) -> Self {
+    pub fn env(mut self, env: Env) -> Self {
         self.env = env;
         self
     }
@@ -267,6 +284,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn builder_debug_redacts_password() {
+        let builder = SessionConfig::builder()
+            .user("alice")
+            .password("builder-secret-193");
+        assert!(!format!("{builder:?}").contains("builder-secret-193"));
+        assert!(!format!("{builder:#?}").contains("builder-secret-193"));
+        assert!(format!("{builder:?}").contains("alice"));
+    }
+
+    #[test]
     fn rejects_empty_user() {
         let err = SessionConfig::builder()
             .user("")
@@ -297,7 +324,7 @@ mod tests {
             .unwrap();
         assert_eq!(cfg.system_name(), DEFAULT_SYSTEM_NAME);
         assert_eq!(cfg.url(), DEFAULT_LUCID_URL);
-        assert_eq!(cfg.env(), RithmicEnv::Live);
+        assert_eq!(cfg.env(), Env::Live);
         assert!(format!("{cfg:?}").contains("***"));
         assert!(!format!("{cfg:?}").contains("secret"));
     }

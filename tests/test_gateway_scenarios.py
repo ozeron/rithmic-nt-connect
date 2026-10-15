@@ -339,6 +339,11 @@ def test_ticker_reset_reissues_ticker_intents(fake_bin, make_client) -> None:
         client = make_client(parent)
         client.subscribe(NQ, EXCHANGE)
         parent.clear_calls()
+        if make_client.kind != "python-plain":
+            # Consumer sessions never reset a host-owned plant; the legacy lake
+            # client keeps its existing wire RPC for compatibility.
+            assert not hasattr(client, "reset_ticker")
+            return
         reset = getattr(client, "reset_ticker_plant", None) or client.reset_ticker
         reset()
         calls = parent.calls()
@@ -441,14 +446,14 @@ def test_a_transport_listener_may_call_the_session_synchronously(
         answers: list[Any] = []
         errors: list[BaseException] = []
 
-        def listener(kind: str, generation: int, attempts: int, cause: Any) -> None:
+        def listener(event: Any) -> None:
             try:
-                answers.append((kind, client.resolved_account()))
+                answers.append((event, client.resolved_account()))
             # A pyo3 PanicException is a BaseException: catch it to fail the test.
             except BaseException as exc:  # NOSONAR
                 errors.append(exc)
 
-        subscription = client.subscribe_transport_events(listener)
+        subscription = client.subscribe_session_events(listener)
         assert subscription is not None
         parent.restart()
         client.ensure_transport_live()

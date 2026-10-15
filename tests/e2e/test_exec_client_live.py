@@ -10,7 +10,7 @@ Marker: ``live`` — needs credentials + network + trading.
 **SAFETY:** ``exec_front_month_instrument`` (conftest) refuses production plants
 and requires ``RITHMIC_ENABLE_TRADING=1`` before opening any session. One
 Rithmic login only. ``cancel_all_orders`` is plant-wide — never for a single
-smoke order; TC-E41 is collection-skipped for this reason.
+smoke order, so TC-E41 has no live test.
 
 Usage:
   uv run pytest tests/e2e/test_exec_client_live.py -v          # full sweep
@@ -631,87 +631,3 @@ class TestReconciliation:
             "repeated CANCELED -> ACCEPTED; adapter bulk-drain suppress "
             "may have regressed"
         )
-
-
-# ══════════════════════════════════════════════════════════════════════
-# Scaffolded / venue-unsupported TCs
-#
-# Kept as named params so the ids stay greppable against the exec matrix, but
-# both groups are skipped at collection time — no TradingNode is built for
-# them (the old one-line scaffolds spun a node up just to skip).
-# ══════════════════════════════════════════════════════════════════════
-
-SCAFFOLDED_TCS = [
-    # Group 4: order modification
-    "TC-E30",
-    "TC-E31",
-    "TC-E32",
-    "TC-E33",
-    "TC-E34",
-    "TC-E35",
-    "TC-E36",
-    # Group 6: bracket orders
-    "TC-E50",
-    "TC-E51",
-    "TC-E52",
-    "TC-E53",
-    # Group 7: order flags
-    "TC-E60",
-    "TC-E61",
-    "TC-E62",
-    "TC-E63",
-    # Group 8: rejection handling
-    "TC-E70",
-    "TC-E71",
-    "TC-E74",
-    "TC-E75",
-    "TC-E76",
-    "TC-E77",
-    "TC-E78",
-    # Group 9: lifecycle & reconciliation
-    "TC-E80",
-    "TC-E81",
-    "TC-E82",
-    "TC-E83",
-    "TC-E86",
-    "TC-E87",
-]
-
-UNSUPPORTED_TCS = [
-    ("TC-E05", "Rithmic is contract-qty only; quote quantity unsupported"),
-    ("TC-E17", "Rithmic has no GTD duration"),
-    ("TC-E18", "Rithmic has no GTD duration"),
-    ("TC-E24", "Rithmic MIT wire mapping is not verified; fail closed"),
-    ("TC-E25", "Rithmic MIT wire mapping is not verified; fail closed"),
-    ("TC-E26", "Rithmic LIT wire mapping is not verified; fail closed"),
-    ("TC-E27", "Rithmic LIT wire mapping is not verified; fail closed"),
-    (
-        "TC-E41",
-        (
-            "cancel-all is cache-scoped (tests/test_cancel_scope.py); not live-run "
-            "so a smoke cannot touch unrelated orders"
-        ),
-    ),
-    ("TC-E43", "batch cancel is per-order (_batch_cancel_orders); not live-proven"),
-]
-
-
-@pytest.mark.live
-@pytest.mark.skip(
-    reason="scaffold not implemented — see nautilus-exec-testing-matrix.md"
-)
-@pytest.mark.parametrize("tc", SCAFFOLDED_TCS)
-def test_scaffolded_tc(tc: str) -> None:
-    raise AssertionError(f"{tc} should be collection-skipped")
-
-
-@pytest.mark.live
-@pytest.mark.parametrize(
-    ("tc", "reason"),
-    [
-        pytest.param(tc, reason, id=tc, marks=pytest.mark.skip(reason=reason))
-        for tc, reason in UNSUPPORTED_TCS
-    ],
-)
-def test_unsupported_tc(tc: str, reason: str) -> None:
-    raise AssertionError(f"{tc} should be collection-skipped")

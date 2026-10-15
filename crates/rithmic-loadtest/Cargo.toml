@@ -11,8 +11,8 @@ name = "rithmic-load"
 path = "src/main.rs"
 
 [dependencies]
+rithmic-host = { path = "../rithmic-host", features = ["testing"] }
 rithmic-gateway = { path = "../rithmic-gateway", features = ["testing"] }
-rithmic-plants = { path = "../rithmic-plants", features = ["testing"] }
 tokio = { version = "1", features = ["full"] }
 hdrhistogram = "7"
 serde = { version = "1", features = ["derive"] }

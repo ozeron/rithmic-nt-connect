@@ -1,38 +1,14 @@
-//! RPC body dispatch (Subscribe / Place / …) for the gateway accept loop.
-//!
-//! Router only: every [`Body`](crate::pb::frame::Body) variant delegates to
-//! the submodule matching its RPC kind — subscriptions (fanout + intent +
-//! restore), orders (trading one-shots + order-handle loads), history (ticks /
-//! time bars), info (reference data). Shared frame constructors and per-topic
-//! locks live here.
-
-mod history;
-mod info;
-mod orders;
-mod subscriptions;
-
-use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
-
-use tokio::sync::{mpsc, Mutex as TokioMutex};
-
-use crate::pb::{frame::Body, Ack, ErrorResponse, Frame};
-use crate::reconnect::{ReconnectController, TimeBarIntent};
-use crate::subscriptions::{FanoutHub, ParentGates, SharedFanout, SubKey};
-
-use super::{ClientCtx, Fingerprint, GatewayState, OutMsg};
+//! Decode → consumer Session → encode. Plant policy belongs to rithmic-host.
+use super::{Fingerprint, GatewayState};
+use crate::convert::*;
 use crate::idle_exit::{IdleExit, IdleExitPolicy};
-
-pub(in crate::server) use subscriptions::TopicIntent;
-pub(super) use subscriptions::{leave_order, leave_pnl};
-
-pub(super) async fn topic_lock(state: &GatewayState, key: &SubKey) -> Arc<TokioMutex<()>> {
-    let mut map = state.topic_locks.lock().await;
-    map.entry(key.clone())
-        .or_insert_with(|| Arc::new(TokioMutex::new(())))
-        .clone()
-}
+use crate::pb::{self, frame::Body, Ack, ErrorResponse, Frame};
+use crate::subscriptions::{FanoutHub, ParentGates, SharedFanout, SubKey};
+use rithmic_host::{
+    Error, HistoryPolicy, LocalSession, ModifyOrder, PlaceBracketOrder, PlaceOrder, Session,
+    SessionHost,
+};
+use std::sync::Arc;
 
 pub(super) fn ack_frame(request_id: u64) -> Frame {
     Frame {
@@ -40,7 +16,6 @@ pub(super) fn ack_frame(request_id: u64) -> Frame {
         body: Some(Body::Ack(Ack {})),
     }
 }
-
 pub(super) fn error_frame(request_id: u64, code: &str, message: &str) -> Frame {
     Frame {
         request_id,
@@ -50,225 +25,277 @@ pub(super) fn error_frame(request_id: u64, code: &str, message: &str) -> Frame {
         })),
     }
 }
-
-fn no_session_frame(request_id: u64) -> Frame {
-    error_frame(request_id, "no_session", "gateway has no plant session")
-}
-
-fn err_to_frame(request_id: u64, code: &str, err: impl std::fmt::Display) -> Frame {
-    error_frame(request_id, code, &err.to_string())
-}
-
-/// The wire class of a failed one-shot command (place, cancel, modify, bracket,
-/// cancel-all). Only a failure known to precede the send is definitive: a venue
-/// reject, a not-sent, a configuration error, a plant that is not connected, or a
-/// gate's own denial (which keeps its code). Anything else may have reached the venue, so it is
-/// `venue_unknown`: the adapter must treat the order as in flight, never as
-/// rejected.
-pub(super) fn plant_err_frame(request_id: u64, e: rithmic_plants::Error) -> Frame {
-    let code = command_error_code(&e);
-    err_to_frame(request_id, &code, e)
-}
-
-pub(super) fn command_error_code(e: &rithmic_plants::Error) -> String {
-    use rithmic_plants::Error as E;
-    match e {
-        E::Rejected(_) => "venue_rejected".into(),
-        // A plant that is not connected (or a connect refused as redundant) is
-        // found before any request is written, as direct mode reports it.
-        E::NotSent(_) | E::Config(_) | E::NotConnected { .. } | E::AlreadyConnected => {
-            "not_sent".into()
+fn reply(request_id: u64, outcome: rithmic_host::Result<Body>, fallback: &str) -> Frame {
+    match outcome {
+        Ok(body) => Frame {
+            request_id,
+            body: Some(body),
+        },
+        Err(Error::Gateway { code, message }) => error_frame(request_id, &code, &message),
+        Err(Error::ReconciliationUnavailable(msg)) => {
+            error_frame(request_id, "reconciliation_unavailable", &msg)
         }
-        E::Gateway { code, .. } => code.clone(),
-        E::ReconciliationUnavailable(_) => "reconciliation_unavailable".into(),
-        E::OutcomeUnknown(_)
-        | E::Rithmic(_)
-        | E::ChannelClosed { .. }
-        | E::ChannelLagged { .. }
-        | E::Session(_)
-        | E::Protocol(_)
-        | E::Transport(_) => "venue_unknown".into(),
+        Err(e) => {
+            let code = if fallback == "command" {
+                command_error_code(&e)
+            } else {
+                fallback.into()
+            };
+            // The client reconstructs these typed errors from code + message.
+            // Display prefixes would become part of their payload on each hop.
+            let message = match (&e, code.as_str()) {
+                (Error::Rejected(message), "venue_rejected")
+                | (Error::NotSent(message), "not_sent")
+                | (Error::OutcomeUnknown(message), "venue_unknown") => message.clone(),
+                _ => e.to_string(),
+            };
+            error_frame(request_id, &code, &message)
+        }
     }
 }
-
-/// Dispatch one request frame body to a response frame, applying parent
-/// gates and (when a session is attached) calling through to
-/// `rithmic_plants::RithmicSession`. Subscribe/unsubscribe bodies also
-/// update this client's fan-out registration in `client`.
+pub(super) fn command_error_code(e: &Error) -> String {
+    match e {
+        Error::Rejected(_) => "venue_rejected".into(),
+        Error::NotSent(_)
+        | Error::Config(_)
+        | Error::NotConnected { .. }
+        | Error::AlreadyConnected => "not_sent".into(),
+        Error::Gateway { code, .. } => code.clone(),
+        Error::ReconciliationUnavailable(_) => "reconciliation_unavailable".into(),
+        _ => "venue_unknown".into(),
+    }
+}
 pub(super) async fn dispatch(
     state: &GatewayState,
-    client: &mut ClientCtx,
-    request_id: u64,
+    client: &LocalSession,
+    id: u64,
     body: Body,
 ) -> Frame {
-    // Slow reads normally run on the connection's slow lane through
-    // `dispatch_read`; reaching here (tests, the gate helper) serves them inline.
-    if crate::rpc_table::lane_of(&body) == crate::rpc_table::Lane::Slow {
-        return dispatch_read(state, request_id, body).await;
+    macro_rules! ack {
+        ($call:expr) => {
+            reply(id, $call.await.map(|()| Body::Ack(Ack {})), "command")
+        };
+    }
+    macro_rules! rows {
+        ($call:expr, $variant:ident, $ty:ident, $field:ident, $convert:expr, $err:literal) => {
+            reply(
+                id,
+                $call.await.map(|rows| {
+                    Body::$variant(pb::$ty {
+                        $field: rows.into_iter().map($convert).collect(),
+                    })
+                }),
+                $err,
+            )
+        };
     }
     match body {
-        Body::Subscribe(req) => {
-            subscriptions::subscribe_topic(
-                state,
-                client,
-                request_id,
-                TopicIntent::Ticker(SubKey {
-                    symbol: req.symbol,
-                    exchange: req.exchange,
-                }),
-            )
-            .await
+        Body::Subscribe(r) => ack!(client.subscribe(&r.symbol, &r.exchange)),
+        Body::Unsubscribe(r) => ack!(client.unsubscribe(&r.symbol, &r.exchange)),
+        Body::SubscribeBook(r) => ack!(client.subscribe_order_book_summary(&r.symbol, &r.exchange)),
+        Body::UnsubscribeBook(r) => {
+            ack!(client.unsubscribe_order_book_summary(&r.symbol, &r.exchange))
         }
-        Body::Unsubscribe(req) => {
-            subscriptions::unsubscribe_topic(
-                state,
-                client,
-                request_id,
-                TopicIntent::Ticker(SubKey {
-                    symbol: req.symbol,
-                    exchange: req.exchange,
-                }),
-            )
-            .await
+        Body::SubscribeTimeBars(r) => {
+            ack!(client.subscribe_time_bars(&r.symbol, &r.exchange, r.bar_type, r.period))
         }
-        Body::SubscribeBook(req) => {
-            subscriptions::subscribe_topic(
-                state,
-                client,
-                request_id,
-                TopicIntent::Book(SubKey {
-                    symbol: req.symbol,
-                    exchange: req.exchange,
-                }),
-            )
-            .await
+        Body::UnsubscribeTimeBars(r) => {
+            ack!(client.unsubscribe_time_bars(&r.symbol, &r.exchange, r.bar_type, r.period))
         }
-        Body::UnsubscribeBook(req) => {
-            subscriptions::unsubscribe_topic(
-                state,
-                client,
-                request_id,
-                TopicIntent::Book(SubKey {
-                    symbol: req.symbol,
-                    exchange: req.exchange,
-                }),
-            )
-            .await
+        Body::SubscribePnl(_) => ack!(client.subscribe_pnl()),
+        Body::SubscribeOrderUpdates(_) => ack!(client.subscribe_order_updates()),
+        Body::SubscribeBracketUpdates(_) => ack!(client.subscribe_bracket_updates()),
+        Body::DisconnectPnl(_) => ack!(client.disconnect_pnl_plant()),
+        Body::DisconnectOrder(_) => ack!(client.disconnect_order_plant()),
+        Body::EnsureOrder(_) => ack!(client.ensure_order_plant()),
+        Body::EnsurePnl(_) => ack!(client.ensure_pnl_plant()),
+        Body::ResetTickerPlant(_) => ack!(state.host.reset_ticker_for_legacy_client()),
+        Body::RequestPlants(r) => match rithmic_host::PlantSet::parse(&r.plants) {
+            Ok(extra) => ack!(client.request_plants(extra)),
+            Err(e) => error_frame(id, "invalid_plants", &e.to_string()),
+        },
+        Body::PlaceOrder(r) => ack!(client.place_order(&PlaceOrder {
+            symbol: r.symbol,
+            exchange: r.exchange,
+            side: r.side,
+            price_type: r.price_type,
+            quantity: r.quantity,
+            user_tag: r.user_tag,
+            price: r.price,
+            trigger_price: r.trigger_price,
+            duration: r.duration,
+            trail_by_ticks: r.trail_by_ticks,
+            trail_by_price_id: r.trail_by_price_id,
+        })),
+        Body::PlaceBracketOrder(r) => ack!(client.place_bracket_order(&PlaceBracketOrder {
+            symbol: r.symbol,
+            exchange: r.exchange,
+            side: r.side,
+            price_type: r.price_type,
+            quantity: r.quantity,
+            localid: r.localid,
+            price: r.price,
+            trigger_price: r.trigger_price,
+            duration: r.duration,
+            stop_ticks: r.stop_ticks,
+            target_ticks: r.target_ticks,
+        })),
+        Body::AdjustBracketStop(r) => {
+            ack!(client.adjust_bracket_stop(&r.basket_id, r.ticks, r.level))
         }
-        Body::SubscribeTimeBars(req) => {
-            subscriptions::subscribe_topic(
-                state,
-                client,
-                request_id,
-                TopicIntent::TimeBars(TimeBarIntent {
-                    symbol: req.symbol,
-                    exchange: req.exchange,
-                    bar_type: req.bar_type,
-                    period: req.period,
-                }),
-            )
-            .await
+        Body::AdjustBracketTarget(r) => {
+            ack!(client.adjust_bracket_target(&r.basket_id, r.ticks, r.level))
         }
-        Body::UnsubscribeTimeBars(req) => {
-            subscriptions::unsubscribe_topic(
-                state,
-                client,
-                request_id,
-                TopicIntent::TimeBars(TimeBarIntent {
-                    symbol: req.symbol,
-                    exchange: req.exchange,
-                    bar_type: req.bar_type,
-                    period: req.period,
-                }),
-            )
-            .await
+        Body::CancelOrder(r) => ack!(client.cancel_order(&r.basket_id)),
+        Body::ModifyOrder(r) => ack!(client.modify_order(&ModifyOrder {
+            basket_id: r.basket_id,
+            symbol: r.symbol,
+            exchange: r.exchange,
+            quantity: r.quantity,
+            price_type: r.price_type,
+            price: r.price,
+            trigger_price: r.trigger_price,
+            trail_by_ticks: r.trail_by_ticks,
+        })),
+        Body::CancelAllOrders(_) => ack!(client.cancel_all_orders()),
+        Body::LoadTicks(r) => rows!(
+            client.load_ticks(&r.symbol, &r.exchange, r.start_time_sec, r.end_time_sec),
+            LoadTicksResponse,
+            LoadTicksResponse,
+            ticks,
+            history_tick_to_pb,
+            "load_ticks_failed"
+        ),
+        Body::LoadTimeBars(r) => rows!(
+            client.load_time_bars(
+                &r.symbol,
+                &r.exchange,
+                r.start_time_sec,
+                r.end_time_sec,
+                r.bar_type,
+                r.period
+            ),
+            LoadTimeBarsResponse,
+            LoadTimeBarsResponse,
+            bars,
+            history_bar_to_pb,
+            "load_time_bars_failed"
+        ),
+        Body::ProbeTimeBars(r) => rows!(
+            client.probe_time_bars(
+                &r.symbol,
+                &r.exchange,
+                r.start_time_sec,
+                r.end_time_sec,
+                r.bar_type,
+                r.period
+            ),
+            ProbeTimeBarsResponse,
+            ProbeTimeBarsResponse,
+            rows,
+            time_bar_probe_row_to_pb,
+            "probe_time_bars_failed"
+        ),
+        Body::LoadOrders(_) => rows!(
+            client.load_orders(0, 0),
+            LoadOrdersResponse,
+            LoadOrdersResponse,
+            events,
+            order_notification_to_pb,
+            "load_orders_failed"
+        ),
+        Body::LoadProductRmsInfo(_) => rows!(
+            client.load_product_rms_info(),
+            LoadProductRmsInfoResponse,
+            LoadProductRmsInfoResponse,
+            rows,
+            product_rms_info_to_pb,
+            "fetch_rms_failed"
+        ),
+        Body::LoadAccountRmsInfo(_) => rows!(
+            client.load_account_rms_info(),
+            LoadAccountRmsInfoResponse,
+            LoadAccountRmsInfoResponse,
+            rows,
+            account_rms_info_to_pb,
+            "fetch_rms_failed"
+        ),
+        Body::LoadFillHistory(r) => rows!(
+            client.load_fill_history(r.start_date, r.finish_date),
+            LoadFillHistoryResponse,
+            LoadFillHistoryResponse,
+            rows,
+            fill_history_to_pb,
+            "load_fill_history_failed"
+        ),
+        Body::LoadOrderHistory(r) => rows!(
+            client.load_order_history(&r.date),
+            LoadOrderHistoryResponse,
+            LoadOrderHistoryResponse,
+            events,
+            order_notification_to_pb,
+            "load_order_history_failed"
+        ),
+        Body::LoadOrderHistoryDates(_) => reply(
+            id,
+            client.load_order_history_dates().await.map(|dates| {
+                Body::LoadOrderHistoryDatesResponse(pb::LoadOrderHistoryDatesResponse { dates })
+            }),
+            "load_order_history_dates_failed",
+        ),
+        Body::GetFrontMonth(r) => reply(
+            id,
+            client
+                .get_front_month(&r.symbol, &r.exchange)
+                .await
+                .map(|dto| Body::FrontMonthResponse(front_month_to_pb(dto))),
+            "get_front_month_failed",
+        ),
+        Body::GetReferenceData(r) => reply(
+            id,
+            client
+                .get_reference_data(&r.symbol, &r.exchange)
+                .await
+                .map(|dto| Body::ReferenceDataResponse(reference_data_to_pb(dto))),
+            "get_reference_data_failed",
+        ),
+        Body::ResolvedAccount(_) => reply(
+            id,
+            client.resolved_account_result().await.map(|account| {
+                Body::ResolvedAccountResponse(
+                    account.map(resolved_account_to_pb).unwrap_or_default(),
+                )
+            }),
+            "resolved_account_failed",
+        ),
+        Body::GetLiveMdState(_) => {
+            let (ticker, book, time_bars) = client.live_md_intent_counts().await;
+            Frame {
+                request_id: id,
+                body: Some(Body::GetLiveMdStateResponse(pb::GetLiveMdStateResponse {
+                    live_md: ticker > 0 || book > 0 || time_bars > 0,
+                    ticker_intents: ticker,
+                    book_intents: book,
+                    time_bar_intents: time_bars,
+                    ready_peers: state.idle.peer_count().await as u32,
+                })),
+            }
         }
-        Body::SubscribePnl(_) => subscriptions::subscribe_pnl(state, client, request_id).await,
-        Body::DisconnectPnl(_) => subscriptions::disconnect_pnl(state, client, request_id).await,
-        Body::SubscribeOrderUpdates(_) => {
-            // Order-plant login is a trading capability (KTD12): gate it the
-            // same as EnsureOrder even though this RPC only asks for
-            // notifications, so `RITHMIC_ENABLE_TRADING=0` cannot be
-            // bypassed by subscribing instead of calling EnsureOrder.
-            subscriptions::subscribe_order_plant_stream(
-                state,
-                client,
-                request_id,
-                "subscribe_order_updates denied: parent trading disabled",
-                false,
-            )
-            .await
-        }
-        Body::SubscribeBracketUpdates(_) => {
-            subscriptions::subscribe_order_plant_stream(
-                state,
-                client,
-                request_id,
-                "subscribe_bracket_updates denied: parent trading disabled",
-                true,
-            )
-            .await
-        }
-        Body::DisconnectOrder(_) => {
-            subscriptions::disconnect_order(state, client, request_id).await
-        }
-        Body::ResetTickerPlant(_) => subscriptions::reset_ticker_plant(state, request_id).await,
-        Body::RequestPlants(req) => info::request_plants(state, request_id, req).await,
-        Body::GetLiveMdState(_) => info::get_live_md_state(state, request_id).await,
-        Body::EnsurePnl(_) => orders::ensure_pnl(state, request_id).await,
-        Body::EnsureOrder(_) => orders::ensure_order(state, request_id).await,
-        Body::PlaceOrder(req) => orders::place_order(state, request_id, req).await,
-        Body::PlaceBracketOrder(req) => orders::place_bracket_order(state, request_id, req).await,
-        Body::AdjustBracketStop(req) => orders::adjust_bracket_stop(state, request_id, req).await,
-        Body::AdjustBracketTarget(req) => {
-            orders::adjust_bracket_target(state, request_id, req).await
-        }
-        Body::CancelOrder(req) => orders::cancel_order(state, request_id, req).await,
-        Body::ModifyOrder(req) => orders::modify_order(state, request_id, req).await,
-        Body::CancelAllOrders(_) => orders::cancel_all_orders(state, request_id).await,
-        Body::Disconnect(_) => ack_frame(request_id),
-        // Responses / events are gateway→client only; a client sending one
-        // back is a protocol misuse, not a crash.
-        _ => error_frame(request_id, "unsupported", "unsupported request body"),
+        Body::Disconnect(_) => ack_frame(id),
+        _ => error_frame(id, "unsupported", "unsupported request body"),
     }
 }
 
-/// Serve one slow read RPC (see `rpc_table::Lane::Slow`). These need only the
-/// shared state, never a connection's client context, so many can run at once.
-pub(super) async fn dispatch_read(state: &GatewayState, request_id: u64, body: Body) -> Frame {
-    match body {
-        Body::LoadOrders(_req) => orders::load_orders(state, request_id).await,
-        Body::LoadProductRmsInfo(_) => orders::load_product_rms_info(state, request_id).await,
-        Body::LoadAccountRmsInfo(_) => orders::load_account_rms_info(state, request_id).await,
-        Body::LoadFillHistory(req) => orders::load_fill_history(state, request_id, req).await,
-        Body::LoadOrderHistoryDates(_) => orders::load_order_history_dates(state, request_id).await,
-        Body::LoadOrderHistory(req) => orders::load_order_history(state, request_id, req).await,
-        Body::LoadTicks(req) => history::load_ticks(state, request_id, req).await,
-        Body::LoadTimeBars(req) => history::load_time_bars(state, request_id, req).await,
-        Body::ProbeTimeBars(req) => history::probe_time_bars(state, request_id, req).await,
-        Body::GetFrontMonth(req) => info::get_front_month(state, request_id, req).await,
-        Body::GetReferenceData(req) => info::get_reference_data(state, request_id, req).await,
-        Body::ResolvedAccount(_) => info::resolved_account(state, request_id).await,
-        _ => error_frame(request_id, "unsupported", "not a slow read request"),
-    }
-}
-
-/// Test helper: process one RPC against `gates` (no session, no socket) and
-/// return the response body. Used by `tests/gates.rs`.
-pub fn gate_rpc_for_test(gates: &ParentGates, body: Body) -> Body {
-    rpc_sequence_with_gates(*gates, vec![body])
-        .0
-        .into_iter()
-        .next()
-        .expect("body")
-}
-
-pub(super) fn test_state(gates: ParentGates, hub: SharedFanout) -> GatewayState {
-    let (gateway_instance_id, transport_generation, transport_epoch) =
-        super::boot_gateway_metadata();
+pub(super) fn test_state(gates: ParentGates, _hub: SharedFanout) -> GatewayState {
     GatewayState {
-        gates,
-        hub: hub.clone(),
+        host: SessionHost::with_handle(
+            None,
+            gates,
+            Default::default(),
+            HistoryPolicy::RefuseUnderLiveMd,
+            true,
+            8,
+        ),
         fingerprint: Fingerprint {
             user: "alice".into(),
             system_name: "LucidTrading".into(),
@@ -278,103 +305,98 @@ pub(super) fn test_state(gates: ParentGates, hub: SharedFanout) -> GatewayState 
             fcm_id: "F1".into(),
             ib_id: "I1".into(),
         },
-        ready: AtomicBool::new(true),
-        force_reconnect: AtomicBool::new(false),
-        reconnect_wake: tokio::sync::Notify::new(),
         expected_auth_token: "secret".into(),
-        session: None,
-        reconnect: Arc::new(ReconnectController::new(hub)),
-        topic_locks: TokioMutex::new(HashMap::new()),
-        recon_lock: Arc::new(TokioMutex::new(())),
-        md_history_gate: Arc::new(TokioMutex::new(())),
-        history_load_lock: Arc::new(TokioMutex::new(())),
         idle: IdleExit::new(IdleExitPolicy::Never),
-        gateway_instance_id,
-        transport_generation,
-        transport_epoch,
-        timing: crate::server::pump::PumpTiming::default(),
+        gateway_instance_id: super::boot_gateway_metadata().0,
     }
 }
-
-/// Run several RPCs on one client and return response bodies + restore plan.
+pub fn gate_rpc_for_test(gates: &ParentGates, body: Body) -> Body {
+    rpc_sequence_with_gates(*gates, vec![body]).0.remove(0)
+}
 pub fn rpc_sequence_with_gates(
     gates: ParentGates,
     bodies: Vec<Body>,
 ) -> (Vec<Body>, crate::reconnect::RestorePlan) {
-    let rt = tokio::runtime::Builder::new_current_thread()
+    tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .expect("current-thread runtime");
-    rt.block_on(async {
-        let hub: SharedFanout = Arc::new(FanoutHub::new(8));
-        let state = test_state(gates, hub);
-        let (out_tx, _out_rx) = mpsc::channel::<OutMsg>(8);
-        let mut client = ClientCtx::new(out_tx);
-        let mut out = Vec::with_capacity(bodies.len());
-        for (i, body) in bodies.into_iter().enumerate() {
-            let resp = dispatch(&state, &mut client, (i as u64) + 1, body).await;
-            out.push(resp.body.expect("body"));
-        }
-        let plan = state.reconnect.restore_plan().await;
-        (out, plan)
-    })
+        .expect("runtime")
+        .block_on(async {
+            let state = test_state(gates, Arc::new(FanoutHub::new(8)));
+            let client = state.host.attach();
+            let mut out = Vec::new();
+            for (i, body) in bodies.into_iter().enumerate() {
+                out.push(
+                    dispatch(&state, &client, i as u64 + 1, body)
+                        .await
+                        .body
+                        .expect("body"),
+                );
+            }
+            let plan = state.reconnect.restore_plan().await;
+            (out, plan)
+        })
 }
-
-/// Note a ticker intent then dispatch a history body (no plant session).
-/// Used to prove Load* is refused while live MD intents are active (RC2.3).
 pub fn history_rpc_with_live_ticker_intent_for_test(body: Body) -> Body {
-    let rt = tokio::runtime::Builder::new_current_thread()
+    tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .expect("current-thread runtime");
-    rt.block_on(async {
-        let hub: SharedFanout = Arc::new(FanoutHub::new(8));
-        let state = test_state(ParentGates::default(), hub);
-        state
-            .reconnect
-            .note_ticker(SubKey {
-                symbol: "MNQU6".into(),
-                exchange: "CME".into(),
-            })
-            .await;
-        let (out_tx, _out_rx) = mpsc::channel::<OutMsg>(8);
-        let mut client = ClientCtx::new(out_tx);
-        dispatch(&state, &mut client, 1, body)
-            .await
-            .body
-            .expect("body")
-    })
+        .expect("runtime")
+        .block_on(async {
+            let state = test_state(ParentGates::default(), Arc::new(FanoutHub::new(8)));
+            state
+                .reconnect
+                .note_ticker(SubKey {
+                    symbol: "MNQU6".into(),
+                    exchange: "CME".into(),
+                })
+                .await;
+            dispatch(&state, &state.host.attach(), 1, body)
+                .await
+                .body
+                .expect("body")
+        })
 }
 
 #[cfg(test)]
-mod command_error_tests {
-    use super::command_error_code;
-    use rithmic_plants::Error as E;
+mod error_payload_tests {
+    use super::*;
 
     #[test]
-    fn only_pre_send_failures_are_definitive() {
-        let cases = [
-            (E::Rejected("r".into()), "venue_rejected"),
-            (E::NotSent("n".into()), "not_sent"),
-            (E::Config("c".into()), "not_sent"),
+    fn typed_errors_keep_inner_payloads_on_the_wire() {
+        for (error, code) in [
+            (Error::Rejected("x".into()), "venue_rejected"),
+            (Error::NotSent("x".into()), "not_sent"),
+            (Error::OutcomeUnknown("x".into()), "venue_unknown"),
             (
-                E::Gateway {
-                    code: "trading_disabled".into(),
-                    message: "m".into(),
-                },
-                "trading_disabled",
+                Error::ReconciliationUnavailable("x".into()),
+                "reconciliation_unavailable",
             ),
-            (E::OutcomeUnknown("u".into()), "venue_unknown"),
-            (E::Rithmic("x".into()), "venue_unknown"),
-            (E::Session("timed out waiting".into()), "venue_unknown"),
-            (E::Protocol("bad".into()), "venue_unknown"),
-            (E::Transport("io".into()), "venue_unknown"),
-            (E::ChannelClosed { plant: "order" }, "venue_unknown"),
-            (E::NotConnected { plant: "order" }, "not_sent"),
-            (E::AlreadyConnected, "not_sent"),
-        ];
-        for (err, want) in cases {
-            assert_eq!(command_error_code(&err), want, "{err}");
+        ] {
+            let frame = reply(7, Err(error), "command");
+            let bytes = crate::codec::encode(&frame).unwrap();
+            let (frame, _) = crate::codec::decode::<Frame>(&bytes).unwrap();
+            assert_eq!(frame.request_id, 7);
+            assert_eq!(
+                frame.body,
+                Some(Body::Error(ErrorResponse {
+                    code: code.into(),
+                    message: "x".into()
+                }))
+            );
         }
+    }
+
+    #[test]
+    fn untyped_command_failures_keep_their_display_text_and_code() {
+        let error = Error::Config("bad input".into());
+        let display = error.to_string();
+        assert_eq!(
+            reply(3, Err(error), "command").body,
+            Some(Body::Error(ErrorResponse {
+                code: "not_sent".into(),
+                message: display
+            }))
+        );
     }
 }

@@ -812,8 +812,23 @@ dependencies = [
  "prost",
  "prost-build",
  "rithmic-gateway",
+ "rithmic-host",
  "rithmic-plants",
- "rithmic-rs",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "rithmic-host"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "fs2",
+ "libc",
+ "rithmic-exec",
+ "rithmic-host",
  "tempfile",
  "thiserror",
  "tokio",
@@ -827,7 +842,7 @@ dependencies = [
  "libc",
  "prost",
  "rithmic-gateway",
- "rithmic-plants",
+ "rithmic-host",
  "serde",
  "serde_json",
  "tempfile",
@@ -841,8 +856,8 @@ dependencies = [
  "pyo3",
  "rithmic-exec",
  "rithmic-gateway",
+ "rithmic-host",
  "rithmic-plants",
- "rithmic-rs",
  "tokio",
 ]
 
@@ -853,9 +868,9 @@ dependencies = [
  "async-trait",
  "futures-util",
  "rithmic-exec",
+ "rithmic-host",
  "rithmic-plants",
  "rithmic-rs",
- "thiserror",
  "tokio",
  "tokio-tungstenite",
 ]

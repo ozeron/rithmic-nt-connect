@@ -16,10 +16,9 @@ from rithmic_nt_connect.session import (
     create_session,
 )
 from rithmic_nt_connect.transport import (
+    Interrupted,
     RecoveryFailed,
-    TransportDown,
-    TransportUp,
-    event_from_rust,
+    Resumed,
 )
 
 _lib = pytest.importorskip("rithmic_nt_connect._lib")
@@ -79,31 +78,43 @@ def test_history_reads_are_served_in_gateway_mode() -> None:
             call()
 
 
+@pytest.mark.parametrize(
+    ("value", "field"),
+    [
+        (_lib.Gates(False, True), "trading"),
+        (_lib.Interrupted(1, "offline"), "generation"),
+        (_lib.Resumed(2), "generation"),
+        (_lib.RecoveryFailed(1, 3, "exhausted"), "attempts"),
+    ],
+)
+def test_frozen_session_values_are_extension_types(value: Any, field: str) -> None:
+    from rithmic_nt_connect import transport
+
+    assert transport.Interrupted is _lib.Interrupted
+    assert transport.Resumed is _lib.Resumed
+    assert transport.RecoveryFailed is _lib.RecoveryFailed
+    assert transport.TransportDown is _lib.Interrupted
+    assert transport.TransportUp is _lib.Resumed
+    with pytest.raises(AttributeError):
+        setattr(value, field, 42)
+
+
 def test_gates_are_closed_by_default_in_both_modes_and_only_direct_can_open_them() -> (
     None
 ):
     direct = _lib.Session(user="u", password="pw")
-    assert direct.is_direct is True
-    # Direct mode owns its gates: closed until configured, opened (never closed).
-    assert direct.trading_enabled is False
-    assert direct.cancel_all_enabled is False
-    direct.configure_gates(trading_enabled=True)
-    assert (direct.trading_enabled, direct.cancel_all_enabled) == (True, False)
-    direct.configure_gates(cancel_all_enabled=True)
-    direct.configure_gates()  # asking for nothing closes nothing
-    assert (direct.trading_enabled, direct.cancel_all_enabled) == (True, True)
-    assert direct.ensure_transport_live() == 0
-    assert direct.transport_connected() is True
-    assert direct.transport_generation() == 0
+    gates = direct.open_gates(trading=False, cancel_all=False)
+    assert not gates.trading and not gates.cancel_all
+    gates = direct.open_gates(trading=True, cancel_all=False)
+    assert gates.trading and not gates.cancel_all
+    gates = direct.open_gates(trading=False, cancel_all=True)
+    assert gates.trading and gates.cancel_all
+    gates = direct.open_gates(trading=False, cancel_all=False)
+    assert gates.trading and gates.cancel_all
 
     gateway = _lib.Session(user="u", connect_mode="gateway")
-    assert gateway.is_direct is False
-    assert gateway.trading_enabled is False  # nothing advertised before connect
-    with pytest.raises(AttributeError):
-        gateway.trading_enabled = True  # type: ignore[misc]
-    # The parent owns a gateway's gates: a client cannot open them.
-    with pytest.raises(RuntimeError, match="owned by the gateway parent"):
-        gateway.configure_gates(trading_enabled=True)
+    gates = gateway.open_gates(trading=True, cancel_all=True)
+    assert not gates.trading and not gates.cancel_all
 
 
 def test_a_gateway_session_before_connect_is_not_connected() -> None:
@@ -144,119 +155,126 @@ def test_the_wrapper_delegates_everything_else_to_the_extension() -> None:
     assert getattr(wrapper, "trading_enabled", True) is False
 
 
-def test_transport_events_are_built_for_the_adapter() -> None:
-    down = event_from_rust("down", 3, 0, None)
-    assert isinstance(down, TransportDown) and down.gen == 3
-    assert down.fault.kind.value == "unix_eof"
-    up = event_from_rust("up", 4, 0, None)
-    assert isinstance(up, TransportUp) and up.gen == 4
-    failed = event_from_rust("recovery_failed", 4, 8, "parent gone")
-    assert isinstance(failed, RecoveryFailed)
-    assert (failed.gen, failed.attempts) == (4, 8)
-    assert "parent gone" in str(failed.cause)
-    assert event_from_rust("nonsense", 1, 0, None) is None
-
-
-class _TransportInner:
-    """Stands in for the extension: one callback registration, fired by hand."""
-
-    def __init__(self) -> None:
-        self.registrations = 0
-        self.callback: Any = None
-        self.cancelled = 0
-        self.disconnected = 0
-
-    def subscribe_transport_events(self, callback: Any) -> Any:
-        self.registrations += 1
-        self.callback = callback
-        owner = self
-
-        class _Subscription:
-            def cancel(self) -> None:
-                owner.cancelled += 1
-
-        return _Subscription()
-
-    def disconnect(self) -> None:
-        self.disconnected += 1
-
-
-def test_the_wrapper_bridges_rust_callbacks_to_adapter_events() -> None:
-    seen: list[Any] = []
-    inner = _TransportInner()
-    wrapper = _RustGatewaySession(inner)
-    unsubscribe = wrapper.subscribe_transport_events(seen.append)
-    assert callable(unsubscribe)
-
-    inner.callback("down", 1, 0, None)
-    inner.callback("up", 2, 0, None)
-    inner.callback("recovery_failed", 2, 8, "gone")
-    inner.callback("nonsense", 2, 0, None)
-    assert [type(e).__name__ for e in seen] == [
-        "TransportDown",
-        "TransportUp",
-        "RecoveryFailed",
-    ]
-
-
-def test_listeners_share_one_registration_and_can_detach() -> None:
+@pytest.mark.parametrize("wrapped", [False, True], ids=["extension", "wrapper"])
+def test_two_session_listeners_can_cancel_independently(
+    tmp_path: Any, wrapped: bool
+) -> None:
+    inner: Any = _lib.Session.fake(lock_dir=str(tmp_path))
+    session = _RustGatewaySession(inner) if wrapped else inner
+    session.connect()
+    session.subscribe("NQH6", "CME")
     first: list[Any] = []
     second: list[Any] = []
-    inner = _TransportInner()
+    got_first = threading.Event()
+    got_second = threading.Event()
+
+    def listener_first(event: Any) -> None:
+        first.append(event)
+        if isinstance(event, Resumed):
+            got_first.set()
+
+    def listener_second(event: Any) -> None:
+        second.append(event)
+        if isinstance(event, Resumed):
+            got_second.set()
+
+    sub_a = session.subscribe_session_events(listener_first)
+    sub_b = session.subscribe_session_events(listener_second)
+    inner.script.fail_stream("ticker")
+    assert got_first.wait(3) and got_second.wait(3)
+    assert [type(e).__name__ for e in first] == ["Interrupted", "Resumed"]
+    assert [type(e).__name__ for e in second] == ["Interrupted", "Resumed"]
+    sub_a.cancel()
+    sub_a.cancel()
+    got_second.clear()
+    inner.script.fail_stream("ticker")
+    assert got_second.wait(3)
+    assert len(first) == 2
+    assert len(second) == 4
+    sub_b.cancel()
+    session.disconnect()
+
+
+def test_a_direct_listener_can_make_a_blocking_session_call(tmp_path: Any) -> None:
+    session: Any = _lib.Session.fake(lock_dir=str(tmp_path))
+    session.connect()
+    session.subscribe("NQH6", "CME")
+    done = threading.Event()
+    seen: list[Any] = []
+    errors: list[BaseException] = []
+
+    def listener(event: Any) -> None:
+        if isinstance(event, Resumed):
+            try:
+                seen.append(
+                    (
+                        threading.current_thread().name,
+                        session.next_events("ticker", timeout_ms=0),
+                    )
+                )
+            except BaseException as exc:  # NOSONAR - includes PyO3 runtime panics
+                errors.append(exc)
+            finally:
+                done.set()
+
+    subscription = session.subscribe_session_events(listener)
+    session.script.fail_stream("ticker")
+    assert done.wait(3)
+    assert not errors
+    assert seen[0][0] != threading.main_thread().name
+    subscription.cancel()
+    session.disconnect()
+
+
+def test_cancelled_listener_does_not_keep_the_session_alive(tmp_path: Any) -> None:
+    inner: Any = _lib.Session.fake(lock_dir=str(tmp_path))
     wrapper = _RustGatewaySession(inner)
-    drop_first = wrapper.subscribe_transport_events(first.append)
-    wrapper.subscribe_transport_events(second.append)
-    assert inner.registrations == 1
-
-    inner.callback("up", 1, 0, None)
-    drop_first()
-    drop_first()  # detaching twice is harmless
-    inner.callback("up", 2, 0, None)
-    assert len(first) == 1
-    assert len(second) == 2
-
-
-def test_the_extension_registration_is_cancelled_when_the_last_listener_leaves() -> (
-    None
-):
-    inner = _TransportInner()
-    wrapper = _RustGatewaySession(inner)
-    drop_a = wrapper.subscribe_transport_events(lambda e: None)
-    drop_b = wrapper.subscribe_transport_events(lambda e: None)
-    drop_a()
-    assert inner.cancelled == 0, "another listener is still attached"
-    drop_b()
-    assert inner.cancelled == 1
-    drop_b()  # idempotent
-    assert inner.cancelled == 1
-    # A later listener registers afresh.
-    wrapper.subscribe_transport_events(lambda e: None)
-    assert inner.registrations == 2
-
-
-def test_disconnect_cancels_the_registration_and_reaches_the_extension() -> None:
-    inner = _TransportInner()
-    wrapper = _RustGatewaySession(inner)
-    wrapper.subscribe_transport_events(lambda e: None)
-    wrapper.disconnect()
-    assert (inner.cancelled, inner.disconnected) == (1, 1)
-
-
-def test_the_extension_callback_does_not_keep_the_session_alive() -> None:
-    """The extension's task holds its callback for the life of the process, so the
-    callback must not reference the wrapper (and through it the whole session)."""
+    wrapper.connect()
+    script = inner.script
+    subscription = wrapper.subscribe_session_events(lambda event: None)
+    subscription.cancel()
+    del wrapper, inner
     import gc
-    import weakref
 
-    inner = _TransportInner()
-    wrapper = _RustGatewaySession(inner)
-    wrapper.subscribe_transport_events(lambda e: None)
-    relay = inner.callback  # what the extension's task would keep
-    ref = weakref.ref(wrapper)
-    del wrapper
     gc.collect()
-    assert ref() is None, "the relay held the session alive"
-    relay("up", 1, 0, None)  # a late event after the session is gone is harmless
+    deadline = time.monotonic() + 3
+    while "disconnect" not in script.calls():
+        assert time.monotonic() < deadline
+        time.sleep(0.005)
+
+
+def test_recovery_exhaustion_delivers_failure_and_registry_replaces_the_host(
+    tmp_path: Any,
+) -> None:
+    old: Any = _lib.Session.fake(lock_dir=str(tmp_path))
+    old.connect()
+    old.subscribe("NQH6", "CME")
+    events: list[Any] = []
+    failed = threading.Event()
+
+    def listener(event: Any) -> None:
+        events.append(event)
+        if isinstance(event, RecoveryFailed):
+            failed.set()
+
+    subscription = old.subscribe_session_events(listener)
+    for _ in range(3):
+        old.script.reject_next("reset_ticker", "offline")
+    old.script.fail_stream("ticker")
+    assert failed.wait(3)
+    assert isinstance(events[0], Interrupted)
+    assert isinstance(events[-1], RecoveryFailed)
+    assert events[-1].attempts == 3
+    replacement: Any = _lib.Session.fake(lock_dir=str(tmp_path))
+    replacement.connect()
+    assert replacement.script.calls().count("connect") == 1
+    with pytest.raises(RuntimeError, match="new host"):
+        old.connect()
+    subscription.cancel()
+    old.disconnect()
+    with pytest.raises(RuntimeError, match=r"detached|new host"):
+        old.connect()
+    replacement.disconnect()
 
 
 def test_create_rust_gateway_session_never_passes_a_password(
@@ -287,21 +305,21 @@ def test_the_transport_callback_reaches_python_from_a_runtime_thread(
 
         def _listener(event: Any) -> None:
             events.append((threading.current_thread().name, event))
-            if isinstance(event, TransportUp):
+            if isinstance(event, Resumed):
                 got_up.set()
 
-        wrapper.subscribe_transport_events(_listener)
+        wrapper.subscribe_session_events(_listener)
         wrapper.subscribe("NQH6", "CME")
 
         parent.restart()
         assert got_up.wait(30), events
         kinds = [type(e).__name__ for _, e in events]
-        assert kinds[0] == "TransportDown"
-        assert "TransportUp" in kinds
+        assert kinds[0] == "Interrupted"
+        assert "Resumed" in kinds
         # Delivered off the main thread, without deadlocking the interpreter.
         assert all(name != threading.main_thread().name for name, _ in events)
-        up = next(e for _, e in events if isinstance(e, TransportUp))
-        assert up.gen >= 2
+        up = next(e for _, e in events if isinstance(e, Resumed))
+        assert up.generation >= 2
         wrapper.disconnect()
 
 
@@ -333,6 +351,6 @@ def test_a_gateway_session_round_trips_through_create_session(fake_bin) -> None:
 
 
 def test_private_names_are_not_delegated_to_the_extension() -> None:
-    wrapper = _RustGatewaySession(_TransportInner())
+    wrapper = _RustGatewaySession(_lib.Session(user="unused", connect_mode="gateway"))
     assert not hasattr(wrapper, "_missing")
-    assert hasattr(wrapper, "subscribe_transport_events")
+    assert hasattr(wrapper, "subscribe_session_events")

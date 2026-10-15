@@ -14,6 +14,9 @@
 //! `RITHMIC_GATEWAY_CANCEL_ALL`, `RITHMIC_GATEWAY_AUTH_TOKEN`,
 //! `RITHMIC_GATEWAY_IDLE_EXIT_SEC`). No password is read.
 
+mod root_config;
+
+use rithmic_host::Venue;
 use std::sync::Arc;
 
 use rithmic_gateway::env_keys::{self, process_env_first};
@@ -21,10 +24,8 @@ use rithmic_gateway::idle_exit::parse_idle_exit_sec;
 use rithmic_gateway::listen::{bind_unix, ListenEndpoint};
 use rithmic_gateway::server::{run_gateway, Fingerprint, GatewayParams, SessionHandle};
 use rithmic_gateway::singleton::{SessionLock, STARTUP_LOCK_GRACE};
-use rithmic_gateway::subscriptions::ParentGates;
 use rithmic_gateway::testing::serve_control;
-use rithmic_plants::fake::FakeSession;
-use rithmic_plants::Session;
+use rithmic_host::fake::FakeVenue;
 use tokio::net::UnixListener;
 
 #[tokio::main]
@@ -69,7 +70,7 @@ async fn run() -> Result<(), String> {
     let control = UnixListener::bind(&control_path)
         .map_err(|e| format!("bind control {control_path}: {e}"))?;
 
-    let fake = Arc::new(FakeSession::new());
+    let fake = Arc::new(FakeVenue::new());
     fake.connect().await.map_err(|e| e.to_string())?;
     tokio::spawn(serve_control(control, Arc::clone(&fake)));
     eprintln!(
@@ -91,9 +92,12 @@ async fn run() -> Result<(), String> {
         },
         expected_auth_token: std::env::var("RITHMIC_GATEWAY_AUTH_TOKEN").unwrap_or_default(),
         idle_policy,
-        gates: ParentGates::from_env(),
-        session: SessionHandle::new(fake),
-        timing: rithmic_gateway::server::pump::PumpTiming::default(),
+        host: rithmic_host::SessionHost::from_connected(
+            SessionHandle::new(fake),
+            root_config::gates(),
+            root_config::timing(),
+            rithmic_host::HistoryPolicy::RefuseUnderLiveMd,
+        ),
     })
     .await;
     let _ = std::fs::remove_file(&control_path);

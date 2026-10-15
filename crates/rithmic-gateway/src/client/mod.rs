@@ -1,9 +1,9 @@
-//! `GatewaySession`: the Rust gateway client behind the [`Session`] trait.
+//! `RemoteSession`: the Rust gateway client behind the [`Session`] trait.
 //!
 //! Attach-only (it never starts the parent) and credential-free (a client has
 //! an auth token and a fingerprint, never the Rithmic password). All sessions in
 //! a process for one fingerprint share one socket and one reader (`runtime`);
-//! each `GatewaySession` is a facade with its own event queues.
+//! each `RemoteSession` is a facade with its own event queues.
 //!
 //! Outcome classes: a failure before send is a plain error; a failure after a
 //! state-changing request was written is [`Error::OutcomeUnknown`] and is never
@@ -12,22 +12,28 @@
 mod attach;
 pub mod convert;
 mod runtime;
+mod transport;
+
+#[cfg(test)]
+mod recovery_tests;
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use rithmic_plants::dto::{
+use rithmic_host::dto::{
     AccountRmsInfoDto, FillHistoryDto, FrontMonthDto, HistoryBarDto, HistoryTickDto,
     OrderNotificationDto, PlantEvent, ProductRmsInfoDto, ReferenceDataDto, TimeBarProbeRow,
 };
-use rithmic_plants::history::{bar_slice_secs, parse_time_bar_type, window_slices};
-use rithmic_plants::{
+use rithmic_host::history::{bar_slice_secs, parse_time_bar_type, window_slices};
+use rithmic_host::{
     AccountTriple, Error, ModifyOrder, PlaceBracketOrder, PlaceOrder, PlantSet, Result, Session,
 };
-use tokio::sync::broadcast;
+
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::{broadcast, RwLock};
 use tokio::time::Instant;
 
 use self::convert::Channel;
@@ -71,7 +77,7 @@ pub struct GatewayConfig {
     pub ib_id: String,
     auth_token: String,
     socket: PathBuf,
-    /// Bounded wait for an already-starting parent and for a silent parent's Ready.
+    /// Bounded initial attach wait and end-to-end socket recovery window.
     pub attach_timeout: Duration,
     pub rpc_timeout: Duration,
     pub history_rpc_timeout: Duration,
@@ -163,24 +169,76 @@ enum Mode {
 }
 
 /// A facade over the shared gateway runtime.
-pub struct GatewaySession {
+pub struct RemoteSession {
     runtime: Arc<Runtime>,
     queues: Arc<Queues>,
     facade_id: AtomicU64,
     connected: AtomicBool,
+    has_connected: AtomicBool,
+    order_closed: AtomicBool,
+    disconnecting_order: AtomicUsize,
+    order_gate: RwLock<()>,
     /// The runtime `connect` ran on; `Drop` (which may run outside any runtime,
     /// e.g. from Python) spawns the facade's last releases there.
     rt_handle: StdMutex<Option<tokio::runtime::Handle>>,
 }
 
-impl GatewaySession {
+/// A clone is a new, disconnected facade with independent queues and intent
+/// holdings over the same transport runtime.
+impl Clone for RemoteSession {
+    fn clone(&self) -> Self {
+        Self::from_runtime(Arc::clone(&self.runtime))
+    }
+}
+
+impl RemoteSession {
     /// Create a session facade. No I/O happens until [`Session::connect`].
     pub fn new(cfg: GatewayConfig) -> Self {
+        Self::from_runtime(Runtime::for_config(&cfg))
+    }
+
+    /// Use an owned stream without Unix dialing, flock attestation or registry
+    /// sharing. The caller authenticates the transport; the normal fingerprint
+    /// and token handshake still runs on `connect`. A consumed stream cannot be
+    /// redialed; use [`Self::with_connector`] when recovery is needed.
+    pub fn over<S>(mut cfg: GatewayConfig, stream: S) -> Self
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        cfg.recovery_attempts = 0;
+        Self::from_runtime(Runtime::with_source(
+            cfg,
+            transport::Source::Once(StdMutex::new(Some(Box::new(stream)))),
+        ))
+    }
+
+    /// Supply a fresh transport for each handshake/recovery attempt. The caller
+    /// owns dialing and transport authentication; no Unix paths or flock are used.
+    pub fn with_connector<S, F, Fut>(cfg: GatewayConfig, connect: F) -> Self
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<S>> + Send + 'static,
+    {
+        Self::from_runtime(Runtime::with_source(
+            cfg,
+            transport::Source::Connector(Box::new(move || {
+                let future = connect();
+                Box::pin(async move { Ok(Box::new(future.await?) as transport::Stream) })
+            })),
+        ))
+    }
+
+    fn from_runtime(runtime: Arc<Runtime>) -> Self {
         Self {
-            runtime: Runtime::for_config(&cfg),
+            runtime,
             queues: Arc::new(Queues::new()),
             facade_id: AtomicU64::new(0),
             connected: AtomicBool::new(false),
+            has_connected: AtomicBool::new(false),
+            order_closed: AtomicBool::new(false),
+            disconnecting_order: AtomicUsize::new(0),
+            order_gate: RwLock::new(()),
             rt_handle: StdMutex::new(None),
         }
     }
@@ -245,16 +303,37 @@ impl GatewaySession {
         }
     }
 
+    fn require_order_open(&self) -> Result<()> {
+        if self.order_closed.load(Ordering::SeqCst)
+            || self.disconnecting_order.load(Ordering::SeqCst) != 0
+        {
+            Err(Error::NotSent("order plant explicitly disconnected".into()))
+        } else {
+            Ok(())
+        }
+    }
+
     /// Send `body`, applying the retry / outcome rules for `mode`.
     async fn call(&self, body: Body, mode: Mode, history: bool) -> Result<Frame> {
         self.require_connected()?;
+        // Hold the facade's gate through send and reply: closing waits for
+        // commands already in flight and prevents any later command being sent.
+        let _order = if mode == Mode::Command {
+            self.require_order_open()?;
+            let guard = self.order_gate.read().await;
+            self.require_connected()?;
+            self.require_order_open()?;
+            Some(guard)
+        } else {
+            None
+        };
         let timeout = self.timeout_for(history);
         // At most one retry: a read after a lost reply, or any request that
         // never left (the connection closed before it was written).
         let mut retried = false;
         loop {
             // A state-changing request that never left is a definitive local
-            // failure (`NotSent`), the same class `DirectSession` reports.
+            // failure (`NotSent`), the same class `RithmicVenue` reports.
             let conn = match self.runtime.ensure_live().await {
                 Ok(conn) => conn,
                 Err(err) if mode == Mode::Command => return Err(Error::NotSent(err.to_string())),
@@ -289,6 +368,16 @@ impl GatewaySession {
         reply!(self.call(body, mode, false).await?, Ack, |_| ())
     }
 
+    async fn intent_ack(&self, conn: &runtime::Connection, body: Body) -> Result<()> {
+        let frame = conn
+            .call(body, self.runtime.cfg.rpc_timeout)
+            .await
+            .map_err(|e| match e {
+                CallError::NotSent(e) | CallError::Sent(e) => e,
+            })?;
+        reply!(map_reply(frame)?, Ack, |_| ())
+    }
+
     fn facade(&self) -> u64 {
         self.facade_id.load(Ordering::SeqCst)
     }
@@ -298,15 +387,37 @@ impl GatewaySession {
     /// a repeat subscribe is how a client retries a join a rebuild left degraded,
     /// and how it re-joins a parent that lost the connection's intents.
     async fn hold_intent(&self, key: IntentKey, body: Body) -> Result<()> {
+        self.require_connected()?;
+        let (_barrier, conn) = self.runtime.intent_connection().await?;
+        self.require_connected()?;
         let _ordered = self.runtime.intent_lock(&key).await;
-        self.ack(body, Mode::Intent).await?;
-        self.runtime.intents().hold(self.facade(), key);
+        let facade = self.facade();
+        self.intent_ack(&conn, body).await?;
+        if !self.runtime.hold_live_intent(facade, key.clone()) {
+            // Disconnect may have run before this Ack, so `leave` could not
+            // release the newly accepted intent. Balance it here unless a
+            // remaining facade holds it (order/brackets release as a group).
+            let shared = {
+                let intents = self.runtime.intents();
+                match key {
+                    IntentKey::Order | IntentKey::Brackets => intents.order_group_held(),
+                    _ => intents.is_held(&key),
+                }
+            };
+            if !shared {
+                self.intent_ack(&conn, key.release_body()).await?;
+            }
+            return Err(Error::NotConnected { plant: "gateway" });
+        }
         Ok(())
     }
 
     /// Drop this facade's hold on an intent; the parent is told only when no
     /// other facade on the shared socket still holds it.
     async fn release_intent(&self, key: IntentKey, body: Body) -> Result<()> {
+        self.require_connected()?;
+        let (_barrier, conn) = self.runtime.intent_connection().await?;
+        self.require_connected()?;
         let _ordered = self.runtime.intent_lock(&key).await;
         let facade = self.facade();
         let held_here = {
@@ -317,7 +428,7 @@ impl GatewaySession {
             }
             held_here
         };
-        let sent = self.ack(body, Mode::Intent).await;
+        let sent = self.intent_ack(&conn, body).await;
         if sent.is_err() && held_here {
             self.runtime.intents().hold(facade, key);
         }
@@ -329,6 +440,9 @@ impl GatewaySession {
     /// holds either; otherwise the order plant, and any bracket subscription on
     /// it, stay for the others.
     async fn release_order(&self) -> Result<()> {
+        self.require_connected()?;
+        let (_barrier, conn) = self.runtime.intent_connection().await?;
+        self.require_connected()?;
         let _ordered = self.runtime.intent_lock(&IntentKey::Order).await;
         let facade = self.facade();
         let had = {
@@ -345,7 +459,7 @@ impl GatewaySession {
             had
         };
         let sent = self
-            .ack(IntentKey::Order.release_body(), Mode::Intent)
+            .intent_ack(&conn, IntentKey::Order.release_body())
             .await;
         if sent.is_err() {
             let mut intents = self.runtime.intents();
@@ -364,8 +478,11 @@ impl GatewaySession {
         if id == 0 {
             return None;
         }
+        // Unregister first: a subscription Ack which races detach can no
+        // longer record a hold after we have removed this facade's holdings.
+        let last = self.runtime.unregister(id);
         let freed = self.runtime.intents().drop_facade(id);
-        Some((self.runtime.unregister(id), freed))
+        Some((last, freed))
     }
 
     /// Compatibility poll: a gap reads as [`Error::ChannelLagged`].
@@ -382,7 +499,9 @@ impl GatewaySession {
     /// Wait for the first event on `channel`; a gap (from the parent or from
     /// this client's own queue overflow) is returned as `PlantEvent::Gap`.
     async fn poll_raw(&self, channel: Channel, timeout: Duration) -> Result<Option<PlantEvent>> {
-        self.require_connected()?;
+        if !self.has_connected.load(Ordering::SeqCst) {
+            self.require_connected()?;
+        }
         self.queues.get(channel).arm();
         let queue = self.queues.get(channel);
         let deadline = Instant::now() + timeout;
@@ -395,14 +514,14 @@ impl GatewaySession {
             match queue.take() {
                 Take::Event(event) => return Ok(Some(own(event))),
                 Take::Lagged(skipped) => {
-                    return Ok(Some(PlantEvent::Gap(rithmic_plants::GapDto {
+                    return Ok(Some(PlantEvent::Gap(rithmic_host::GapDto {
                         stream: channel.stream(),
                         skipped,
                     })))
                 }
                 Take::Empty => {}
             }
-            if self.runtime.is_down() {
+            if !self.connected.load(Ordering::SeqCst) || self.runtime.stream_closed() {
                 return Err(Error::ChannelClosed {
                     plant: channel.plant(),
                 });
@@ -447,7 +566,7 @@ impl GatewaySession {
     }
 }
 
-impl Drop for GatewaySession {
+impl Drop for RemoteSession {
     /// A facade dropped without `disconnect` still releases what only it held,
     /// or the parent would keep those subscriptions (and keep fanning them to
     /// this socket) until the last facade closed it. The releases run on the
@@ -502,7 +621,11 @@ fn map_reply(frame: Frame) -> Result<Frame> {
 }
 
 #[async_trait]
-impl Session for GatewaySession {
+impl Session for RemoteSession {
+    fn session_events(&self) -> broadcast::Receiver<rithmic_host::events::SessionEvent> {
+        self.runtime.session_events()
+    }
+
     async fn connect(&self) -> Result<()> {
         if self.connected.load(Ordering::SeqCst) {
             return Err(Error::AlreadyConnected);
@@ -513,6 +636,7 @@ impl Session for GatewaySession {
         self.runtime.allow_recovery();
         match self.runtime.ensure_live().await {
             Ok(_) => {
+                self.has_connected.store(true, Ordering::SeqCst);
                 self.connected.store(true, Ordering::SeqCst);
                 Ok(())
             }
@@ -527,6 +651,7 @@ impl Session for GatewaySession {
 
     async fn disconnect(&self) -> Result<()> {
         self.connected.store(false, Ordering::SeqCst);
+        self.queues.wake_all();
         match self.leave() {
             // Last facade in the process: close the socket; the parent drops its
             // intents and stays up.
@@ -549,8 +674,11 @@ impl Session for GatewaySession {
     }
 
     async fn ensure_order_plant(&self) -> Result<()> {
+        let _gate = self.order_gate.write().await;
         self.ack(Body::EnsureOrder(pb::EnsureOrderRequest {}), Mode::Intent)
-            .await
+            .await?;
+        self.order_closed.store(false, Ordering::SeqCst);
+        Ok(())
     }
 
     async fn ensure_pnl_plant(&self) -> Result<()> {
@@ -559,6 +687,19 @@ impl Session for GatewaySession {
     }
 
     async fn disconnect_order_plant(&self) -> Result<()> {
+        struct Closing<'a>(&'a AtomicUsize);
+        impl Drop for Closing<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        self.require_connected()?;
+        self.disconnecting_order.fetch_add(1, Ordering::SeqCst);
+        let _closing = Closing(&self.disconnecting_order);
+        self.order_closed.store(true, Ordering::SeqCst);
+        let _gate = self.order_gate.write().await;
+        // An ensure already ahead of this writer may have reopened the gate.
+        self.order_closed.store(true, Ordering::SeqCst);
         self.release_order().await
     }
 
@@ -570,14 +711,12 @@ impl Session for GatewaySession {
         .await
     }
 
-    async fn reset_ticker(&self) -> Result<()> {
-        self.ack(
-            Body::ResetTickerPlant(pb::ResetTickerPlantRequest {}),
-            Mode::Intent,
-        )
-        .await
+    async fn open_gates(&self, _trading: bool, _cancel_all: bool) -> rithmic_host::Gates {
+        rithmic_host::Gates {
+            trading: self.trading_enabled(),
+            cancel_all: self.cancel_all_enabled(),
+        }
     }
-
     async fn resolved_account(&self) -> Option<AccountTriple> {
         let frame = self
             .call(
@@ -688,21 +827,27 @@ impl Session for GatewaySession {
     }
 
     async fn subscribe_order_updates(&self) -> Result<()> {
+        let _gate = self.order_gate.write().await;
         self.queues.get(Channel::Order).arm();
         self.hold_intent(
             IntentKey::Order,
             Body::SubscribeOrderUpdates(pb::SubscribeOrderUpdatesRequest {}),
         )
-        .await
+        .await?;
+        self.order_closed.store(false, Ordering::SeqCst);
+        Ok(())
     }
 
     async fn subscribe_bracket_updates(&self) -> Result<()> {
+        let _gate = self.order_gate.write().await;
         self.queues.get(Channel::Order).arm();
         self.hold_intent(
             IntentKey::Brackets,
             Body::SubscribeBracketUpdates(pb::SubscribeBracketUpdatesRequest {}),
         )
-        .await
+        .await?;
+        self.order_closed.store(false, Ordering::SeqCst);
+        Ok(())
     }
 
     async fn get_front_month(&self, symbol: &str, exchange: &str) -> Result<FrontMonthDto> {
@@ -1018,7 +1163,7 @@ impl Session for GatewaySession {
 
     async fn next_events(
         &self,
-        stream: rithmic_plants::Stream,
+        stream: rithmic_host::Stream,
         max: usize,
         timeout: Duration,
     ) -> Result<Vec<PlantEvent>> {
@@ -1032,7 +1177,7 @@ impl Session for GatewaySession {
             match queue.take() {
                 Take::Event(event) => out.push(own(event)),
                 Take::Lagged(skipped) => {
-                    out.push(PlantEvent::Gap(rithmic_plants::GapDto { stream, skipped }))
+                    out.push(PlantEvent::Gap(rithmic_host::GapDto { stream, skipped }))
                 }
                 Take::Empty => break,
             }

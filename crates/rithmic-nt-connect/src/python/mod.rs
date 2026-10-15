@@ -8,18 +8,29 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use tokio::runtime::Runtime;
 
+mod direct;
 mod exec;
+mod session_events;
+#[cfg(feature = "testing")]
+mod testing;
+#[cfg(all(test, feature = "testing"))]
+mod tests;
+use session_events::*;
 
-use rithmic_gateway::client::{GatewayConfig, GatewaySession, TransportEvent};
-use rithmic_plants::config::{SessionConfig, DEFAULT_LUCID_URL};
-use rithmic_plants::dto::{
+use rithmic_gateway::client::{GatewayConfig, RemoteSession};
+use rithmic_host::dto::{
     AccountPnlDto, AccountRmsInfoDto, BboDto, BracketUpdateDto, FillHistoryDto, FrontMonthDto,
     HistoryBarDto, HistoryTickDto, InstrumentPnlDto, LastTradeDto, OrderBookDto,
     OrderNotificationDto, PlantEvent, ProductRmsInfoDto, ReferenceDataDto, TimeBarProbeRow,
 };
-use rithmic_plants::error::Error;
-use rithmic_plants::plants::PlantSet;
-use rithmic_plants::{DirectSession, ModifyOrder, PlaceBracketOrder, PlaceOrder, Session};
+use rithmic_host::error::Error;
+use rithmic_host::plants::PlantSet;
+use rithmic_host::{
+    HostFingerprint, HostOptions, HostRegistry, ModifyOrder, PlaceBracketOrder, PlaceOrder,
+    Session, SessionEvent,
+};
+use rithmic_plants::config::{SessionConfig, DEFAULT_LUCID_URL};
+use rithmic_plants::RithmicVenue;
 
 pyo3::create_exception!(rithmic_nt_connect, ChannelLaggedError, PyRuntimeError);
 pyo3::create_exception!(rithmic_nt_connect, ChannelClosedError, PyRuntimeError);
@@ -548,14 +559,13 @@ fn time_bar_event_dict(py: Python<'_>, b: HistoryBarDto) -> PyResult<Py<PyDict>>
 /// A thin shell over the [`Session`] trait: every blocking call runs on the
 /// extension runtime with the GIL released, and records are converted to plain
 /// dicts in this module only. Order-op safety (disconnect gate, detached order
-/// handle) lives in `DirectSession`, not here.
+/// handle) lives in `RithmicVenue`, not here.
 #[pyclass(name = "Session")]
 pub struct PySession {
-    session: Arc<dyn Session>,
+    attachment: std::sync::RwLock<direct::Attachment>,
+    direct: Option<std::sync::Mutex<direct::DirectState>>,
     /// The gateway client, when `connect_mode` is `gateway` (transport hooks).
-    gateway: Option<Arc<GatewaySession>>,
-    /// The in-process session, when `connect_mode` is `direct` (it owns the gates).
-    direct: Option<Arc<DirectSession>>,
+    gateway: Option<Arc<RemoteSession>>,
 }
 
 impl PySession {
@@ -595,6 +605,7 @@ impl PySession {
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
+        py: Python<'_>,
         user: String,
         password: Option<String>,
         system_name: &str,
@@ -612,9 +623,9 @@ impl PySession {
         gateway_auth_token: Option<String>,
     ) -> PyResult<Self> {
         let (renv, env_name) = match env {
-            "Live" | "live" => (rithmic_rs::RithmicEnv::Live, "Live"),
-            "Demo" | "demo" => (rithmic_rs::RithmicEnv::Demo, "Demo"),
-            "Test" | "test" => (rithmic_rs::RithmicEnv::Test, "Test"),
+            "Live" | "live" => (rithmic_host::Env::Live, "Live"),
+            "Demo" | "demo" => (rithmic_host::Env::Demo, "Demo"),
+            "Test" | "test" => (rithmic_host::Env::Test, "Test"),
             other => {
                 return Err(PyValueError::new_err(format!(
                     "invalid env {other:?}; expected Live, Demo, or Test"
@@ -635,16 +646,31 @@ impl PySession {
                 if let Some(token) = gateway_auth_token {
                     cfg = cfg.with_auth_token(&token);
                 }
-                let gateway = Arc::new(GatewaySession::new(cfg));
+                let gateway = Arc::new(RemoteSession::new(cfg));
                 Ok(Self {
-                    session: gateway.clone(),
-                    gateway: Some(gateway),
+                    attachment: std::sync::RwLock::new(direct::Attachment {
+                        session: gateway.clone(),
+                        failed: Box::new(|| false),
+                        #[cfg(feature = "testing")]
+                        script: None,
+                        #[cfg(feature = "testing")]
+                        fault_venue: None,
+                    }),
                     direct: None,
+                    gateway: Some(gateway),
                 })
             }
             "direct" => {
                 let password = password
                     .ok_or_else(|| PyValueError::new_err("direct mode requires a password"))?;
+                let mut key = HostFingerprint::new(&user, system_name, url, env_name);
+                key.account_id = account_id.clone();
+                key.fcm_id = fcm_id.clone();
+                key.ib_id = ib_id.clone();
+                key.gateway_listen = gateway_listen;
+                key.beta_url = beta_url.clone();
+                key.app_name = app_name.into();
+                key.app_version = app_version.into();
                 let mut builder = SessionConfig::builder()
                     .user(user)
                     .password(password)
@@ -667,11 +693,65 @@ impl PySession {
                 }
                 let config = builder.build().map_err(to_py_err)?;
                 let plants = PlantSet::parse(plants).map_err(to_py_err)?;
-                let direct = Arc::new(DirectSession::new(config, plants));
-                Ok(Self {
-                    session: direct.clone(),
-                    gateway: None,
-                    direct: Some(direct),
+                static REGISTRY: OnceLock<HostRegistry<RithmicVenue>> = OnceLock::new();
+                let lock_path = rithmic_gateway::singleton::SessionLock::lock_path(
+                    &key.user,
+                    &key.system_name,
+                    &key.url,
+                    &key.env,
+                );
+                let lock_dir = lock_path.parent().expect("lock directory").to_path_buf();
+                let options = HostOptions {
+                    lock_filename: lock_path.file_name().map(ToOwned::to_owned),
+                    ..HostOptions::default()
+                };
+                direct::new(py, plants, move || {
+                    runtime().block_on(async {
+                        let registry = REGISTRY.get_or_init(HostRegistry::default);
+                        loop {
+                            let host = registry
+                                .get_or_start(
+                                    key.clone(),
+                                    || {
+                                        Arc::new(
+                                            RithmicVenue::new(
+                                                config.clone(),
+                                                PlantSet::MARKET_DATA,
+                                            )
+                                            .with_gates(true, true),
+                                        )
+                                    },
+                                    &lock_dir,
+                                    options.clone(),
+                                )
+                                .await
+                                .map_err(|e| SessionLockError::new_err(e.to_string()))?;
+                            if let Ok(session) = host.attach_owned() {
+                                host.request_plants_on_connect(plants);
+                                let failed_host = host.clone();
+                                break Ok(direct::Attachment {
+                                    session: Arc::new(session),
+                                    failed: Box::new(move || {
+                                        failed_host
+                                            .state
+                                            .failed
+                                            .load(std::sync::atomic::Ordering::SeqCst)
+                                    }),
+                                    #[cfg(feature = "testing")]
+                                    script: None,
+                                    #[cfg(feature = "testing")]
+                                    fault_venue: Some(
+                                        host.state
+                                            .session
+                                            .as_ref()
+                                            .expect("direct venue")
+                                            .checkout()
+                                            .await,
+                                    ),
+                                });
+                            }
+                        }
+                    })
                 })
             }
             other => Err(PyValueError::new_err(format!(
@@ -680,48 +760,89 @@ impl PySession {
         }
     }
 
-    /// The trading gate: the parent's in gateway mode (read-only; a client cannot
-    /// elevate it) and this process's own in direct mode (closed until
-    /// `configure_gates`). Enforced inside the Rust session in both modes.
+    /// Credential-free attachment to the real host lifecycle, for dev/CI only.
+    #[cfg(feature = "testing")]
+    #[staticmethod]
+    #[pyo3(signature = (user="fake", *, lock_dir=None, system_name="Fake", url="wss://fake", env="Test", account_id=None, fcm_id=None, ib_id=None, beta_url=None, app_name="rithmic-nt-connect", app_version="0.1.0"))]
+    #[allow(clippy::too_many_arguments)]
+    fn fake(
+        py: Python<'_>,
+        user: &str,
+        lock_dir: Option<String>,
+        system_name: &str,
+        url: &str,
+        env: &str,
+        account_id: Option<String>,
+        fcm_id: Option<String>,
+        ib_id: Option<String>,
+        beta_url: Option<String>,
+        app_name: &str,
+        app_version: &str,
+    ) -> PyResult<Self> {
+        let mut key = HostFingerprint::new(user, system_name, url, env);
+        key.account_id = account_id;
+        key.fcm_id = fcm_id;
+        key.ib_id = ib_id;
+        key.beta_url = beta_url;
+        key.app_name = app_name.into();
+        key.app_version = app_version.into();
+        testing::new(py, key, lock_dir)
+    }
+    #[cfg(feature = "testing")]
     #[getter]
-    fn trading_enabled(&self) -> Option<bool> {
-        match (&self.gateway, &self.direct) {
-            (Some(g), _) => Some(g.trading_enabled()),
-            (_, Some(d)) => Some(d.trading_enabled()),
-            _ => None,
-        }
+    fn script(&self) -> Option<testing::PyFakeScript> {
+        self.attachment
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .script
+            .as_ref()
+            .map(|venue| testing::PyFakeScript {
+                venue: venue.clone(),
+            })
     }
 
-    /// The plant-wide cancel-all gate, independent of trading (same split as above).
-    #[getter]
-    fn cancel_all_enabled(&self) -> Option<bool> {
-        match (&self.gateway, &self.direct) {
-            (Some(g), _) => Some(g.cancel_all_enabled()),
-            (_, Some(d)) => Some(d.cancel_all_enabled()),
-            _ => None,
-        }
-    }
-
-    /// `True` for an in-process session (it owns its gates), `False` for a gateway
-    /// client (the parent owns them).
-    #[getter]
-    fn is_direct(&self) -> bool {
-        self.direct.is_some()
-    }
-
-    /// Direct mode only: open the trading and/or cancel-all gate for this process.
-    /// A gate is only ever opened (the session is shared by every client in the
-    /// process); a gateway client cannot change the parent's gates and gets an error.
-    #[pyo3(signature = (trading_enabled=false, cancel_all_enabled=false))]
-    fn configure_gates(&self, trading_enabled: bool, cancel_all_enabled: bool) -> PyResult<()> {
-        match &self.direct {
-            Some(direct) => {
-                direct.allow(trading_enabled, cancel_all_enabled);
-                Ok(())
+    /// Dev-only transport fault; shared direct holders observe the same outage.
+    #[cfg(feature = "testing")]
+    fn _fault_drop_plant(&self, py: Python<'_>, plant: &str) -> PyResult<()> {
+        let venue = self.attachment.read().unwrap_or_else(|e| e.into_inner()).fault_venue.clone().ok_or_else(|| {
+            PyValueError::new_err("fault injection requires a real direct session; gateway and fake sessions are unsupported")
+        })?;
+        let stream = match plant {
+            "ticker" => rithmic_host::Stream::Ticker,
+            "pnl" => rithmic_host::Stream::Pnl,
+            "order" => rithmic_host::Stream::Order,
+            _ => {
+                return Err(PyValueError::new_err(
+                    "fault injection supports ticker, pnl, or order",
+                ))
             }
-            None => Err(PyRuntimeError::new_err(
-                "gates are owned by the gateway parent; a client cannot change them",
-            )),
+        };
+        self.run(py, venue.fault_inject_drop_plant(stream))
+    }
+
+    #[getter]
+    fn trading_enabled(&self, py: Python<'_>) -> bool {
+        self.open_gates(py, false, false).trading
+    }
+    #[getter]
+    fn cancel_all_enabled(&self, py: Python<'_>) -> bool {
+        self.open_gates(py, false, false).cancel_all
+    }
+    fn open_gates(&self, py: Python<'_>, trading: bool, cancel_all: bool) -> PyGates {
+        let gates = py.detach(|| {
+            let mut direct = self
+                .direct
+                .as_ref()
+                .map(|state| state.lock().unwrap_or_else(|e| e.into_inner()));
+            if let Some(state) = &mut direct {
+                state.trading |= trading;
+                state.cancel_all |= cancel_all;
+            }
+            runtime().block_on(self.session().open_gates(trading, cancel_all))
+        });
+        PyGates {
+            trading: gates.trading,
+            cancel_all: gates.cancel_all,
         }
     }
 
@@ -750,107 +871,60 @@ impl PySession {
         }
     }
 
-    /// Call `callback(kind, generation, attempts, cause)` on every gateway
-    /// transport event: `kind` is `"down"`, `"up"` or `"recovery_failed"`.
-    /// Fire-and-forget from a runtime thread; a no-op in direct mode.
-    fn subscribe_transport_events(
+    /// Deliver host and socket recovery events on a dedicated Python delivery
+    /// thread. Each registration has an independent receiver and cancellation.
+    fn subscribe_session_events(
         &self,
-        callback: Py<PyAny>,
-    ) -> PyResult<Option<PyTransportSubscription>> {
-        let Some(gateway) = self.gateway.as_ref() else {
-            return Ok(None);
-        };
-        let mut transport = gateway.subscribe_transport();
-        let mut failed = gateway.subscribe_recovery_failed();
-        // Python is called from a dedicated thread, never from a tokio worker: a
-        // listener may call a blocking session method, which `block_on`s the
-        // shared runtime and would panic on one of its own workers.
-        let (tx, rx) = std::sync::mpsc::channel::<(&'static str, u64, u32, String)>();
-        let delivery = std::thread::Builder::new()
-            .name("rithmic-transport-events".into())
-            .spawn(move || {
-                while let Ok((kind, generation, attempts, cause)) = rx.recv() {
-                    Python::attach(|py| {
-                        let cause = if cause.is_empty() { None } else { Some(cause) };
-                        if let Err(err) = callback.call1(py, (kind, generation, attempts, cause)) {
-                            err.print(py);
-                        }
-                    });
-                }
-            });
-        // `None` means direct mode; a thread that cannot start is an error, not
-        // a silent subscription that never delivers.
-        delivery.map_err(|e| {
-            PyRuntimeError::new_err(format!("transport event thread did not start: {e}"))
-        })?;
-        let notify = move |kind: &'static str, generation: u64, attempts: u32, cause: String| {
-            let _ = tx.send((kind, generation, attempts, cause));
-        };
-        let task = runtime().spawn(async move {
-            loop {
-                tokio::select! {
-                    event = transport.recv() => match event {
-                        Ok(TransportEvent::Down { generation }) => {
-                            notify("down", generation, 0, String::new());
-                        }
-                        Ok(TransportEvent::Up { generation }) => {
-                            notify("up", generation, 0, String::new());
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-                    },
-                    report = failed.recv() => match report {
-                        Ok(report) => {
-                            notify("recovery_failed", report.generation, report.attempts, report.cause);
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-                    },
-                }
-            }
-        });
-        Ok(Some(PyTransportSubscription {
-            task: task.abort_handle(),
-        }))
+        listener: Py<PyAny>,
+    ) -> PyResult<PySessionEventSubscription> {
+        session_events::subscribe(self.session().session_events(), listener, runtime())
     }
 
     fn request_plants(&self, py: Python<'_>, plants: &str) -> PyResult<()> {
         let extra = PlantSet::parse(plants).map_err(to_py_err)?;
-        self.run(py, self.session.request_plants(extra))
+        py.detach(|| {
+            let mut direct = self
+                .direct
+                .as_ref()
+                .map(|state| state.lock().unwrap_or_else(|e| e.into_inner()));
+            if let Some(state) = &mut direct {
+                state.plants.ticker |= extra.ticker;
+                state.plants.history |= extra.history;
+                state.plants.pnl |= extra.pnl;
+            }
+            runtime()
+                .block_on(self.session().request_plants(extra))
+                .map_err(to_py_err)
+        })
     }
 
     fn connect(&self, py: Python<'_>) -> PyResult<()> {
-        self.run(py, self.session.connect())
+        self.connect_attachment(py)
     }
 
     fn disconnect(&self, py: Python<'_>) -> PyResult<()> {
-        self.run(py, self.session.disconnect())
-    }
-
-    /// Recreate only the ticker plant (the data client's channel-error resync).
-    fn reset_ticker(&self, py: Python<'_>) -> PyResult<()> {
-        self.run(py, self.session.reset_ticker())
+        self.disconnect_attachment(py)
     }
 
     fn disconnect_order_plant(&self, py: Python<'_>) -> PyResult<()> {
-        self.run(py, self.session.disconnect_order_plant())
+        self.run(py, self.session().disconnect_order_plant())
     }
 
     fn disconnect_pnl_plant(&self, py: Python<'_>) -> PyResult<()> {
-        self.run(py, self.session.disconnect_pnl_plant())
+        self.run(py, self.session().disconnect_pnl_plant())
     }
 
     fn ensure_pnl_plant(&self, py: Python<'_>) -> PyResult<()> {
-        self.run(py, self.session.ensure_pnl_plant())
+        self.run(py, self.session().ensure_pnl_plant())
     }
 
     fn ensure_order_plant(&self, py: Python<'_>) -> PyResult<()> {
-        self.run(py, self.session.ensure_order_plant())
+        self.run(py, self.session().ensure_order_plant())
     }
 
     /// Resolved account triple after override or discovery (`None` until ensure).
     fn resolved_account(&self, py: Python<'_>) -> PyResult<Option<Py<PyDict>>> {
-        let account = py.detach(|| runtime().block_on(self.session.resolved_account()));
+        let account = py.detach(|| runtime().block_on(self.session().resolved_account()));
         let Some(acct) = account else {
             return Ok(None);
         };
@@ -862,11 +936,11 @@ impl PySession {
     }
 
     fn subscribe(&self, py: Python<'_>, symbol: &str, exchange: &str) -> PyResult<()> {
-        self.run(py, self.session.subscribe(symbol, exchange))
+        self.run(py, self.session().subscribe(symbol, exchange))
     }
 
     fn unsubscribe(&self, py: Python<'_>, symbol: &str, exchange: &str) -> PyResult<()> {
-        self.run(py, self.session.unsubscribe(symbol, exchange))
+        self.run(py, self.session().unsubscribe(symbol, exchange))
     }
 
     fn get_front_month(
@@ -875,7 +949,7 @@ impl PySession {
         symbol: &str,
         exchange: &str,
     ) -> PyResult<Py<PyDict>> {
-        let dto = self.run(py, self.session.get_front_month(symbol, exchange))?;
+        let dto = self.run(py, self.session().get_front_month(symbol, exchange))?;
         front_month_dict(py, dto)
     }
 
@@ -885,7 +959,7 @@ impl PySession {
         symbol: &str,
         exchange: &str,
     ) -> PyResult<Py<PyDict>> {
-        let dto = self.run(py, self.session.get_reference_data(symbol, exchange))?;
+        let dto = self.run(py, self.session().get_reference_data(symbol, exchange))?;
         reference_data_dict(py, dto)
     }
 
@@ -894,7 +968,7 @@ impl PySession {
     fn poll_event(&self, py: Python<'_>, timeout_ms: u64) -> PyResult<Option<Py<PyDict>>> {
         let event = self.run(
             py,
-            self.session.poll_event(Duration::from_millis(timeout_ms)),
+            self.session().poll_event(Duration::from_millis(timeout_ms)),
         )?;
         event_or_none(py, event)
     }
@@ -912,15 +986,18 @@ impl PySession {
         max_events: usize,
         timeout_ms: u64,
     ) -> PyResult<Vec<Py<PyDict>>> {
-        let parsed = rithmic_plants::Stream::from_plant(stream).ok_or_else(|| {
+        let parsed = rithmic_host::Stream::from_plant(stream).ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err(format!(
                 "unknown stream {stream:?}; expected ticker, history, pnl or order"
             ))
         })?;
         let events = self.run(
             py,
-            self.session
-                .next_events(parsed, max_events.max(1), Duration::from_millis(timeout_ms)),
+            self.session().next_events(
+                parsed,
+                max_events.max(1),
+                Duration::from_millis(timeout_ms),
+            ),
         )?;
         // The batch is already dequeued, so one event that fails to convert must not
         // discard its neighbours. It becomes a gap of one, which the consumer
@@ -945,7 +1022,7 @@ impl PySession {
     fn poll_pnl_event(&self, py: Python<'_>, timeout_ms: u64) -> PyResult<Option<Py<PyDict>>> {
         let event = self.run(
             py,
-            self.session
+            self.session()
                 .poll_pnl_event(Duration::from_millis(timeout_ms)),
         )?;
         event_or_none(py, event)
@@ -956,7 +1033,7 @@ impl PySession {
     fn poll_history_event(&self, py: Python<'_>, timeout_ms: u64) -> PyResult<Option<Py<PyDict>>> {
         let event = self.run(
             py,
-            self.session
+            self.session()
                 .poll_history_event(Duration::from_millis(timeout_ms)),
         )?;
         event_or_none(py, event)
@@ -967,7 +1044,7 @@ impl PySession {
     fn poll_order_event(&self, py: Python<'_>, timeout_ms: u64) -> PyResult<Option<Py<PyDict>>> {
         let event = self.run(
             py,
-            self.session
+            self.session()
                 .poll_order_event(Duration::from_millis(timeout_ms)),
         )?;
         event_or_none(py, event)
@@ -984,7 +1061,7 @@ impl PySession {
     ) -> PyResult<Py<PyList>> {
         let ticks = self.run(
             py,
-            self.session
+            self.session()
                 .load_ticks(symbol, exchange, start_time_sec, end_time_sec),
         )?;
         let list = PyList::empty(py);
@@ -1004,7 +1081,7 @@ impl PySession {
     ) -> PyResult<()> {
         self.run(
             py,
-            self.session
+            self.session()
                 .subscribe_time_bars(symbol, exchange, bar_type, period),
         )
     }
@@ -1019,7 +1096,7 @@ impl PySession {
     ) -> PyResult<()> {
         self.run(
             py,
-            self.session
+            self.session()
                 .unsubscribe_time_bars(symbol, exchange, bar_type, period),
         )
     }
@@ -1032,7 +1109,8 @@ impl PySession {
     ) -> PyResult<()> {
         self.run(
             py,
-            self.session.subscribe_order_book_summary(symbol, exchange),
+            self.session()
+                .subscribe_order_book_summary(symbol, exchange),
         )
     }
 
@@ -1044,7 +1122,7 @@ impl PySession {
     ) -> PyResult<()> {
         self.run(
             py,
-            self.session
+            self.session()
                 .unsubscribe_order_book_summary(symbol, exchange),
         )
     }
@@ -1064,7 +1142,7 @@ impl PySession {
     ) -> PyResult<Py<PyList>> {
         let bars = self.run(
             py,
-            self.session.load_time_bars(
+            self.session().load_time_bars(
                 symbol,
                 exchange,
                 start_time_sec,
@@ -1095,7 +1173,7 @@ impl PySession {
     ) -> PyResult<Py<PyList>> {
         let rows = self.run(
             py,
-            self.session.probe_time_bars(
+            self.session().probe_time_bars(
                 symbol,
                 exchange,
                 start_time_sec,
@@ -1112,15 +1190,15 @@ impl PySession {
     }
 
     fn subscribe_pnl(&self, py: Python<'_>) -> PyResult<()> {
-        self.run(py, self.session.subscribe_pnl())
+        self.run(py, self.session().subscribe_pnl())
     }
 
     fn subscribe_order_updates(&self, py: Python<'_>) -> PyResult<()> {
-        self.run(py, self.session.subscribe_order_updates())
+        self.run(py, self.session().subscribe_order_updates())
     }
 
     fn subscribe_bracket_updates(&self, py: Python<'_>) -> PyResult<()> {
-        self.run(py, self.session.subscribe_bracket_updates())
+        self.run(py, self.session().subscribe_bracket_updates())
     }
 
     /// Load order events (fills + cancels + rejects + working) over a window.
@@ -1130,7 +1208,7 @@ impl PySession {
         start_sec: i32,
         end_sec: i32,
     ) -> PyResult<Vec<Py<PyDict>>> {
-        let events = self.run(py, self.session.load_orders(start_sec, end_sec))?;
+        let events = self.run(py, self.session().load_orders(start_sec, end_sec))?;
         events
             .into_iter()
             .map(|n| order_notification_dict(py, n))
@@ -1139,7 +1217,7 @@ impl PySession {
 
     /// Fetch product-level RMS info (per-product commission fill rates).
     fn load_product_rms_info(&self, py: Python<'_>) -> PyResult<Vec<Py<PyDict>>> {
-        let rows = self.run(py, self.session.load_product_rms_info())?;
+        let rows = self.run(py, self.session().load_product_rms_info())?;
         rows.into_iter()
             .map(|r| product_rms_info_dict(py, r))
             .collect()
@@ -1147,7 +1225,7 @@ impl PySession {
 
     /// Fetch account-level RMS info (default commission rate).
     fn load_account_rms_info(&self, py: Python<'_>) -> PyResult<Vec<Py<PyDict>>> {
-        let rows = self.run(py, self.session.load_account_rms_info())?;
+        let rows = self.run(py, self.session().load_account_rms_info())?;
         rows.into_iter()
             .map(|r| account_rms_info_dict(py, r))
             .collect()
@@ -1155,7 +1233,7 @@ impl PySession {
 
     /// Replay one trade date's order history (CCYYMMDD) as order notifications. Read-only.
     fn load_order_history(&self, py: Python<'_>, date: &str) -> PyResult<Vec<Py<PyDict>>> {
-        let events = self.run(py, self.session.load_order_history(date))?;
+        let events = self.run(py, self.session().load_order_history(date))?;
         events
             .into_iter()
             .map(|n| order_notification_dict(py, n))
@@ -1169,13 +1247,16 @@ impl PySession {
         start_date: i32,
         finish_date: i32,
     ) -> PyResult<Vec<Py<PyDict>>> {
-        let rows = self.run(py, self.session.load_fill_history(start_date, finish_date))?;
+        let rows = self.run(
+            py,
+            self.session().load_fill_history(start_date, finish_date),
+        )?;
         rows.into_iter().map(|r| fill_history_dict(py, r)).collect()
     }
 
     /// Trade dates (CCYYMMDD) for which the venue keeps order history. Read-only.
     fn load_order_history_dates(&self, py: Python<'_>) -> PyResult<Vec<String>> {
-        self.run(py, self.session.load_order_history_dates())
+        self.run(py, self.session().load_order_history_dates())
     }
 
     #[pyo3(signature = (
@@ -1220,7 +1301,7 @@ impl PySession {
             stop_ticks,
             target_ticks,
         };
-        self.run(py, self.session.place_bracket_order(&order))
+        self.run(py, self.session().place_bracket_order(&order))
     }
 
     #[pyo3(signature = (basket_id, ticks, level=None))]
@@ -1233,7 +1314,7 @@ impl PySession {
     ) -> PyResult<()> {
         self.run(
             py,
-            self.session.adjust_bracket_stop(basket_id, ticks, level),
+            self.session().adjust_bracket_stop(basket_id, ticks, level),
         )
     }
 
@@ -1247,7 +1328,8 @@ impl PySession {
     ) -> PyResult<()> {
         self.run(
             py,
-            self.session.adjust_bracket_target(basket_id, ticks, level),
+            self.session()
+                .adjust_bracket_target(basket_id, ticks, level),
         )
     }
 
@@ -1293,11 +1375,11 @@ impl PySession {
             trail_by_ticks,
             trail_by_price_id,
         };
-        self.run(py, self.session.place_order(&order))
+        self.run(py, self.session().place_order(&order))
     }
 
     fn cancel_order(&self, py: Python<'_>, basket_id: &str) -> PyResult<()> {
-        self.run(py, self.session.cancel_order(basket_id))
+        self.run(py, self.session().cancel_order(basket_id))
     }
 
     #[pyo3(signature = (
@@ -1333,33 +1415,11 @@ impl PySession {
             trigger_price,
             trail_by_ticks,
         };
-        self.run(py, self.session.modify_order(&order))
+        self.run(py, self.session().modify_order(&order))
     }
 
     fn cancel_all_orders(&self, py: Python<'_>) -> PyResult<()> {
-        self.run(py, self.session.cancel_all_orders())
-    }
-}
-
-/// A running `subscribe_transport_events` registration. Cancelling (or dropping)
-/// it stops the task that holds the Python callback, so a session that no longer
-/// has listeners is not kept alive by it.
-#[pyclass(name = "TransportSubscription")]
-struct PyTransportSubscription {
-    task: tokio::task::AbortHandle,
-}
-
-#[pymethods]
-impl PyTransportSubscription {
-    /// Stop delivering transport events and release the callback. Idempotent.
-    fn cancel(&self) {
-        self.task.abort();
-    }
-}
-
-impl Drop for PyTransportSubscription {
-    fn drop(&mut self) {
-        self.task.abort();
+        self.run(py, self.session().cancel_all_orders())
     }
 }
 
@@ -1379,7 +1439,9 @@ fn list_systems(py: Python<'_>, url: Option<&str>) -> PyResult<Vec<String>> {
 fn _lib(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySession>()?;
     m.add_class::<PySessionLock>()?;
-    m.add_class::<PyTransportSubscription>()?;
+    session_events::register(m)?;
+    #[cfg(feature = "testing")]
+    m.add_class::<testing::PyFakeScript>()?;
     exec::register(m)?;
     m.add("SessionLockError", m.py().get_type::<SessionLockError>())?;
     m.add_function(wrap_pyfunction!(list_systems, m)?)?;

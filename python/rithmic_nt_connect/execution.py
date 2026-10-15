@@ -60,7 +60,7 @@ from nautilus_trader.model.objects import (
 from nautilus_trader.model.orders import Order
 
 if TYPE_CHECKING:
-    from rithmic_nt_connect.transport import RecoveryFailed, TransportDown
+    from rithmic_nt_connect.transport import Interrupted, RecoveryFailed
 
 from rithmic_nt_connect._convert import (
     ConvertError,
@@ -234,7 +234,9 @@ class RithmicExecutionClient(LiveExecutionClient):
         )
         self._config_local = config
         self._session = session
-        self._open_direct_gates()
+        self._cancel_all_requested = env_truthy(
+            os.environ.get("RITHMIC_GATEWAY_CANCEL_ALL")
+        )
         self._poll_task: asyncio.Task | None = None
         self._order_poll_task: asyncio.Task | None = None
         self._positions: dict[str, dict[str, Any]] = {}
@@ -261,7 +263,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         # The session's resolved account, fetched off the event loop (in gateway
         # mode it is a socket round trip) and read synchronously from here.
         self._resolved_account_raw: str | None = None
-        # Re-arms the order plant after gateway transport recovery (L3).
+        # Re-arms the order plant after session recovery in either mode.
         self._recovery = self._build_recovery()
         # PnL is streamed frequently; avoid publishing identical AccountState
         # events (and making Nautilus Portfolio log each one).
@@ -286,6 +288,8 @@ class RithmicExecutionClient(LiveExecutionClient):
     # Cached off-loop answer of ``session.resolved_account`` (set in __init__ too).
     _resolved_account_raw: str | None = None
     _ORDER_POLL_MAX_TRANSIENT = 5
+    # A poll begun on an older PnL stream cannot establish fresh exposure.
+    _pnl_epoch: int = 0
 
     def _fill_key_seen(self, key: str) -> bool:
         return self._seen_fill_keys.has_seen(key)
@@ -348,6 +352,8 @@ class RithmicExecutionClient(LiveExecutionClient):
         self._forget_pnl_state()
         await asyncio.to_thread(ensure_connected, self._session)
         self._recovery.attach(self._session)
+        # Remote gates are advertised at handshake, so read them after connect.
+        await asyncio.to_thread(self._open_gates)
         self._log.info("Rithmic exec session ready (shared with data client)")
 
         # Whether the PnL poll loop is running for THIS connect: the re-arm
@@ -524,29 +530,32 @@ class RithmicExecutionClient(LiveExecutionClient):
             latch_now=lambda: self._order_plant.latch(),
         )
 
-    def _on_transport_down(self, event: TransportDown) -> None:
+    def _on_transport_down(self, event: Interrupted) -> None:
         self._order_plant.latch()
         self._log.error(
-            f"gateway TRANSPORT_DOWN gen={event.gen} "
-            f"fault={event.fault.kind.value}; order plant disarmed"
+            f"session Interrupted generation={event.generation} "
+            f"cause={event.cause}; order plant disarmed"
         )
 
     def _on_transport_recovery_failed(self, event: RecoveryFailed) -> None:
         self._order_plant.latch()
         self._log.error(
-            f"gateway TRANSPORT recovery failed gen={event.gen} "
+            f"session recovery failed gen={event.generation} "
             f"attempts={event.attempts}: {event.cause}"
         )
 
     async def _restore_plants_after_transport_up(
         self, generation: int, attempt: int
     ) -> None:
-        """Transport is already LIVE; resubscribe plants + drain/PnL + rearm.
+        """Session intents are live; refresh subscriptions + drain/PnL + rearm.
 
-        The Rust client runtime owns dial; ``TransportRecoveryBridge`` owns retry
+        The session host owns recovery; ``TransportRecoveryBridge`` owns retry
         (each failed attempt re-latches). Mid-session plant resync never clears
         a latch — only ``begin_connect`` + ``rearm`` after fresh observation.
         """
+        # unify-session-host design D8.10: joining/re-joining a live PnL intent
+        # requests a venue snapshot. Discard pre-Resumed evidence; re-arm must
+        # observe that fresh snapshot, never infer readiness from elapsed time.
         self._forget_pnl_state()
         if not self.enable_trading:
             # No order plant to restore, but the PnL stream (positions, account)
@@ -583,10 +592,6 @@ class RithmicExecutionClient(LiveExecutionClient):
         """Re-issue the PnL subscription and make sure its poller runs."""
         if not self._pnl_connected:
             return
-        try:
-            await asyncio.to_thread(self._session.disconnect_pnl_plant)
-        except Exception as teardown_exc:
-            self._log.warning(f"L3 PnL disconnect before resubscribe: {teardown_exc}")
         await asyncio.to_thread(self._session.subscribe_pnl)
         if self._poll_task is None or self._poll_task.done():
             self._poll_task = self._make_poll_task("pnl")
@@ -616,6 +621,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         # An observation from before the gap is no proof the stream is alive
         # now: the PnL gate waits for a fresh one (the venue pushes account PnL
         # on a short interval even when nothing changed).
+        self._pnl_epoch += 1
         self._pnl_snapshot_observed.clear()
         await self._rearm_after_reconnect()
         if not self._order_plant.rearm(poll_alive=True):
@@ -628,6 +634,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         # Exposure reads Unknown until a fresh observation has settled (a failed
         # resubscribe keeps it Unknown). ``_positions`` stays for position reports.
         self._pnl_live_since_ns = None
+        self._pnl_epoch += 1
         self._pnl_snapshot_observed.clear()  # the next re-arm waits for the new stream
         self._unreadable_position_symbols.discard(_ANY_SYMBOL)  # a fresh stream
         await asyncio.to_thread(self._session.disconnect_pnl_plant)
@@ -739,18 +746,33 @@ class RithmicExecutionClient(LiveExecutionClient):
         stream: str | None = None,
         on_gap: Callable[[], Any] | None = None,
     ) -> None:
+        poll_epoch = self._pnl_epoch
+
+        def poll_with_epoch() -> dict[str, Any] | None:
+            nonlocal poll_epoch
+            poll_epoch = self._pnl_epoch
+            return poll_fn()
+
+        def dispatch_current(event: dict[str, Any]) -> None:
+            # The blocking call may complete after recovery invalidated its
+            # stream. Ignore the whole old batch, including its exposure rows.
+            if name != "pnl" or poll_epoch == self._pnl_epoch:
+                on_event(event)
+
         batch_fn = None
         if stream is not None:
             session = self._session
 
             def batch_fn() -> list[dict[str, Any]]:
+                nonlocal poll_epoch
+                poll_epoch = self._pnl_epoch
                 return session.next_events(stream, _POLL_BATCH, _POLL_WAIT_MS)
 
         poller = PlantPoller(
             name=name,
-            poll_fn=poll_fn,
+            poll_fn=poll_with_epoch,
             batch_fn=batch_fn,
-            on_event=on_event,
+            on_event=dispatch_current,
             on_resync=on_resync,
             on_gap=on_gap,
             max_transient=self._ORDER_POLL_MAX_TRANSIENT,
@@ -897,6 +919,7 @@ class RithmicExecutionClient(LiveExecutionClient):
 
     def _forget_pnl_state(self) -> None:
         """(Re)connect: the previous stream's rows are not proof of current exposure."""
+        self._pnl_epoch += 1
         self._pnl_snapshot_observed.clear()
         self._pnl_live_since_ns = None
         self._positions.clear()
@@ -1070,22 +1093,16 @@ class RithmicExecutionClient(LiveExecutionClient):
         self._order_plant.latch()
         self._log.error(f"{action}; order plant latched: {reason}")
 
-    def _open_direct_gates(self) -> None:
-        """Open the in-process session's gates per this client's config.
-
-        In direct mode the Rust session enforces the trading and cancel-all gates
-        itself (closed by default), so a strategy cannot bypass this client's
-        ``enable_trading``. The session is shared by every client in the process,
-        so a gate is only ever opened here, never closed. A gateway session's gates
-        belong to the parent and are left alone.
-        """
-        session: Any = self._session
-        if not getattr(session, "is_direct", False):
-            return
-        session.configure_gates(
-            trading_enabled=self.enable_trading,
-            cancel_all_enabled=env_truthy(os.environ.get("RITHMIC_GATEWAY_CANCEL_ALL")),
+    def _open_gates(self) -> None:
+        """Request host gates once per connect, using construction-time settings."""
+        gates = self._session.open_gates(
+            trading=self.enable_trading,
+            cancel_all=self._cancel_all_requested,
         )
+        if self.enable_trading and not gates.trading:
+            self._log.warning(
+                "Rithmic trading requested but not granted by session gates"
+            )
 
     def _order_command_failed(
         self,

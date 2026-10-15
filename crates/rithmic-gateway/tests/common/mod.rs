@@ -2,18 +2,17 @@
 //! (`FakeParent`) and a scriptable mock parent (`MockParent`).
 #![allow(dead_code, clippy::large_enum_variant)]
 
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use rithmic_host::Venue;
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use prost::Message;
-use rithmic_gateway::client::GatewayConfig;
+use rithmic_gateway::client::{GatewayConfig, RemoteSession};
 use rithmic_gateway::pb::{self, frame::Body, Frame};
-use rithmic_gateway::singleton::flock_held;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
+use tokio::net::UnixListener;
 
 pub const SYSTEM: &str = "LucidTrading";
 pub const URL: &str = "wss://fake.example";
@@ -38,7 +37,10 @@ pub fn short_dir() -> tempfile::TempDir {
         .expect("tempdir")
 }
 
+#[allow(unused_imports)]
 pub use rithmic_gateway::testing::wait_until;
+
+pub mod unix;
 
 // --- the real server over a fake plant ---------------------------------------
 
@@ -48,129 +50,131 @@ pub struct Opts {
     pub cancel_all: bool,
 }
 
+pub const AUTH_TOKEN: &str = "duplex-test-token";
+
+/// Real server and pump, with in-memory transports and scripted fake plants.
 pub struct FakeParent {
-    child: Option<Child>,
-    pub dir: tempfile::TempDir,
     pub user: String,
-    pub listen: PathBuf,
-    pub control: PathBuf,
+    pub fake: Arc<rithmic_host::fake::FakeVenue>,
+    pub state: Arc<rithmic_gateway::server::GatewayState>,
+    tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    shared: RemoteSession,
+}
+
+pub fn gateway_state(
+    user: &str,
+    fake: Arc<rithmic_host::fake::FakeVenue>,
     opts: Opts,
+) -> Arc<rithmic_gateway::server::GatewayState> {
+    use rithmic_gateway::{
+        idle_exit::{IdleExit, IdleExitPolicy},
+        server::{boot_gateway_metadata, Fingerprint, GatewayState, SessionHandle},
+    };
+    use rithmic_host::{HistoryPolicy, ParentGates, SessionHost, Timing};
+    let (gateway_instance_id, _, _) = boot_gateway_metadata();
+    Arc::new(GatewayState {
+        host: SessionHost::from_connected(
+            SessionHandle::new(fake),
+            ParentGates {
+                trading_enabled: opts.trading,
+                cancel_all_enabled: opts.cancel_all,
+            },
+            Timing {
+                restore_backoff: Duration::from_millis(50),
+                ..Default::default()
+            },
+            HistoryPolicy::RefuseUnderLiveMd,
+        ),
+        fingerprint: Fingerprint {
+            user: user.into(),
+            system_name: SYSTEM.into(),
+            url: URL.into(),
+            env: "Live".into(),
+            account_id: String::new(),
+            fcm_id: String::new(),
+            ib_id: String::new(),
+        },
+        expected_auth_token: AUTH_TOKEN.into(),
+        idle: IdleExit::new(IdleExitPolicy::Never),
+        gateway_instance_id,
+    })
+}
+
+fn connection(
+    state: Arc<rithmic_gateway::server::GatewayState>,
+    tasks: &Mutex<Vec<tokio::task::JoinHandle<()>>>,
+) -> DuplexStream {
+    // A relay gives stop/restart a transport-level disconnect without aborting
+    // serve_connection before its ordinary detach/teardown path runs.
+    let (client, mut relay_client) = tokio::io::duplex(64 * 1024);
+    let (mut relay_server, server) = tokio::io::duplex(64 * 1024);
+    let relay = tokio::spawn(async move {
+        let _ = tokio::io::copy_bidirectional(&mut relay_client, &mut relay_server).await;
+    });
+    tasks.lock().unwrap().push(relay);
+    tokio::spawn(async move {
+        let _ = rithmic_gateway::server::serve_connection(server, state).await;
+    });
+    client
 }
 
 impl FakeParent {
     pub async fn start(opts: Opts) -> Self {
-        let mut parent = Self {
-            child: None,
-            dir: short_dir(),
-            user: unique_user("fake"),
-            listen: PathBuf::new(),
-            control: PathBuf::new(),
-            opts,
-        };
-        parent.listen = parent.dir.path().join("gw.sock");
-        parent.control = parent.dir.path().join("ctl.sock");
-        parent.spawn().await;
-        parent
-    }
-
-    pub fn config(&self) -> GatewayConfig {
-        GatewayConfig::new(&self.user, SYSTEM, URL, "Live")
-            .with_listen(&format!("unix://{}", self.listen.display()))
-            .expect("listen")
-    }
-
-    async fn spawn(&mut self) {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_rithmic-gateway-fake"));
-        cmd.env_clear()
-            .env("RITHMIC_USER", &self.user)
-            .env("RITHMIC_SYSTEM_NAME", SYSTEM)
-            .env("RITHMIC_URL", URL)
-            .env("RITHMIC_ENV", "Live")
-            .env(
-                "RITHMIC_GATEWAY_LISTEN",
-                format!("unix://{}", self.listen.display()),
-            )
-            .env("RITHMIC_FAKE_CONTROL", &self.control)
-            .env("RITHMIC_GATEWAY_RESTORE_BACKOFF_MS", "50")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        // The credential flock lives under the runtime dir both sides derive.
-        for key in ["PATH", "HOME", "TMPDIR", "XDG_RUNTIME_DIR"] {
-            if let Ok(v) = std::env::var(key) {
-                cmd.env(key, v);
+        let user = unique_user("fake");
+        let fake = Arc::new(rithmic_host::fake::FakeVenue::new());
+        fake.connect().await.unwrap();
+        let state = gateway_state(&user, fake.clone(), opts);
+        let tasks = Arc::new(Mutex::new(Vec::new()));
+        let cfg = GatewayConfig::new(&user, SYSTEM, URL, "Live").with_auth_token(AUTH_TOKEN);
+        let shared = RemoteSession::with_connector(cfg, {
+            let state = state.clone();
+            let tasks = tasks.clone();
+            move || {
+                let client = connection(state.clone(), &tasks);
+                async { Ok(client) }
             }
+        });
+        Self {
+            user,
+            fake,
+            state,
+            tasks,
+            shared,
         }
-        if self.opts.trading {
-            cmd.env("RITHMIC_ENABLE_TRADING", "1");
-        }
-        if self.opts.cancel_all {
-            cmd.env("RITHMIC_GATEWAY_CANCEL_ALL", "1");
-        }
-        self.child = Some(cmd.spawn().expect("spawn fake gateway"));
-        let up = wait_until(Duration::from_secs(20), || {
-            std::os::unix::net::UnixStream::connect(&self.listen).is_ok()
-                && flock_held(&self.user, SYSTEM, URL, "Live")
-                // The socket file exists from `bind`, before it listens: wait for
-                // a connect to succeed, not for the file.
-                && std::os::unix::net::UnixStream::connect(&self.control).is_ok()
-        })
-        .await;
-        assert!(up, "fake gateway did not come up");
+    }
+
+    pub fn session(&self) -> RemoteSession {
+        self.shared.clone()
+    }
+
+    pub fn stream(&self) -> DuplexStream {
+        connection(self.state.clone(), &self.tasks)
     }
 
     pub fn stop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+        for task in self.tasks.lock().unwrap().drain(..) {
+            task.abort();
+        }
+        let host = self.state.host.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move { host.shutdown().await });
         }
     }
 
-    /// Kill the parent and start a fresh one on the same paths / fingerprint.
-    pub async fn restart(&mut self) {
-        self.stop();
-        assert!(
-            wait_until(Duration::from_secs(10), || !flock_held(
-                &self.user, SYSTEM, URL, "Live"
-            ))
-            .await,
-            "flock not released"
-        );
-        let _ = std::fs::remove_file(&self.listen);
-        self.spawn().await;
-    }
-
     pub async fn control(&self, commands: &[String]) -> Vec<Vec<String>> {
-        let mut stream = UnixStream::connect(&self.control)
-            .await
-            .expect("control connect");
         let mut replies = Vec::new();
-        for chunk in commands.chunks(200) {
-            let mut text = String::new();
-            for c in chunk {
-                text.push_str(c);
-                text.push('\n');
+        for batch in commands.chunks(200) {
+            for cmd in batch {
+                replies.push(
+                    rithmic_gateway::testing::control_command(&self.fake, cmd)
+                        .lines()
+                        .map(str::to_owned)
+                        .collect(),
+                );
             }
-            stream
-                .write_all(text.as_bytes())
-                .await
-                .expect("control write");
-            let mut lines = BufReader::new(&mut stream).lines();
-            let mut current = Vec::new();
-            let mut got = 0;
-            while got < chunk.len() {
-                let line = lines
-                    .next_line()
-                    .await
-                    .expect("control read")
-                    .expect("control closed");
-                if line == "END" {
-                    replies.push(std::mem::take(&mut current));
-                    got += 1;
-                } else {
-                    current.push(line);
-                }
-            }
+            // Preserve bounded producer batches without relying on socket I/O
+            // to let the pump and client readers run.
+            tokio::task::yield_now().await;
         }
         replies
     }
@@ -246,7 +250,9 @@ type Handler = dyn Fn(&Frame, usize) -> Action + Send + Sync;
 /// A tiny parent: Handshake → Ready, then every request goes to `handler`
 /// (request, connection index). Records every request it receives.
 pub struct MockParent {
-    pub path: PathBuf,
+    streams: Option<tokio::sync::mpsc::UnboundedSender<DuplexStream>>,
+    task: tokio::task::JoinHandle<()>,
+    accept: Option<tokio::task::JoinHandle<()>>,
     pub requests: Arc<Mutex<Vec<Frame>>>,
     pub connections: Arc<AtomicUsize>,
     pub handshakes: Arc<Mutex<Vec<Vec<u8>>>>,
@@ -286,12 +292,58 @@ impl MockParent {
     }
 
     pub fn serve(
-        path: &Path,
+        _path: &Path,
         listener: UnixListener,
         ready: pb::Ready,
         not_ready_first: usize,
         handler: impl Fn(&Frame, usize) -> Action + Send + Sync + 'static,
     ) -> Self {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let accept = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                if tx.send(stream).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut mock = Self::serve_streams(rx, ready, not_ready_first, handler, None);
+        mock.accept = Some(accept);
+        mock
+    }
+
+    pub fn duplex(
+        ready: pb::Ready,
+        not_ready_first: usize,
+        handler: impl Fn(&Frame, usize) -> Action + Send + Sync + 'static,
+    ) -> Self {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        Self::serve_streams(rx, ready, not_ready_first, handler, Some(tx))
+    }
+
+    pub fn session(&self, cfg: GatewayConfig) -> RemoteSession {
+        let tx = self.streams.as_ref().expect("duplex mock").clone();
+        RemoteSession::with_connector(cfg, move || {
+            let (client, server) = tokio::io::duplex(64 * 1024);
+            let sent = tx
+                .send(server)
+                .map_err(|_| rithmic_host::Error::Transport("mock parent stopped".into()));
+            async move {
+                sent?;
+                Ok(client)
+            }
+        })
+    }
+
+    fn serve_streams<S>(
+        mut streams_rx: tokio::sync::mpsc::UnboundedReceiver<S>,
+        ready: pb::Ready,
+        not_ready_first: usize,
+        handler: impl Fn(&Frame, usize) -> Action + Send + Sync + 'static,
+        streams: Option<tokio::sync::mpsc::UnboundedSender<DuplexStream>>,
+    ) -> Self
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let connections = Arc::new(AtomicUsize::new(0));
         let handshakes = Arc::new(Mutex::new(Vec::new()));
@@ -303,10 +355,11 @@ impl MockParent {
             handshakes.clone(),
             events_tx.clone(),
         );
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let not_ready = Arc::new(AtomicUsize::new(not_ready_first));
+            let mut clients = tokio::task::JoinSet::new();
             loop {
-                let Ok((mut stream, _)) = listener.accept().await else {
+                let Some(mut stream) = streams_rx.recv().await else {
                     return;
                 };
                 let index = conns.fetch_add(1, Ordering::SeqCst);
@@ -318,7 +371,7 @@ impl MockParent {
                     not_ready.clone(),
                 );
                 let mut events = events.subscribe();
-                tokio::spawn(async move {
+                clients.spawn(async move {
                     let Ok((hello, raw)) = read_frame(&mut stream).await else {
                         return;
                     };
@@ -343,19 +396,19 @@ impl MockParent {
 
                     // Frames are read on their own task so the select below only
                     // waits on cancel-safe channel receives.
-                    let (mut read, mut write) = stream.into_split();
+                    let (mut read, mut write) = tokio::io::split(stream);
                     let (frames_tx, mut frames) = tokio::sync::mpsc::channel::<Frame>(64);
-                    tokio::spawn(async move {
+                    let reader = AbortOnDrop(tokio::spawn(async move {
                         while let Ok((frame, _)) = read_frame(&mut read).await {
                             if frames_tx.send(frame).await.is_err() {
                                 return;
                             }
                         }
-                    });
+                    }));
                     loop {
                         tokio::select! {
                             frame = frames.recv() => {
-                                let Some(frame) = frame else { return };
+                                let Some(frame) = frame else { break };
                                 reqs.lock().unwrap().push(frame.clone());
                                 match handler(&frame, index) {
                                     Action::Reply(body) => {
@@ -364,7 +417,7 @@ impl MockParent {
                                     Action::Ack => {
                                         write_body(&mut write, frame.request_id, Body::Ack(pb::Ack {})).await
                                     }
-                                    Action::Close => return,
+                                    Action::Close => break,
                                     Action::Hang => {}
                                 }
                             }
@@ -378,11 +431,16 @@ impl MockParent {
                             }
                         }
                     }
+                    drop(reader);
+                    let _ = write.shutdown().await;
                 });
+                while clients.try_join_next().is_some() {}
             }
         });
         Self {
-            path: path.to_path_buf(),
+            accept: None,
+            streams,
+            task,
             requests,
             connections,
             handshakes,
@@ -411,6 +469,29 @@ impl MockParent {
             .filter_map(|f| f.body.clone())
             .collect()
     }
+}
+
+impl Drop for MockParent {
+    fn drop(&mut self) {
+        self.task.abort();
+        if let Some(accept) = &self.accept {
+            accept.abort();
+        }
+    }
+}
+
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+pub fn duplex_config() -> GatewayConfig {
+    let mut cfg = GatewayConfig::new(&unique_user("duplex"), SYSTEM, URL, "Live");
+    cfg.rpc_timeout = Duration::from_secs(5);
+    cfg.attach_timeout = Duration::from_secs(5);
+    cfg
 }
 
 pub fn mock_ready(trading: bool, cancel_all: bool) -> pb::Ready {

@@ -11,46 +11,57 @@ Semantic rules for this adapter:
 
 Read that file (or the sections you are touching) before implementing or reviewing data, execution, config, or plant code. In-tree Rust v2 machinery is N/A here; the **semantic** conventions still apply.
 
-### Direct ↔ gateway plant-surface parity (hard)
+### One host, two attachments
 
-Direct and gateway are two implementations of one Rust trait, `Session`
-(`crates/rithmic-plants/src/backend.rs`): `DirectSession` (in-process plants, owns
-the order-op gate) and `GatewaySession` (`crates/rithmic-gateway/src/client`,
-attach-only, one socket per fingerprint). The PyO3 `Session` and the gateway
-**server** (`crates/rithmic-gateway/src/server`) are both generic over that trait,
-so the adapter has one call surface in either mode, including the read-only
-fill-history and order-history queries (one-shot, trading-gated reads).
+`SessionHost` (`crates/rithmic-host/src/host.rs`) owns intents, fan-out, gates
+and plant recovery. It drives `Venue` (`backend.rs`), implemented by
+`RithmicVenue` (`crates/rithmic-plants/src/venue.rs`) and `FakeVenue`
+(`crates/rithmic-host/src/fake.rs`, feature `testing`). Consumers use `Session`
+(`backend.rs`): `LocalSession` (`local.rs`) attaches in-process; `RemoteSession`
+(`crates/rithmic-gateway/src/client`) attaches over a socket. The gateway parent
+uses the same host, with a `LocalSession` per connection.
+
+The PyO3 `Session` attaches through `LocalSession` in direct mode or
+`RemoteSession` in gateway mode. Both expose the same consumer surface,
+including fill-history and order-history queries (one-shot, trading-gated reads).
 
 When you add or change a plant RPC (place / cancel / modify / brackets / ensure / subscribe / …):
 
-1. Add it to the `Session` trait, with `DirectSession` and `FakeSession` (feature `testing`) implementations.
-2. Add its row to the RPC table (`crates/rithmic-gateway/src/rpc_table.rs`: kind + gate), then the `session.proto` message, the server dispatch, the `GatewaySession` call (with its call mode: Read / Command / Intent), and the PyO3 method plus `_lib.pyi`.
+1. Add the plant operation to `Venue` in `crates/rithmic-host/src/backend.rs`, with `RithmicVenue` and `FakeVenue` implementations. Add the consumer operation to `Session` there, with `LocalSession` and `RemoteSession` implementations; host policy belongs in `local.rs` / `local/subscriptions.rs`.
+2. Add the host `RPC_TABLE` row (`crates/rithmic-host/src/rpc_table.rs`: kind, gate, lane, restore mapping), the gateway Body↔method mapping (`crates/rithmic-gateway/src/rpc_table.rs`), the message in `proto/rithmic_gateway/v1/session.proto`, and dispatch in `crates/rithmic-gateway/src/server/dispatch/mod.rs`. Set the `RemoteSession` call mode (Read / Command / Intent); expose the PyO3 method (`crates/rithmic-nt-connect/src/python/mod.rs`) and `python/rithmic_nt_connect/_lib.pyi`.
 3. Keep request field names and semantics aligned (e.g. bracket `localid` / `stop_ticks` / `target_ticks`).
-4. Tests that fail on drift: `tests/rpc_table.rs` (proto ↔ trait ↔ table ↔ `RestorePlan`), `tests/client_scenarios.rs` + `tests/test_gateway_scenarios.py` (same scenarios through every client), `tests/test_wire_trait_parity.py` (PyO3 ↔ `WireSession`).
+4. Tests that fail on drift: `crates/rithmic-host/tests/rpc_table.rs` (trait ↔ table ↔ restore), `crates/rithmic-gateway/tests/rpc_table.rs` (proto ↔ mapping ↔ gates), `crates/rithmic-gateway/tests/client_scenarios.rs` (LocalSession / RemoteSession), `tests/test_gateway_scenarios.py` (Python / Rust gateway clients), and `tests/test_wire_trait_parity.py` (PyO3 ↔ `WireSession`).
 5. Do not ship “direct-only” for a new live capability unless STATUS marks gateway as deferred **and** book/runners refuse that mode.
 
-Structure now enforces the first half of this: declare the RPC on `WireSession` in `session.py` and
-`tests/test_wire_session_parity.py` fails until every adapter exposes it with a compatible signature: `_FlockedDirectSession` (direct),
-`_RustGatewaySession` (gateway; both in `python/rithmic_nt_connect/session.py`), the test double
-`WireSessionStub` (`tests/_stubs.py`), and the compiled extension via the hand-written `_lib.pyi` (itself
-checked against the built extension). `tests/test_gateway_proto_parity.py`
-fails when `session_pb2.py` was not regenerated after editing `session.proto`. Proto framing and gateway
-dispatch/gate tests (`crates/rithmic-gateway/tests`) are still yours to extend.
+Declare the RPC on `WireSession` in `python/rithmic_nt_connect/session.py` too:
+`tests/test_wire_session_parity.py` checks `_FlockedDirectSession`, `_RustGatewaySession`,
+`WireSessionStub` (`tests/_stubs.py`) and `_lib.pyi` (itself checked against the built extension).
+`tests/test_gateway_proto_parity.py` fails unless `session_pb2.py` is regenerated after
+editing `session.proto`. Extend host semantics tests (`crates/rithmic-host/tests`)
+and gateway framing / dispatch / gate tests (`crates/rithmic-gateway/tests`) as needed.
 
 #### Learning: gateway RPC kinds (do not confuse)
 
-Gateway plant RPCs are **not** all the same shape. Shipping a new stream as a bare `session.subscribe_*` + Ack is how bracket updates lost fan-out delivery and reconnect restore. The RPC table's `kind` column is the single place this is decided, and its tests enforce it.
+Plant RPCs are **not** all the same shape. Shipping a new stream as a bare `session.subscribe_*` + Ack is how bracket updates lost fan-out delivery and reconnect restore. The `kind` column in `rithmic-host::rpc_table::RPC_TABLE` is the single place this is decided; the gateway maps bodies to those host rows.
 
 | Kind | Examples | Must include |
 | --- | --- | --- |
-| **One-shot command** | `place_*`, `adjust_*`, `cancel_*`, `modify_*` | Trading gate → plant call → map error. No fanout / `note_*` / restore. Client side: never retried after the request was written (`OutcomeUnknown`). |
-| **Subscription intent** | ticker, book, time bars, PnL, **order updates**, **bracket updates** | Gate → attach hub fanout → `note_*` refcount → plant only on 0→1 → rollback on fail → **`restore_intents` re-issues after plant reconnect**. |
+| **One-shot command** | `place_*`, `adjust_*`, `cancel_*`, `modify_*` | Host gate → venue call → map error. No fanout / `note_*` / restore. Remote client: never retried after the request was written (`OutcomeUnknown`). |
+| **Subscription intent** | ticker, book, time bars, PnL, **order updates**, **bracket updates** | Host gate → attach fanout → `note_*` refcount → venue join on 0→1 → rollback on fail → host restore after plant reconnect. Snapshot on join / gap resync for book and PnL; retry degraded MD intents. |
 
-Every RPC also declares a **lane** in the table. A connection reads requests on its own task and serves them on two lanes: the **command** lane (subscriptions and every state-changing request) runs one request at a time in arrival order; the **slow** lane (history, order-history and fill-history loads, plus reference-data, front-month and resolved-account reads) runs a few at a time and replies as each finishes, so a slow read can never hold up a place or cancel on the same socket. New RPCs default to the command lane; a read that can take seconds is marked `slow(...)` in its table row, which is the only place lanes are declared (`rpc_table::lane_of` reads the table; `tests/lanes.rs` guards it). Never put a request that mutates the connection's `ClientCtx` on the slow lane.
+Every RPC also declares a **lane** in the host table. Gateway connections serve the **command** lane (subscriptions and state-changing requests) one at a time in arrival order; the **slow** lane (history, order/fill-history, reference-data, front-month and resolved-account reads) runs a few at a time and replies as each finishes. New RPCs default to command; set `Lane::Slow` on a read that can take seconds. `crates/rithmic-host/tests/lanes.rs` guards classification; `crates/rithmic-gateway/tests/lanes.rs` guards transport scheduling. Never put a request that mutates attachment intent state on the slow lane. Local calls need no transport lanes.
 
-**Recovery.** After a plant reconnect the parent re-issues every intent itself and keeps clients attached, sending each a `TransportResumed` event; clients must not re-subscribe or reset the shared plant. A gateway client never calls `reset_ticker` (only a direct session does); a stream `gap` is a resync of that consumer's intent with no reset. A new subscription intent needs its `RestorePlan` / `restore_intents` entry, and a market-data one a degraded-set path (`MdIntent`).
+**Recovery.** The host pump (`crates/rithmic-host/src/pump.rs`) recovers plants and restores intents in both attachment modes. `SessionEvent` (`events.rs`) reports `Interrupted`, then `Resumed { generation }` after restore, or `RecoveryFailed` when bounded recovery fails. On socket loss, `RemoteSession` re-attaches and re-joins its recorded intents before reporting `Resumed`; one-shot commands stay unknown after send and are never replayed. A stream `gap` re-joins only that consumer's intent; `ResetTickerPlantRequest` remains on the wire only as a compatibility RPC for older clients.
 
-Bracket notifications ride the **order-plant** stream. Use `subscribe_order_plant_stream` in `server/dispatch/subscriptions.rs` (order and/or brackets flags) — never a one-shot plant call. Extend `RestorePlan` + `restore_intents` and the table row; `intent_rows_cover_exactly_the_restore_plan_fields` and `every_subscription_intent_is_reissued_by_restore_intents` fail otherwise. Proto string greps alone are not enough.
+Adapter consumers only reconcile on `Interrupted` / `Resumed` / `RecoveryFailed`:
+exec disarms, drains working orders and waits for the PnL barrier before re-arming;
+data reconciles books / bars on a gap. No adapter `reset_ticker` or recovery replay.
+See [ADR 0004](docs/adr/0004-session-host-owns-plant-recovery.md), which supersedes
+ADR 0002's MD replay clause and retains adapter re-arm / capability policy.
+
+**Snapshot on join.** In `local/subscriptions.rs`, joining or rejoining an already-live book intent calls `Venue::refresh_book`; PnL calls `Venue::pnl_snapshot`. All holders receive the fresh snapshot. A gap resync may repeat the consumer's subscribe without resetting the plant or adding another intent count. Ticker / bars use gap reconciliation; exec drains orders via `load_orders`.
+
+Bracket notifications ride the **order-plant** stream. Use the host's `subscribe_order_plant_stream` in `crates/rithmic-host/src/local/subscriptions.rs` (order and/or brackets flags), never a one-shot venue call. Extend `RestorePlan` (`intents.rs`), `restore_intents` (`pump.rs`) and the host table row; `intent_rows_cover_exactly_the_restore_plan_fields` and `every_subscription_intent_is_reissued_by_restore_intents` in `crates/rithmic-host/tests/rpc_table.rs` fail otherwise. Proto string greps alone are not enough.
 
 ### Execution rules live in `rithmic-exec`
 
@@ -151,13 +162,13 @@ Gateway client / wire tests need the plants/gateway crates, a system `protoc`
 the protobuf Python package (core dep):
 
 ```bash
-uv sync --extra dev
+uv sync --extra dev  # editable extension includes testing; release maturin features do not
 # Rust: fmt (hk pre-commit/check only) + clippy (-D warnings) + tests (hk check
 # + CI). clippy is the Rust analog of `ruff check`; `cargo fmt --check` runs
 # locally via the hk hooks but is NOT a CI gate (the pre-commit hook enforces it).
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test -p rithmic-plants -p rithmic-gateway -p rithmic-exec -p rithmic-nt-connect
+cargo test -p rithmic-host -p rithmic-plants -p rithmic-gateway -p rithmic-exec -p rithmic-nt-connect --features rithmic-gateway/testing,rithmic-host/testing,rithmic-nt-connect/testing
 uv run ruff check .
 uv run ruff format --check .
 uv run ty check python/rithmic_nt_connect python/rithmic_gateway tests

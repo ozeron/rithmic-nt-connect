@@ -1,11 +1,11 @@
 //! pb → DTO: the exact inverse of `crate::convert` (the server's DTO → pb).
 //!
-//! `GatewaySession` hands out the same `rithmic_plants` DTOs `DirectSession`
+//! `RemoteSession` hands out the same `rithmic_host` DTOs `RithmicVenue`
 //! does, so the extension converts them to dicts in exactly one place for both
 //! modes. A round-trip test (`tests/client_convert.rs`) pins `from(to(x)) == x`.
 
-use rithmic_plants::dto::{PlantEvent, ReferenceDataDto};
-use rithmic_plants::AccountTriple;
+use rithmic_host::dto::{PlantEvent, ReferenceDataDto};
+use rithmic_host::AccountTriple;
 
 pub use crate::mirror::{
     account_pnl_from_pb, account_rms_info_from_pb, bbo_from_pb, bracket_update_from_pb,
@@ -66,8 +66,8 @@ impl Channel {
     pub const ALL: [Self; 4] = [Self::Market, Self::History, Self::Pnl, Self::Order];
 
     /// Plant name used in typed channel errors.
-    pub fn stream(self) -> rithmic_plants::Stream {
-        use rithmic_plants::Stream;
+    pub fn stream(self) -> rithmic_host::Stream {
+        use rithmic_host::Stream;
         match self {
             Self::Market => Stream::Ticker,
             Self::History => Stream::History,
@@ -85,8 +85,8 @@ impl Channel {
         }
     }
 
-    pub fn of_stream(stream: rithmic_plants::Stream) -> Self {
-        use rithmic_plants::Stream;
+    pub fn of_stream(stream: rithmic_host::Stream) -> Self {
+        use rithmic_host::Stream;
         match stream {
             Stream::Ticker => Self::Market,
             Stream::History => Self::History,
@@ -122,9 +122,9 @@ pub fn plant_event_from_pb(event: pb::Event) -> Option<PlantEvent> {
         Body::BracketUpdate(b) => PlantEvent::BracketUpdate(bracket_update_from_pb(b)),
         Body::TimeBar(b) => PlantEvent::TimeBar(history_bar_from_pb(b)),
         // Connection-level, not a plant event: the runtime handles it before this.
-        Body::TransportResumed(_) => return None,
-        Body::Gap(g) => PlantEvent::Gap(rithmic_plants::GapDto {
-            stream: rithmic_plants::Stream::from_plant(&g.stream)?,
+        Body::TransportResumed(_) | Body::TransportInterrupted(_) => return None,
+        Body::Gap(g) => PlantEvent::Gap(rithmic_host::GapDto {
+            stream: rithmic_host::Stream::from_plant(&g.stream)?,
             skipped: g.skipped,
         }),
         Body::Other(o) => PlantEvent::Other {

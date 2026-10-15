@@ -36,6 +36,10 @@ _FAKE_PARENT = textwrap.dedent(
     from rithmic_gateway.flock import SessionLock
 
     mode = os.environ.get("FAKE_PARENT_MODE", "ok")
+    if mode == "leak":
+        print(os.environ["RITHMIC_PASSWORD"], file=sys.stderr)
+        print(os.environ["RITHMIC_GATEWAY_AUTH_TOKEN"], file=sys.stderr)
+        sys.exit(3)
     if mode == "crash":
         print("fake parent: RITHMIC_USER required", file=sys.stderr)
         sys.exit(3)
@@ -219,3 +223,46 @@ def test_the_helper_never_starts_a_process_when_the_flock_is_held(
             start_parent(cfg, password="pw", bin_path=_fake_binary(tmp_path))
     finally:
         lock.close()
+
+
+def test_parent_env_display_hides_secrets(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path, "u-helper-leak")
+    cfg.auth_token = "offline-token-294"
+    env = parent_env(cfg, password="offline-password-193", source={})
+    assert "offline-password-193" not in repr(env)
+    assert env["RITHMIC_GATEWAY_AUTH_TOKEN"] == cfg.auth_token
+
+
+def test_child_stderr_is_scrubbed_before_raising(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path, "u-helper-stderr")
+    cfg.auth_token = "offline-token-294"
+    with pytest.raises(ParentStartError) as exc:
+        start_parent(
+            cfg,
+            password="offline-password-193",
+            extra_env={"FAKE_PARENT_MODE": "leak"},
+            bin_path=_fake_binary(tmp_path),
+            timeout_sec=20.0,
+        )
+    assert "offline-password-193" not in str(exc.value)
+    assert "offline-token-294" not in str(exc.value)
+    assert "***" in str(exc.value)
+
+
+def test_parent_credentials_are_only_in_environment_not_argv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = _cfg(tmp_path, "u-helper-argv")
+    cfg.auth_token = "offline-token-294"
+
+    def intercepted(argv, **kwargs):
+        assert argv == ["/offline/gateway"]
+        assert kwargs["env"]["RITHMIC_PASSWORD"] == "offline-password-193"
+        assert kwargs["env"]["RITHMIC_GATEWAY_AUTH_TOKEN"] == "offline-token-294"
+        assert "offline-password-193" not in repr(kwargs)
+        assert "offline-token-294" not in repr(kwargs)
+        raise RuntimeError("intercepted without launching a process")
+
+    monkeypatch.setattr(subprocess, "Popen", intercepted)
+    with pytest.raises(RuntimeError, match="intercepted"):
+        start_parent(cfg, password="offline-password-193", bin_path="/offline/gateway")
