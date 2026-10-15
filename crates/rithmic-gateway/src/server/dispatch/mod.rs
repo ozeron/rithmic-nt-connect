@@ -41,7 +41,15 @@ fn reply(request_id: u64, outcome: rithmic_host::Result<Body>, fallback: &str) -
             } else {
                 fallback.into()
             };
-            error_frame(request_id, &code, &e.to_string())
+            // The client reconstructs these typed errors from code + message.
+            // Display prefixes would become part of their payload on each hop.
+            let message = match (&e, code.as_str()) {
+                (Error::Rejected(message), "venue_rejected")
+                | (Error::NotSent(message), "not_sent")
+                | (Error::OutcomeUnknown(message), "venue_unknown") => message.clone(),
+                _ => e.to_string(),
+            };
+            error_frame(request_id, &code, &message)
         }
     }
 }
@@ -348,4 +356,47 @@ pub fn history_rpc_with_live_ticker_intent_for_test(body: Body) -> Body {
                 .body
                 .expect("body")
         })
+}
+
+#[cfg(test)]
+mod error_payload_tests {
+    use super::*;
+
+    #[test]
+    fn typed_errors_keep_inner_payloads_on_the_wire() {
+        for (error, code) in [
+            (Error::Rejected("x".into()), "venue_rejected"),
+            (Error::NotSent("x".into()), "not_sent"),
+            (Error::OutcomeUnknown("x".into()), "venue_unknown"),
+            (
+                Error::ReconciliationUnavailable("x".into()),
+                "reconciliation_unavailable",
+            ),
+        ] {
+            let frame = reply(7, Err(error), "command");
+            let bytes = crate::codec::encode(&frame).unwrap();
+            let (frame, _) = crate::codec::decode::<Frame>(&bytes).unwrap();
+            assert_eq!(frame.request_id, 7);
+            assert_eq!(
+                frame.body,
+                Some(Body::Error(ErrorResponse {
+                    code: code.into(),
+                    message: "x".into()
+                }))
+            );
+        }
+    }
+
+    #[test]
+    fn untyped_command_failures_keep_their_display_text_and_code() {
+        let error = Error::Config("bad input".into());
+        let display = error.to_string();
+        assert_eq!(
+            reply(3, Err(error), "command").body,
+            Some(Body::Error(ErrorResponse {
+                code: "not_sent".into(),
+                message: display
+            }))
+        );
+    }
 }
