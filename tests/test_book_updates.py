@@ -8,14 +8,175 @@ Fixtures are venue-shaped: the dict the extension builds from a Rithmic
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
-from nautilus_trader.model.enums import BookAction, RecordFlag
-from rithmic_nt_connect._convert import ConvertError, order_book_to_fields
-from rithmic_nt_connect.data import BookAssembler
+from _stubs import _TestDataClient
+from nautilus_trader.model.book import OrderBook
+from nautilus_trader.model.enums import BookAction, BookType, RecordFlag
+from nautilus_trader.model.identifiers import InstrumentId
+from rithmic_nt_connect._convert import (
+    ConvertError,
+    bbo_to_fields,
+    last_trade_to_fields,
+    order_book_to_fields,
+    time_bar_to_fields,
+)
+from rithmic_nt_connect.data import BookAssembler, fields_to_order_book_deltas
 
 F_LAST = int(RecordFlag.F_LAST.value)
 F_SNAPSHOT = int(RecordFlag.F_SNAPSHOT.value)
+
+
+@pytest.fixture
+def snapshot_without_timestamp() -> dict[str, Any]:
+    # Rithmic Test NQZ6/CME, 2026-10-15: snapshot image has no time keys.
+    # Arrays are truncated from the capture; field names and omission are exact.
+    return {
+        "type": "order_book",
+        "symbol": "NQZ6",
+        "exchange": "CME",
+        "update_type": 3,
+        "bid_price": [27000.25, 29797.0, 30023.25, 30030.5],
+        "bid_size": [1, 62, 1, 1],
+        "ask_price": [30607.25, 30613.0, 30613.5],
+        "ask_size": [41, 1, 2],
+    }
+
+
+def test_timestamp_less_snapshot_uses_adapter_clock_and_snapshot_flags(
+    snapshot_without_timestamp: dict[str, Any],
+) -> None:
+    ts_init = 1_792_065_600_000_000_123
+    fields = order_book_to_fields(snapshot_without_timestamp, ts_init=ts_init)
+    out = fields_to_order_book_deltas(fields, ts_init=ts_init)
+
+    assert fields["ts_event"] == ts_init
+    assert [d.action for d in out.deltas] == [BookAction.CLEAR] + [BookAction.ADD] * 7
+    assert [d.flags for d in out.deltas] == [F_SNAPSHOT] * 7 + [F_SNAPSHOT | F_LAST]
+    assert all(d.ts_event == d.ts_init == ts_init for d in out.deltas)
+
+
+@pytest.mark.parametrize(
+    ("timestamp", "expected"),
+    [
+        ({"ssboe": 1_792_065_600, "usecs": 123}, 1_792_065_600_000_123_000),
+        (
+            {"ts_event_ns": 1_792_065_600_000_123_456, "ssboe": 1},
+            1_792_065_600_000_123_456,
+        ),
+    ],
+)
+def test_incremental_keeps_venue_timestamp(
+    timestamp: dict[str, int], expected: int
+) -> None:
+    row = _venue_book(7, bids=[(30030.5, 9)]) | timestamp
+    ts_init = expected + 1_000_000
+    fields = order_book_to_fields(row, ts_init=ts_init)
+    out = BookAssembler().feed(fields, ts_init=ts_init)
+    assert out is not None
+    assert out.ts_event == expected
+    assert out.ts_init == ts_init
+
+
+@pytest.mark.parametrize(
+    ("changes", "error"),
+    [
+        ({"symbol": None}, "missing required fields: symbol"),
+        ({"bid_size": []}, "length mismatch"),
+        ({"ask_price": [None, 30613.0, 30613.5]}, "null price/size"),
+        ({"update_type": 9}, "unknown order book update_type"),
+    ],
+)
+def test_timestamp_fallback_still_rejects_malformed_book(
+    snapshot_without_timestamp: dict[str, Any],
+    changes: dict[str, Any],
+    error: str,
+) -> None:
+    with pytest.raises(ConvertError, match=error):
+        order_book_to_fields(snapshot_without_timestamp | changes, ts_init=5)
+
+
+def test_non_book_events_still_require_venue_timestamp() -> None:
+    with pytest.raises(ConvertError, match="missing timestamp fields"):
+        last_trade_to_fields(
+            {"symbol": "NQZ6", "trade_price": 30030.5, "trade_size": 1}
+        )
+    with pytest.raises(ConvertError, match="missing timestamp fields"):
+        time_bar_to_fields(
+            {
+                "symbol": "NQZ6",
+                "open_price": 30030.5,
+                "high_price": 30030.5,
+                "low_price": 30030.5,
+                "close_price": 30030.5,
+                "volume": 1,
+            }
+        )
+    assert (
+        bbo_to_fields(
+            {
+                "symbol": "NQZ6",
+                "bid_price": 30030.5,
+                "bid_size": 1,
+                "ask_price": 30607.25,
+                "ask_size": 41,
+            }
+        )
+        is None
+    )
+
+
+def test_data_client_initializes_book_from_timestamp_less_snapshot(
+    snapshot_without_timestamp: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ts_init = 1_792_065_600_000_000_123
+    client = _TestDataClient.__new__(_TestDataClient)
+    client._clock = Mock(timestamp_ns=Mock(return_value=ts_init))
+    client._log = Mock()
+    client._books = BookAssembler()
+    client._skip_counts = {}
+    client._skip_last_flush = float("inf")
+    client._skip_log_interval_secs = 60
+    received: list[Any] = []
+    monkeypatch.setattr(client, "_handle_data", received.append)
+    monkeypatch.setattr(client, "_price_precision", lambda _: 2)
+
+    client._dispatch_event(snapshot_without_timestamp)
+    assert len(received) == 1
+    book = OrderBook(InstrumentId.from_str("NQZ6-CME.RITHMIC"), BookType.L2_MBP)
+    book.apply_deltas(received[0])
+    assert book.best_bid_price().as_double() == pytest.approx(30030.5)
+    assert book.best_ask_size().as_double() == 41
+    assert len(book.bids()) == 4
+    assert len(book.asks()) == 3
+    assert received[0].ts_event == ts_init
+
+    client._dispatch_event(
+        {
+            "type": "order_book",
+            "symbol": "NQZ6",
+            "exchange": "CME",
+            "update_type": 7,
+            "bid_price": [30030.5],
+            "bid_size": [9],
+            "ask_price": [30607.25],
+            "ask_size": [0],
+            "ssboe": 1_792_065_600,
+            "usecs": 123,
+        }
+    )
+    assert len(received) == 2
+    book.apply_deltas(received[1])
+    book.check_integrity()
+    assert book.best_bid_size().as_double() == 9
+    assert book.best_ask_price().as_double() == pytest.approx(30613.0)
+    assert book.best_ask_size().as_double() == 1
+    assert len(book.bids()) == 4
+    assert len(book.asks()) == 2
+    assert received[1].ts_event == 1_792_065_600_000_123_000
+    assert received[1].ts_init == ts_init
+    assert client._skip_counts == {}
 
 
 def _venue_book(

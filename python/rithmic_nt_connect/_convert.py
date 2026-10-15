@@ -210,18 +210,26 @@ def account_pnl_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def order_book_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
+def order_book_to_fields(
+    d: Mapping[str, Any], *, ts_init: int | None = None
+) -> dict[str, Any]:
     """Map an OrderBook venue dict to OrderBookDeltas-oriented fields.
 
     ``update_kind`` says what the levels are (``rithmic_exec::BookUpdate``): the
     whole book (``snapshot``), a reset (``clear`` / ``no_book``), or changed
     levels (``solo``, or ``begin`` / ``middle`` / ``end`` parts of one update).
     An ``update_type`` outside the venue's set is rejected.
+
+    Rithmic snapshot images can omit both optional venue time fields (Test,
+    2026-10-15). Only for books without venue time, use the supplied adapter
+    clock ``ts_init`` as ``ts_event``; venue time always takes precedence.
     """
     _require(d, "symbol")
     symbol = str(d["symbol"])
     exchange = d.get("exchange")
     ts = _ts_ns(d)
+    if ts is None:
+        ts = ts_init
     if ts is None:
         raise ConvertError("missing timestamp fields: ts_event_ns or ssboe")
 
