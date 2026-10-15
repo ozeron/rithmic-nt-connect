@@ -8,7 +8,7 @@
 | --- | --- |
 | **Done enough to use** | Futures MD (trades/quotes + history), paper path, account auto-discovery, TC-D data sweep, order dry-run, test-plant live place (2026-08-17), self-contained wheel |
 | **Partial / advertised incomplete** | L2 book, EXTERNAL bars (1m proven; 15m/1h/1d open), order types/brackets (Test accept/survive both modes), PnL, submit/cancel/modify honesty, recon, gateway shared login, exec hardening |
-| **Not started** | Definition updates · recovery suite — **2** marks left |
+| **Not started** | Definition updates — **1** mark left |
 | **Out of scope (N/A)** | Non-futures · L3 MBO · mark/index/funding/greeks · catalog/Parquet · Python v2 LiveNode · native TLS remote · in-tree Rust v2 |
 
 Acceptance target: **NQ / CME via LucidTrading**. One Rithmic login (close MotiveWave / R|Trader).
@@ -30,15 +30,15 @@ Legend: **Done** `[x]` · **Partial** `[~]` · **Not started** `[ ]` · `N/A` ou
 | Area | Total | Done | Partial | Not started | N/A |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | **Capability matrix** | 22 | 4 | 12 | 0 | 6 |
-| **Phase marks (0–9)** | 29 | 15 | 8 | 2 | 4 |
+| **Phase marks (0–9)** | 29 | 15 | 9 | 1 | 4 |
 | **Convention marks** | 18 | 14 | 4 | 0 | 0 |
 | **Close-outs (advertised path)** | 10 | 5 | 3 | 0 | 2 |
 | **Paper path (intraday)** | 8 | 8 | 0 | 0 | 0 |
-| **TOTAL** | 87 | 46 | 27 | 2 | 12 |
+| **TOTAL** | 87 | 46 | 28 | 1 | 12 |
 
-**Implemented:** 79% (`46` done + `27` partial of `75` in-scope marked items (`12` N/A excluded); partial counts as half).
+**Implemented:** 80% (`46` done + `28` partial of `75` in-scope marked items (`12` N/A excluded); partial counts as half).
 
-Not started (real leftover work): Phase 2 definition updates, Phase 7 recovery suite.
+Not started (real leftover work): Phase 2 definition updates.
 
 ---
 
@@ -89,7 +89,7 @@ Not started (real leftover work): Phase 2 definition updates, Phase 7 recovery s
 
 **Engine in-flight UNKNOWN (Nautilus-side, 2026-08-19).** After `inflight_check_retries=5`, engine `_resolve_inflight_order` synthesizes `OrderRejected(reason="UNKNOWN")` for a still-`SUBMITTED` order — **regardless of whether the adapter raises or returns `None`** (retry counter increments per issued query; raise swallowed by task runner). Adapter resolves out of `SUBMITTED` via bounded per-`user_tag` drain and fails closed (`VenueQueryUnavailable`) when it cannot resolve. Only reliable prevention when the venue genuinely does not know the order: operator `inflight_check_interval_ms=0` on `LiveExecEngineConfig` (via `TradingNodeConfig.exec_engine`; not on base `ExecEngineConfig` — see `docs/references/ops-runbook.md`).
 
-**Reconnect + MD resubscribe.** The Rust `SessionHost` owns per-plant recovery and restores ticker, book, time-bar, PnL, order and bracket intents in both modes. Consumers receive typed `Interrupted`, `Resumed` and `RecoveryFailed` events on the dedicated Python delivery thread. Data recovery clears local BBO/book state without resetting plants or replaying market-data intent; a stream gap re-joins only that consumer's intent. Execution disarms at interruption and reconciles before re-arming. `ResetTickerPlantRequest` remains available only for legacy wire clients. Offline fake-host and gateway tests cover recovery, stream ordering and independent listeners; the new direct path has not been live-verified. The earlier direct ticker resync was live-proven on Rithmic Test 2026-08-24, before this host switch. Direct throughput comparison remains deferred to task 5.5a2 on a quiet machine.
+**Reconnect + MD resubscribe.** The Rust `SessionHost` owns per-plant recovery and restores ticker, book, time-bar, PnL, order and bracket intents in both modes. Consumers receive typed `Interrupted`, `Resumed` and `RecoveryFailed` events on the dedicated Python delivery thread. Data recovery clears local BBO/book state without resetting plants or replaying market-data intent; a stream gap re-joins only that consumer's intent. Execution disarms at interruption and reconciles before re-arming. `ResetTickerPlantRequest` remains available only for legacy wire clients. Offline fake-host and gateway tests cover recovery, stream ordering and independent listeners (plus `crates/rithmic-gateway/tests/rejoin_delivery.rs` against the fake Rithmic server). **Live on Rithmic Test 2026-10-15 (NQZ6, direct):** a real ticker connection abort (`_fault_drop_plant`, testing build only) gives `Interrupted` → `Resumed` and fresh ticker events with no adapter re-subscribe; ticker + book resync also passes. Order-plant and PnL-plant recovery, and the gateway parent's plant recovery, are offline-tested only. Direct-mode host overhead is about 5% end to end into Python (accepted budget 10%, `docs/perf/2026-10-15-direct-hop.md`). The Test plant's history replay times out, so bars-inclusive resync is unproven live.
 
 **Session gateway (shared login).** Plants/session parity on the wire (incl. book unsub, `probe_time_bars`, ensure_order, `resolved_account`).
 
@@ -161,8 +161,8 @@ Not started (real leftover work): Phase 2 definition updates, Phase 7 recovery s
 ### Phase 7: Conformance
 
 - [~] Unit + MD smoke + live↔history; order dry-run exercised LucidTrading 2026-08-14 (local under gitignored `artifacts/`)
-- [~] Recovery suite [ ] + skipped-spec register [x] (ops-runbook "Skipped-spec register")
-  - Both direct fake-host recovery and gateway socket/plant recovery are offline-tested (`tests/test_recovery_bridge.py`, `tests/test_data_transport_recovery.py`, `tests/test_rust_gateway_session.py`); live acceptance of the unified host is still open
+- [~] Recovery suite [~] + skipped-spec register [x] (ops-runbook "Skipped-spec register")
+  - Direct fake-host and gateway socket/plant recovery are offline-tested (`tests/test_recovery_bridge.py`, `tests/test_data_transport_recovery.py`, `tests/test_rust_gateway_session.py`, `crates/rithmic-gateway/tests/rejoin_delivery.rs`). Live (Rithmic Test 2026-10-15, direct): ticker-plant abort recovery and ticker + book resync pass (`tests/e2e/test_reconnect_live.py`). Order/PnL-plant and parent-side live recovery are still open.
 - [~] **Exit:** not claimed until advertised close-outs have evidence
 
 ### Phase 8: Perf / robustness
