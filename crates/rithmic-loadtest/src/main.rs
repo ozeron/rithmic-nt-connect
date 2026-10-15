@@ -12,6 +12,7 @@
 //! ```
 
 mod alloc;
+mod direct_hop;
 mod metrics;
 mod rig;
 mod scen;
@@ -36,7 +37,9 @@ fn print_summary(r: &Report) {
             a,
             r.alloc_bytes_per_event.unwrap_or(0.0)
         );
-        return;
+        if r.sent == 0 || r.conns.is_empty() {
+            return;
+        }
     }
     eprintln!(
         "{:<28} sent {:>9}  delivered>= {:>6.2}%  {:>9.0} ev/s  lat p50 {:>8.2} p99 {:>9.2} p99.9 {:>9.2} ms  rss {:>6} MB",
@@ -158,6 +161,8 @@ async fn main() {
             println!("rpc_isolation_same_connection");
             println!("alloc_publish_1sub");
             println!("alloc_publish_4sub");
+            println!("direct_hop_venue");
+            println!("direct_hop_host");
         }
         "suite" => {
             let full = args.iter().any(|a| a == "--full");
@@ -212,7 +217,12 @@ async fn main() {
         "run" => {
             let name = args.get(1).expect("scenario name (see `list`)");
             let full = args.iter().any(|a| a == "--full");
-            let report = if name == "rpc_isolation_same_connection" {
+            let report = if matches!(name.as_str(), "direct_hop_venue" | "direct_hop_host") {
+                let events = arg_value(&args, "--events")
+                    .map(|v| v.parse().expect("--events"))
+                    .unwrap_or(200_000);
+                direct_hop::run(name == "direct_hop_host", events).await
+            } else if name == "rpc_isolation_same_connection" {
                 scen::run_rpc_isolation(3.0).await
             } else if let Some(n) = name.strip_prefix("alloc_publish_") {
                 let receivers: usize = n.trim_end_matches("sub").parse().expect("receiver count");
@@ -237,7 +247,7 @@ async fn main() {
             write_out(&args, &[report]);
         }
         _ => {
-            eprintln!("usage: rithmic-load suite [--full] [--out f] | smoke [--out f] | run <scenario> [--rate N] [--secs S] [--conns N] [--out f] | list");
+            eprintln!("usage: rithmic-load suite [--full] [--out f] | smoke [--out f] | run <scenario> [--rate N] [--secs S] [--conns N] [--events N (direct_hop only)] [--out f] | list");
         }
     }
 }
