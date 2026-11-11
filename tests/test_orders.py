@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from nautilus_trader.model.enums import OrderSide, OrderType, TimeInForce
-from nautilus_trader.model.objects import Price, Quantity
+from nautilus_trader.model import OrderSide, OrderType, Price, Quantity, TimeInForce
 from rithmic_nt_connect._convert import ConvertError
 from rithmic_nt_connect._order_plant import OrderPlantPolicy, OrderPlantState
 from rithmic_nt_connect._orders import (
@@ -61,7 +60,7 @@ def test_unsupported_order_type_raises():
 def test_trailing_ticks_from_order():
     from decimal import Decimal
 
-    from nautilus_trader.model.enums import TrailingOffsetType
+    from nautilus_trader.model import TrailingOffsetType
     from rithmic_nt_connect._orders import trailing_ticks_from_order
 
     plain = SimpleNamespace(order_type=OrderType.STOP_MARKET)

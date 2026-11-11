@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
-from nautilus_trader.model.enums import OrderStatus, OrderType, TimeInForce
+from nautilus_trader.model import OrderStatus, OrderType, TimeInForce
 
 from rithmic_nt_connect import _lib
 from rithmic_nt_connect._convert import ConvertError, _ts_ns, instrument_id_from_symbol
@@ -387,7 +387,7 @@ def fill_dedup_key(fields: Mapping[str, Any], *, ts_event: int) -> str:
 
 def order_side_from_notification(fields: Mapping[str, Any]) -> Any | None:
     """Map wire ``transaction_type`` (1=Buy, 2=Sell) to Nautilus ``OrderSide``."""
-    from nautilus_trader.model.enums import OrderSide
+    from nautilus_trader.model import OrderSide
 
     raw = fields.get("transaction_type")
     if raw is None:

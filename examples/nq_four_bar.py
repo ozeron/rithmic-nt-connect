@@ -10,29 +10,35 @@ https://nautilustrader.io/docs/latest/concepts/strategies/
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, timedelta
+from typing import Any, Self
 from zoneinfo import ZoneInfo
 
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.indicators import SimpleMovingAverage, VolumeWeightedAveragePrice
-from nautilus_trader.model.data import Bar, BarType
-from nautilus_trader.model.enums import BarAggregation, OrderSide, TimeInForce
-from nautilus_trader.model.events import (
+from nautilus_trader.model import (
+    Bar,
+    BarAggregation,
+    BarType,
+    InstrumentId,
     OrderFilled,
+    OrderSide,
     PositionChanged,
     PositionClosed,
     PositionOpened,
+    Price,
+    StrategyId,
+    TimeInForce,
 )
-from nautilus_trader.model.identifiers import InstrumentId
-from nautilus_trader.model.instruments import Instrument
-from nautilus_trader.model.objects import Price
-from nautilus_trader.trading.strategy import Strategy
+from nautilus_trader.trading import Strategy
 from rithmic_nt_connect import VENUE
 
 _CHI = ZoneInfo("America/Chicago")
 
 
-class NqFourBarConfig(StrategyConfig, frozen=True):
+@dataclass(frozen=True)
+class NqFourBarConfig:
     strategy_id: str = "NqFourBar-001"
     log_events: bool = False
     log_commands: bool = False
@@ -45,9 +51,21 @@ class NqFourBarConfig(StrategyConfig, frozen=True):
 
 
 class NqFourBarStrategy(Strategy):
+    def __new__(cls, *args: Any, **kwargs: Any) -> Self:
+        # The native base's ``__new__`` takes only a ``StrategyConfig``.
+        return super().__new__(cls)
+
     def __init__(self, config: NqFourBarConfig) -> None:
-        super().__init__(config)
-        self._instrument: Instrument | None = None
+        super().__init__(
+            StrategyConfig(
+                strategy_id=StrategyId(config.strategy_id),
+                log_events=config.log_events,
+                log_commands=config.log_commands,
+            )
+        )
+        # ``self.config`` is the native ``StrategyConfig``; keep the rule's own.
+        self.rule = config
+        self._instrument: Any = None
         self._last_close: Price | None = None
         self._down = 0
         self._up = 0
@@ -63,6 +81,7 @@ class NqFourBarStrategy(Strategy):
         self._vwap_ready = False
         self.bars = 0
         self.fills = 0
+        self.fill_events: list[OrderFilled] = []
 
     def _note_ready(self) -> None:
         if self._sma.initialized and not self._sma_ready:
@@ -77,7 +96,7 @@ class NqFourBarStrategy(Strategy):
             )
 
     def _ctx(self) -> str:
-        need = int(self.config.sma_period)
+        need = int(self.rule.sma_period)
         sma = (
             f"{self._sma.value:.2f}"
             if self._sma.initialized
@@ -113,9 +132,9 @@ class NqFourBarStrategy(Strategy):
         return _cb
 
     def on_start(self) -> None:
-        venue = self.config.venue
-        if self.config.instrument_id:
-            instrument_id = InstrumentId.from_str(self.config.instrument_id)
+        venue = self.rule.venue
+        if self.rule.instrument_id:
+            instrument_id = InstrumentId.from_str(self.rule.instrument_id)
             instrument = self.cache.instrument(instrument_id)
             if instrument is None:
                 self.log.error(f"instrument {instrument_id} not in cache")
@@ -157,13 +176,13 @@ class NqFourBarStrategy(Strategy):
         daily = self._daily_type
         m1_ext = self._m1_ext
         m1_int = self._m1_int
-        self.subscribe_trade_ticks(instrument_id)
+        self.subscribe_trades(instrument_id)
         self.subscribe_bars(self._sec_type)
-        if self.config.request_lookback:
+        if self.rule.request_lookback:
             now = self.clock.utc_now()
             self.request_bars(
                 daily,
-                start=now - timedelta(days=int(self.config.sma_lookback_days)),
+                start=now - timedelta(days=int(self.rule.sma_lookback_days)),
                 end=now,
                 callback=self._after_lookback(daily, "SMA"),
             )
@@ -177,9 +196,9 @@ class NqFourBarStrategy(Strategy):
             self.subscribe_bars(daily)
             self.subscribe_bars(m1_int)
         self.log.info(
-            f"ready {instrument_id}  daily SMA{int(self.config.sma_period)} "
+            f"ready {instrument_id}  daily SMA{int(self.rule.sma_period)} "
             f"+ 1m VWAP (EXTERNAL warmup / INTERNAL live) + 1s 4-bar  "
-            f"(lookback={'on' if self.config.request_lookback else 'off'})"
+            f"(lookback={'on' if self.rule.request_lookback else 'off'})"
         )
 
     def on_reset(self) -> None:
@@ -194,10 +213,13 @@ class NqFourBarStrategy(Strategy):
         self._up = 0
         self.bars = 0
         self.fills = 0
+        self.fill_events.clear()
 
-    def on_historical_data(self, data) -> None:
-        if not isinstance(data, Bar):
-            return
+    def on_historical_bars(self, bars: list[Bar]) -> None:
+        for bar in bars:
+            self._on_history_bar(bar)
+
+    def _on_history_bar(self, data: Bar) -> None:
         spec = data.bar_type.spec
         if spec.aggregation == BarAggregation.DAY:
             self._hist_day += 1
@@ -274,6 +296,7 @@ class NqFourBarStrategy(Strategy):
 
     def on_order_filled(self, event: OrderFilled) -> None:
         self.fills += 1
+        self.fill_events.append(event)
         self.log.info(
             f"FILL  {event.order_side.name} {event.last_qty} @ {event.last_px}"
         )
@@ -298,9 +321,8 @@ class NqFourBarStrategy(Strategy):
     def on_stop(self) -> None:
         if self._instrument is None:
             return
-        if not self.portfolio.is_flat(self._instrument.id):
-            self.log.info(
-                f"FLATTEN net={self.portfolio.net_position(self._instrument.id)}"
-            )
+        net = self.portfolio.net_position(self._instrument.id)
+        if net:
+            self.log.info(f"FLATTEN net={net}")
             self.close_all_positions(self._instrument.id)
         self.cancel_all_orders(self._instrument.id)

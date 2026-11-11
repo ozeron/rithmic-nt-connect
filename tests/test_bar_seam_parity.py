@@ -7,8 +7,9 @@ incremental trades or BBO, stale synthetic snapshots) while its bar plant keeps
 running — a live INTERNAL-vs-EXTERNAL proof is not reliably hostable on Test
 (TC-D40 remains the live proof that EXTERNAL bars are delivered). These unit
 tests pin the same seam deterministically by driving the *same* engine
-aggregator the ``LiveDataEngine`` uses (``TimeBarAggregator`` with
-``time_bars_timestamp_on_close=False``) over the *same* venue trade payloads
+aggregation (a NautilusTrader 2 ``BacktestEngine`` whose strategy subscribes
+the ``1-MINUTE-INTERNAL`` bar, ``DataEngineConfig.time_bars_timestamp_on_close``
+set like the adapter) over the *same* venue trade payloads
 the adapter converts, and comparing its output against the adapter's EXTERNAL
 bar conversion (``payloads_to_bars`` close→open shift):
 
@@ -27,10 +28,23 @@ ticks; ``marker`` = bar CLOSE time for EXTERNAL bars).
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
-from nautilus_trader.common.component import TestClock
-from nautilus_trader.data.aggregation import TimeBarAggregator
-from nautilus_trader.model.data import Bar, BarType
+from nautilus_trader.backtest import BacktestEngine, BacktestEngineConfig
+from nautilus_trader.common import LoggerConfig
+from nautilus_trader.data import DataEngineConfig
+from nautilus_trader.execution import FixedFeeModel
+from nautilus_trader.model import (
+    AccountType,
+    Bar,
+    BarType,
+    Money,
+    OmsType,
+    TraderId,
+    Venue,
+)
+from nautilus_trader.trading import Strategy
 from rithmic_nt_connect.data import payloads_to_bars, payloads_to_trade_ticks
 from rithmic_nt_connect.providers import future_from_reference
 
@@ -80,31 +94,53 @@ def _ticks(payloads: list[dict]) -> list:
     return ticks
 
 
+INTERNAL_1M = BarType.from_str("NQU6-CME.RITHMIC-1-MINUTE-LAST-INTERNAL")
+
+
+class _BarRecorder(Strategy):
+    def __init__(self) -> None:
+        super().__init__()
+        self.bars: list[Bar] = []
+
+    def on_start(self) -> None:
+        self.subscribe_bars(INTERNAL_1M)
+
+    def on_bar(self, bar: Bar) -> None:
+        self.bars.append(bar)
+
+
 def _internal_bars(ticks: list, on_close: bool = False) -> list[Bar]:
-    """Drive the engine's 1-MINUTE-INTERNAL aggregator over the ticks.
+    """Run the engine's 1-MINUTE-INTERNAL aggregation over the ticks.
 
-    Mirrors the ``LiveDataEngine`` configuration the dropped live e2e used
-    (``time_bars_timestamp_on_close=False``) so INTERNAL bars are stamped with
-    the OPEN minute, exactly like the adapter's EXTERNAL conversion.
+    A ``BacktestEngine`` replays the trade ticks through the same data engine a
+    live node uses, with ``time_bars_timestamp_on_close`` set like the adapter.
+    Bars close at interval boundaries as the clock advances to each tick:
+    deterministic, no real timers.
     """
-    instrument = _instrument()
-    bars: list[Bar] = []
-
-    def handler(bar: Bar) -> None:
-        bars.append(bar)
-
-    aggregator = TimeBarAggregator(
-        instrument,
-        BarType.from_str("NQU6-CME.RITHMIC-1-MINUTE-LAST-INTERNAL"),
-        handler,
-        TestClock(),
-        timestamp_on_close=on_close,
+    engine = BacktestEngine(
+        BacktestEngineConfig(
+            trader_id=TraderId("SEAM-001"),
+            logging=LoggerConfig(bypass_logging=True),
+            data_engine=DataEngineConfig(time_bars_timestamp_on_close=on_close),
+        )
     )
-    # Historical mode advances the clock to each tick's ts_init and closes
-    # bars at interval boundaries — deterministic, no real timers.
-    aggregator.set_historical_mode(True, handler)
-    for tick in ticks:
-        aggregator.handle_trade_tick(tick)
+    engine.add_venue(
+        Venue("RITHMIC"),
+        OmsType.NETTING,
+        AccountType.MARGIN,
+        [Money.from_decimal(Decimal(100_000), _instrument().quote_currency)],
+        default_leverage=Decimal(1),
+        fee_model=FixedFeeModel(
+            Money.from_decimal(Decimal(0), _instrument().quote_currency)
+        ),
+    )
+    engine.add_instrument(_instrument())
+    engine.add_data(ticks)
+    recorder = _BarRecorder()
+    engine.add_strategy(recorder)
+    engine.run()
+    bars = list(recorder.bars)
+    engine.dispose()
     return bars
 
 

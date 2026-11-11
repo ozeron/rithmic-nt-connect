@@ -12,9 +12,13 @@ from unittest.mock import Mock
 
 import pytest
 from _stubs import _TestDataClient
-from nautilus_trader.model.book import OrderBook
-from nautilus_trader.model.enums import BookAction, BookType, RecordFlag
-from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.model import (
+    BookAction,
+    BookType,
+    InstrumentId,
+    OrderBook,
+    RecordFlag,
+)
 from rithmic_nt_connect._convert import (
     ConvertError,
     bbo_to_fields,
@@ -144,7 +148,7 @@ def test_data_client_initializes_book_from_timestamp_less_snapshot(
 
     client._dispatch_event(snapshot_without_timestamp)
     assert len(received) == 1
-    book = OrderBook(InstrumentId.from_str("NQZ6-CME.RITHMIC"), BookType.L2_MBP)
+    book: Any = OrderBook(InstrumentId.from_str("NQZ6-CME.RITHMIC"), BookType.L2_MBP)
     book.apply_deltas(received[0])
     assert book.best_bid_price().as_double() == pytest.approx(30030.5)
     assert book.best_ask_size().as_double() == 41

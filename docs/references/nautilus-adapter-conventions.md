@@ -21,7 +21,7 @@ The upstream guide distinguishes:
 | **Examples** | One sound implementation; not mandatory. |
 | **Exceptions** | Valid when venue semantics or protocol boundaries require them. |
 
-Semantic rules apply even when in-tree Rust v2 machinery is **N/A** (this repo is out-of-tree 1.231.x).
+Semantic rules apply even when in-tree Rust v2 machinery is **N/A** (this repo is out-of-tree Python on NautilusTrader 2.0).
 
 ---
 
@@ -76,7 +76,7 @@ Semantic rules apply even when in-tree Rust v2 machinery is **N/A** (this repo i
 - Exec bootstrap: creds/account → private transport → streams that cannot lose acks → initial account → wait until engine can see it → connected.
 - Reconnect restores **auth + subscription intent + required context**, not only the socket.
 
-**Here:** Python `LiveMarketDataClient` / `LiveExecutionClient` on 1.231.x. Plants are the transports.
+**Here:** Python `MarketDataClient` / `ExecutionClient` (`nautilus_trader.live.clients`) on 2.0. Plants are the transports.
 
 ## Data
 
@@ -127,7 +127,7 @@ Do not infer support from a venue API alone. Implement Nautilus command/event se
 
 After `OrderSubmitted`, emit `OrderRejected` for a **definitive venue rejection** (a structured reject notification from the venue for that order). Emit it for local evidence that proves **no transmission**. Everything else stays unknown: transport errors, timeouts, disconnects, channel errors, 5xx without command proof, rate limits, missing acks, and parse failures **after** send.
 
-On 1.231.x: use `generate_order_denied` when the API exists for pre-send failure. Otherwise document the closest honest event and do not claim a venue reject.
+On 2.0: use `generate_order_denied(order, reason)` for pre-send failure. Otherwise document the closest honest event and do not claim a venue reject.
 
 Retryability ≠ ambiguity. An error can be both, either, or neither. Do not retry a state-changing command unless repeating it cannot apply twice.
 

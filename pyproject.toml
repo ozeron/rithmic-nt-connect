@@ -3,11 +3,11 @@ name = "rithmic-nt-connect"
 version = "0.1.0"
 description = "Unofficial Rithmic R|Protocol adapter compatible with NautilusTrader (Rust core, Python surface)"
 readme = "README.md"
-requires-python = ">=3.12,<3.15"
+requires-python = ">=3.13,<3.15"
 license = { text = "Apache-2.0" }
 authors = [{ name = "rithmic-nt-connect contributors" }]
 dependencies = [
-  "nautilus_trader==1.231.0",
+  "nautilus_trader==2.0.0rc9",
   "protobuf==5.29.6",
 ]
 
@@ -20,7 +20,7 @@ dev = [
   "pytest>=8.0",
 ]
 nautilus = [
-  "nautilus_trader==1.231.0",
+  "nautilus_trader==2.0.0rc9",
 ]
 # The gateway parent binary + pure-Python lake client ship as their own platform
 # wheel (`python/`); the adapter never imports it, so it is opt-in.
@@ -55,12 +55,8 @@ markers = [
 ]
 
 [tool.ty.environment]
-# Nautilus model classes (orders/events/data/...) are compiled Cython with no
-# shipped stubs, so ty sees them as Unknown. ``stubs/`` holds stubgen output
-# generated from the installed nautilus_trader (runtime attribute surface) plus
-# hand-ported ctor fixes; regenerate with:
-#   uv run --with mypy python scripts/gen_nautilus_stubs.py
-extra-paths = ["stubs", "tests", "scripts"]
+# NautilusTrader 2 ships ``.pyi`` stubs for its extension; no local stubs.
+extra-paths = ["tests", "tests/e2e", "scripts", "examples"]
 
 [tool.ty.analysis]
 # session_pb2 is protoc-generated: its message classes are created dynamically
@@ -68,10 +64,9 @@ extra-paths = ["stubs", "tests", "scripts"]
 replace-imports-with-any = ["rithmic_gateway.v1.**"]
 
 [tool.ruff]
-target-version = "py312"
+target-version = "py313"
 line-length = 88
 exclude = [
-  "stubs",
   "python/rithmic_gateway/v1/session_pb2.py",
 ]
 

@@ -8,10 +8,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from nautilus_trader.execution.reports import OrderStatusReport
-from nautilus_trader.model.enums import LiquiditySide, OrderStatus
-from nautilus_trader.model.identifiers import ClientOrderId, TradeId, VenueOrderId
-from nautilus_trader.model.objects import Currency, Quantity
+from nautilus_trader.model import (
+    ClientOrderId,
+    Currency,
+    LiquiditySide,
+    OrderStatus,
+    OrderStatusReport,
+    Quantity,
+    TradeId,
+    VenueOrderId,
+)
 
 from rithmic_nt_connect._orders import (
     fill_dedup_key,
@@ -28,7 +34,7 @@ class VenueNotificationIntake:
     """Route venue order notifications to tracked events or untracked reports.
 
     Holds the host client by reference (cache/clock/stores/emit stay on the
-    client). Does not wrap Nautilus cache/clock/msgbus/session.
+    client). Does not wrap the Nautilus cache/clock or the session.
     """
 
     def __init__(self, host: Any) -> None:
@@ -59,52 +65,25 @@ class VenueNotificationIntake:
         action = notification_action(fields, order)
         if action is None:
             return
-        strategy_id = order.strategy_id
-        instrument_id = order.instrument_id
         if action.kind == "accepted":
             self.emit_accepted(order, client_order_id, venue_order_id, ts_event)
         elif action.kind == "rejected":
-            host.generate_order_rejected(
-                strategy_id,
-                instrument_id,
-                client_order_id,
-                str(action.reason),
-                ts_event,
-            )
+            host.generate_order_rejected(order, str(action.reason), ts_event, False)
         elif action.kind == "modify_rejected":
             host.generate_order_modify_rejected(
-                strategy_id,
-                instrument_id,
-                client_order_id,
-                venue_order_id,
-                str(action.reason),
-                ts_event,
+                order, venue_order_id, str(action.reason), ts_event
             )
         elif action.kind == "cancel_rejected":
             host.generate_order_cancel_rejected(
-                strategy_id,
-                instrument_id,
-                client_order_id,
-                venue_order_id,
-                str(action.reason),
-                ts_event,
+                order, venue_order_id, str(action.reason), ts_event
             )
         elif action.kind == "updated":
             qty, price, trigger = self.resolve_updated_terms(order, action)
             host.generate_order_updated(
-                strategy_id,
-                instrument_id,
-                client_order_id,
-                venue_order_id,
-                qty,
-                price,
-                trigger,
-                ts_event,
+                order, venue_order_id, qty, price, trigger, None, ts_event
             )
         elif action.kind == "canceled":
-            host.generate_order_canceled(
-                strategy_id, instrument_id, client_order_id, venue_order_id, ts_event
-            )
+            host.generate_order_canceled(order, venue_order_id, ts_event)
         elif action.kind == "triggered":
             self.emit_triggered_guarded(
                 order, client_order_id, venue_order_id, ts_event
@@ -124,13 +103,7 @@ class VenueNotificationIntake:
         """Emit OrderAccepted under the LAP-42 guard."""
         host = self._host
         if order.status is OrderStatus.SUBMITTED:
-            host.generate_order_accepted(
-                order.strategy_id,
-                order.instrument_id,
-                client_order_id,
-                venue_order_id,
-                ts_event,
-            )
+            host.generate_order_accepted(order, venue_order_id, ts_event)
         else:
             host._log.debug(
                 f"skipping late/duplicate OrderAccepted for {client_order_id}: "
@@ -177,13 +150,7 @@ class VenueNotificationIntake:
                 f"{client_order_id} (market-style stop or already triggered)"
             )
             return
-        host.generate_order_triggered(
-            order.strategy_id,
-            order.instrument_id,
-            client_order_id,
-            venue_order_id,
-            ts_event,
-        )
+        host.generate_order_triggered(order, venue_order_id, ts_event)
 
     def handle_tracked_fill(
         self,
@@ -196,7 +163,6 @@ class VenueNotificationIntake:
     ) -> None:
         """Emit one venue-priced tracked fill; dedup by venue trade id."""
         host = self._host
-        strategy_id = order.strategy_id
         instrument_id = order.instrument_id
         if action.fill_qty is None or action.trade_id is None:
             host._log.error(f"fill action missing fields: {slim_order_fields(fields)}")
@@ -229,21 +195,16 @@ class VenueNotificationIntake:
             int(fill_qty),
         )
         host.generate_order_filled(
-            strategy_id,
-            instrument_id,
-            client_order_id,
+            order,
             venue_order_id,
             None,
             TradeId(str(action.trade_id)),
-            order.side,
-            order.order_type,
             fill_qty,
             fill_px,
             Currency.from_str("USD"),
             commission,
             LiquiditySide.NO_LIQUIDITY_SIDE,
             ts_event,
-            info={"rithmic": dict(fields)},
         )
         host._mark_fill_key(dedup)
 
@@ -346,8 +307,8 @@ class VenueNotificationIntake:
             host._send_order_status_report(report)
         except Exception as exc:
             host._log.exception(
-                f"{context}: status report publication failed; skipping stale report",
-                exc,
+                f"{context}: status report publication failed; "
+                f"skipping stale report: {exc}"
             )
             return False
         return True

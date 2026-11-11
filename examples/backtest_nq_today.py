@@ -119,26 +119,21 @@ def _window(
     return start, end, span
 
 
-def _fingerprint(engine: Any, venue: Any, ticks: list[Any]) -> dict[str, Any]:
-    fills = engine.trader.generate_order_fills_report()
-    acct = engine.trader.generate_account_report(venue)
-    n_fills = 0 if fills is None or getattr(fills, "empty", True) else len(fills)
-    cash = None
-    if acct is not None and not getattr(acct, "empty", True):
-        cash = str(acct.iloc[-1]["total"])
-    fill_sig: tuple[Any, ...] = ()
-    if n_fills:
-        cols = [
-            c
-            for c in ("ts_last", "side", "order_side", "last_px", "last_qty")
-            if c in fills.columns
-        ]
-        fill_sig = tuple(fills[cols].astype(str).itertuples(index=False, name=None))
+def _fingerprint(strategy: Any, cash: str | None, ticks: list[Any]) -> dict[str, Any]:
+    fill_sig = tuple(
+        (
+            str(fill.ts_event),
+            fill.order_side.name,
+            str(fill.last_px),
+            str(fill.last_qty),
+        )
+        for fill in strategy.fill_events
+    )
     return {
         "ticks": len(ticks),
         "first": _utc_from_ns(ticks[0].ts_event),
         "last": _utc_from_ns(ticks[-1].ts_event),
-        "fills": n_fills,
+        "fills": len(fill_sig),
         "cash": cash,
         "fill_sig": fill_sig,
     }
@@ -160,7 +155,7 @@ def _resolve_window(*, rth: bool, until: str | None) -> tuple[datetime, datetime
 def _load_history(
     root: str, exchange: str, start: datetime, end: datetime
 ) -> tuple[Any, list[Any], list[Any]]:
-    from nautilus_trader.model.data import BarType
+    from nautilus_trader.model import BarType
     from rithmic_nt_connect.historical import (
         load_front_month_instrument,
         load_time_bars,
@@ -199,31 +194,41 @@ def _backtest_fingerprint(
     *,
     log_strategy: bool,
 ) -> dict[str, Any]:
-    from nautilus_trader.backtest.engine import BacktestEngine
-    from nautilus_trader.config import BacktestEngineConfig, LoggingConfig
-    from nautilus_trader.model.enums import AccountType, BookType, OmsType
-    from nautilus_trader.model.identifiers import TraderId, Venue
-    from nautilus_trader.model.objects import Currency, Money
+    from nautilus_trader.backtest import BacktestEngine, BacktestEngineConfig
+    from nautilus_trader.common import LoggerConfig, LogLevel
+    from nautilus_trader.execution import FixedFeeModel
+    from nautilus_trader.model import (
+        AccountType,
+        BookType,
+        Currency,
+        Money,
+        OmsType,
+        TraderId,
+        Venue,
+    )
     from nq_four_bar import NqFourBarConfig, NqFourBarStrategy
     from rithmic_nt_connect import VENUE
 
+    usd = Currency.from_str("USD")
     engine = BacktestEngine(
-        config=BacktestEngineConfig(
+        BacktestEngineConfig(
             trader_id=TraderId("BACK-001"),
-            logging=LoggingConfig(
-                log_level="WARNING",
+            logging=LoggerConfig(
+                stdout_level=LogLevel.WARNING,
                 print_config=False,
-                log_component_levels={"NqFourBar-001": "INFO"} if log_strategy else {},
+                component_levels={"NqFourBar-001": "INFO"} if log_strategy else None,
             ),
         )
     )
     engine.add_venue(
-        venue=Venue(VENUE),
-        oms_type=OmsType.NETTING,
-        account_type=AccountType.MARGIN,
-        starting_balances=[Money.from_str("100000 USD")],
-        base_currency=Currency.from_str("USD"),
+        Venue(VENUE),
+        OmsType.NETTING,
+        AccountType.MARGIN,
+        [Money.from_str("100000 USD")],
+        base_currency=usd,
         default_leverage=Decimal(20),
+        # Commission-free so the result is the rule alone.
+        fee_model=FixedFeeModel(Money(Decimal(0), usd)),
         book_type=BookType.L1_MBP,
         trade_execution=True,
         bar_execution=True,
@@ -232,9 +237,14 @@ def _backtest_fingerprint(
     if daily_bars:
         engine.add_data(list(daily_bars))
     engine.add_data(list(ticks))
-    engine.add_strategy(NqFourBarStrategy(NqFourBarConfig()))
+    strategy = NqFourBarStrategy(NqFourBarConfig())
+    engine.add_strategy(strategy)
     engine.run()
-    return _fingerprint(engine, Venue(VENUE), ticks)
+    account = engine.cache.account_for_venue(Venue(VENUE))
+    cash = None if account is None else str(account.balance_total(usd))
+    result = _fingerprint(strategy, cash, ticks)
+    engine.dispose()
+    return result
 
 
 def main(argv: list[str] | None = None) -> int:

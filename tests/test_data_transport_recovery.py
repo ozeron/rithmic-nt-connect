@@ -18,7 +18,7 @@ def test_resumed_reconciles_without_market_data_replay(tmp_path: Path) -> None:
         session: Any = _lib.Session.fake(lock_dir=str(tmp_path))
         await asyncio.to_thread(session.connect)
         await asyncio.to_thread(session.subscribe, "NQU6", "CME")
-        client = _TestDataClient.__new__(_TestDataClient)
+        client: Any = _TestDataClient.__new__(_TestDataClient)
         client._loop = asyncio.get_running_loop()
         client._log = _CaptureLog()
         client._session = session
@@ -69,7 +69,7 @@ def test_disconnect_drops_listener_and_cancels_reconciliation() -> None:
             self.disconnected = True
 
     async def run() -> None:
-        client = _TestDataClient.__new__(_TestDataClient)
+        client: Any = _TestDataClient.__new__(_TestDataClient)
         client._loop = asyncio.get_running_loop()
         client._log = _CaptureLog()
         sess = Sess()

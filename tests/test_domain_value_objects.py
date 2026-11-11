@@ -2,7 +2,7 @@
 
 from unittest.mock import Mock
 
-from nautilus_trader.model.enums import OrderStatus
+from nautilus_trader.model import OrderStatus
 from rithmic_nt_connect._orders import (
     FillDedupStore,
     SeenKeyCache,

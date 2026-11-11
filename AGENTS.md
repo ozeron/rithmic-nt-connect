@@ -1,6 +1,6 @@
 # Agent notes — rithmic-nt-connect
 
-Unofficial out-of-tree Rithmic adapter for NautilusTrader **1.231.x**.
+Unofficial out-of-tree Rithmic adapter for NautilusTrader **2.0.0rc9** (Python `LiveNode` client seam).
 Read this before changing adapter, wire, or docs.
 
 ## Must follow
@@ -86,7 +86,7 @@ Related:
 | --- | --- |
 | [`docs/references/nautilus-adapter-phases.md`](docs/references/nautilus-adapter-phases.md) | Upstream phase pattern (0–9) |
 | [`docs/STATUS.md`](docs/STATUS.md) | Planned vs done; update marks when you close a gap |
-| [`docs/references/nautilus-adapter-tiers.md`](docs/references/nautilus-adapter-tiers.md) | 1.231.x `TradingNode` seam; naming |
+| [`docs/references/nautilus-adapter-tiers.md`](docs/references/nautilus-adapter-tiers.md) | NautilusTrader 2 `LiveNode` Python seam; naming |
 | [`docs/references/ops-runbook.md`](docs/references/ops-runbook.md) | How to run smokes |
 | [`docs/references/gateway-remote.md`](docs/references/gateway-remote.md) | Gateway unix / tunnel / TLS roadmap |
 | [`docs/adr/`](docs/adr/) | Decisions an architecture review should not re-litigate |

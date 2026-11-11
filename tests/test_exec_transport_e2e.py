@@ -29,32 +29,27 @@ from _stubs import (
     _Log,
     _TestClient,
 )
-from nautilus_trader.core.uuid import UUID4
-from nautilus_trader.execution.messages import (
-    GenerateFillReports,
-    GenerateOrderStatusReport,
-    GenerateOrderStatusReports,
-    GeneratePositionStatusReports,
-    SubmitOrder,
-)
-from nautilus_trader.execution.reports import FillReport, OrderStatusReport
-from nautilus_trader.model.enums import (
-    OrderSide,
-    OrderStatus,
-    OrderType,
-    TimeInForce,
-)
-from nautilus_trader.model.events import OrderSubmitted
-from nautilus_trader.model.identifiers import (
+from nautilus_trader.core import UUID4
+from nautilus_trader.model import (
     AccountId,
     ClientOrderId,
+    Currency,
+    FillReport,
     InstrumentId,
+    LimitOrder,
+    Money,
+    OrderSide,
+    OrderStatus,
+    OrderStatusReport,
+    OrderSubmitted,
+    OrderType,
+    Price,
+    Quantity,
     StrategyId,
+    TimeInForce,
     TraderId,
     VenueOrderId,
 )
-from nautilus_trader.model.objects import Currency, Money, Price, Quantity
-from nautilus_trader.model.orders import LimitOrder
 from rithmic_nt_connect._order_plant import OrderPlantPolicy, OrderPlantState
 from rithmic_nt_connect._orders import (
     FillDedupStore,
@@ -66,7 +61,7 @@ from rithmic_nt_connect.errors import (
     ReconciliationUnavailableError,
     VenueQueryUnavailable,
 )
-from rithmic_nt_connect.execution import RithmicExecutionClient
+from rithmic_nt_connect.execution import ReportQuery, RithmicExecutionClient
 from rithmic_nt_connect.recon import drain_for
 from rithmic_nt_connect.session import (
     WireSession,
@@ -147,8 +142,8 @@ class _LoadOrdersSession(WireSessionStub):
         return self._events
 
 
-def _fill_cmd() -> GenerateFillReports:
-    return GenerateFillReports(None, None, None, None, UUID4(), 1)
+def _fill_cmd() -> ReportQuery:
+    return ReportQuery()
 
 
 def _fill_event(*, fill_id: str = "F1", basket: str = "B1") -> dict[str, object]:
@@ -288,25 +283,16 @@ def _sentinel_status_fields() -> dict[str, object]:
     }
 
 
-def _query(cid: str = "O-1") -> GenerateOrderStatusReport:
-    return GenerateOrderStatusReport(None, ClientOrderId(cid), None, UUID4(), 1)
+def _query(cid: str = "O-1") -> ReportQuery:
+    return ReportQuery(client_order_id=ClientOrderId(cid))
 
 
-def _status_cmd() -> GenerateOrderStatusReports:
-    return GenerateOrderStatusReports(
-        instrument_id=None,
-        start=None,
-        end=None,
-        open_only=False,
-        command_id=UUID4(),
-        ts_init=1,
-    )
+def _status_cmd() -> ReportQuery:
+    return ReportQuery(open_only=False)
 
 
-def _position_cmd() -> GeneratePositionStatusReports:
-    return GeneratePositionStatusReports(
-        instrument_id=None, start=None, end=None, command_id=UUID4(), ts_init=1
-    )
+def _position_cmd() -> ReportQuery:
+    return ReportQuery()
 
 
 def _submitted_limit_order() -> LimitOrder:
@@ -325,21 +311,23 @@ def _submitted_limit_order() -> LimitOrder:
         OrderSide.BUY,
         Quantity.from_int(1),
         Price.from_str("21000.0"),
+        TimeInForce.GTC,
+        False,
+        False,
+        False,
         UUID4(),
         0,
-        TimeInForce.GTC,
     )
     order.apply(OrderSubmitted(trader, strategy, iid, cid, account, UUID4(), ts, ts))
     return order
 
 
-def _submit_cmd() -> SubmitOrder:
-    return SubmitOrder(
-        TraderId("TRADER-1"),
-        StrategyId("STRATEGY-1"),
-        _submitted_limit_order(),
-        UUID4(),
-        1,
+def _submit_cmd() -> Any:  # engine-built on v2; a duck-typed double
+    return SimpleNamespace(
+        trader_id=TraderId("TRADER-1"),
+        strategy_id=StrategyId("STRATEGY-1"),
+        order=_submitted_limit_order(),
+        command_id=UUID4(),
     )
 
 
@@ -369,7 +357,7 @@ def test_unresolved_inflight_query_raises_not_none(
     )
 
     with pytest.raises(VenueQueryUnavailable, match="in-flight"):
-        asyncio.run(client.generate_order_status_report(_query()))
+        asyncio.run(client._generate_order_status_report(_query()))
 
     assert rejected == []
     assert canceled == []
@@ -383,13 +371,13 @@ def test_unbound_submitted_query_recovers_by_tag_from_drain() -> None:
     order = _inflight_order()
     client._cache._orders[str(order.client_order_id)] = order
 
-    report = asyncio.run(client.generate_order_status_report(_query()))
+    report = asyncio.run(client._generate_order_status_report(_query()))
 
     assert report is not None
     assert report.venue_order_id == VenueOrderId("B1")
     assert report.client_order_id == ClientOrderId("O-1")
     assert report.order_status == OrderStatus.ACCEPTED
-    assert client._cache.venue_order_id(ClientOrderId("O-1")) == VenueOrderId("B1")
+    assert client._venue_order_id_for(ClientOrderId("O-1")) == VenueOrderId("B1")
     assert "load_orders" in session.calls
 
 
@@ -405,17 +393,17 @@ def test_unusable_drain_row_does_not_bind_or_disable_recovery() -> None:
     client._cache._orders[str(order.client_order_id)] = order
 
     with pytest.raises(VenueQueryUnavailable, match="in-flight"):
-        asyncio.run(client.generate_order_status_report(_query()))
+        asyncio.run(client._generate_order_status_report(_query()))
 
-    assert client._cache.venue_order_id(ClientOrderId("O-1")) is None
+    assert client._venue_order_id_for(ClientOrderId("O-1")) is None
 
     # The venue heals: the same still-in-flight order recovers by tag.
     session.working_orders = [_working_order_row()]
-    report = asyncio.run(client.generate_order_status_report(_query()))
+    report = asyncio.run(client._generate_order_status_report(_query()))
 
     assert report is not None
     assert report.venue_order_id == VenueOrderId("B1")
-    assert client._cache.venue_order_id(ClientOrderId("O-1")) == VenueOrderId("B1")
+    assert client._venue_order_id_for(ClientOrderId("O-1")) == VenueOrderId("B1")
 
 
 def test_recovered_report_uses_venue_row_timestamp() -> None:
@@ -429,7 +417,7 @@ def test_recovered_report_uses_venue_row_timestamp() -> None:
     order = _inflight_order()
     client._cache._orders[str(order.client_order_id)] = order
 
-    report = asyncio.run(client.generate_order_status_report(_query()))
+    report = asyncio.run(client._generate_order_status_report(_query()))
 
     assert report is not None
     assert report.ts_accepted == row_ts
@@ -449,13 +437,13 @@ def test_recovery_drain_rejects_row_with_fabricated_terms() -> None:
     client._cache._orders[str(order.client_order_id)] = order
 
     with pytest.raises(VenueQueryUnavailable, match="in-flight"):
-        asyncio.run(client.generate_order_status_report(_query()))
+        asyncio.run(client._generate_order_status_report(_query()))
 
-    assert client._cache.venue_order_id(ClientOrderId("O-1")) is None
+    assert client._venue_order_id_for(ClientOrderId("O-1")) is None
 
     # A real working-order row recovers normally.
     session.working_orders = [_working_order_row()]
-    report = asyncio.run(client.generate_order_status_report(_query()))
+    report = asyncio.run(client._generate_order_status_report(_query()))
 
     assert report is not None
     assert report.venue_order_id == VenueOrderId("B1")
@@ -475,9 +463,9 @@ def test_recovery_drain_rejects_row_with_complete_status() -> None:
     client._cache._orders[str(order.client_order_id)] = order
 
     with pytest.raises(VenueQueryUnavailable, match="in-flight"):
-        asyncio.run(client.generate_order_status_report(_query()))
+        asyncio.run(client._generate_order_status_report(_query()))
 
-    assert client._cache.venue_order_id(ClientOrderId("O-1")) is None
+    assert client._venue_order_id_for(ClientOrderId("O-1")) is None
 
 
 def test_stale_drain_row_does_not_regress_live_resolution() -> None:
@@ -499,7 +487,7 @@ def test_stale_drain_row_does_not_regress_live_resolution() -> None:
 
     session.on_load_orders = _resolve_live
 
-    report = asyncio.run(client.generate_order_status_report(_query()))
+    report = asyncio.run(client._generate_order_status_report(_query()))
 
     assert report is not None
     assert report.order_status == OrderStatus.FILLED  # live state wins
@@ -523,12 +511,12 @@ def test_recovery_prefers_latest_strict_row() -> None:
     order = _inflight_order()
     client._cache._orders[str(order.client_order_id)] = order
 
-    report = asyncio.run(client.generate_order_status_report(_query()))
+    report = asyncio.run(client._generate_order_status_report(_query()))
 
     assert report is not None
     assert report.order_status == OrderStatus.CANCELED  # newest row wins
     assert report.venue_order_id == VenueOrderId("B1")
-    assert client._cache.venue_order_id(ClientOrderId("O-1")) == VenueOrderId("B1")
+    assert client._venue_order_id_for(ClientOrderId("O-1")) == VenueOrderId("B1")
 
 
 def test_order_poll_persistent_transient_fails_closed() -> None:
@@ -720,7 +708,7 @@ def test_transport_generation_bump_schedules_l3_rearm(
 
     async def _run() -> None:
         loop = asyncio.get_running_loop()
-        client._loop = loop  # type: ignore[attr-defined]
+        cast(Any, client)._loop = loop
         from rithmic_nt_connect.transport import (
             TransportDown,
             TransportUp,
@@ -831,7 +819,7 @@ def test_up_while_a_restore_is_in_flight_is_dropped(
     client = _restore_client(session, monkeypatch)
 
     async def _run() -> None:
-        client._loop = asyncio.get_running_loop()  # type: ignore[attr-defined]
+        cast(Any, client)._loop = asyncio.get_running_loop()
         in_flight = asyncio.get_running_loop().create_future()
         client._recovery.task = cast(Any, in_flight)
         client._recovery.on_event(TransportUp(generation=3))
@@ -858,7 +846,7 @@ def test_restore_exhaustion_leaves_the_plant_latched(
     monkeypatch.setattr(asyncio, "sleep", _sleep)
 
     async def _run() -> None:
-        client._loop = asyncio.get_running_loop()  # type: ignore[attr-defined]
+        cast(Any, client)._loop = asyncio.get_running_loop()
         client._recovery.on_event(_transport_down())
         client._recovery.on_event(TransportUp(generation=2))
         await real_sleep(0)
@@ -880,7 +868,7 @@ def test_restore_is_skipped_when_trading_is_disabled(
     client = _restore_client(session, monkeypatch, enable_trading=False)
 
     async def _run() -> None:
-        client._loop = asyncio.get_running_loop()  # type: ignore[attr-defined]
+        cast(Any, client)._loop = asyncio.get_running_loop()
         client._recovery.on_event(_transport_down())
         client._recovery.on_event(TransportUp(generation=2))
         await asyncio.sleep(0)
@@ -907,7 +895,7 @@ def test_exec_restores_once_per_generation(
     client = _restore_client(session, monkeypatch)
 
     async def _run() -> None:
-        client._loop = asyncio.get_running_loop()  # type: ignore[attr-defined]
+        cast(Any, client)._loop = asyncio.get_running_loop()
         for gen in (2, 2, 3):
             client._recovery.on_event(_transport_down(gen - 1))
             client._recovery.on_event(TransportUp(generation=gen))
@@ -944,7 +932,7 @@ def test_disconnect_drops_the_listener_and_cancels_a_restore(
     client = _restore_client(session, monkeypatch)
 
     async def _run() -> None:
-        client._loop = asyncio.get_running_loop()  # type: ignore[attr-defined]
+        cast(Any, client)._loop = asyncio.get_running_loop()
         client._recovery.attach(session)
         in_flight = asyncio.ensure_future(asyncio.sleep(3600))
         client._recovery.task = in_flight
@@ -1070,7 +1058,7 @@ def test_reconnect_ream_applies_drain_rows(
     asyncio.run(client._connect())
 
     assert client._order_plant.allow_submit()
-    assert client._cache.venue_order_id(ClientOrderId("O-1")) == VenueOrderId("B1")
+    assert client._venue_order_id_for(ClientOrderId("O-1")) == VenueOrderId("B1")
     assert len(reports) == 1
     assert reports[0].venue_order_id == VenueOrderId("B1")
 
@@ -1108,11 +1096,11 @@ def test_reconnect_ream_drain_binds_only_usable_rows(
 
     assert client._order_plant.allow_submit()
     # Fully usable row: bound + published.
-    assert client._cache.venue_order_id(ClientOrderId("O-1")) == VenueOrderId("B1")
+    assert client._venue_order_id_for(ClientOrderId("O-1")) == VenueOrderId("B1")
     # Malformed row: no bind, no publish.
-    assert client._cache.venue_order_id(ClientOrderId("O-2")) is None
+    assert client._venue_order_id_for(ClientOrderId("O-2")) is None
     # Terms-missing row: advisory report still publishes, but no bind.
-    assert client._cache.venue_order_id(ClientOrderId("O-3")) is None
+    assert client._venue_order_id_for(ClientOrderId("O-3")) is None
     assert {r.venue_order_id for r in reports} == {
         VenueOrderId("B1"),
         VenueOrderId("B3"),
@@ -1186,7 +1174,7 @@ def test_rearm_drain_skips_row_with_malformed_ts(
     client._apply_drain_rows([good, bad])
 
     # No exception: the malformed row was skipped, the valid row still bound.
-    assert client._cache.venue_order_id(ClientOrderId("O-1")) == VenueOrderId("B2")
+    assert client._venue_order_id_for(ClientOrderId("O-1")) == VenueOrderId("B2")
 
 
 def test_rearm_drain_publishes_row_without_venue_ts(
@@ -1212,7 +1200,7 @@ def test_rearm_drain_publishes_row_without_venue_ts(
 
     # The valid snapshot is published AND bound, despite the tracked order
     # having ts_last=1 > the synthetic row ts 0.
-    assert client._cache.venue_order_id(ClientOrderId("O-1")) == VenueOrderId("B1")
+    assert client._venue_order_id_for(ClientOrderId("O-1")) == VenueOrderId("B1")
     assert len(reports) == 1
     assert client._order_plant.allow_submit()
 
@@ -1230,8 +1218,8 @@ def test_inflight_report_uses_venue_id_on_order_model(
     order.venue_order_id = VenueOrderId("V-MODEL")
     client._cache._orders[str(order.client_order_id)] = order
     report = asyncio.run(
-        client.generate_order_status_report(
-            GenerateOrderStatusReport(None, order.client_order_id, None, UUID4(), 1)
+        client._generate_order_status_report(
+            ReportQuery(client_order_id=order.client_order_id)
         )
     )
 
@@ -1269,7 +1257,7 @@ def test_fill_trade_id_stable_without_fill_id_or_venue_ts(
             client, "_clock", SimpleNamespace(timestamp_ns=lambda: clock)
         )
         client._session = _LoadOrdersSession([raw])
-        reports = asyncio.run(client.generate_fill_reports(_fill_cmd()))
+        reports = asyncio.run(client._generate_fill_reports(_fill_cmd()))
         assert len(reports) == 1
         return reports[0]
 
@@ -1521,7 +1509,7 @@ def test_reconnect_ream_drain_publish_failure_fails_barrier(
     assert client._order_plant.latched
     assert client._order_plant.state is OrderPlantState.LATCHED
     assert not client._order_plant.allow_submit()
-    assert client._cache.venue_order_id(ClientOrderId("O-1")) is None
+    assert client._venue_order_id_for(ClientOrderId("O-1")) is None
 
 
 def test_apply_drain_rows_skips_stale_live_advanced_row(
@@ -1548,7 +1536,7 @@ def test_apply_drain_rows_skips_stale_live_advanced_row(
 
     assert client._order_plant.allow_submit()
     assert reports == [], "stale drain row must not be published over live state"
-    assert client._cache.venue_order_id(ClientOrderId("O-1")) is None
+    assert client._venue_order_id_for(ClientOrderId("O-1")) is None
 
 
 def test_pnl_marker_only_after_successful_account_processing(
@@ -1618,7 +1606,7 @@ def test_tracked_overfill_emits_latches_and_logs(
     )
 
     assert len(filled) == 1, "the real venue fill must never be dropped"
-    assert filled[0][8] == Quantity.from_int(2), "the emitted qty must not be capped"
+    assert filled[0][4] == Quantity.from_int(2), "the emitted qty must not be capped"
     assert client._order_plant.latched
     assert client._order_plant.state is OrderPlantState.LATCHED
     assert any("overfill" in message for message in log.messages)
@@ -1815,7 +1803,7 @@ def test_fault_inject_submit_unknown_latches_and_recovers_without_duplicate(
 
     assert not client._order_plant.latched
     assert client._order_plant.state is OrderPlantState.LIVE
-    reports = asyncio.run(client.generate_order_status_reports(_status_cmd()))
+    reports = asyncio.run(client._generate_order_status_reports(_status_cmd()))
     assert [r.venue_order_id for r in reports] == [VenueOrderId("B1")]
 
 
@@ -1940,7 +1928,7 @@ def test_latched_submit_recovered_via_status_reports() -> None:
     session = FaultInjectingSession(working_orders=[_working_order_row()])
     client = _trading_client(session, plant_state=OrderPlantState.LATCHED)
 
-    reports = asyncio.run(client.generate_order_status_reports(_status_cmd()))
+    reports = asyncio.run(client._generate_order_status_reports(_status_cmd()))
 
     assert [r.venue_order_id for r in reports] == [VenueOrderId("B1")]
     assert [r.client_order_id for r in reports] == [ClientOrderId("O-1")]
@@ -1980,7 +1968,7 @@ def test_bulk_status_suppresses_stale_open_row_for_closed_order() -> None:
     log = _CaptureLog()
     client._log = log
 
-    reports = asyncio.run(client.generate_order_status_reports(_status_cmd()))
+    reports = asyncio.run(client._generate_order_status_reports(_status_cmd()))
 
     assert reports == []
     assert any("suppressing stale drain row" in m for m in log.debugs)
@@ -2003,7 +1991,7 @@ def test_bulk_status_still_reports_terminal_row_for_closed_order() -> None:
     client._cache._orders["O-1"] = _closed_cached_order()
     client._cache.add_venue_order_id(ClientOrderId("O-1"), VenueOrderId("B1"))
 
-    reports = asyncio.run(client.generate_order_status_reports(_status_cmd()))
+    reports = asyncio.run(client._generate_order_status_reports(_status_cmd()))
 
     assert [r.order_status for r in reports] == [OrderStatus.CANCELED]
     assert [r.client_order_id for r in reports] == [ClientOrderId("O-1")]
@@ -2030,7 +2018,7 @@ def test_position_query_failure_emits_no_fills(
     )
 
     with pytest.raises(RuntimeError, match="position query failed"):
-        asyncio.run(client.generate_position_status_reports(_position_cmd()))
+        asyncio.run(client._generate_position_status_reports(_position_cmd()))
 
     assert filled == []
 
@@ -2189,7 +2177,7 @@ def test_fill_commission_uses_venue_product_rate(
 
     assert len(filled) == 1
     # generate_order_filled: (…, last_qty, last_px, quote_currency, commission, …)
-    assert filled[0][11] == Money(Decimal("1.0"), Currency.from_str("USD"))
+    assert filled[0][7] == Money.from_decimal(Decimal("1.0"), Currency.from_str("USD"))
 
 
 def test_fill_commission_falls_back_to_account_default(
@@ -2214,7 +2202,7 @@ def test_fill_commission_falls_back_to_account_default(
     )
 
     assert len(filled) == 1
-    assert filled[0][11] == Money(Decimal("0.5"), Currency.from_str("USD"))
+    assert filled[0][7] == Money.from_decimal(Decimal("0.5"), Currency.from_str("USD"))
 
 
 def test_fill_commission_resolves_contract_symbol_via_instrument(
@@ -2241,7 +2229,7 @@ def test_fill_commission_resolves_contract_symbol_via_instrument(
 
     assert len(filled) == 1
     # rate 0.5 x 2 = 1.00 — NOT the 0.50 the account default would give
-    assert filled[0][11] == Money(Decimal("1.0"), Currency.from_str("USD"))
+    assert filled[0][7] == Money.from_decimal(Decimal("1.0"), Currency.from_str("USD"))
 
 
 def test_fill_commission_zero_when_rates_unavailable(
@@ -2259,7 +2247,7 @@ def test_fill_commission_zero_when_rates_unavailable(
     )
 
     assert len(filled) == 1
-    assert filled[0][11] == Money(Decimal(0), Currency.from_str("USD"))
+    assert filled[0][7] == Money.from_decimal(Decimal(0), Currency.from_str("USD"))
 
 
 def test_load_commission_rates_fetch_failure_is_nonfatal() -> None:
@@ -2316,7 +2304,9 @@ def test_untracked_fill_report_uses_venue_product_rate(
     report = client._fill_report_from_fields(fields, ts_event=1_700_000_000_000_000_000)
 
     assert report is not None
-    assert report.commission == Money(Decimal("0.5"), Currency.from_str("USD"))
+    assert report.commission == Money.from_decimal(
+        Decimal("0.5"), Currency.from_str("USD")
+    )
 
 
 def test_nonzero_position_visible_before_trading_armed(
@@ -2344,7 +2334,7 @@ def test_nonzero_position_visible_before_trading_armed(
         raising=False,
     )
 
-    reports = asyncio.run(client.generate_position_status_reports(_position_cmd()))
+    reports = asyncio.run(client._generate_position_status_reports(_position_cmd()))
 
     assert len(reports) == 1
     assert reports[0].quantity == Quantity.from_int(1)
@@ -2366,7 +2356,7 @@ def test_tracked_open_from_submitted_emits_accept(
     _notify(client, _accepted_notification())
 
     assert len(gens["accepted"]) == 1
-    assert client._cache.venue_order_id(ClientOrderId("O-1")) == VenueOrderId("B1")
+    assert client._venue_order_id_for(ClientOrderId("O-1")) == VenueOrderId("B1")
     assert log.messages == []
 
 

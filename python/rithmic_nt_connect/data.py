@@ -11,39 +11,41 @@ from collections import OrderedDict
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from nautilus_trader.cache.cache import Cache
-from nautilus_trader.common.component import LiveClock, MessageBus
-from nautilus_trader.data.messages import (
+from nautilus_trader.common import Clock, Logger
+from nautilus_trader.live import (
+    BarsResponse,
+    ClientCache,
     RequestBars,
-    RequestTradeTicks,
+    RequestTrades,
     SubscribeBars,
-    SubscribeOrderBook,
-    SubscribeQuoteTicks,
-    SubscribeTradeTicks,
+    SubscribeBookDeltas,
+    SubscribeQuotes,
+    SubscribeTrades,
+    TradesResponse,
     UnsubscribeBars,
-    UnsubscribeOrderBook,
-    UnsubscribeQuoteTicks,
-    UnsubscribeTradeTicks,
+    UnsubscribeBookDeltas,
+    UnsubscribeQuotes,
+    UnsubscribeTrades,
 )
-from nautilus_trader.live.data_client import LiveMarketDataClient
-from nautilus_trader.model.data import (
+from nautilus_trader.live.clients import MarketDataClient
+from nautilus_trader.model import (
+    AggressorSide,
     Bar,
+    BarAggregation,
     BarType,
+    BookAction,
     BookOrder,
+    InstrumentId,
     OrderBookDelta,
     OrderBookDeltas,
-    QuoteTick,
-    TradeTick,
-)
-from nautilus_trader.model.enums import (
-    AggressorSide,
-    BarAggregation,
-    BookAction,
     OrderSide,
+    Quantity,
+    QuoteTick,
     RecordFlag,
+    TradeId,
+    TradeTick,
+    Venue,
 )
-from nautilus_trader.model.identifiers import ClientId, InstrumentId, TradeId, Venue
-from nautilus_trader.model.objects import Quantity
 
 if TYPE_CHECKING:
     from rithmic_nt_connect.transport import Interrupted, RecoveryFailed
@@ -56,7 +58,6 @@ from rithmic_nt_connect._convert import (
     time_bar_to_fields,
 )
 from rithmic_nt_connect._prices import price_from_wire
-from rithmic_nt_connect.config import RithmicDataClientConfig
 from rithmic_nt_connect.constants import ADAPTER_NAME, VENUE
 from rithmic_nt_connect.errors import (
     is_reconnectable_poll_error,
@@ -134,9 +135,9 @@ _RITHMIC_WEEKLY = 4
 
 def _aggressor(value: Any) -> AggressorSide:
     if value in (1, "1", "BUY", "BUYER", "bid"):
-        return AggressorSide.BUYER
+        return AggressorSide.BUY
     if value in (2, "2", "SELL", "SELLER", "ask"):
-        return AggressorSide.SELLER
+        return AggressorSide.SELL
     if value is None:
         return AggressorSide.NO_AGGRESSOR
     raise ValueError(f"unknown aggressor value: {value!r}")
@@ -338,6 +339,9 @@ def _book_delta(
     ts_event: int,
     ts_init: int,
 ) -> OrderBookDelta:
+    if order is None:
+        # A CLEAR carries the null book order ``OrderBookDelta.clear`` builds.
+        order = OrderBookDelta.clear(instrument_id, 0, ts_event, ts_init).order
     return OrderBookDelta(
         instrument_id,
         action,
@@ -765,19 +769,12 @@ def bar_resync_subscriptions(bar_types: dict) -> set[tuple[str, str, int, int]]:
     return subs
 
 
-class RithmicDataClient(LiveMarketDataClient):
+class RithmicDataClient(MarketDataClient):
     """Out-of-tree live market-data client backed by the Rust Rithmic session.
 
-    Nautilus 1.231.x models ``LiveMarketDataClient`` as a ``MarketDataClient``
-    rather than a ``LiveDataClient``, yet ``LiveDataClientFactory.create``
-    contracts ``-> LiveDataClient``. The 8862b62 attempt to satisfy that
-    contract by taking both bases broke at runtime: the two base ``__init__``
-    chains are not cooperative in this version (either MRO ordering lands on
-    the other base's required ``loop``), so ``TradingNode.build`` raised
-    ``TypeError: LiveDataClient.__init__() missing 'loop'``. The factory
-    contract is satisfied by the vendored stub declaring
-    ``LiveMarketDataClient(LiveDataClient)``; at runtime the node builder
-    only registers the client (no ``isinstance`` check).
+    A NautilusTrader 2 Python client: hooks run on the node's event loop,
+    ``cache`` is a read-only view of the core cache, and every instrument, data
+    point and history response is queued for the core through the client output.
     """
 
     # Class default for doubles built without __init__ (set per config there).
@@ -785,25 +782,23 @@ class RithmicDataClient(LiveMarketDataClient):
 
     def __init__(
         self,
-        loop: asyncio.AbstractEventLoop,
-        msgbus: MessageBus,
-        cache: Cache,
-        clock: LiveClock,
-        instrument_provider: RithmicInstrumentProvider,
-        config: RithmicDataClientConfig,
-        session: WireSession,
+        *,
         name: str | None = None,
+        config: Any,
+        cache: ClientCache,
+        clock: Clock,
+        instrument_provider: RithmicInstrumentProvider,
+        session: WireSession,
     ) -> None:
         super().__init__(
-            loop=loop,
-            client_id=ClientId(name or ADAPTER_NAME),
-            venue=Venue(VENUE),
-            msgbus=msgbus,
+            name=name or ADAPTER_NAME,
+            config=config,
             cache=cache,
             clock=clock,
+            venue=Venue(VENUE),
             instrument_provider=instrument_provider,
-            config=None,
         )
+        self._log = Logger(name or ADAPTER_NAME)
         self._config_local = config
         self._session = session
         self._poll_task: asyncio.Task | None = None
@@ -817,7 +812,8 @@ class RithmicDataClient(LiveMarketDataClient):
         self._bar_types: dict[tuple[str, str, int, int], set[BarType]] = {}
         self._instrument_routes: dict[str, tuple[str, str]] = {}
         self._history_poll_task: asyncio.Task | None = None
-        self._resync_lock = asyncio.Lock()
+        # Created in ``_connect``: v2 clients bind to the node loop at startup.
+        self._resync_lock: asyncio.Lock | None = None
         self._resync_generation = 0
         self._recovery = self._build_recovery()
         # One-sided BestBidOffer merge state, keyed by symbol[:exchange].
@@ -838,6 +834,26 @@ class RithmicDataClient(LiveMarketDataClient):
         self._skip_counts: dict[str, int] = {}
         self._skip_last_flush = 0.0
 
+    @property
+    def _cache(self) -> Any:
+        return self.cache
+
+    @_cache.setter
+    def _cache(self, value: Any) -> None:
+        self.cache = value
+
+    @property
+    def _clock(self) -> Any:
+        return self.clock
+
+    @_clock.setter
+    def _clock(self, value: Any) -> None:
+        self.clock = value
+
+    @property
+    def _instrument_provider(self) -> Any:
+        return self.instrument_provider
+
     async def _connect(self) -> None:
         from rithmic_nt_connect.session import ensure_connected
 
@@ -845,7 +861,7 @@ class RithmicDataClient(LiveMarketDataClient):
         self._recovery.attach(self._session)
         await self._instrument_provider.initialize()
         for instrument in self._instrument_provider.list_all():
-            self._handle_data(instrument)
+            self._handle_instrument(instrument)
             info = instrument.info or {}
             try:
                 exchange = str(info["rithmic_exchange"])
@@ -875,9 +891,11 @@ class RithmicDataClient(LiveMarketDataClient):
         self._books.reset()
         if self._bar_types:
             self._ensure_history_poll_task()
-        # Own the task: LiveMarketDataClient.create_task WARNs on our cancel.
+        # Own the task (joined in ``_disconnect``): its cancel is a normal stop.
         self._poll_closing = False
-        self._poll_task = self._loop.create_task(self._poll_loop(), name="rithmic_poll")
+        self._poll_task = asyncio.get_running_loop().create_task(
+            self._poll_loop(), name="rithmic_poll"
+        )
         self._poll_task.add_done_callback(
             lambda task: self._on_poll_done(task, name="rithmic_poll")
         )
@@ -885,7 +903,7 @@ class RithmicDataClient(LiveMarketDataClient):
     def _ensure_history_poll_task(self) -> None:
         if self._history_poll_task is not None:
             return
-        self._history_poll_task = self._loop.create_task(
+        self._history_poll_task = asyncio.get_running_loop().create_task(
             self._history_poll_loop(), name="rithmic_history_poll"
         )
         self._history_poll_task.add_done_callback(
@@ -899,12 +917,21 @@ class RithmicDataClient(LiveMarketDataClient):
         if exc is not None:
             self._log.error(f"{name} died: {exc}")
 
+    def _event_loop(self) -> asyncio.AbstractEventLoop | None:
+        """The node loop once the client is bound (``loop``), else an explicitly
+        assigned ``_loop`` (doubles built without ``__init__``)."""
+        try:
+            loop = self.loop
+        except AttributeError:
+            loop = None
+        return loop if loop is not None else self.__dict__.get("_loop")
+
     def _build_recovery(self) -> TransportRecoveryBridge:
         return TransportRecoveryBridge(
             label="MD reconciliation",
             task_name="rithmic_md_reconcile",
             log=lambda: self._log,
-            get_loop=lambda: getattr(self, "_loop", None),
+            get_loop=self._event_loop,
             spawn=lambda loop, coro, name: loop.create_task(coro, name=name),
             restore=self._reconcile_md_after_resumed,
             on_down=self._on_transport_down,
@@ -947,6 +974,8 @@ class RithmicDataClient(LiveMarketDataClient):
 
     async def _resync_ticker_subscription(self) -> None:
         start_gen = self._resync_generation
+        if self._resync_lock is None:
+            self._resync_lock = asyncio.Lock()
         async with self._resync_lock:
             if self._resync_generation != start_gen:
                 return
@@ -1032,6 +1061,11 @@ class RithmicDataClient(LiveMarketDataClient):
 
     def _price_precision(self, instrument_id: InstrumentId) -> int:
         instrument = self._cache.instrument(instrument_id)
+        if instrument is None:
+            # The core applies queued instruments asynchronously; the provider
+            # already holds what ``_connect`` loaded.
+            provider = getattr(self, "instrument_provider", None)
+            instrument = provider.find(instrument_id) if provider else None
         if instrument is None:
             raise ConvertError(f"instrument not in cache: {instrument_id}")
         return int(instrument.price_precision)
@@ -1122,7 +1156,7 @@ class RithmicDataClient(LiveMarketDataClient):
         except ConvertError as exc:
             self._count_skip(f"{etype}: {exc}")
         except Exception as exc:
-            self._log.exception(f"failed to dispatch {etype}", exc)
+            self._log.exception(f"failed to dispatch {etype}: {exc}")
 
     def _route(self, instrument_id: InstrumentId) -> tuple[str, str]:
         key = str(instrument_id)
@@ -1136,11 +1170,44 @@ class RithmicDataClient(LiveMarketDataClient):
     def _bar_types_for_event(self, event: dict[str, Any]) -> set[BarType]:
         return bar_types_for_event(self._bar_types, event)
 
-    async def _subscribe_trade_ticks(self, command: SubscribeTradeTicks) -> None:
-        await self._add_ticker_intent(command.instrument_id, "trade")
+    async def _each(
+        self, action: str, members: list[Any], call: Callable[[Any], Any]
+    ) -> None:
+        """Apply ``call`` to every list member, best effort.
 
-    async def _subscribe_quote_ticks(self, command: SubscribeQuoteTicks) -> None:
-        await self._add_ticker_intent(command.instrument_id, "quote")
+        NautilusTrader 2 hands a subscription hook every compatible member at
+        once. A member failure must not skip the members after it; each failure
+        is logged. The hook raises only when no member succeeded: a batch whose
+        other members are live must not be reported to the node as failed.
+        """
+        errors: list[str] = []
+        for member in members:
+            try:
+                await call(member)
+            except Exception as exc:
+                self._log.error(f"{action} {member}: {exc}")
+                errors.append(f"{member}: {exc}")
+        if errors and len(errors) == len(members):
+            raise RuntimeError(f"{action} failed for {'; '.join(errors)}")
+        if errors:
+            self._log.warning(
+                f"{action}: {len(errors)} of {len(members)} failed "
+                f"({'; '.join(errors)}); the rest are live"
+            )
+
+    async def _subscribe_trades(self, command: SubscribeTrades) -> None:
+        await self._each(
+            "subscribe_trades",
+            command.instrument_ids,
+            lambda iid: self._add_ticker_intent(iid, "trade"),
+        )
+
+    async def _subscribe_quotes(self, command: SubscribeQuotes) -> None:
+        await self._each(
+            "subscribe_quotes",
+            command.instrument_ids,
+            lambda iid: self._add_ticker_intent(iid, "quote"),
+        )
 
     async def _add_ticker_intent(self, instrument_id: Any, kind: str) -> None:
         if not hasattr(self, "_ticker_intents"):
@@ -1164,11 +1231,19 @@ class RithmicDataClient(LiveMarketDataClient):
                     del self._ticker_intents[key]
                 raise
 
-    async def _unsubscribe_trade_ticks(self, command: UnsubscribeTradeTicks) -> None:
-        await self._remove_ticker_intent(command.instrument_id, "trade")
+    async def _unsubscribe_trades(self, command: UnsubscribeTrades) -> None:
+        await self._each(
+            "unsubscribe_trades",
+            command.instrument_ids,
+            lambda iid: self._remove_ticker_intent(iid, "trade"),
+        )
 
-    async def _unsubscribe_quote_ticks(self, command: UnsubscribeQuoteTicks) -> None:
-        await self._remove_ticker_intent(command.instrument_id, "quote", clear_bbo=True)
+    async def _unsubscribe_quotes(self, command: UnsubscribeQuotes) -> None:
+        await self._each(
+            "unsubscribe_quotes",
+            command.instrument_ids,
+            lambda iid: self._remove_ticker_intent(iid, "quote", clear_bbo=True),
+        )
 
     async def _remove_ticker_intent(
         self, instrument_id: Any, kind: str, *, clear_bbo: bool = False
@@ -1204,31 +1279,45 @@ class RithmicDataClient(LiveMarketDataClient):
                     self._ticker_intents[key] = {kind}
                     raise
 
-    async def _subscribe_order_book_deltas(self, command: SubscribeOrderBook) -> None:
-        symbol, exchange = self._route(command.instrument_id)
+    async def _subscribe_book_deltas(self, command: SubscribeBookDeltas) -> None:
+        await self._each(
+            "subscribe_book_deltas", command.instrument_ids, self._add_book_intent
+        )
+
+    async def _add_book_intent(self, instrument_id: InstrumentId) -> None:
+        symbol, exchange = self._route(instrument_id)
         await asyncio.to_thread(
             self._session.subscribe_order_book_summary, symbol, exchange
         )
         self._book_subscriptions.add((symbol, exchange))
 
-    async def _unsubscribe_order_book_deltas(
-        self, command: UnsubscribeOrderBook
-    ) -> None:
-        symbol, exchange = self._route(command.instrument_id)
+    async def _unsubscribe_book_deltas(self, command: UnsubscribeBookDeltas) -> None:
+        await self._each(
+            "unsubscribe_book_deltas",
+            command.instrument_ids,
+            self._remove_book_intent,
+        )
+
+    async def _remove_book_intent(self, instrument_id: InstrumentId) -> None:
+        symbol, exchange = self._route(instrument_id)
         await asyncio.to_thread(
             self._session.unsubscribe_order_book_summary, symbol, exchange
         )
         self._book_subscriptions.discard((symbol, exchange))
 
     async def _subscribe_bars(self, command: SubscribeBars) -> None:
-        bar_type = command.bar_type
-        if not bar_type.is_externally_aggregated():
-            return
-        if not external_bar_advertised(bar_type):
+        external = [bt for bt in command.bar_types if bt.is_externally_aggregated()]
+        # Reject an unsupported list before any effect (v2 list contract).
+        unsupported = [bt for bt in external if not external_bar_advertised(bt)]
+        if unsupported:
             raise ValueError(
-                f"live EXTERNAL bars not advertised for {bar_type}; "
+                "live EXTERNAL bars not advertised for "
+                f"{', '.join(str(bt) for bt in unsupported)}; "
                 "use request_bars for lookback or INTERNAL 1s from ticks"
             )
+        await self._each("subscribe_bars", external, self._add_bar_intent)
+
+    async def _add_bar_intent(self, bar_type: BarType) -> None:
         symbol, exchange = self._route(bar_type.instrument_id)
         rtype, period = bar_type_to_rithmic(bar_type)
         await asyncio.to_thread(
@@ -1241,11 +1330,14 @@ class RithmicDataClient(LiveMarketDataClient):
         self._ensure_history_poll_task()
 
     async def _unsubscribe_bars(self, command: UnsubscribeBars) -> None:
-        bar_type = command.bar_type
-        if not bar_type.is_externally_aggregated():
-            return
-        if not external_bar_advertised(bar_type):
-            return
+        external = [
+            bt
+            for bt in command.bar_types
+            if bt.is_externally_aggregated() and external_bar_advertised(bt)
+        ]
+        await self._each("unsubscribe_bars", external, self._remove_bar_intent)
+
+    async def _remove_bar_intent(self, bar_type: BarType) -> None:
         symbol, exchange = self._route(bar_type.instrument_id)
         rtype, period = bar_type_to_rithmic(bar_type)
         # Save for rollback
@@ -1280,31 +1372,17 @@ class RithmicDataClient(LiveMarketDataClient):
                         self._bar_types.pop(k, None)
                 raise
 
-    async def _request_trade_ticks(self, request: RequestTradeTicks) -> None:
-        try:
-            symbol, exchange = self._route(request.instrument_id)
-        except ValueError as exc:
-            self._log.error(f"RequestTradeTicks: {exc}")
-            self._handle_trade_ticks(
-                request.instrument_id,
-                [],
-                request.id,
-                request.start,
-                request.end,
-                request.params,
-            )
-            return
+    async def _request_trades(self, request: RequestTrades) -> None:
+        """Trade history for one instrument.
+
+        A successful fetch (possibly empty) completes with ``TradesResponse``; a
+        failure raises, and NautilusTrader 2 hands the message to the requester
+        as ``failure_reason``. The request never hangs.
+        """
+        instrument_id = request.instrument_id
+        symbol, exchange = self._route(instrument_id)
         if request.start is None or request.end is None:
-            self._log.error("RequestTradeTicks requires start and end")
-            self._handle_trade_ticks(
-                request.instrument_id,
-                [],
-                request.id,
-                request.start,
-                request.end,
-                request.params,
-            )
-            return
+            raise ValueError("RequestTrades requires start and end")
         start = int(request.start.timestamp())
         end = int(request.end.timestamp())
         try:
@@ -1316,82 +1394,52 @@ class RithmicDataClient(LiveMarketDataClient):
                 end,
             )
         except Exception as exc:
-            self._log.error(
-                f"Error requesting trade ticks for {request.instrument_id}: {exc}"
-            )
-            self._handle_trade_ticks(
-                request.instrument_id,
-                [],
-                request.id,
-                request.start,
-                request.end,
-                request.params,
-            )
-            return
+            self._log.error(f"Error requesting trade ticks for {instrument_id}: {exc}")
+            raise
 
         ts_init = self._clock.timestamp_ns()
-        try:
-            prec = self._price_precision(request.instrument_id)
-            ticks = payloads_to_trade_ticks(
-                list(ticks_raw),
-                symbol=symbol,
-                exchange=exchange,
-                price_precision=prec,
-                ts_init=ts_init,
-                on_invalid_row=lambda _exc: self._count_skip("history_tick_invalid"),
-            )
-        except ValueError as exc:
-            self._log.error(f"Invalid history tick for {request.instrument_id}: {exc}")
-            self._handle_trade_ticks(
-                request.instrument_id,
-                [],
-                request.id,
-                request.start,
-                request.end,
-                request.params,
-            )
-            return
-
+        prec = self._price_precision(instrument_id)
+        ticks = payloads_to_trade_ticks(
+            list(ticks_raw),
+            symbol=symbol,
+            exchange=exchange,
+            price_precision=prec,
+            ts_init=ts_init,
+            on_invalid_row=lambda _exc: self._count_skip("history_tick_invalid"),
+        )
         # Order: Rithmic FORWARDS replay + session sorts by ts_event_ns.
-        # Nautilus _handle_trade_ticks does not re-sort; last-N needs time order.
+        # The engine does not re-sort; last-N needs time order.
         if request.limit:
             ticks = ticks[-request.limit :]
-        self._handle_trade_ticks(
-            request.instrument_id,
-            ticks,
-            request.id,
-            request.start,
-            request.end,
-            request.params,
+        self._handle_response(
+            TradesResponse(
+                client_id=self.client_id,
+                instrument_id=instrument_id,
+                data=ticks,
+                correlation_id=request.request_id,
+                ts_init=ts_init,
+                start=request.start_ns,
+                end=request.end_ns,
+                params=request.params,
+            )
         )
 
     async def _request_bars(self, request: RequestBars) -> None:
+        """Venue bars for one ``BarType`` (completed or raised, never hung).
+
+        A failure also records its tag for ``request_bars_error`` (book
+        hydration distinguishes the RC2.3 live-MD block from other errors).
+        """
         bar_type = request.bar_type
         try:
             symbol, exchange = self._route(bar_type.instrument_id)
             rithmic_type, period = bar_type_to_rithmic(bar_type)
+            if request.start is None or request.end is None:
+                raise ValueError("RequestBars requires start and end")
         except ValueError as exc:
+            _note_request_bars_error(request.request_id, "history_error")
             self._log.error(str(exc))
-            self._handle_bars(
-                bar_type,
-                [],
-                request.id,
-                request.start,
-                request.end,
-                request.params,
-            )
-            return
-        if request.start is None or request.end is None:
-            self._log.error("RequestBars requires start and end")
-            self._handle_bars(
-                bar_type,
-                [],
-                request.id,
-                request.start,
-                request.end,
-                request.params,
-            )
-            return
+            raise
         start = int(request.start.timestamp())
         end = int(request.end.timestamp())
         self._log.info(
@@ -1426,23 +1474,19 @@ class RithmicDataClient(LiveMarketDataClient):
                     await asyncio.sleep(retry_every)
                     continue
                 if _is_live_md_history_denied(exc):
-                    _note_request_bars_error(request.id, "hydrate_blocked_live_md")
+                    _note_request_bars_error(
+                        request.request_id, "hydrate_blocked_live_md"
+                    )
                     self._log.error(
                         f"HYDRATE_BLOCKED_LIVE_MD: Error requesting bars for "
                         f"{bar_type} after {wait_budget:.0f}s wait: {exc}"
                     )
-                else:
-                    _note_request_bars_error(request.id, "history_error")
-                    self._log.error(f"Error requesting bars for {bar_type}: {exc}")
-                self._handle_bars(
-                    bar_type,
-                    [],
-                    request.id,
-                    request.start,
-                    request.end,
-                    request.params,
-                )
-                return
+                    raise RuntimeError(
+                        f"HYDRATE_BLOCKED_LIVE_MD: {bar_type}: {exc}"
+                    ) from exc
+                _note_request_bars_error(request.request_id, "history_error")
+                self._log.error(f"Error requesting bars for {bar_type}: {exc}")
+                raise
 
         ts_init = self._clock.timestamp_ns()
         try:
@@ -1458,21 +1502,14 @@ class RithmicDataClient(LiveMarketDataClient):
                 timestamp_on_close=self._bars_timestamp_on_close,
             )
         except ValueError as exc:
+            _note_request_bars_error(request.request_id, "history_error")
             self._log.error(f"Invalid history bar for {bar_type}: {exc}")
-            self._handle_bars(
-                bar_type,
-                [],
-                request.id,
-                request.start,
-                request.end,
-                request.params,
-            )
-            return
+            raise
 
         bars = closed_bars(
             bars,
             bar_type,
-            int(request.end.timestamp() * 1_000_000_000),
+            int(request.end_ns) if request.end_ns is not None else end * 1_000_000_000,
             timestamp_on_close=self._bars_timestamp_on_close,
         )
         # Order: FORWARDS + session sort by ts_event_ns (NT does not re-sort).
@@ -1483,11 +1520,15 @@ class RithmicDataClient(LiveMarketDataClient):
         self._log.info(
             f"loaded {len(bars)} {bar_type} history bars (raw={len(bars_raw)})"
         )
-        self._handle_bars(
-            bar_type,
-            bars,
-            request.id,
-            request.start,
-            request.end,
-            request.params,
+        self._handle_response(
+            BarsResponse(
+                client_id=self.client_id,
+                bar_type=bar_type,
+                data=bars,
+                correlation_id=request.request_id,
+                ts_init=ts_init,
+                start=request.start_ns,
+                end=request.end_ns,
+                params=request.params,
+            )
         )

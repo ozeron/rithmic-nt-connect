@@ -6,13 +6,15 @@ import asyncio
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pytest
 from _stubs import _CacheStub, _Log, _TestClient
-from nautilus_trader.model.identifiers import AccountId
+from nautilus_trader.model import AccountId
 from rithmic_nt_connect.errors import VenueQueryUnavailable
 from rithmic_nt_connect.exposure import (
+    EXPOSURE_HUB,
     PNL_SETTLE_NS,
+    ExposureHub,
     ExposureSnapshot,
-    exposure_topic,
     matches_root,
     product_root,
     signed_net,
@@ -83,9 +85,11 @@ def test_product_root_and_signed_net() -> None:
 def test_net_is_unknown_until_the_pnl_stream_is_live() -> None:
     now = [10]
     client = _client(now, [])
+    seen: list[ExposureSnapshot] = []
+    EXPOSURE_HUB.subscribe("MNQ", seen.append)
     snap = asyncio.run(client.request_exposure("MNQ"))
     assert snap.net is None and not snap.complete and snap.reply
-    assert client._msgbus.published[-1] == (exposure_topic("MNQ"), snap)
+    assert seen[-1] == snap
 
 
 def test_complete_snapshot_counts_root_orders_and_net() -> None:
@@ -142,9 +146,11 @@ def test_reconnect_forgets_rows_from_the_previous_stream() -> None:
 
 def test_position_rows_push_a_net_only_snapshot() -> None:
     client = _client([5], [])
+    seen: list[ExposureSnapshot] = []
+    EXPOSURE_HUB.subscribe("mnq", seen.append)
     client._cache_position(_pnl("MNQZ6", 1))
-    topic, snap = client._msgbus.published[-1]
-    assert topic == "rithmic.exposure.MNQ"
+    snap = seen[-1]
+    assert snap.root == "MNQ"
     assert isinstance(snap, ExposureSnapshot)
     assert snap.net == 1 and snap.open_orders is None and not snap.complete
     assert snap.reply is False
@@ -224,3 +230,35 @@ def test_an_unreadable_row_without_a_symbol_poisons_every_root() -> None:
     client._forget_pnl_state()  # a fresh stream starts clean
     client._cache_position(_pnl("ESZ6", 0))
     assert asyncio.run(client.request_exposure("ES")).net == 0
+
+
+def test_hub_routes_requests_to_the_latest_connected_responder() -> None:
+    hub = ExposureHub()
+    with pytest.raises(LookupError):
+        asyncio.run(hub.request("MNQ"))
+    first = _client([10], [])
+    second = _client([20], [])
+    assert hub.register_responder(first.request_exposure)
+    # A client that died without disconnecting must not keep answering.
+    assert not hub.register_responder(second.request_exposure)
+    assert asyncio.run(hub.request(" mnq ")).ts_init == 20
+    hub.unregister_responder(first.request_exposure)  # not the responder: no-op
+    assert hub.has_responder
+    hub.unregister_responder(second.request_exposure)
+    assert not hub.has_responder
+
+
+def test_hub_unsubscribe_and_wildcard() -> None:
+    hub = ExposureHub()
+    roots: list[str] = []
+    every: list[str] = []
+    hub.subscribe("MNQ", lambda s: roots.append(s.root))
+    hub.subscribe("*", lambda s: every.append(s.root))
+    snap = ExposureSnapshot("MNQ", 1, None, 1, None, 1)
+    hub.publish(snap)
+    hub.publish(ExposureSnapshot("ES", 0, None, 1, None, 1))
+    assert roots == ["MNQ"] and every == ["MNQ", "ES"]
+    handler = hub._handlers["MNQ"][0]
+    hub.unsubscribe("MNQ", handler)
+    hub.publish(snap)
+    assert roots == ["MNQ"]

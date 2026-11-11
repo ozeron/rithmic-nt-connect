@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from nautilus_trader.model.data import Bar, BarType
-from nautilus_trader.model.objects import Price, Quantity
+from nautilus_trader.model import Bar, BarType, Price, Quantity
 from rithmic_nt_connect.data import BarSequenceGuard, closed_bars
 
 M1 = BarType.from_str("MNQZ6.RITHMIC-1-MINUTE-LAST-EXTERNAL")

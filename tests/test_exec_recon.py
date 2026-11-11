@@ -4,54 +4,53 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from types import MethodType, SimpleNamespace
 from typing import Any, cast
 
 import pytest
 from _stubs import _CacheStub, _CaptureLog, _Log, _TestClient
-from nautilus_trader.core.uuid import UUID4
-from nautilus_trader.execution.messages import (
-    GenerateFillReports,
-    GenerateOrderStatusReport,
-    GenerateOrderStatusReports,
-    GeneratePositionStatusReports,
-)
-from nautilus_trader.execution.reports import OrderStatusReport
-from nautilus_trader.model.enums import (
+from nautilus_trader.core import UUID4
+from nautilus_trader.model import (
+    AccountId,
+    ClientId,
+    ClientOrderId,
+    Currency,
+    InstrumentId,
+    LimitOrder,
     LiquiditySide,
+    Money,
+    OrderAccepted,
+    OrderFilled,
     OrderSide,
     OrderStatus,
+    OrderStatusReport,
+    OrderSubmitted,
     OrderType,
-    TimeInForce,
-    TriggerType,
-)
-from nautilus_trader.model.events import OrderAccepted, OrderFilled, OrderSubmitted
-from nautilus_trader.model.identifiers import (
-    AccountId,
-    ClientOrderId,
-    InstrumentId,
+    Price,
+    Quantity,
     StrategyId,
+    TimeInForce,
     TradeId,
     TraderId,
+    TriggerType,
+    Venue,
     VenueOrderId,
 )
-from nautilus_trader.model.objects import Currency, Money, Price, Quantity
-from nautilus_trader.model.orders import LimitOrder, Order
 from rithmic_nt_connect._order_plant import OrderPlantPolicy, OrderPlantState
 from rithmic_nt_connect._orders import FillDedupStore, UntrackedStatusBook
 from rithmic_nt_connect.errors import (
     ReconciliationUnavailableError,
     VenueQueryUnavailable,
 )
-from rithmic_nt_connect.execution import RithmicExecutionClient
+from rithmic_nt_connect.execution import ReportQuery, RithmicExecutionClient
 from rithmic_nt_connect.notification_intake import intake_for
 from rithmic_nt_connect.order_rows import (
     order_status_from_fields,
     trigger_type_from_fields,
 )
-from rithmic_nt_connect.recon import drain_for
+from rithmic_nt_connect.recon import drain_for, soft_mass_status
 from rithmic_nt_connect.session import WireSession
 
 
@@ -63,10 +62,10 @@ def _bind_untracked_methods(client: Any) -> None:
 
 
 def _client() -> _TestClient:
-    """Build a test double without the Cython base's ``__init__``.
+    """Build a test double without the native base's ``__init__``.
 
-    The base's ``_log`` / ``_clock`` / ``_cache`` / ``account_id`` are cdef
-    read-only, so ``_TestClient`` re-exposes them as writable properties. The
+    The base's ``_log`` / ``_clock`` / ``_cache`` / ``account_id`` are read-only
+    on the real client, so ``_TestClient`` re-exposes them as writable properties. The
     defaults here keep every code path loggable, clocked, and cache-backed.
     """
     client = _TestClient.__new__(_TestClient)
@@ -168,7 +167,7 @@ def _report_client() -> SimpleNamespace:
     """Minimal host for ``order_status_report_from_fields``; the report's
     order type / TIF / status / trigger type come from the real wire fields."""
     client = SimpleNamespace(
-        account_id="RITHMIC-ACC1",
+        account_id=AccountId("RITHMIC-ACC1"),
         _clock=SimpleNamespace(timestamp_ns=lambda: 2),
         _seed_account_if_needed=lambda account_raw: None,
     )
@@ -187,25 +186,21 @@ def _drain_row_result(
     return SimpleNamespace(fields=fields, ts_event=ts_event, report=status)
 
 
-def _fill_cmd() -> GenerateFillReports:
-    return GenerateFillReports(
+def _fill_cmd() -> ReportQuery:
+    return ReportQuery(
         instrument_id=None,
         venue_order_id=None,
         start=None,
         end=None,
-        command_id=UUID4(),
-        ts_init=1,
     )
 
 
-def _status_cmd() -> GenerateOrderStatusReports:
-    return GenerateOrderStatusReports(
+def _status_cmd() -> ReportQuery:
+    return ReportQuery(
         instrument_id=None,
         start=None,
         end=None,
         open_only=False,
-        command_id=UUID4(),
-        ts_init=1,
     )
 
 
@@ -616,7 +611,7 @@ def test_emit_triggered_guarded_suppresses_duplicate_trigger(
     client = _client()
     order = _order(OrderType.STOP_LIMIT)
     order.status = OrderStatus.TRIGGERED
-    triggered: list[tuple[object, ...]] = []
+    triggered: list[tuple[Any, ...]] = []
     monkeypatch.setattr(
         client, "generate_order_triggered", lambda *args: triggered.append(args)
     )
@@ -741,7 +736,7 @@ def test_trigger_notification_emission_guarded_by_order_type(
     client = _client()
     order = _order(order_type)
     client._cache._orders[str(order.client_order_id)] = order
-    triggered: list[tuple[object, ...]] = []
+    triggered: list[tuple[Any, ...]] = []
     monkeypatch.setattr(
         client, "generate_order_triggered", lambda *args: triggered.append(args)
     )
@@ -753,7 +748,7 @@ def test_trigger_notification_emission_guarded_by_order_type(
     assert bool(triggered) is emits_triggered
     if emits_triggered:
         assert len(triggered) == 1
-        assert triggered[0][2] == ClientOrderId("O-1")
+        assert triggered[0][0].client_order_id == ClientOrderId("O-1")
 
 
 def test_stop_market_trigger_then_fill_still_emits_fill(
@@ -823,7 +818,7 @@ def test_status_report_publication_failure_is_non_fatal_to_fill_reconciliation(
         lambda report: (_ for _ in ()).throw(RuntimeError("stale report")),
     )
 
-    reports = asyncio.run(client.generate_fill_reports(_fill_cmd()))
+    reports = asyncio.run(client._generate_fill_reports(_fill_cmd()))
 
     assert reports == []
 
@@ -849,7 +844,7 @@ def test_fill_reconciliation_skips_fill_without_status_prerequisite(
     )
     monkeypatch.setattr(client, "_send_order_status_report", lambda report: None)
 
-    reports = asyncio.run(client.generate_fill_reports(_fill_cmd()))
+    reports = asyncio.run(client._generate_fill_reports(_fill_cmd()))
 
     assert reports == []
 
@@ -876,8 +871,8 @@ def test_replayed_fill_publishes_status_before_fill_and_is_idempotent(
         lambda report: published.append(("status", report)),
     )
 
-    first = asyncio.run(client.generate_fill_reports(_fill_cmd()))
-    second = asyncio.run(client.generate_fill_reports(_fill_cmd()))
+    first = asyncio.run(client._generate_fill_reports(_fill_cmd()))
+    second = asyncio.run(client._generate_fill_reports(_fill_cmd()))
 
     assert first == [fill_report]
     assert second == []
@@ -1075,10 +1070,10 @@ def test_generate_order_status_reports_preserves_stop_trigger_type(
     Nautilus, with the venue drain stubbed to return one stop event.
     """
     client = _trading_client(_LoadOrdersSession([_stop_recon_event()]))
-    client.account_id = "RITHMIC-ACC1"
+    client.account_id = AccountId("RITHMIC-ACC1")
     monkeypatch.setattr(client, "_seed_account_if_needed", lambda account_raw: None)
 
-    reports = asyncio.run(client.generate_order_status_reports(_status_cmd()))
+    reports = asyncio.run(client._generate_order_status_reports(_status_cmd()))
 
     assert len(reports) == 1
     report = reports[0]
@@ -1194,7 +1189,7 @@ def test_cached_stop_order_status_report_preserves_native_order_metadata() -> No
         avg_px=0.0,  # resting stop: no fills yet
     )
     client = SimpleNamespace(
-        _cache=SimpleNamespace(venue_order_id=lambda cid: venue_order_id),
+        _venue_order_id_for=lambda cid: venue_order_id,
         account_id=AccountId("RITHMIC-ACC1"),
     )
     client._venue_id_for_order = MethodType(
@@ -1202,7 +1197,7 @@ def test_cached_stop_order_status_report_preserves_native_order_metadata() -> No
     )
 
     report = RithmicExecutionClient._order_status_report_for(
-        cast(RithmicExecutionClient, client), cast(Order, order), 3
+        cast(RithmicExecutionClient, client), cast(Any, order), 3
     )
 
     assert report is not None
@@ -1238,7 +1233,7 @@ def test_cached_submitted_stop_query_reports_accepted() -> None:
     )
     venue_order_id = VenueOrderId("201087037")
     client = SimpleNamespace(
-        _cache=SimpleNamespace(venue_order_id=lambda cid: venue_order_id),
+        _venue_order_id_for=lambda cid: venue_order_id,
         account_id=AccountId("RITHMIC-ACC1"),
     )
     client._venue_id_for_order = MethodType(
@@ -1246,7 +1241,7 @@ def test_cached_submitted_stop_query_reports_accepted() -> None:
     )
 
     report = RithmicExecutionClient._order_status_report_for(
-        cast(RithmicExecutionClient, client), cast(Order, order), 3
+        cast(RithmicExecutionClient, client), cast(Any, order), 3
     )
 
     assert report is not None
@@ -1254,7 +1249,7 @@ def test_cached_submitted_stop_query_reports_accepted() -> None:
     # The remap must not leak into post-accept local states.
     order.status = OrderStatus.PENDING_CANCEL
     pending = RithmicExecutionClient._order_status_report_for(
-        cast(RithmicExecutionClient, client), cast(Order, order), 4
+        cast(RithmicExecutionClient, client), cast(Any, order), 4
     )
     assert pending is not None
     assert pending.order_status is OrderStatus.PENDING_CANCEL
@@ -1378,11 +1373,6 @@ def test_publish_account_nonnumeric_balance_does_not_seed(
 
     monkeypatch.setattr(
         RithmicExecutionClient,
-        "_set_account_id",
-        lambda self, aid: calls.append(("set", aid)),
-    )
-    monkeypatch.setattr(
-        RithmicExecutionClient,
         "_seed_account_if_needed",
         lambda self, account_raw=None: calls.append(("seed", account_raw)),
     )
@@ -1400,11 +1390,6 @@ def test_publish_account_nonfinite_balance_does_not_seed(
     client._account_seeded = False
     calls: list[tuple[str, object]] = []
 
-    monkeypatch.setattr(
-        RithmicExecutionClient,
-        "_set_account_id",
-        lambda self, aid: calls.append(("set", aid)),
-    )
     monkeypatch.setattr(
         RithmicExecutionClient,
         "_seed_account_if_needed",
@@ -1429,6 +1414,7 @@ def test_publish_account_suppresses_unchanged_state() -> None:
         _clock=SimpleNamespace(timestamp_ns=lambda: 123),
         _set_account_id=lambda account_id: set_account_id(client, account_id),
         _seed_account_if_needed=lambda account_raw=None: None,
+        _note_account_identity=lambda venue_raw: None,
         _pnl_snapshot_observed=asyncio.Event(),
         generate_account_state=lambda **kwargs: published.append(kwargs),
     )
@@ -1496,7 +1482,7 @@ def test_generate_fill_reports_suppresses_fill_seen_live(
     client = _fill_reports_client(monkeypatch, [_fill_event(fill_id="F1")])
     # The live path already marked this fill.
     client._mark_fill_key("ACC1|NQU6.RITHMIC|F1")
-    reports = asyncio.run(client.generate_fill_reports(_fill_cmd()))
+    reports = asyncio.run(client._generate_fill_reports(_fill_cmd()))
     assert reports == []
 
 
@@ -1505,7 +1491,7 @@ def test_generate_fill_reports_emits_and_marks_unseen_fill(
 ):
     report = object()
     client = _fill_reports_client(monkeypatch, [_fill_event(fill_id="F1")], report)
-    reports = asyncio.run(client.generate_fill_reports(_fill_cmd()))
+    reports = asyncio.run(client._generate_fill_reports(_fill_cmd()))
     assert reports == [report]
     assert client._fill_key_seen("ACC1|NQU6.RITHMIC|F1")
 
@@ -1516,7 +1502,7 @@ def test_generate_fill_reports_dedups_fill_without_venue_id(
     raw = _fill_event(fill_id="")
     report = object()
     client = _fill_reports_client(monkeypatch, [raw, raw], report)
-    reports = asyncio.run(client.generate_fill_reports(_fill_cmd()))
+    reports = asyncio.run(client._generate_fill_reports(_fill_cmd()))
     assert reports == [report]
 
 
@@ -1541,7 +1527,7 @@ def test_fill_prerequisite_shares_clock_ts_when_row_has_no_ts(
     published: list[OrderStatusReport] = []
     monkeypatch.setattr(client, "_send_order_status_report", published.append)
 
-    reports = asyncio.run(client.generate_fill_reports(_fill_cmd()))
+    reports = asyncio.run(client._generate_fill_reports(_fill_cmd()))
 
     assert len(reports) == 1
     assert len(published) == 1
@@ -1578,7 +1564,7 @@ def test_order_status_reports_last_row_wins_on_equal_ts(
             SimpleNamespace(order_status=fields["kind"]), fields, ts_event
         ),
     )
-    reports = asyncio.run(client.generate_order_status_reports(_status_cmd()))
+    reports = asyncio.run(client._generate_order_status_reports(_status_cmd()))
     assert [r.order_status for r in reports] == ["canceled"]
 
 
@@ -1597,13 +1583,13 @@ class _UnavailableLoadOrdersSession:
 def test_fill_reports_raises_when_unavailable_source():
     client = _trading_client(session=_UnavailableLoadOrdersSession())
     with pytest.raises(ReconciliationUnavailableError, match="unavailable"):
-        asyncio.run(client.generate_fill_reports(_fill_cmd()))
+        asyncio.run(client._generate_fill_reports(_fill_cmd()))
 
 
 def test_fill_reports_raises_when_trading_disabled():
     client = _trading_client(enable_trading=False)
     with pytest.raises(VenueQueryUnavailable, match="unavailable"):
-        asyncio.run(client.generate_fill_reports(_fill_cmd()))
+        asyncio.run(client._generate_fill_reports(_fill_cmd()))
 
 
 def test_status_reports_raises_when_trading_source_unavailable():
@@ -1611,14 +1597,14 @@ def test_status_reports_raises_when_trading_source_unavailable():
     # back to local cache as authoritative venue state.
     client = _trading_client(session=_UnavailableLoadOrdersSession())
     with pytest.raises(ReconciliationUnavailableError, match="unavailable"):
-        asyncio.run(client.generate_order_status_reports(_status_cmd()))
+        asyncio.run(client._generate_order_status_reports(_status_cmd()))
 
 
 def test_status_reports_empty_drain_raises_for_full_recon():
     """open_only=False (startup mass-status): empty drain must raise, not []."""
     client = _trading_client(session=_LoadOrdersSession([]))
     with pytest.raises(VenueQueryUnavailable, match="best-effort drain"):
-        asyncio.run(client.generate_order_status_reports(_status_cmd()))
+        asyncio.run(client._generate_order_status_reports(_status_cmd()))
 
 
 def test_status_reports_empty_drain_returns_empty_for_open_only():
@@ -1628,15 +1614,13 @@ def test_status_reports_empty_drain_returns_empty_for_open_only():
     stay advisory (not canceled).
     """
     client = _trading_client(session=_LoadOrdersSession([]))
-    cmd = GenerateOrderStatusReports(
+    cmd = ReportQuery(
         instrument_id=None,
         start=None,
         end=None,
         open_only=True,
-        command_id=UUID4(),
-        ts_init=1,
     )
-    assert asyncio.run(client.generate_order_status_reports(cmd)) == []
+    assert asyncio.run(client._generate_order_status_reports(cmd)) == []
 
 
 def test_status_reports_cache_backed_for_read_only(monkeypatch: pytest.MonkeyPatch):
@@ -1646,7 +1630,7 @@ def test_status_reports_cache_backed_for_read_only(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(
         client, "_cache_backed_order_status_reports", lambda cmd: ["cached"]
     )
-    reports = asyncio.run(client.generate_order_status_reports(_status_cmd()))
+    reports = asyncio.run(client._generate_order_status_reports(_status_cmd()))
     assert reports == ["cached"]
 
 
@@ -1678,7 +1662,7 @@ def test_generate_mass_status_soft_completes_when_order_drain_empty(
     ``generate_order_status_reports``; the Rithmic override must still return a
     mass status (with position reports) so MY043 can run with recon enabled.
     """
-    from nautilus_trader.model.identifiers import ClientId, Venue
+    from nautilus_trader.model import ClientId, Venue
 
     captured: dict[str, object] = {}
 
@@ -1692,9 +1676,7 @@ def test_generate_mass_status_soft_completes_when_order_drain_empty(
             ),
         )
 
-    monkeypatch.setattr(
-        "rithmic_nt_connect.execution.ExecutionMassStatus", _mass_factory
-    )
+    monkeypatch.setattr("rithmic_nt_connect.execution.soft_mass_status", _mass_factory)
 
     async def _orders_raise(_cmd: object) -> list[object]:
         raise VenueQueryUnavailable("empty drain")
@@ -1707,27 +1689,24 @@ def test_generate_mass_status_soft_completes_when_order_drain_empty(
     async def _positions(_cmd: object) -> list[object]:
         return pos
 
-    # Bind the unbound method onto a plain host — Cython Component.id is
-    # read-only on real instances, which blocks constructing ExecutionMassStatus.
+    # Bind the unbound method onto a plain host: the real client cannot be
+    # built without a node.
     host: Any = SimpleNamespace(
-        id=ClientId("RITHMIC"),
+        client_id=ClientId("RITHMIC"),
         venue=Venue("RITHMIC"),
         account_id=AccountId("RITHMIC-ACC1"),
         _log=_Log(),
         _clock=SimpleNamespace(
             timestamp_ns=lambda: 2,
-            utc_now=lambda: __import__("pandas").Timestamp(0, tz="UTC"),
+            utc_now=lambda: datetime.fromtimestamp(0, UTC),
         ),
         reconciliation_active=False,
-        generate_order_status_reports=_orders_raise,
-        generate_fill_reports=_fills_raise,
-        generate_position_status_reports=_positions,
-        _apply_mass_status_report_window=(
-            RithmicExecutionClient._apply_mass_status_report_window
-        ),
+        _generate_order_status_reports=_orders_raise,
+        _generate_fill_reports=_fills_raise,
+        _generate_position_status_reports=_positions,
     )
     mass = asyncio.run(
-        RithmicExecutionClient.generate_mass_status(host, lookback_mins=None)
+        RithmicExecutionClient._generate_mass_status(host, lookback_mins=None)
     )
     assert mass is not None
     assert captured["orders"] == []
@@ -1741,31 +1720,31 @@ def test_generate_mass_status_omits_fills_when_fill_drain_returns_rows(
 ) -> None:
     """Soft mass-status must not attach fill reports even when the drain yields.
 
-    NT 1.231 ``_adjust_mass_status_fills`` invents ``S-`` openings from incomplete
-    fill windows vs venue position; ``generate_missing_orders=False`` does not
-    gate that path. Position reports remain the venue-qty authority.
+    The engine's fill adjustment invents ``S-`` openings from incomplete fill
+    windows vs venue position; ``generate_missing_orders=False`` does not gate
+    that path. Position reports remain the venue-qty authority.
     """
-    from nautilus_trader.model.identifiers import ClientId, Venue
+    from nautilus_trader.model import ClientId, Venue
 
     captured: dict[str, list[object]] = {}
     window: dict[str, object] = {}
 
-    def _mass_factory(**kwargs: object) -> SimpleNamespace:
+    def _mass_factory(**kwargs: Any) -> SimpleNamespace:
+        real = soft_mass_status(**kwargs)
+        window.update(
+            lookback_start=real.lookback_start,
+            reports_complete=real.reports_complete,
+        )
         return SimpleNamespace(
-            ts_init=kwargs.get("ts_init", 99),
+            ts_init=real.ts_init,
             add_order_reports=lambda reports: captured.__setitem__("orders", reports),
             add_fill_reports=lambda reports: captured.__setitem__("fills", reports),
             add_position_reports=lambda reports: captured.__setitem__(
                 "positions", reports
             ),
-            set_report_window=lambda start, complete: window.update(
-                {"lookback_start": start, "reports_complete": complete}
-            ),
         )
 
-    monkeypatch.setattr(
-        "rithmic_nt_connect.execution.ExecutionMassStatus", _mass_factory
-    )
+    monkeypatch.setattr("rithmic_nt_connect.execution.soft_mass_status", _mass_factory)
 
     order_row = object()
     fill_row = object()
@@ -1781,24 +1760,21 @@ def test_generate_mass_status_omits_fills_when_fill_drain_returns_rows(
         return pos
 
     host: Any = SimpleNamespace(
-        id=ClientId("RITHMIC"),
+        client_id=ClientId("RITHMIC"),
         venue=Venue("RITHMIC"),
         account_id=AccountId("RITHMIC-ACC1"),
         _log=_Log(),
         _clock=SimpleNamespace(
             timestamp_ns=lambda: 99,
-            utc_now=lambda: __import__("pandas").Timestamp(0, tz="UTC"),
+            utc_now=lambda: datetime.fromtimestamp(0, UTC),
         ),
         reconciliation_active=False,
-        generate_order_status_reports=_orders,
-        generate_fill_reports=_fills,
-        generate_position_status_reports=_positions,
-        _apply_mass_status_report_window=(
-            RithmicExecutionClient._apply_mass_status_report_window
-        ),
+        _generate_order_status_reports=_orders,
+        _generate_fill_reports=_fills,
+        _generate_position_status_reports=_positions,
     )
     mass = asyncio.run(
-        RithmicExecutionClient.generate_mass_status(host, lookback_mins=None)
+        RithmicExecutionClient._generate_mass_status(host, lookback_mins=None)
     )
     assert mass is not None
     assert captured["orders"] == [order_row]
@@ -1811,25 +1787,25 @@ def test_generate_mass_status_omits_fills_when_fill_drain_returns_rows(
 def test_generate_mass_status_declares_lookback_when_lookback_mins_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When NT exposes ``set_report_window``, soft mass-status declares the bound."""
-    from nautilus_trader.model.identifiers import ClientId, Venue
+    """Soft mass-status declares the lookback bound as an incomplete window."""
+    from nautilus_trader.model import ClientId, Venue
 
     window: dict[str, object] = {}
 
-    def _mass_factory(**kwargs: object) -> SimpleNamespace:
+    def _mass_factory(**kwargs: Any) -> SimpleNamespace:
+        real = soft_mass_status(**kwargs)
+        window.update(
+            lookback_start=real.lookback_start,
+            reports_complete=real.reports_complete,
+        )
         return SimpleNamespace(
-            ts_init=kwargs.get("ts_init", 1),
+            ts_init=real.ts_init,
             add_order_reports=lambda reports: None,
             add_fill_reports=lambda reports: None,
             add_position_reports=lambda reports: None,
-            set_report_window=lambda start, complete: window.update(
-                {"lookback_start": start, "reports_complete": complete}
-            ),
         )
 
-    monkeypatch.setattr(
-        "rithmic_nt_connect.execution.ExecutionMassStatus", _mass_factory
-    )
+    monkeypatch.setattr("rithmic_nt_connect.execution.soft_mass_status", _mass_factory)
 
     async def _empty(_cmd: object) -> list[object]:
         return []
@@ -1838,24 +1814,21 @@ def test_generate_mass_status_declares_lookback_when_lookback_mins_set(
         raise VenueQueryUnavailable("empty drain")
 
     host: Any = SimpleNamespace(
-        id=ClientId("RITHMIC"),
+        client_id=ClientId("RITHMIC"),
         venue=Venue("RITHMIC"),
         account_id=AccountId("RITHMIC-ACC1"),
         _log=_Log(),
         _clock=SimpleNamespace(
             timestamp_ns=lambda: 1,
-            utc_now=lambda: __import__("pandas").Timestamp("2026-09-02T15:00:00Z"),
+            utc_now=lambda: datetime(2026, 9, 2, 15, 0, tzinfo=UTC),
         ),
         reconciliation_active=False,
-        generate_order_status_reports=_orders_raise,
-        generate_fill_reports=_orders_raise,
-        generate_position_status_reports=_empty,
-        _apply_mass_status_report_window=(
-            RithmicExecutionClient._apply_mass_status_report_window
-        ),
+        _generate_order_status_reports=_orders_raise,
+        _generate_fill_reports=_orders_raise,
+        _generate_position_status_reports=_empty,
     )
     mass = asyncio.run(
-        RithmicExecutionClient.generate_mass_status(host, lookback_mins=60)
+        RithmicExecutionClient._generate_mass_status(host, lookback_mins=60)
     )
     assert mass is not None
     assert window["reports_complete"] is False
@@ -1865,34 +1838,31 @@ def test_generate_mass_status_declares_lookback_when_lookback_mins_set(
     )
 
 
-def test_apply_mass_status_report_window_noop_on_nt_1231_shape() -> None:
-    """Installed NT 1.231 ExecutionMassStatus has no report-window setter."""
-    from nautilus_trader.execution.reports import ExecutionMassStatus
-    from nautilus_trader.model.identifiers import ClientId, Venue
-
-    mass = ExecutionMassStatus(
+def test_soft_mass_status_declares_a_bounded_incomplete_window() -> None:
+    """Rithmic drains are never a complete history: the mass status says so,
+    so the engine keeps unsupported fills from moving positions."""
+    mass = soft_mass_status(
         client_id=ClientId("RITHMIC"),
         account_id=AccountId("RITHMIC-ACC1"),
         venue=Venue("RITHMIC"),
-        report_id=__import__("nautilus_trader.core.uuid", fromlist=["UUID4"]).UUID4(),
-        ts_init=1,
+        ts_init=7,
+        lookback_start_ns=5,
     )
-    assert (
-        RithmicExecutionClient._apply_mass_status_report_window(
-            mass, lookback_start_ns=1, reports_complete=False
-        )
-        is False
-    )
-    assert not hasattr(mass, "lookback_start")
-    assert not hasattr(mass, "reports_complete")
+    assert mass.lookback_start == 5
+    assert mass.reports_complete is False
+    assert mass.ts_init == 7
+    assert str(mass.account_id) == "RITHMIC-ACC1"
 
 
 def test_augment_soft_mass_flat_for_cache_opens() -> None:
     """Open positions in cache missing from venue must get explicit FLAT reports."""
-    from nautilus_trader.execution.reports import PositionStatusReport
-    from nautilus_trader.model.enums import PositionSide
-    from nautilus_trader.model.identifiers import InstrumentId, Venue
-    from nautilus_trader.model.objects import Quantity
+    from nautilus_trader.model import (
+        InstrumentId,
+        PositionSide,
+        PositionStatusReport,
+        Quantity,
+        Venue,
+    )
 
     instrument_id = InstrumentId.from_str("MNQZ5.GLBX")
     account_id = AccountId("RITHMIC-ACC1")
@@ -1901,8 +1871,7 @@ def test_augment_soft_mass_flat_for_cache_opens() -> None:
         def __init__(self) -> None:
             self.instrument_id = instrument_id
 
-        def signed_decimal_qty(self) -> object:
-            return __import__("decimal").Decimal(1)
+        signed_qty = 1.0
 
     cache = SimpleNamespace(
         positions_open=lambda **_k: [_Pos()],
@@ -1925,10 +1894,13 @@ def test_augment_soft_mass_flat_for_cache_opens() -> None:
 
 def test_warn_soft_mass_cache_vs_venue_logs_flush_redis() -> None:
     """Ghost cache vs venue flat must warn that NT will not invent closing fills."""
-    from nautilus_trader.execution.reports import PositionStatusReport
-    from nautilus_trader.model.enums import PositionSide
-    from nautilus_trader.model.identifiers import InstrumentId, Venue
-    from nautilus_trader.model.objects import Quantity
+    from nautilus_trader.model import (
+        InstrumentId,
+        PositionSide,
+        PositionStatusReport,
+        Quantity,
+        Venue,
+    )
 
     instrument_id = InstrumentId.from_str("MNQZ5.GLBX")
     account_id = AccountId("RITHMIC-ACC1")
@@ -1938,8 +1910,7 @@ def test_warn_soft_mass_cache_vs_venue_logs_flush_redis() -> None:
         def __init__(self) -> None:
             self.instrument_id = instrument_id
 
-        def signed_decimal_qty(self) -> object:
-            return __import__("decimal").Decimal(1)
+        signed_qty = 1.0
 
     host: Any = SimpleNamespace(
         venue=Venue("GLBX"),
@@ -1951,19 +1922,19 @@ def test_warn_soft_mass_cache_vs_venue_logs_flush_redis() -> None:
         instrument_id=instrument_id,
         position_side=PositionSide.FLAT,
         quantity=Quantity.from_int(0),
-        report_id=__import__("nautilus_trader.core.uuid", fromlist=["UUID4"]).UUID4(),
+        report_id=UUID4(),
         ts_last=1,
         ts_init=1,
     )
     RithmicExecutionClient._warn_soft_mass_cache_vs_venue(host, [flat])
-    assert any("Flush Redis" in msg for msg in log.messages)
+    assert any("Start cold" in msg for msg in log.messages)
 
 
 def test_generate_mass_status_aborts_on_unexpected_order_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Unexpected order-drain failures must not soft-complete as empty."""
-    from nautilus_trader.model.identifiers import ClientId, Venue
+    from nautilus_trader.model import ClientId, Venue
 
     async def _orders_boom(_cmd: object) -> list[object]:
         raise RuntimeError("database corrupt")
@@ -1975,24 +1946,21 @@ def test_generate_mass_status_aborts_on_unexpected_order_error(
         return []
 
     host: Any = SimpleNamespace(
-        id=ClientId("RITHMIC"),
+        client_id=ClientId("RITHMIC"),
         venue=Venue("RITHMIC"),
         account_id=AccountId("RITHMIC-ACC1"),
         _log=_Log(),
         _clock=SimpleNamespace(
             timestamp_ns=lambda: 2,
-            utc_now=lambda: __import__("pandas").Timestamp(0, tz="UTC"),
+            utc_now=lambda: datetime.fromtimestamp(0, UTC),
         ),
         reconciliation_active=False,
-        generate_order_status_reports=_orders_boom,
-        generate_fill_reports=_fills_ok,
-        generate_position_status_reports=_positions_ok,
-        _apply_mass_status_report_window=(
-            RithmicExecutionClient._apply_mass_status_report_window
-        ),
+        _generate_order_status_reports=_orders_boom,
+        _generate_fill_reports=_fills_ok,
+        _generate_position_status_reports=_positions_ok,
     )
     mass = asyncio.run(
-        RithmicExecutionClient.generate_mass_status(host, lookback_mins=None)
+        RithmicExecutionClient._generate_mass_status(host, lookback_mins=None)
     )
     assert mass is None
 
@@ -2023,13 +1991,11 @@ class _InstrumentCache:
         return key if key in self._loaded else None
 
 
-def _position_cmd() -> GeneratePositionStatusReports:
-    return GeneratePositionStatusReports(
+def _position_cmd() -> ReportQuery:
+    return ReportQuery(
         instrument_id=None,
         start=None,
         end=None,
-        command_id=UUID4(),
-        ts_init=1,
     )
 
 
@@ -2052,7 +2018,7 @@ def test_position_status_reports_skip_unloaded_instruments(
             or f"R:{fields['instrument_id']}"
         ),
     )
-    reports = asyncio.run(client.generate_position_status_reports(_position_cmd()))
+    reports = asyncio.run(client._generate_position_status_reports(_position_cmd()))
     assert [str(r) for r in reports] == ["R:MNQU6.RITHMIC"]
     assert emitted == ["MNQU6.RITHMIC"]
 
@@ -2081,7 +2047,7 @@ def test_position_status_reports_warn_on_unloaded_nonzero_position(
             or f"R:{fields['instrument_id']}"
         ),
     )
-    reports = asyncio.run(client.generate_position_status_reports(_position_cmd()))
+    reports = asyncio.run(client._generate_position_status_reports(_position_cmd()))
     assert reports == []
     assert emitted == []
     assert len(warnings) == 1
@@ -2116,14 +2082,26 @@ def _filled_limit_order() -> LimitOrder:
         OrderSide.BUY,
         Quantity.from_int(2),
         Price.from_str("21000.0"),
+        TimeInForce.GTC,
+        False,
+        False,
+        False,
         UUID4(),
         0,
-        TimeInForce.GTC,
     )
     order.apply(OrderSubmitted(trader, strategy, iid, cid, account, UUID4(), ts, ts))
     order.apply(
         OrderAccepted(
-            trader, strategy, iid, cid, VenueOrderId("B-1"), account, UUID4(), ts, ts
+            trader,
+            strategy,
+            iid,
+            cid,
+            VenueOrderId("B-1"),
+            account,
+            UUID4(),
+            ts,
+            ts,
+            False,
         )
     )
     order.apply(
@@ -2135,17 +2113,17 @@ def _filled_limit_order() -> LimitOrder:
             VenueOrderId("B-1"),
             account,
             TradeId("T1"),
-            None,  # position_id
             OrderSide.BUY,
             OrderType.LIMIT,
             Quantity.from_int(2),
             Price.from_str("21000.5"),
             Currency.from_str("USD"),
-            Money(0, Currency.from_str("USD")),
             LiquiditySide.NO_LIQUIDITY_SIDE,
             UUID4(),
             ts,
             ts,
+            False,
+            commission=Money(0, Currency.from_str("USD")),
         )
     )
     return order
@@ -2164,14 +2142,8 @@ def test_cached_status_query_carries_avg_px_for_filled_order(
     client.account_id = AccountId("RITHMIC-ACC1")
     monkeypatch.setattr(client, "_cache", _SingleOrderCache(order))
 
-    command = GenerateOrderStatusReport(
-        None,
-        ClientOrderId("O-1"),
-        None,
-        UUID4(),
-        1,
-    )
-    report = asyncio.run(client.generate_order_status_report(command))
+    command = ReportQuery(client_order_id=ClientOrderId("O-1"))
+    report = asyncio.run(client._generate_order_status_report(command))
 
     assert report is not None
     assert report.order_status == OrderStatus.FILLED
@@ -2188,14 +2160,8 @@ def test_cached_status_query_non_stop_order_does_not_crash_on_trigger_type(
     client.account_id = AccountId("RITHMIC-ACC1")
     monkeypatch.setattr(client, "_cache", _SingleOrderCache(order))
 
-    command = GenerateOrderStatusReport(
-        None,
-        ClientOrderId("O-1"),
-        None,
-        UUID4(),
-        1,
-    )
-    report = asyncio.run(client.generate_order_status_report(command))
+    command = ReportQuery(client_order_id=ClientOrderId("O-1"))
+    report = asyncio.run(client._generate_order_status_report(command))
 
     assert report is not None
     assert report.trigger_type == TriggerType.NO_TRIGGER
@@ -2247,7 +2213,7 @@ def _bare_client(
             lambda fields, ts_event: _drain_row_result(None)
         )
     log = _CaptureLog()
-    client._log = log
+    cast(Any, client)._log = log
     return client, log
 
 
@@ -2457,7 +2423,7 @@ def test_no_position_reports_while_pnl_is_not_live(
     monkeypatch.setattr(
         client, "_position_report_from_fields", lambda fields, ts_init: "R"
     )
-    assert asyncio.run(client.generate_position_status_reports(_position_cmd())) == []
+    assert asyncio.run(client._generate_position_status_reports(_position_cmd())) == []
     assert client._positions_known() is False
 
 
@@ -2479,14 +2445,14 @@ def test_a_row_from_before_the_current_stream_is_not_reported(
         "_position_report_from_fields",
         lambda fields, ts_init: f"R:{fields['instrument_id']}",
     )
-    reports = asyncio.run(client.generate_position_status_reports(_position_cmd()))
+    reports = asyncio.run(client._generate_position_status_reports(_position_cmd()))
     assert reports == ["R:MNQU6.RITHMIC"]
 
 
 def test_mass_status_adds_no_flat_reports_while_positions_are_unknown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from nautilus_trader.model.identifiers import ClientId, Venue
+    from nautilus_trader.model import ClientId, Venue
 
     captured: dict[str, object] = {}
 
@@ -2500,38 +2466,70 @@ def test_mass_status_adds_no_flat_reports_while_positions_are_unknown(
             ),
         )
 
-    monkeypatch.setattr(
-        "rithmic_nt_connect.execution.ExecutionMassStatus", _mass_factory
-    )
+    monkeypatch.setattr("rithmic_nt_connect.execution.soft_mass_status", _mass_factory)
 
     async def _empty(_cmd: object) -> list[object]:
         return []
 
     augmented: list[object] = []
     host: Any = SimpleNamespace(
-        id=ClientId("RITHMIC"),
+        client_id=ClientId("RITHMIC"),
         venue=Venue("RITHMIC"),
         account_id=AccountId("RITHMIC-ACC1"),
         _log=_Log(),
         _clock=SimpleNamespace(
             timestamp_ns=lambda: 2,
-            utc_now=lambda: __import__("pandas").Timestamp(0, tz="UTC"),
+            utc_now=lambda: datetime.fromtimestamp(0, UTC),
         ),
         reconciliation_active=False,
-        generate_order_status_reports=_empty,
-        generate_fill_reports=_empty,
-        generate_position_status_reports=_empty,
-        _apply_mass_status_report_window=(
-            RithmicExecutionClient._apply_mass_status_report_window
-        ),
+        _generate_order_status_reports=_empty,
+        _generate_fill_reports=_empty,
+        _generate_position_status_reports=_empty,
         _positions_known=lambda: False,
         _augment_soft_mass_flat_for_cache_opens=lambda positions, ts_init: (
             augmented.append(True) or ["FABRICATED-FLAT"]
         ),
     )
     mass = asyncio.run(
-        RithmicExecutionClient.generate_mass_status(host, lookback_mins=None)
+        RithmicExecutionClient._generate_mass_status(host, lookback_mins=None)
     )
     assert mass is not None
     assert augmented == [], "no flat reports invented for unknown positions"
     assert captured["positions"] == []
+
+
+@pytest.mark.parametrize(
+    ("configured", "venue_accounts", "warnings"),
+    [
+        ("RITHMIC-ABC", ["ABC", "ABC"], 0),
+        ("RITHMIC-ABC", ["XYZ", "XYZ", "QRS"], 2),
+        ("RITHMIC-AUTO", ["XYZ"], 0),
+    ],
+)
+def test_a_venue_account_unlike_the_configured_one_is_warned_once(
+    configured: str, venue_accounts: list[str], warnings: int
+) -> None:
+    """The v2 ``account_id`` is fixed at construction: a plant reporting another
+    account must be visible (once per account), except under ``RITHMIC-AUTO``."""
+    client: Any = _client()
+    client.account_id = AccountId(configured)
+    log = _CaptureLog()
+    client._log = log
+    for raw in venue_accounts:
+        client._note_account_identity(raw)
+    hits = [m for m in log.messages if "venue reports account" in m]
+    assert len(hits) == warnings
+
+
+def test_reconnect_forgets_the_resolved_venue_account() -> None:
+    client: Any = SimpleNamespace(
+        _pnl_epoch=0,
+        _pnl_snapshot_observed=asyncio.Event(),
+        _pnl_live_since_ns=1,
+        _positions={},
+        _position_seen_ns={},
+        _unreadable_position_symbols=set(),
+        _resolved_account_raw="OLD",
+    )
+    RithmicExecutionClient._forget_pnl_state(client)
+    assert client._resolved_account_raw is None

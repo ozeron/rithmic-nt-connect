@@ -16,13 +16,15 @@ from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any, cast
 
-from nautilus_trader.model.identifiers import (
+from nautilus_trader.model import (
     AccountId,
     ClientOrderId,
     InstrumentId,
+    Venue,
     VenueOrderId,
 )
 from rithmic_nt_connect.commission import CommissionRegistry
+from rithmic_nt_connect.constants import VENUE
 from rithmic_nt_connect.data import RithmicDataClient
 from rithmic_nt_connect.execution import RithmicExecutionClient
 from rithmic_nt_connect.session import Gates, SessionEventSubscription, WireSession
@@ -378,9 +380,9 @@ class _RecordingBus:
 
 
 class _TestClient(RithmicExecutionClient):
-    """Test double: skips the Cython base's ``__init__`` and re-exposes the
-    cdef read-only ``_log`` / ``_clock`` / ``_cache`` / ``account_id`` as
-    writable properties, so real adapter methods run on a bare instance."""
+    """Test double: skips the native base's ``__init__`` and makes ``_log`` /
+    ``_clock`` / ``_cache`` / ``account_id`` (read-only or node-bound on the
+    real client) writable, so real adapter methods run on a bare instance."""
 
     def __new__(cls) -> _TestClient:
         # ``__init__`` is skipped, so seed the state production sets there.
@@ -389,7 +391,7 @@ class _TestClient(RithmicExecutionClient):
         self._recovery = self._build_recovery()
         return self
 
-    # The cdef base declares these read-only; re-expose as writable via
+    # The native base makes these read-only; re-expose as writable via
     # name-mangled storage. ``object.__getattribute__`` / ``__setattr__`` keep
     # the dynamic slots invisible to the type checker (no ``type: ignore``).
 
@@ -445,6 +447,8 @@ class _TestClient(RithmicExecutionClient):
 
     # ``__init__`` is skipped: per-connect PnL liveness starts unknown.
     _pnl_live_since_ns: int | None = None
+    # The v2 base sets ``venue`` in ``__init__``; doubles skip it.
+    venue = Venue(VENUE)
 
     # ``__init__`` creates the per-row PnL observation times; default lazily here.
     @property
@@ -481,7 +485,7 @@ class _TestClient(RithmicExecutionClient):
 
 
 class _TestDataClient(RithmicDataClient):
-    """Test double: skips the Cython base's ``__init__`` and re-exposes the cdef
+    """Test double: skips the native base's ``__init__`` and re-exposes the
     read-only ``_log`` as a writable property (same trick as ``_TestClient``)."""
 
     @property

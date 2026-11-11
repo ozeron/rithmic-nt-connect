@@ -1,37 +1,37 @@
-"""TradingNode factories for Rithmic data and execution clients."""
+"""LiveNode factories for Rithmic data and execution clients.
+
+NautilusTrader 2 calls ``create`` synchronously with the owning node's context
+(name, config, read-only cache, clock and, for execution, the trader id). The
+factory builds the client and its session object only: no task, event loop or
+network resource is touched before the client's ``_connect``.
+"""
 
 from __future__ import annotations
 
-import asyncio
+from typing import Any
 
-from nautilus_trader.cache.cache import Cache
-from nautilus_trader.common.component import LiveClock, MessageBus
-from nautilus_trader.config import (
-    InstrumentProviderConfig,
-    LiveDataClientConfig,
-    LiveExecClientConfig,
-)
-from nautilus_trader.live.factories import LiveDataClientFactory, LiveExecClientFactory
+from nautilus_trader.common import Clock
+from nautilus_trader.config import InstrumentProviderConfig
+from nautilus_trader.live import ClientCache
+from nautilus_trader.live.clients import DataClientFactory, ExecutionClientFactory
+from nautilus_trader.model import AccountId, TraderId
 
 from rithmic_nt_connect.config import (
     RithmicDataClientConfig,
     RithmicExecClientConfig,
+    RithmicLiveDataClientConfig,
     RithmicLiveExecClientConfig,
     SessionConfig,
 )
+from rithmic_nt_connect.constants import AUTO_ACCOUNT, VENUE
 from rithmic_nt_connect.data import RithmicDataClient
 from rithmic_nt_connect.execution import RithmicExecutionClient
-from rithmic_nt_connect.pandas_compat import patch_nautilus_pandas
 from rithmic_nt_connect.providers import RithmicInstrumentProvider
 from rithmic_nt_connect.session import (
     PLANTS_EXECUTION,
     PLANTS_MARKET_DATA,
     create_session,
 )
-
-# The pandas shim only matters at runtime (BacktestEngine.run, INTERNAL bar
-# aggregation) — same placement as historical.py, keeping all imports at top.
-patch_nautilus_pandas()
 
 
 def _session_config_from_data(config: object) -> SessionConfig:
@@ -47,15 +47,27 @@ def _pairs_from_session(session: SessionConfig) -> list[tuple[str, str]]:
     return [("NQ", "CME")]
 
 
-class RithmicLiveDataClientFactory(LiveDataClientFactory):
+def nautilus_account_id(session: SessionConfig) -> AccountId:
+    """The node's account identity for a Rithmic session.
+
+    NautilusTrader 2 fixes an execution client's ``account_id`` at construction
+    (every event and report must carry it), while Rithmic resolves the trading
+    account at login. A configured ``RITHMIC_ACCOUNT_ID`` names the account
+    (``RITHMIC-<id>``); without one the venue-resolved account is used under the
+    stable ``RITHMIC-AUTO`` label and recorded in the AccountState ``info``.
+    """
+    raw = (session.account_id or "").strip()
+    return AccountId(f"{VENUE}-{raw or AUTO_ACCOUNT}")
+
+
+class RithmicLiveDataClientFactory(DataClientFactory):
     @staticmethod
     def create(
-        loop: asyncio.AbstractEventLoop,
+        *,
         name: str,
-        config: LiveDataClientConfig,
-        msgbus: MessageBus,
-        cache: Cache,
-        clock: LiveClock,
+        config: Any,
+        cache: ClientCache,
+        clock: Clock,
     ) -> RithmicDataClient:
         session_cfg = _session_config_from_data(config)
         session = create_session(session_cfg, plants=PLANTS_MARKET_DATA)
@@ -64,37 +76,34 @@ class RithmicLiveDataClientFactory(LiveDataClientFactory):
             pairs=_pairs_from_session(session_cfg),
             config=InstrumentProviderConfig(load_all=True),
         )
-        data_config = (
-            config
-            if isinstance(config, RithmicDataClientConfig)
-            else RithmicDataClientConfig(
+        # The node-registered config is the Nautilus config (base fields such as
+        # routing are read by the node); Rithmic knobs ride on it.
+        if not isinstance(config, RithmicLiveDataClientConfig):
+            config = RithmicLiveDataClientConfig(
                 session=session_cfg,
                 bars_timestamp_on_close=bool(
                     getattr(config, "bars_timestamp_on_close", True)
                 ),
             )
-        )
         return RithmicDataClient(
-            loop=loop,
-            msgbus=msgbus,
+            name=name,
+            config=config,
             cache=cache,
             clock=clock,
             instrument_provider=provider,
-            config=data_config,
             session=session,
-            name=name,
         )
 
 
-class RithmicLiveExecClientFactory(LiveExecClientFactory):
+class RithmicLiveExecClientFactory(ExecutionClientFactory):
     @staticmethod
     def create(
-        loop: asyncio.AbstractEventLoop,
+        *,
         name: str,
-        config: LiveExecClientConfig,
-        msgbus: MessageBus,
-        cache: Cache,
-        clock: LiveClock,
+        config: Any,
+        cache: ClientCache,
+        clock: Clock,
+        trader_id: TraderId,
     ) -> RithmicExecutionClient:
         session_cfg = _session_config_from_data(config)
         session = create_session(session_cfg, plants=PLANTS_EXECUTION)
@@ -104,20 +113,26 @@ class RithmicLiveExecClientFactory(LiveExecClientFactory):
             config=InstrumentProviderConfig(load_all=True),
         )
         # Pass the registered live config through unchanged: it carries
-        # ``enable_trading`` (the fallback only covers a bare nautilus
-        # ``LiveExecClientConfig``, which never enables trading).
-        client_config: RithmicExecClientConfig | RithmicLiveExecClientConfig
-        if isinstance(config, (RithmicLiveExecClientConfig, RithmicExecClientConfig)):
-            client_config = config
-        else:
-            client_config = RithmicExecClientConfig(session=session_cfg)
+        # ``enable_trading`` (a bare ``ExecutionClientConfig`` never enables
+        # trading).
+        if not isinstance(config, RithmicLiveExecClientConfig):
+            config = RithmicLiveExecClientConfig(session=session_cfg)
         return RithmicExecutionClient(
-            loop=loop,
-            msgbus=msgbus,
+            name=name,
+            config=config,
             cache=cache,
             clock=clock,
+            trader_id=trader_id,
+            account_id=nautilus_account_id(session_cfg),
             instrument_provider=provider,
-            config=client_config,
             session=session,
-            name=name,
         )
+
+
+__all__ = [
+    "RithmicDataClientConfig",
+    "RithmicExecClientConfig",
+    "RithmicLiveDataClientFactory",
+    "RithmicLiveExecClientFactory",
+    "nautilus_account_id",
+]

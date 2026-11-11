@@ -12,15 +12,22 @@ from collections.abc import Iterator
 from decimal import Decimal
 from typing import Any
 
-from nautilus_trader.core.uuid import UUID4
-from nautilus_trader.execution.reports import (
+from nautilus_trader.core import UUID4
+from nautilus_trader.model import (
+    AccountId,
+    ClientId,
+    ClientOrderId,
+    ExecutionMassStatus,
     FillReport,
+    OrderSide,
+    OrderStatus,
     OrderStatusReport,
+    PositionSide,
     PositionStatusReport,
+    Quantity,
+    Venue,
+    VenueOrderId,
 )
-from nautilus_trader.model.enums import OrderSide, OrderStatus
-from nautilus_trader.model.identifiers import ClientOrderId, VenueOrderId
-from nautilus_trader.model.objects import Quantity
 
 from rithmic_nt_connect import _lib
 from rithmic_nt_connect._orders import (
@@ -49,35 +56,36 @@ TERMINAL_ORDER_STATUSES = frozenset(
 )
 
 
-def apply_mass_status_report_window(
-    mass_status: Any,
+def soft_mass_status(
     *,
-    lookback_start_ns: int | None,
-    reports_complete: bool,
-) -> bool:
-    """Declare NT mass-status history bound when the installed API allows.
+    client_id: ClientId,
+    account_id: AccountId,
+    venue: Venue,
+    ts_init: int,
+    lookback_start_ns: int,
+) -> ExecutionMassStatus:
+    """An empty mass status that declares its history bounded and incomplete.
 
-    NT 1.231 ``ExecutionMassStatus`` has neither ``lookback_start`` nor
-    ``set_report_window`` (those land on master / 2.0.x; Python bindings may
-    still omit the setter). Returns whether the contract was applied.
+    Rithmic order/fill drains are best-effort working-order reads, never a
+    complete history, so the window is always ``reports_complete=False``: the
+    engine then keeps unsupported fills from moving positions. The Python
+    binding has no ``set_report_window``; ``from_dict`` carries both fields.
     """
-    setter = getattr(mass_status, "set_report_window", None)
-    if callable(setter):
-        setter(lookback_start_ns, reports_complete)
-        return True
-    applied = False
-    for name, value in (
-        ("lookback_start", lookback_start_ns),
-        ("reports_complete", reports_complete),
-    ):
-        if not hasattr(mass_status, name):
-            continue
-        try:
-            setattr(mass_status, name, value)
-            applied = True
-        except (AttributeError, TypeError):
-            continue
-    return applied
+    return ExecutionMassStatus.from_dict(
+        {
+            "type": "ExecutionMassStatus",
+            "client_id": str(client_id),
+            "account_id": str(account_id),
+            "venue": str(venue),
+            "report_id": str(UUID4()),
+            "ts_init": ts_init,
+            "lookback_start": lookback_start_ns,
+            "reports_complete": False,
+            "order_reports": {},
+            "fill_reports": {},
+            "position_reports": {},
+        }
+    )
 
 
 def _client_order_id_for_tag(tag: Any) -> ClientOrderId | None:
@@ -121,7 +129,7 @@ class WorkingOrdersDrain:
     """Interpret and apply working-orders drain rows.
 
     Holds the host client by reference (cache/clock/publish/bind stay on the
-    client). Does not wrap Nautilus cache/clock/msgbus/session.
+    client). Does not wrap the Nautilus cache/clock or the session.
     """
 
     def __init__(self, host: Any) -> None:
@@ -152,7 +160,8 @@ class WorkingOrdersDrain:
             return None
         try:
             side = order_side_from_notification(fields)
-            qty = Quantity.from_int(max(0, int(fields.get("quantity") or 0)))
+            qty_int = max(0, int(fields.get("quantity") or 0))
+            qty = Quantity.from_int(qty_int)
             filled = Quantity.from_int(max(0, int(fields.get("total_fill_size") or 0)))
             price_raw = fields.get("price")
             trigger_raw = fields.get("trigger_price")
@@ -160,7 +169,7 @@ class WorkingOrdersDrain:
             trigger = price_from_wire(trigger_raw) if trigger_raw is not None else None
             avg = fields.get("avg_fill_price")
             avg_px = Decimal(str(avg)) if avg is not None else None
-            if qty <= 0:
+            if qty_int == 0:
                 # No order terms (e.g. a bare TRIGGER notification): a status
                 # report cannot be built. Skip rather than crash the handler
                 # (the constructor rejects a zero quantity).
@@ -361,7 +370,7 @@ class WorkingOrdersDrain:
                 client_order_id is not None
                 and row.bindable
                 and host._cache.order(client_order_id) is not None
-                and host._cache.venue_order_id(client_order_id) is None
+                and host._venue_order_id_for(client_order_id) is None
             ):
                 host._bind_venue_id(client_order_id, basket)
 
@@ -535,11 +544,14 @@ class WorkingOrdersDrain:
             if instrument is None:
                 continue
             reports.append(
-                PositionStatusReport.create_flat(
+                PositionStatusReport(
                     account_id=host.account_id,
                     instrument_id=position.instrument_id,
-                    size_precision=instrument.size_precision,
+                    position_side=PositionSide.FLAT,
+                    quantity=Quantity(0, int(instrument.size_precision)),
+                    ts_last=ts_init,
                     ts_init=ts_init,
+                    report_id=UUID4(),
                 )
             )
         return reports
@@ -547,7 +559,7 @@ class WorkingOrdersDrain:
     def warn_soft_mass_cache_vs_venue(
         self, positions: list[PositionStatusReport]
     ) -> None:
-        """Warn: NT will not clear Redis ghosts if generate_missing_orders=False."""
+        """Warn when cached open positions disagree with the venue."""
         host = self._host
         for report in positions:
             try:
@@ -562,17 +574,27 @@ class WorkingOrdersDrain:
                     for p in host._cache.positions_open(venue=host.venue)
                     if p.instrument_id == report.instrument_id
                 ]
-            cached = sum((p.signed_decimal_qty() for p in opens), Decimal(0))
-            venue_qty = report.signed_decimal_qty
+            cached = sum((Decimal(str(p.signed_qty)) for p in opens), Decimal(0))
+            venue_qty = report_signed_qty(report)
             if cached == venue_qty:
                 continue
             host._log.warning(
                 "soft mass-status: cache open qty "
                 f"{cached} != venue {report.instrument_id} qty {venue_qty}; "
-                "NT 1.231 with generate_missing_orders=False will not invent "
-                "closing fills to clear Redis/OMS ghosts. Flush Redis (or start "
-                "cold) when plant is flat before enabling live recon."
+                "startup reconciliation may not clear cached ghosts. Start cold "
+                "when the plant is flat before enabling live recon."
             )
+
+
+def report_signed_qty(report: PositionStatusReport) -> Decimal:
+    """Signed venue quantity of a position report (LONG +, SHORT -, FLAT 0)."""
+    qty = Decimal(str(report.quantity))
+    side = report.position_side
+    if side == PositionSide.SHORT:
+        return -qty
+    if side == PositionSide.LONG:
+        return qty
+    return Decimal(0)
 
 
 def drain_for(host: Any) -> WorkingOrdersDrain:

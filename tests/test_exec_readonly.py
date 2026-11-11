@@ -1,4 +1,4 @@
-"""Execution client tests (helpers; Cython base resists partial construction)."""
+"""Execution client tests (helpers; native base resists partial construction)."""
 
 from __future__ import annotations
 
@@ -6,8 +6,7 @@ import asyncio
 from decimal import Decimal
 
 import pytest
-from nautilus_trader.model.identifiers import AccountId, Venue
-from nautilus_trader.model.objects import AccountBalance, Currency, Money
+from nautilus_trader.model import AccountBalance, AccountId, Currency, Money, Venue
 from rithmic_nt_connect._convert import account_pnl_to_fields
 from rithmic_nt_connect.constants import VENUE
 from rithmic_nt_connect.execution import wait_account_in_cache
@@ -23,8 +22,8 @@ def test_account_pnl_fields_build_balance():
     }
     fields = account_pnl_to_fields(event)
     currency = Currency.from_str(str(fields.get("currency", "USD")))
-    free = Money(Decimal(str(fields["cash_on_hand"])), currency)
-    bal = AccountBalance(free, Money(Decimal(0), currency), free)
+    free = Money.from_decimal(Decimal(str(fields["cash_on_hand"])), currency)
+    bal = AccountBalance(free, Money.from_decimal(Decimal(0), currency), free)
     assert float(bal.free) == pytest.approx(1000.0)
     assert AccountId(f"{VENUE}-{fields['account_id']}").value.startswith(f"{VENUE}-")
 

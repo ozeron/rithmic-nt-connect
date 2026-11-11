@@ -339,11 +339,14 @@ def test_package_imports_without_network() -> None:
 
 
 def test_live_data_client_config_is_nautilus_config() -> None:
-    from nautilus_trader.config import LiveDataClientConfig
+    from nautilus_trader.config import DataClientConfig
     from rithmic_nt_connect.config import RithmicLiveDataClientConfig
 
-    cfg = RithmicLiveDataClientConfig()
-    assert isinstance(cfg, LiveDataClientConfig)
+    cfg = RithmicLiveDataClientConfig(bars_timestamp_on_close=False)
+    assert isinstance(cfg, DataClientConfig)
+    assert cfg.bars_timestamp_on_close is False
+    # Base fields still come from the Nautilus constructor.
+    assert cfg.routing is not None
 
 
 def test_connect_mode_carries_no_default() -> None:

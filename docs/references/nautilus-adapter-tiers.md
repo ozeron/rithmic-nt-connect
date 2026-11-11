@@ -35,7 +35,7 @@ This repo uses **`rithmic-nt-connect`** (import / crate lib: `rithmic_nt_connect
 
 ## Python runtime seam (important)
 
-- **1.231.x (v1):** out-of-tree Python adapters via `TradingNode.add_data_client_factory` / `add_exec_client_factory` are the supported path for External adapters.
-- **Python v2 / LiveNode on published wheels:** as of issue [#4694](https://github.com/nautechsystems/nautilus_trader/issues/4694), no supported out-of-tree adapter seam; factories must be compiled into the PyO3 module. Native Rust binaries can still link external adapters.
+- **1.231.x (v1):** out-of-tree Python adapters via `TradingNode.add_data_client_factory` / `add_exec_client_factory`.
+- **2.0 (`LiveNode`):** out-of-tree Python clients subclass `nautilus_trader.live.clients.MarketDataClient` / `ExecutionClient`; factories subclass `DataClientFactory` / `ExecutionClientFactory` and are passed to `LiveNode.build(..., data_factories=, exec_factories=)` (or `LiveNodeBuilder.add_data_client`). The node treats a factory as Python only if it subclasses those bases. Clients see a read-only `ClientCache` and no message bus; their output is queued and applied by the core. Custom Python clients get no Redis/Postgres cache backing. Earlier wheels had no such seam (issue [#4694](https://github.com/nautechsystems/nautilus_trader/issues/4694)).
 
-**This project targets 1.231.x.**
+**This project targets 2.0.0rc9** (hard cut 2026-11-10; 1.231 history stays in git).

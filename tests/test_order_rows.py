@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from nautilus_trader.model.enums import OrderStatus, OrderType, TimeInForce, TriggerType
+from nautilus_trader.model import OrderStatus, OrderType, TimeInForce, TriggerType
 from rithmic_nt_connect._orders import enum_int, sentinel_none
 from rithmic_nt_connect.order_rows import (
     order_status_from_fields,
