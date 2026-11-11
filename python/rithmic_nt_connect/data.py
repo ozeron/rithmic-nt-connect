@@ -1176,8 +1176,9 @@ class RithmicDataClient(MarketDataClient):
         """Apply ``call`` to every list member, best effort.
 
         NautilusTrader 2 hands a subscription hook every compatible member at
-        once. A member failure must not skip the members after it; the failures
-        are raised together at the end so the runtime logs them.
+        once. A member failure must not skip the members after it; each failure
+        is logged. The hook raises only when no member succeeded: a batch whose
+        other members are live must not be reported to the node as failed.
         """
         errors: list[str] = []
         for member in members:
@@ -1186,8 +1187,13 @@ class RithmicDataClient(MarketDataClient):
             except Exception as exc:
                 self._log.error(f"{action} {member}: {exc}")
                 errors.append(f"{member}: {exc}")
-        if errors:
+        if errors and len(errors) == len(members):
             raise RuntimeError(f"{action} failed for {'; '.join(errors)}")
+        if errors:
+            self._log.warning(
+                f"{action}: {len(errors)} of {len(members)} failed "
+                f"({'; '.join(errors)}); the rest are live"
+            )
 
     async def _subscribe_trades(self, command: SubscribeTrades) -> None:
         await self._each(

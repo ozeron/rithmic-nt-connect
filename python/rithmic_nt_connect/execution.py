@@ -546,6 +546,30 @@ class RithmicExecutionClient(ExecutionClient):
             return value.removeprefix(prefix)
         return None
 
+    def _note_account_identity(self, venue_raw: str) -> None:
+        """Warn once per venue account that differs from the configured one.
+
+        The Nautilus ``account_id`` is fixed when the client is built
+        (``RITHMIC-<RITHMIC_ACCOUNT_ID>``); every account state, position and
+        recon report is published under it. A plant that reports another
+        account (wrong config, or a failover) would otherwise be silent.
+        ``RITHMIC-AUTO`` takes whatever account the venue resolves.
+        """
+        if self._auto_account or self.account_id is None:
+            return
+        configured = str(self.account_id).removeprefix(f"{VENUE}-")
+        if not venue_raw or venue_raw == configured:
+            return
+        warned: set[str] = self.__dict__.setdefault("_account_mismatch_warned", set())
+        if venue_raw in warned:
+            return
+        warned.add(venue_raw)
+        self._log.warning(
+            f"venue reports account {venue_raw!r} but this client publishes as "
+            f"{self.account_id} (RITHMIC_ACCOUNT_ID={configured!r}); check the "
+            "configured account"
+        )
+
     def _seed_account_if_needed(self, account_raw: str | None = None) -> None:
         """Register a USD margin account so Portfolio can apply fills.
 
@@ -924,6 +948,7 @@ class RithmicExecutionClient(ExecutionClient):
         currency_raw = fields.get("currency") or DEFAULT_ACCOUNT_CURRENCY
         currency = Currency.from_str(str(currency_raw))
         account_id = self.account_id
+        self._note_account_identity(str(fields["account_id"]))
         self._seed_account_if_needed(str(fields["account_id"]))
         free = Money.from_decimal(free_dec, currency)
         locked = Money.from_decimal(Decimal(0), currency)
@@ -997,6 +1022,8 @@ class RithmicExecutionClient(ExecutionClient):
         self._positions.clear()
         self._position_seen_ns.clear()
         self._unreadable_position_symbols.clear()
+        # The account the login resolves can differ after a reconnect.
+        self._resolved_account_raw = None
 
     def _exposure_snapshot(
         self,

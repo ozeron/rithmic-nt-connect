@@ -1414,6 +1414,7 @@ def test_publish_account_suppresses_unchanged_state() -> None:
         _clock=SimpleNamespace(timestamp_ns=lambda: 123),
         _set_account_id=lambda account_id: set_account_id(client, account_id),
         _seed_account_if_needed=lambda account_raw=None: None,
+        _note_account_identity=lambda venue_raw: None,
         _pnl_snapshot_observed=asyncio.Event(),
         generate_account_state=lambda **kwargs: published.append(kwargs),
     )
@@ -2495,3 +2496,40 @@ def test_mass_status_adds_no_flat_reports_while_positions_are_unknown(
     assert mass is not None
     assert augmented == [], "no flat reports invented for unknown positions"
     assert captured["positions"] == []
+
+
+@pytest.mark.parametrize(
+    ("configured", "venue_accounts", "warnings"),
+    [
+        ("RITHMIC-ABC", ["ABC", "ABC"], 0),
+        ("RITHMIC-ABC", ["XYZ", "XYZ", "QRS"], 2),
+        ("RITHMIC-AUTO", ["XYZ"], 0),
+    ],
+)
+def test_a_venue_account_unlike_the_configured_one_is_warned_once(
+    configured: str, venue_accounts: list[str], warnings: int
+) -> None:
+    """The v2 ``account_id`` is fixed at construction: a plant reporting another
+    account must be visible (once per account), except under ``RITHMIC-AUTO``."""
+    client: Any = _client()
+    client.account_id = AccountId(configured)
+    log = _CaptureLog()
+    client._log = log
+    for raw in venue_accounts:
+        client._note_account_identity(raw)
+    hits = [m for m in log.messages if "venue reports account" in m]
+    assert len(hits) == warnings
+
+
+def test_reconnect_forgets_the_resolved_venue_account() -> None:
+    client: Any = SimpleNamespace(
+        _pnl_epoch=0,
+        _pnl_snapshot_observed=asyncio.Event(),
+        _pnl_live_since_ns=1,
+        _positions={},
+        _position_seen_ns={},
+        _unreadable_position_symbols=set(),
+        _resolved_account_raw="OLD",
+    )
+    RithmicExecutionClient._forget_pnl_state(client)
+    assert client._resolved_account_raw is None

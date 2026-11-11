@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any
 
@@ -661,3 +662,29 @@ def test_transient_poll_errors_back_off_and_deliver_later_events(
 
     asyncio.run(run())
     assert delays == [0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 2.0, 2.0, 0.05]
+
+
+def test_a_partly_failed_subscription_batch_is_not_reported_as_failed() -> None:
+    """Live members of a batch stay live: the hook raises only if every member
+    failed, and logs the failures either way."""
+    from _stubs import _CaptureLog, _TestDataClient
+
+    client: Any = _TestDataClient.__new__(_TestDataClient)
+    log = _CaptureLog()
+    client._log = log
+    done: list[int] = []
+
+    async def call(member: int) -> None:
+        if member == 2:
+            raise ValueError("no route")
+        done.append(member)
+
+    asyncio.run(client._each("subscribe_trades", [1, 2, 3], call))
+    assert done == [1, 3]
+    assert any("1 of 3 failed" in m for m in log.messages)
+
+    async def always_fail(member: int) -> None:
+        raise ValueError("no route")
+
+    with pytest.raises(RuntimeError, match="subscribe_trades failed"):
+        asyncio.run(client._each("subscribe_trades", [1, 2], always_fail))
