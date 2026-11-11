@@ -75,9 +75,8 @@ jobs:
             runner: ubuntu-22.04-arm
             compat: --compatibility manylinux_2_35
           - name: macos-arm64
-            # nautilus_trader 1.231.0 ships macOS wheels for macOS 26 only, so the
-            # install smoke needs a macOS 26 host. The wheels themselves still
-            # target macOS 11 (MACOSX_DEPLOYMENT_TARGET).
+            # nautilus_trader 2.0.0rc9 ships macOS 11+ arm64 wheels; the wheels
+            # here target macOS 11 too (MACOSX_DEPLOYMENT_TARGET).
             runner: macos-26
             compat: ""
     runs-on: ${{ matrix.runner }}
@@ -91,7 +90,6 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: |
-            3.12
             3.13
             3.14
       # No cache: these wheels are published (zizmor cache-poisoning).
@@ -118,10 +116,10 @@ jobs:
         with:
           working-directory: python
           args: --release --out ../dist ${{ matrix.compat }}
-      - name: Build rithmic-nt-connect (cp312-cp314)
+      - name: Build rithmic-nt-connect (cp313-cp314)
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
-          args: --release --out dist -i python3.12 python3.13 python3.14 ${{ matrix.compat }}
+          args: --release --out dist -i python3.13 python3.14 ${{ matrix.compat }}
       # Install smoke: a clean venv that may not compile anything (`--no-build`),
       # so a wheel that needs Rust, protoc or maturin fails here. Rust below
       # only builds the test-only fake parent the client scenarios dial.

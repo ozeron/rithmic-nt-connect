@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
-from nautilus_trader.model.enums import OrderStatus
+from nautilus_trader.model import OrderStatus
 
 from rithmic_nt_connect import _lib
 from rithmic_nt_connect._orders import order_notification_to_fields

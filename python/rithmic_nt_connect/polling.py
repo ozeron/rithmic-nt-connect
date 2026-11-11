@@ -180,7 +180,7 @@ class PlantPoller:
                 continue
             except Exception as exc:
                 self._log.exception(
-                    f"{self.name} event handler error (suppressed)", exc
+                    f"{self.name} event handler error (suppressed): {exc}"
                 )
                 if self.name == "order":
                     if self.on_latch is not None:

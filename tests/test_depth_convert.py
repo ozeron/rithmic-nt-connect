@@ -28,7 +28,7 @@ def test_order_book_summary_to_delta_fields() -> None:
 
 
 def test_order_book_fields_to_nautilus_deltas() -> None:
-    from nautilus_trader.model.enums import RecordFlag
+    from nautilus_trader.model import RecordFlag
 
     fields = order_book_to_fields(ORDER_BOOK_SUMMARY)
     deltas = fields_to_order_book_deltas(fields, ts_init=1)

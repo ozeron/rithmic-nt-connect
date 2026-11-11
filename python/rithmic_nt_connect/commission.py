@@ -7,9 +7,8 @@ import logging
 from decimal import Decimal
 from typing import Any
 
-from nautilus_trader.cache.cache import Cache
-from nautilus_trader.model.identifiers import InstrumentId
-from nautilus_trader.model.objects import Currency, Money
+from nautilus_trader.common import Cache
+from nautilus_trader.model import Currency, InstrumentId, Money
 
 from rithmic_nt_connect._lib import CommissionTable
 from rithmic_nt_connect.session import WireSession
@@ -118,7 +117,7 @@ class CommissionRegistry:
         """
         text = self._table.rate_for(product_code)
         rate = Decimal(text) if text is not None else Decimal(0)
-        return Money(rate * Decimal(qty), Currency.from_str("USD"))
+        return Money.from_decimal(rate * Decimal(qty), Currency.from_str("USD"))
 
 
 def _text(value: Any) -> str | None:

@@ -34,7 +34,7 @@ from rithmic_nt_connect.config import ConnectMode, env_truthy, system_kind
 if TYPE_CHECKING:
     from multiprocessing.connection import Connection
 
-    from nautilus_trader.model.instruments import FuturesContract
+    from nautilus_trader.model import FuturesContract
     from rithmic_nt_connect.session import WireSession
 
 

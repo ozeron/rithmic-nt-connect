@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -98,7 +99,7 @@ def test_bbo_fields_to_quote_tick():
 
 
 def test_order_book_fields_to_deltas():
-    from nautilus_trader.model.enums import BookAction, RecordFlag
+    from nautilus_trader.model import BookAction, RecordFlag
 
     raw = {
         "type": "order_book",
@@ -163,7 +164,7 @@ def test_bar_wire_period_keys_cover_venue_seconds_echo() -> None:
     ``time_bar_unsubscribed`` (the node-path bug the dropped TC-D54 live test's
     bar leg caught before it was removed).
     """
-    from nautilus_trader.model.data import BarType
+    from nautilus_trader.model import BarType
     from rithmic_nt_connect.data import bar_wire_period_keys
 
     assert bar_wire_period_keys(
@@ -182,7 +183,7 @@ def test_bar_wire_period_keys_cover_venue_seconds_echo() -> None:
 
 def test_time_bar_dispatch_matches_venue_seconds_period() -> None:
     """A live EXTERNAL bar event (seconds-period echo) must not be dropped."""
-    from nautilus_trader.model.data import BarType
+    from nautilus_trader.model import BarType
     from rithmic_nt_connect.data import (
         bar_type_to_rithmic,
         bar_types_for_event,
@@ -212,7 +213,7 @@ def test_time_bar_dispatch_matches_venue_seconds_period() -> None:
 
 def test_bar_resync_subscriptions_dedupe_dual_keys() -> None:
     """Resync must re-issue one native request per BarType, not both keys."""
-    from nautilus_trader.model.data import BarType
+    from nautilus_trader.model import BarType
     from rithmic_nt_connect.data import (
         bar_resync_subscriptions,
         bar_type_to_rithmic,
@@ -324,7 +325,7 @@ def test_concurrent_gap_resyncs_replay_once() -> None:
             calls.append((symbol, exchange))
 
     async def scenario() -> None:
-        client = RithmicDataClient.__new__(RithmicDataClient)
+        client: Any = RithmicDataClient.__new__(RithmicDataClient)
         client._bbo_state = {}
         client._books = BookAssembler()
         client._subscriptions = {("NQU6", "CME")}
@@ -416,9 +417,7 @@ def test_bbo_state_cleared_on_quote_unsubscribe_and_resync() -> None:
     with pre-unsubscribe/pre-reset state (review thread 3797072595)."""
     import asyncio
 
-    from nautilus_trader.core.uuid import UUID4
-    from nautilus_trader.data.messages import UnsubscribeQuoteTicks
-    from nautilus_trader.model.identifiers import ClientId, InstrumentId, Venue
+    from nautilus_trader.model import InstrumentId
     from rithmic_nt_connect.data import RithmicDataClient
 
     client = RithmicDataClient.__new__(RithmicDataClient)
@@ -450,14 +449,10 @@ def test_bbo_state_cleared_on_quote_unsubscribe_and_resync() -> None:
             pass  # Quote unsubscribe drops the accumulator for that symbol.
 
     client._session = Sess()
-    cmd = UnsubscribeQuoteTicks(
-        InstrumentId.from_str("NQU6-CME.RITHMIC"),
-        ClientId("test"),
-        Venue("RITHMIC"),
-        UUID4(),
-        0,
+    cmd: Any = SimpleNamespace(
+        instrument_ids=[InstrumentId.from_str("NQU6-CME.RITHMIC")]
     )
-    asyncio.run(client._unsubscribe_quote_ticks(cmd))
+    asyncio.run(client._unsubscribe_quotes(cmd))
     assert "NQU6:CME" not in client._bbo_state
 
     # A resync also clears all accumulators before re-issuing intents.
@@ -475,7 +470,7 @@ def test_connect_reissues_intent_and_resets_derived_state() -> None:
     import asyncio
     import contextlib
 
-    from nautilus_trader.model.data import BarType
+    from nautilus_trader.model import BarType
     from rithmic_nt_connect.data import RithmicDataClient
 
     calls: list[tuple[Any, ...]] = []
@@ -514,12 +509,12 @@ def test_connect_reissues_intent_and_resets_derived_state() -> None:
             return []
 
     async def _run() -> None:
-        client = RithmicDataClient.__new__(RithmicDataClient)
+        client: Any = RithmicDataClient.__new__(RithmicDataClient)
         sess = Sess()
         client._recovery = client._build_recovery()
         sess._inner = sess
         client._session = sess
-        client._instrument_provider = Provider()
+        client.instrument_provider = Provider()
         client._subscriptions = {("NQU6", "CME")}
         client._book_subscriptions = {("NQU6", "CME")}
         # Dual-unit keys for one BarType: replay must re-issue ONE native

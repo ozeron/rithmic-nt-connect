@@ -56,7 +56,7 @@ __all__ = [
 
 
 def __getattr__(name: str) -> Any:
-    """Lazy-load TradingNode factories (requires nautilus_trader)."""
+    """Lazy-load LiveNode factories (requires nautilus_trader)."""
     if name == "RithmicLiveDataClientFactory":
         from rithmic_nt_connect.factories import RithmicLiveDataClientFactory
 

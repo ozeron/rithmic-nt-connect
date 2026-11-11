@@ -50,7 +50,7 @@ def test_slim_order_fields_omits_noise():
 
 
 def test_order_side_from_notification():
-    from nautilus_trader.model.enums import OrderSide
+    from nautilus_trader.model import OrderSide
     from rithmic_nt_connect._orders import order_side_from_notification
 
     assert order_side_from_notification({"transaction_type": 1}) == OrderSide.BUY

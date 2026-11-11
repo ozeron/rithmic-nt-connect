@@ -566,51 +566,81 @@ class RithmicDataClientConfig:
 
 
 try:
-    from nautilus_trader.config import LiveDataClientConfig
+    from nautilus_trader.config import DataClientConfig
 
-    _LIVE_DATA_CONFIG_BASE: Any = LiveDataClientConfig
+    _LIVE_DATA_CONFIG_BASE: Any = DataClientConfig
 except ImportError:  # pragma: no cover - nautilus not installed
     _LIVE_DATA_CONFIG_BASE = None
 
 if _LIVE_DATA_CONFIG_BASE is not None:
 
-    class RithmicLiveDataClientConfig(
-        _LIVE_DATA_CONFIG_BASE, frozen=True, kw_only=True
-    ):
-        """TradingNode-facing data config. Factory loads
-        ``SessionConfig.from_env()``.
+    class RithmicLiveDataClientConfig(_LIVE_DATA_CONFIG_BASE):
+        """``LiveNode``-facing data config. The factory loads
+        ``SessionConfig.from_env()`` when ``session`` is unset.
 
         ``bars_timestamp_on_close`` stamps EXTERNAL bars at the venue close
-        (default, as ``DataEngineConfig.time_bars_timestamp_on_close``); keep the
-        two equal so INTERNAL and EXTERNAL bars share one convention.
+        (default, as ``LiveDataEngineConfig.time_bars_timestamp_on_close``); keep
+        the two equal so INTERNAL and EXTERNAL bars share one convention.
+
+        NautilusTrader 2 configs are PyO3 types: the base reads its own fields
+        (``instrument_provider``, ``routing``, ...) in ``__new__`` and ignores
+        the adapter keywords declared here.
         """
 
-        session: SessionConfig | None = None
-        bars_timestamp_on_close: bool = True
+        def __init__(
+            self,
+            *,
+            session: SessionConfig | None = None,
+            bars_timestamp_on_close: bool = True,
+            **_kwargs: Any,
+        ) -> None:
+            super().__init__()
+            self.session = session
+            self.bars_timestamp_on_close = bool(bars_timestamp_on_close)
+
+        def __repr__(self) -> str:
+            return (
+                f"RithmicLiveDataClientConfig(session={self.session!r}, "
+                f"bars_timestamp_on_close={self.bars_timestamp_on_close!r})"
+            )
 
 
 try:
-    from nautilus_trader.config import LiveExecClientConfig
+    from nautilus_trader.config import ExecutionClientConfig
 
-    _LIVE_EXEC_CONFIG_BASE: Any = LiveExecClientConfig
+    _LIVE_EXEC_CONFIG_BASE: Any = ExecutionClientConfig
 except ImportError:  # pragma: no cover - nautilus not installed
     _LIVE_EXEC_CONFIG_BASE = None
 
 if _LIVE_EXEC_CONFIG_BASE is not None:
-    # msgspec ``frozen=True`` (inherited from ``NautilusConfig``); stated here so
-    # the class is self-describing and checkers don't flag the subclass.
-    class RithmicLiveExecClientConfig(
-        _LIVE_EXEC_CONFIG_BASE, kw_only=True, frozen=True
-    ):
-        """TradingNode-facing exec config. Factory loads ``SessionConfig.from_env()``.
+
+    class RithmicLiveExecClientConfig(_LIVE_EXEC_CONFIG_BASE):
+        """``LiveNode``-facing exec config. The factory loads
+        ``SessionConfig.from_env()`` when ``session`` is unset.
 
         Adds the Rithmic ``session`` + ``enable_trading`` knobs on top of the base
-        ``LiveExecClientConfig`` so the client can be registered on a ``TradingNode``.
+        ``ExecutionClientConfig`` so the client can be registered on a ``LiveNode``.
         """
 
-        session: SessionConfig | None = None
-        enable_trading: bool = False
-        soft_fail_pnl: bool = True
+        def __init__(
+            self,
+            *,
+            session: SessionConfig | None = None,
+            enable_trading: bool = False,
+            soft_fail_pnl: bool = True,
+            **_kwargs: Any,
+        ) -> None:
+            super().__init__()
+            self.session = session
+            self.enable_trading = bool(enable_trading)
+            self.soft_fail_pnl = bool(soft_fail_pnl)
+
+        def __repr__(self) -> str:
+            return (
+                f"RithmicLiveExecClientConfig(session={self.session!r}, "
+                f"enable_trading={self.enable_trading!r}, "
+                f"soft_fail_pnl={self.soft_fail_pnl!r})"
+            )
 
 
 def __getattr__(name: str) -> Any:

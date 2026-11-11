@@ -7,9 +7,12 @@ from typing import Any, cast
 
 import pytest
 from _stubs import _CacheStub, _Log
-from nautilus_trader.execution.reports import OrderStatusReport
-from nautilus_trader.model.enums import OrderStatus
-from nautilus_trader.model.identifiers import ClientOrderId, VenueOrderId
+from nautilus_trader.model import (
+    ClientOrderId,
+    OrderStatus,
+    OrderStatusReport,
+    VenueOrderId,
+)
 from rithmic_nt_connect.errors import VenueQueryUnavailable
 from rithmic_nt_connect.order_rows import order_status_from_fields
 from rithmic_nt_connect.recon import (
@@ -56,6 +59,7 @@ def _host(**over: Any) -> SimpleNamespace:
         _bind_venue_id=lambda cid, basket: host._cache.add_venue_order_id(
             cid, VenueOrderId(basket)
         ),
+        _venue_order_id_for=lambda cid: host._cache.venue_order_id(cid),
     )
     for key, value in over.items():
         setattr(host, key, value)

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Live NQ ticks + INTERNAL 1-second bars; paper trades on Nautilus Sandbox.
 
-Rithmic is **data only**. Orders go to ``SandboxLiveExecClientFactory``
-(``venue=RITHMIC``), not the Rithmic order plant.
+Rithmic is **data only**. Orders go to NautilusTrader's simulated
+``SandboxExecutionClientFactory`` (``venue=RITHMIC``), not the Rithmic order
+plant.
 
 Rule: 4 consecutive lower closes → buy 1; 4 consecutive higher closes → sell 1
 (can stack). Daily SMA20 (EXTERNAL lookback) + 1m INTERNAL VWAP from ticks.
@@ -25,9 +26,97 @@ import os
 import sys
 import traceback
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "python"))
+sys.path.insert(0, str(ROOT / "examples"))
+
+
+def build_paper_node(
+    data_factory: Any,
+    data_config: Any,
+    *,
+    log_level: str = "INFO",
+    timeout_connection_secs: int = 45,
+) -> Any:
+    """Rithmic data + NautilusTrader Sandbox execution on ``venue=RITHMIC``."""
+    from nautilus_trader.adapters.sandbox import (
+        SandboxExecutionClientConfig,
+        SandboxExecutionClientFactory,
+    )
+    from nautilus_trader.common import Environment, LoggerConfig, LogLevel
+    from nautilus_trader.config import LiveExecutionEngineConfig
+    from nautilus_trader.execution import FixedFeeModel
+    from nautilus_trader.live import LiveNode
+    from nautilus_trader.model import (
+        AccountType,
+        Currency,
+        Money,
+        OmsType,
+        TraderId,
+        Venue,
+    )
+    from rithmic_nt_connect import ADAPTER_NAME, VENUE
+
+    usd = Currency.from_str("USD")
+    return (
+        LiveNode.builder("PAPER", TraderId("PAPER-001"), Environment.SANDBOX)
+        .with_logging(
+            LoggerConfig(
+                # Default INFO so SMA/VWAP lookback and BAR lines show.
+                stdout_level=getattr(LogLevel, log_level.upper()),
+                print_config=False,
+                component_levels={"NqFourBar-001": "INFO"},
+            )
+        )
+        .with_exec_engine_config(
+            LiveExecutionEngineConfig(reconciliation_startup_delay_secs=0.0)
+        )
+        .with_timeout_connection(timeout_connection_secs)
+        .with_timeout_reconciliation(5)
+        .with_timeout_portfolio(5)
+        .with_timeout_disconnection_secs(5)
+        .with_delay_post_stop_secs(5)
+        .add_data_client(ADAPTER_NAME, data_factory, data_config)
+        .add_simulated_exec_client(
+            "SANDBOX",
+            SandboxExecutionClientFactory(),
+            SandboxExecutionClientConfig(
+                venue=Venue(VENUE),
+                starting_balances=[Money(100_000, usd)],
+                # Commission-free paper fills: the rule alone.
+                fee_model=FixedFeeModel(Money(0, usd)),
+                oms_type=OmsType.NETTING,
+                account_type=AccountType.MARGIN,
+                trade_execution=True,
+                bar_execution=True,
+            ),
+        )
+        .build()
+    )
+
+
+async def run_for(node: Any, seconds: float) -> None:
+    """Run ``node`` for ``seconds``, then stop it (the strategy flattens)."""
+    import asyncio
+
+    handle = node.handle()
+    runner = asyncio.create_task(node.run_async())
+    try:
+        await asyncio.sleep(max(seconds, 1.0))
+    finally:
+        if not runner.done():
+            handle.stop()
+            await runner
+        else:
+            exc = runner.exception()
+            if exc is not None:
+                raise exc
+            print(
+                "warning: LiveNode.run_async() returned before --seconds elapsed",
+                file=sys.stderr,
+            )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -52,101 +141,23 @@ def main(argv: list[str] | None = None) -> int:
 
     import asyncio
 
-    from nautilus_trader.adapters.sandbox.config import SandboxExecutionClientConfig
-    from nautilus_trader.adapters.sandbox.factory import SandboxLiveExecClientFactory
-    from nautilus_trader.config import (
-        LiveDataEngineConfig,
-        LiveExecEngineConfig,
-        LiveRiskEngineConfig,
-        LoggingConfig,
-        TradingNodeConfig,
-    )
-    from nautilus_trader.live.node import TradingNode
-    from nautilus_trader.model.identifiers import TraderId
     from nq_four_bar import NqFourBarConfig, NqFourBarStrategy
     from rithmic_nt_connect import (
-        ADAPTER_NAME,
-        VENUE,
         RithmicLiveDataClientConfig,
         RithmicLiveDataClientFactory,
     )
 
-    node = TradingNode(
-        config=TradingNodeConfig(
-            trader_id=TraderId("PAPER-001"),
-            logging=LoggingConfig(
-                # Default INFO so SMA/VWAP lookback and BAR lines show.
-                # https://nautilustrader.io/docs/latest/concepts/logging/
-                log_level=args.log_level.upper(),
-                print_config=False,
-                log_component_levels={
-                    "NqFourBar-001": "INFO",
-                    "PAPER-001.NqFourBar-001": "INFO",
-                },
-            ),
-            data_engine=LiveDataEngineConfig(graceful_shutdown_on_exception=True),
-            exec_engine=LiveExecEngineConfig(
-                graceful_shutdown_on_exception=True,
-                reconciliation_startup_delay_secs=0.0,
-            ),
-            risk_engine=LiveRiskEngineConfig(graceful_shutdown_on_exception=True),
-            data_clients={ADAPTER_NAME: RithmicLiveDataClientConfig()},
-            exec_clients={
-                "SANDBOX": SandboxExecutionClientConfig(
-                    venue=VENUE,
-                    starting_balances=["100000 USD"],
-                    oms_type="NETTING",
-                    account_type="MARGIN",
-                    trade_execution=True,
-                    bar_execution=True,
-                ),
-            },
-            timeout_connection=45.0,
-            timeout_reconciliation=5.0,
-            timeout_portfolio=5.0,
-            timeout_disconnection=5.0,
-            timeout_post_stop=5.0,
-        )
+    node = build_paper_node(
+        RithmicLiveDataClientFactory,
+        RithmicLiveDataClientConfig(),
+        log_level=args.log_level,
     )
-    node.add_data_client_factory(ADAPTER_NAME, RithmicLiveDataClientFactory)
-    node.add_exec_client_factory("SANDBOX", SandboxLiveExecClientFactory)
     strategy = NqFourBarStrategy(NqFourBarConfig(request_lookback=True))
-    node.trader.add_strategy(strategy)
-    node.build()
+    node.add_strategy(strategy)
     print(f"paper node up  data=Rithmic exec=Sandbox  {args.seconds:.0f}s", flush=True)
 
-    loop = node.get_event_loop()
-    if loop is None:
-        print("no event loop after TradingNode build")
-        node.dispose()
-        return 1
-
-    async def _run() -> None:
-        runner = asyncio.create_task(node.run_async())
-        try:
-            await asyncio.sleep(max(args.seconds, 1.0))
-        finally:
-            if not runner.done():
-                await node.stop_async()
-                await runner
-            else:
-                exc = runner.exception()
-                if exc is not None:
-                    print(
-                        f"ERROR: TradingNode.run_async() failed: {exc}", file=sys.stderr
-                    )
-                    traceback.print_exception(exc, file=sys.stderr)
-                    raise exc
-                print(
-                    (
-                        "warning: TradingNode.run_async() returned before --seconds "
-                        "elapsed"
-                    ),
-                    file=sys.stderr,
-                )
-
     try:
-        loop.run_until_complete(_run())
+        asyncio.run(run_for(node, args.seconds))
         print(
             f"PNL  bars={strategy.bars} fills={strategy.fills}",
             flush=True,

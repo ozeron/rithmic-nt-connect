@@ -6,58 +6,54 @@ import asyncio
 import contextlib
 import os
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from nautilus_trader.cache.cache import Cache
-from nautilus_trader.common.component import LiveClock, MessageBus
-from nautilus_trader.core.uuid import UUID4
-from nautilus_trader.execution.messages import (
+from nautilus_trader.common import Clock, Logger
+from nautilus_trader.core import UUID4
+from nautilus_trader.live import (
     BatchCancelOrders,
     CancelAllOrders,
     CancelOrder,
+    ClientCache,
     GenerateFillReports,
     GenerateOrderStatusReport,
     GenerateOrderStatusReports,
     GeneratePositionStatusReports,
     ModifyOrder,
+    QueryOrder,
     SubmitOrder,
     SubmitOrderList,
 )
-from nautilus_trader.execution.reports import (
+from nautilus_trader.live.clients import ExecutionClient
+from nautilus_trader.model import (
+    AccountBalance,
+    AccountId,
+    AccountType,
+    ClientOrderId,
+    Currency,
     ExecutionMassStatus,
     FillReport,
-    OrderStatusReport,
-    PositionStatusReport,
-)
-from nautilus_trader.live.execution_client import LiveExecutionClient
-from nautilus_trader.model.enums import (
-    AccountType,
+    InstrumentId,
     LiquiditySide,
+    Money,
     OmsType,
     OrderStatus,
+    OrderStatusReport,
     OrderType,
     PositionSide,
-    TriggerType,
-)
-from nautilus_trader.model.identifiers import (
-    AccountId,
-    ClientId,
-    ClientOrderId,
-    InstrumentId,
+    PositionStatusReport,
+    Price,
+    Quantity,
     TradeId,
+    TraderId,
+    TriggerType,
     Venue,
     VenueOrderId,
 )
-from nautilus_trader.model.objects import (
-    AccountBalance,
-    Currency,
-    Money,
-    Price,
-    Quantity,
-)
-from nautilus_trader.model.orders import Order
 
 if TYPE_CHECKING:
     from rithmic_nt_connect.transport import Interrupted, RecoveryFailed
@@ -86,20 +82,22 @@ from rithmic_nt_connect._orders import (
 from rithmic_nt_connect._prices import price_from_wire
 from rithmic_nt_connect.commission import CommissionRegistry
 from rithmic_nt_connect.config import (
-    RithmicExecClientConfig,
-    RithmicLiveExecClientConfig,
     env_truthy,
 )
-from rithmic_nt_connect.constants import ADAPTER_NAME, DEFAULT_ACCOUNT_CURRENCY, VENUE
+from rithmic_nt_connect.constants import (
+    ADAPTER_NAME,
+    AUTO_ACCOUNT,
+    DEFAULT_ACCOUNT_CURRENCY,
+    VENUE,
+)
 from rithmic_nt_connect.errors import (
     ReconciliationUnavailableError,
     UnreadableEventError,
     VenueQueryUnavailable,
 )
 from rithmic_nt_connect.exposure import (
-    EXPOSURE_ENDPOINT,
+    EXPOSURE_HUB,
     ExposureSnapshot,
-    exposure_topic,
     matches_root,
     signed_net,
 )
@@ -111,14 +109,18 @@ from rithmic_nt_connect.polling import PlantPoller
 from rithmic_nt_connect.providers import RithmicInstrumentProvider
 from rithmic_nt_connect.recon import (
     TERMINAL_ORDER_STATUSES,
-    apply_mass_status_report_window,
     drain_for,
+    soft_mass_status,
 )
 from rithmic_nt_connect.recon import (
     DrainRowResult as _DrainRowResult,
 )
 from rithmic_nt_connect.recovery_bridge import TransportRecoveryBridge
 from rithmic_nt_connect.session import WireSession
+
+# NautilusTrader 2 has no common order base class; concrete orders share the
+# attribute surface this adapter reads.
+Order = Any
 
 _POSITION_SIDE = {
     "LONG": PositionSide.LONG,
@@ -152,6 +154,31 @@ def _failure_class(exc: BaseException) -> str:
 def _failure_reason(kind: str, exc: BaseException) -> str:
     prefix = "not sent: " if kind == "not_sent" else "venue rejected: "
     return f"{prefix}{exc}"
+
+
+@dataclass(frozen=True)
+class _CancelTarget:
+    """One order a ``CancelAllOrders`` selects (v2 commands are engine-built)."""
+
+    client_order_id: ClientOrderId
+    venue_order_id: VenueOrderId | None
+    command_id: UUID4 | None = None
+
+
+@dataclass(frozen=True)
+class ReportQuery:
+    """The report-command fields this client reads (``start``/``end`` in ns).
+
+    NautilusTrader 2 report commands are engine-built; the soft mass status
+    composes its own reads with this shape.
+    """
+
+    instrument_id: InstrumentId | None = None
+    venue_order_id: VenueOrderId | None = None
+    client_order_id: ClientOrderId | None = None
+    start: int | None = None
+    end: int | None = None
+    open_only: bool = False
 
 
 ACCOUNT_CACHE_TIMEOUT_S = 10.0
@@ -200,38 +227,40 @@ async def wait_account_in_cache(
         await asyncio.sleep(0.05)
 
 
-class RithmicExecutionClient(LiveExecutionClient):
+class RithmicExecutionClient(ExecutionClient):
     """Rithmic execution client (PnL always; order plant when ``enable_trading``)."""
 
     # Soft-complete startup mass-status (RC-5): empty/unavailable order drains
-    # must not abort TradingNode start. Fill economics are never attached — see
-    # ``generate_mass_status`` (MY043 2026-09-02 S- invent via NT partial-window).
+    # must not abort node start. Fill economics are never attached — see
+    # ``_generate_mass_status`` (MY043 2026-09-02 S- invent via NT partial-window).
     SOFT_MASS_STATUS: bool = True
 
     def __init__(
         self,
-        loop: asyncio.AbstractEventLoop,
-        msgbus: MessageBus,
-        cache: Cache,
-        clock: LiveClock,
-        instrument_provider: RithmicInstrumentProvider,
-        config: RithmicExecClientConfig | RithmicLiveExecClientConfig,
-        session: WireSession,
+        *,
         name: str | None = None,
+        config: Any,
+        cache: ClientCache,
+        clock: Clock,
+        trader_id: TraderId,
+        account_id: AccountId,
+        instrument_provider: RithmicInstrumentProvider,
+        session: WireSession,
     ) -> None:
         super().__init__(
-            loop=loop,
-            client_id=ClientId(name or f"{ADAPTER_NAME}-EXEC"),
-            venue=Venue(VENUE),
-            oms_type=OmsType.NETTING,
-            account_type=AccountType.MARGIN,
-            base_currency=Currency.from_str("USD"),
-            instrument_provider=instrument_provider,
-            msgbus=msgbus,
+            name=name or f"{ADAPTER_NAME}-EXEC",
+            config=config,
             cache=cache,
             clock=clock,
-            config=None,
+            trader_id=trader_id,
+            venue=Venue(VENUE),
+            account_id=account_id,
+            account_type=AccountType.MARGIN,
+            oms_type=OmsType.NETTING,
+            base_currency=Currency.from_str("USD"),
+            instrument_provider=instrument_provider,
         )
+        self._log = Logger(name or f"{ADAPTER_NAME}-EXEC")
         self._config_local = config
         self._session = session
         self._cancel_all_requested = env_truthy(
@@ -259,6 +288,11 @@ class RithmicExecutionClient(LiveExecutionClient):
         # proves stream activity, not position completeness; the re-arm barrier
         # requires it before clearing the latch (positions ride that stream).
         self._pnl_snapshot_observed = asyncio.Event()
+        # Venue <-> client order ids learned from notifications/drains. The v2
+        # cache is read-only and learns the mapping only once the core applies
+        # the queued OrderAccepted, so this bridges that window.
+        self._venue_ids: OrderedDict[str, str] = OrderedDict()
+        self._client_ids: OrderedDict[str, str] = OrderedDict()
         self._account_seeded = False
         # The session's resolved account, fetched off the event loop (in gateway
         # mode it is a socket round trip) and read synchronously from here.
@@ -278,10 +312,6 @@ class RithmicExecutionClient(LiveExecutionClient):
         self._pnl_live_since_ns: int | None = None
         self._position_seen_ns: dict[str, int] = {}
         self._unreadable_position_symbols: set[str] = set()
-        # One venue answers exposure per node: a second Rithmic exec client (or a paper
-        # responder already registered) keeps the first registration.
-        if EXPOSURE_ENDPOINT not in msgbus.endpoints():
-            msgbus.register(EXPOSURE_ENDPOINT, self._on_exposure_request)
 
     _MAX_SEEN_FILL_KEYS = 10_000
     _REARM_PNL_SNAPSHOT_TIMEOUT_S = 5.0
@@ -290,6 +320,33 @@ class RithmicExecutionClient(LiveExecutionClient):
     _ORDER_POLL_MAX_TRANSIENT = 5
     # A poll begun on an older PnL stream cannot establish fresh exposure.
     _pnl_epoch: int = 0
+
+    @property
+    def _cache(self) -> Any:
+        return self.cache
+
+    @_cache.setter
+    def _cache(self, value: Any) -> None:
+        self.cache = value
+
+    @property
+    def _clock(self) -> Any:
+        return self.clock
+
+    @_clock.setter
+    def _clock(self, value: Any) -> None:
+        self.clock = value
+
+    @property
+    def _auto_account(self) -> bool:
+        """The account label is ``RITHMIC-AUTO`` (venue account resolved at login)."""
+        return str(self.account_id) == f"{VENUE}-{AUTO_ACCOUNT}"
+
+    def _send_order_status_report(self, report: OrderStatusReport) -> None:
+        self._handle_report(report)
+
+    def _send_fill_report(self, report: FillReport) -> None:
+        self._handle_report(report)
 
     def _fill_key_seen(self, key: str) -> bool:
         return self._seen_fill_keys.has_seen(key)
@@ -422,24 +479,27 @@ class RithmicExecutionClient(LiveExecutionClient):
                         "staying un-armed"
                     )
         await self._await_account_registered()
+        # One venue answers exposure per process: the latest connected client.
+        if not EXPOSURE_HUB.register_responder(self.request_exposure):
+            self._log.warning("exposure responder replaced by this exec client")
 
     async def _await_account_registered(
         self, timeout_secs: float = ACCOUNT_CACHE_TIMEOUT_S, log_registered: bool = True
     ) -> None:
         deadline = time.monotonic() + timeout_secs
-        while self.account_id is None and time.monotonic() < deadline:
+        while not self._account_seeded and time.monotonic() < deadline:
             await self._resolve_and_seed_account()
-            if self.account_id is not None:
+            if self._account_seeded:
                 break
             await asyncio.sleep(0.05)
-        if self.account_id is None:
+        if not self._account_seeded:
             if self.enable_trading:
                 raise RuntimeError(
-                    "no Rithmic account id after connect — "
+                    "no Rithmic account resolved after connect — "
                     "set RITHMIC_ACCOUNT_ID or wait for plant resolve"
                 )
             self._log.warning(
-                "no Rithmic account id; exec connected without AccountState"
+                "no Rithmic account resolved; exec connected without AccountState"
             )
             return
         remaining = max(0.5, deadline - time.monotonic())
@@ -480,7 +540,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         cfg_id = getattr(session, "account_id", None)
         if cfg_id:
             return str(cfg_id)
-        if self.account_id is not None:
+        if self.account_id is not None and not self._auto_account:
             value = str(self.account_id)
             prefix = f"{VENUE}-"
             return value.removeprefix(prefix)
@@ -492,17 +552,13 @@ class RithmicExecutionClient(LiveExecutionClient):
         Lucid PnL often omits currency; without generate_account_state the
         engine drops fills (``no account registered``) and flatten is a no-op.
         """
-        if self._account_seeded and self.account_id is not None:
+        if self._account_seeded:
             return
         raw = self._account_raw(account_raw)
         if not raw:
             return
-        if self.account_id is None:
-            self._set_account_id(AccountId(f"{VENUE}-{raw}"))
-        if self._account_seeded:
-            return
         usd = Currency.from_str(DEFAULT_ACCOUNT_CURRENCY)
-        zero = Money(Decimal(0), usd)
+        zero = Money.from_decimal(Decimal(0), usd)
         self.generate_account_state(
             balances=[AccountBalance(zero, zero, zero)],
             margins=[],
@@ -516,13 +572,30 @@ class RithmicExecutionClient(LiveExecutionClient):
             f"seeded account {self.account_id} currency={DEFAULT_ACCOUNT_CURRENCY}"
         )
 
+    def _event_loop(self) -> asyncio.AbstractEventLoop | None:
+        """The node loop once the client is bound (``loop``), else an explicitly
+        assigned ``_loop`` (doubles built without ``__init__``)."""
+        try:
+            loop = self.loop
+        except AttributeError:
+            loop = None
+        return loop if loop is not None else self.__dict__.get("_loop")
+
+    def _spawn(
+        self, loop: asyncio.AbstractEventLoop, coro: Any, name: str
+    ) -> asyncio.Task[Any]:
+        """Supervised task on the node runtime; a plain loop task without one."""
+        if "_runtime" in self.__dict__:
+            return self.create_task(coro, name)
+        return loop.create_task(coro, name=name)
+
     def _build_recovery(self) -> TransportRecoveryBridge:
         return TransportRecoveryBridge(
             label="L3 plant restore",
             task_name="rithmic_l3_plant_restore",
             log=lambda: self._log,
-            get_loop=lambda: getattr(self, "_loop", None),
-            spawn=lambda loop, coro, name: self.create_task(coro, log_msg=name),
+            get_loop=self._event_loop,
+            spawn=self._spawn,
             restore=self._restore_plants_after_transport_up,
             on_down=self._on_transport_down,
             on_failed=self._on_transport_recovery_failed,
@@ -734,7 +807,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                 on_event=self._dispatch_pnl_event,
                 on_resync=self._resync_pnl_subscription,
             )
-        return self.create_task(loop, log_msg=f"rithmic_{stream}_poll")
+        return self.create_task(loop, f"rithmic_{stream}_poll")
 
     async def _plant_poll_loop(
         self,
@@ -817,6 +890,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         self._handle_order_notification(fields)
 
     async def _disconnect(self) -> None:
+        EXPOSURE_HUB.unregister_responder(self.request_exposure)
         self._order_plant.disconnect()
         await self._stop_background()
         try:
@@ -849,12 +923,10 @@ class RithmicExecutionClient(LiveExecutionClient):
             return
         currency_raw = fields.get("currency") or DEFAULT_ACCOUNT_CURRENCY
         currency = Currency.from_str(str(currency_raw))
-        account_id = AccountId(f"{VENUE}-{fields['account_id']}")
-        if self.account_id is None:
-            self._set_account_id(account_id)
+        account_id = self.account_id
         self._seed_account_if_needed(str(fields["account_id"]))
-        free = Money(free_dec, currency)
-        locked = Money(Decimal(0), currency)
+        free = Money.from_decimal(free_dec, currency)
+        locked = Money.from_decimal(Decimal(0), currency)
         total = free
         balances = [AccountBalance(total, locked, free)]
         # Rithmic streams account PnL on a short interval even when the
@@ -976,11 +1048,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         )
 
     def _publish_exposure(self, snap: ExposureSnapshot) -> None:
-        self._msgbus.publish(exposure_topic(snap.root), snap)
-
-    def _on_exposure_request(self, root: str) -> None:
-        """msgbus endpoint: drain the venue for ``root`` and publish the snapshot."""
-        self.create_task(self.request_exposure(str(root)))
+        EXPOSURE_HUB.publish(snap)
 
     def _working_orders_for_root(
         self, events: list[dict[str, Any]], root: str
@@ -1017,7 +1085,7 @@ class RithmicExecutionClient(LiveExecutionClient):
 
         Net from the PnL plant rows, open orders from a fresh bounded drain. A
         failed drain leaves ``open_orders=None`` (never 0); ``complete`` is the
-        only proof. Published on ``exposure_topic(root)`` and returned.
+        only proof. Published on ``EXPOSURE_HUB`` and returned.
         """
         open_orders: int | None = None
         drain_ts: int | None = None
@@ -1036,15 +1104,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         fields: dict[str, Any],
         ts_init: int,
     ) -> PositionStatusReport | None:
-        if self.account_id is None:
-            account_raw = fields.get("account_id")
-            if not account_raw:
-                return None
-            self._set_account_id(AccountId(f"{VENUE}-{account_raw}"))
-        # ``account_id`` is guaranteed set above (either branch returns if it
-        # couldn't be resolved). Use a guarded read so the type-checker sees a
-        # non-None value without a bare ``assert`` (B101).
-        if self.account_id is None:  # pragma: no cover — defensive only
+        if self.account_id is None:  # pragma: no cover — fixed at construction
             return None
         side = _POSITION_SIDE.get(str(fields["position_side"]), PositionSide.FLAT)
         avg = fields.get("avg_px_open")
@@ -1067,7 +1127,7 @@ class RithmicExecutionClient(LiveExecutionClient):
     ) -> Price:
         instrument = self._cache.instrument(instrument_id)
         if instrument is not None:
-            return instrument.make_price(value)
+            return price_from_wire(value, int(instrument.price_precision))
         return price_from_wire(value)
 
     def _route(self, instrument_id: InstrumentId) -> tuple[str, str]:
@@ -1140,7 +1200,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         """
         basket = fields.get("basket_id")
         if basket:
-            cached = self._cache.client_order_id(VenueOrderId(str(basket)))
+            cached = self._client_order_id_for_venue(str(basket))
             if cached is not None:
                 cached_order = self._cache.order(cached)
                 # Mirror the user_tag guard: a terminal order remains in the
@@ -1165,7 +1225,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         """Client order id backing a notification's basket id (or None)."""
         basket = fields.get("basket_id")
         if basket:
-            return self._cache.client_order_id(VenueOrderId(str(basket)))
+            return self._client_order_id_for_venue(str(basket))
         return None
 
     def _drain_client_order_id(self, fields: dict[str, Any]) -> ClientOrderId | None:
@@ -1184,9 +1244,44 @@ class RithmicExecutionClient(LiveExecutionClient):
             return cached
         return self._resolve_client_order_id(fields)
 
+    _MAX_VENUE_IDS = 10_000
+
     def _bind_venue_id(self, client_order_id: ClientOrderId, venue_id: str) -> None:
-        # Record the venue -> client mapping in the cache (authoritative source).
-        self._cache.add_venue_order_id(client_order_id, VenueOrderId(venue_id))
+        """Remember a venue <-> client order id pair (bounded, newest kept).
+
+        The v2 cache is read-only; it learns the pair from the queued
+        OrderAccepted. Lookups check this map first, then the cache.
+        """
+        cid = client_order_id.value
+        for book, key, value in (
+            (self._id_book("_venue_ids"), cid, venue_id),
+            (self._id_book("_client_ids"), venue_id, cid),
+        ):
+            book[key] = value
+            book.move_to_end(key)
+            while len(book) > self._MAX_VENUE_IDS:
+                book.popitem(last=False)
+
+    def _id_book(self, attr: str) -> OrderedDict[str, str]:
+        book = self.__dict__.get(attr)
+        if book is None:
+            book = OrderedDict()
+            setattr(self, attr, book)
+        return book
+
+    def _venue_order_id_for(
+        self, client_order_id: ClientOrderId
+    ) -> VenueOrderId | None:
+        local = self._id_book("_venue_ids").get(client_order_id.value)
+        if local is not None:
+            return VenueOrderId(local)
+        return self._cache.venue_order_id(client_order_id)
+
+    def _client_order_id_for_venue(self, venue_id: str) -> ClientOrderId | None:
+        local = self._id_book("_client_ids").get(venue_id)
+        if local is not None:
+            return ClientOrderId(local)
+        return self._cache.client_order_id(VenueOrderId(venue_id))
 
     def _venue_id_for(
         self, fields: dict[str, Any], client_order_id: ClientOrderId | None
@@ -1198,7 +1293,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         # the cache (bound at accept) so modify_rejected/cancel_rejected
         # reference the venue order, not the client/tag id.
         if client_order_id is not None:
-            cached = self._cache.venue_order_id(client_order_id)
+            cached = self._venue_order_id_for(client_order_id)
             if cached is not None:
                 return cached.value
         tag = fields.get("user_tag")
@@ -1281,7 +1376,7 @@ class RithmicExecutionClient(LiveExecutionClient):
 
     def _venue_id_for_order(self, order: Order) -> str | None:
         """Venue id for an order: the cache mapping wins, then the order model's."""
-        cached = self._cache.venue_order_id(order.client_order_id)
+        cached = self._venue_order_id_for(order.client_order_id)
         if cached is not None:
             return cached.value
         if order.venue_order_id is not None:
@@ -1327,16 +1422,14 @@ class RithmicExecutionClient(LiveExecutionClient):
             quantity=order.quantity,
             filled_qty=order.filled_qty,
             report_id=UUID4(),
-            ts_accepted=order.ts_accepted,
+            ts_accepted=order.ts_accepted or 0,
             ts_last=order.ts_last,
             ts_init=ts_init,
             client_order_id=order.client_order_id,
             price=order.price if order.has_price else None,
             trigger_price=order.trigger_price if order.has_trigger_price else None,
-            # Only stop orders expose ``trigger_type`` on the 1.231.x model;
-            # plain limit/market orders must not be touched (AttributeError).
-            # ``getattr`` keeps this statically honest: the base ``Order`` stub
-            # deliberately does not declare the attribute.
+            # Only stop orders expose ``trigger_type``; limit/market orders have
+            # none (``TriggerType.NO_TRIGGER`` is ``None`` on NautilusTrader 2).
             trigger_type=getattr(order, "trigger_type", TriggerType.NO_TRIGGER),
             reduce_only=order.is_reduce_only,
             avg_px=Decimal(str(order.avg_px)) if order.avg_px else None,
@@ -1344,7 +1437,7 @@ class RithmicExecutionClient(LiveExecutionClient):
 
     def _cache_backed_order_status_reports(
         self,
-        command: GenerateOrderStatusReports,
+        command: GenerateOrderStatusReports | ReportQuery,
     ) -> list[OrderStatusReport]:
         ts_init = self._clock.timestamp_ns()
         reports: list[OrderStatusReport] = []
@@ -1387,29 +1480,40 @@ class RithmicExecutionClient(LiveExecutionClient):
     def _modify_rejected(
         self, command: ModifyOrder, venue_id: str | None, reason: str
     ) -> None:
+        order = self._cache.order(command.client_order_id)
+        if order is None:
+            # v2 events are built from the order; an unknown one has no owner.
+            self._log.error(
+                f"modify rejected for unknown order {command.client_order_id}: {reason}"
+            )
+            return
         self.generate_order_modify_rejected(
-            command.strategy_id,
-            command.instrument_id,
-            command.client_order_id,
-            VenueOrderId(venue_id or "UNKNOWN"),
+            order,
+            VenueOrderId(venue_id) if venue_id else None,
             reason,
             self._clock.timestamp_ns(),
+            getattr(command, "command_id", None),
         )
 
-    def _cancel_rejected(
-        self, command: CancelOrder, venue_id: str | None, reason: str
-    ) -> None:
+    def _cancel_rejected(self, command: Any, venue_id: str | None, reason: str) -> None:
+        order = self._cache.order(command.client_order_id)
+        if order is None:
+            self._log.error(
+                f"cancel rejected for unknown order {command.client_order_id}: {reason}"
+            )
+            return
         self.generate_order_cancel_rejected(
-            command.strategy_id,
-            command.instrument_id,
-            command.client_order_id,
-            VenueOrderId(venue_id or "UNKNOWN"),
+            order,
+            VenueOrderId(venue_id) if venue_id else None,
             reason,
             self._clock.timestamp_ns(),
+            getattr(command, "command_id", None),
         )
 
     async def _submit_order(self, command: SubmitOrder) -> None:
-        order: Order = command.order
+        await self._submit_one(command.order)
+
+    async def _submit_one(self, order: Order) -> None:
         refused = self._command_refusal("submit")
         if refused is not None:
             self._deny_all([order], refused)
@@ -1432,12 +1536,7 @@ class RithmicExecutionClient(LiveExecutionClient):
             DEFAULT_TRAIL_BY_PRICE_ID if trail_by_ticks is not None else None
         )
 
-        self.generate_order_submitted(
-            order.strategy_id,
-            order.instrument_id,
-            order.client_order_id,
-            self._clock.timestamp_ns(),
-        )
+        self.generate_order_submitted(order)
         try:
             await asyncio.to_thread(
                 self._session.place_order,
@@ -1500,22 +1599,12 @@ class RithmicExecutionClient(LiveExecutionClient):
     def _reject_all(self, orders: list, reason: str) -> None:
         for order in orders:
             self.generate_order_rejected(
-                order.strategy_id,
-                order.instrument_id,
-                order.client_order_id,
-                reason,
-                self._clock.timestamp_ns(),
+                order, reason, self._clock.timestamp_ns(), False
             )
 
     def _deny_all(self, orders: list, reason: str) -> None:
         for order in orders:
-            self.generate_order_denied(
-                order.strategy_id,
-                order.instrument_id,
-                order.client_order_id,
-                reason,
-                self._clock.timestamp_ns(),
-            )
+            self.generate_order_denied(order, reason)
 
     def _bracket_ticks(
         self, entry: Any, stop: Any | None, target: Any | None
@@ -1569,12 +1658,23 @@ class RithmicExecutionClient(LiveExecutionClient):
         except Exception:
             return None, None
 
+    def _order_list_orders(self, command: SubmitOrderList) -> list[Order]:
+        """The list's orders (v2 ``OrderList`` holds ids; the cache holds orders)."""
+        orders = []
+        for client_order_id in command.order_list.client_order_ids():
+            order = self._cache.order(client_order_id)
+            if order is None:
+                self._log.error(f"order list member {client_order_id} not in cache")
+                continue
+            orders.append(order)
+        return orders
+
     async def _submit_order_list(self, command: SubmitOrderList) -> None:
+        orders = self._order_list_orders(command)
         if not self.enable_trading:
             self._log_trading_disabled("submit_order_list")
-            self._deny_all(list(command.order_list.orders), _TRADING_DISABLED_REASON)
+            self._deny_all(orders, _TRADING_DISABLED_REASON)
             return
-        orders = list(command.order_list.orders)
         # Bracket path: try to map 3-leg OrderList to single plant bracket.
         if self._is_bracket_order_list(orders):
             import os
@@ -1629,12 +1729,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                 return
             # One plant bracket carries all three legs: they share its events.
             for order in orders:
-                self.generate_order_submitted(
-                    order.strategy_id,
-                    order.instrument_id,
-                    order.client_order_id,
-                    self._clock.timestamp_ns(),
-                )
+                self.generate_order_submitted(order)
             try:
                 await asyncio.to_thread(
                     self._session.place_bracket_order,
@@ -1658,16 +1753,7 @@ class RithmicExecutionClient(LiveExecutionClient):
                 )
             return
         for order in orders:
-            await self._submit_order(
-                SubmitOrder(
-                    trader_id=command.trader_id,
-                    strategy_id=command.strategy_id,
-                    order=order,
-                    command_id=UUID4(),
-                    ts_init=self._clock.timestamp_ns(),
-                    client_id=command.client_id,
-                )
-            )
+            await self._submit_one(order)
 
     async def _modify_order(self, command: ModifyOrder) -> None:
         hint = command.venue_order_id.value if command.venue_order_id else None
@@ -1723,9 +1809,14 @@ class RithmicExecutionClient(LiveExecutionClient):
             )
 
     async def _cancel_order(self, command: CancelOrder) -> None:
+        await self._cancel_one(command)
+
+    async def _cancel_one(self, command: Any) -> None:
+        """Cancel one order; ``command`` needs ``client_order_id`` and
+        ``venue_order_id`` (a v2 ``CancelOrder`` or ``_CancelTarget``)."""
         venue_id = command.venue_order_id.value if command.venue_order_id else None
         if not venue_id:
-            cached_venue = self._cache.venue_order_id(command.client_order_id)
+            cached_venue = self._venue_order_id_for(command.client_order_id)
             if cached_venue is not None:
                 venue_id = cached_venue.value
         refused = self._command_refusal("cancel")
@@ -1763,25 +1854,48 @@ class RithmicExecutionClient(LiveExecutionClient):
             side=command.order_side,
         )
         for order in orders:
-            await self._cancel_order(
-                CancelOrder(
-                    command.trader_id,
-                    order.strategy_id,
-                    order.instrument_id,
-                    order.client_order_id,
-                    order.venue_order_id,
-                    UUID4(),
-                    self._clock.timestamp_ns(),
+            await self._cancel_one(
+                _CancelTarget(
+                    client_order_id=order.client_order_id,
+                    venue_order_id=order.venue_order_id,
+                    command_id=getattr(command, "command_id", None),
                 )
             )
 
     async def _batch_cancel_orders(self, command: BatchCancelOrders) -> None:
         for cancel in command.cancels:
-            await self._cancel_order(cancel)
+            await self._cancel_one(cancel)
 
-    async def generate_order_status_report(
+    async def _query_order(self, command: QueryOrder) -> None:
+        """``Strategy.query_order`` / the engine's single-order query.
+
+        NautilusTrader 2 routes ``QueryOrder`` here (1.231 composed it from the
+        status-report hook). Publish the order's status report; an in-flight
+        order goes through the bounded working-orders drain first. A drain that
+        cannot resolve it leaves the order in flight (fail closed), logged.
+        """
+        query = ReportQuery(
+            instrument_id=command.instrument_id,
+            client_order_id=command.client_order_id,
+            venue_order_id=command.venue_order_id,
+        )
+        try:
+            report = await self._generate_order_status_report(query)
+        except (VenueQueryUnavailable, ReconciliationUnavailableError) as exc:
+            self._log.warning(
+                f"query_order {command.client_order_id}: {exc}; order stays in flight"
+            )
+            return
+        if report is None:
+            self._log.warning(
+                f"query_order {command.client_order_id}: order not in cache"
+            )
+            return
+        self._send_order_status_report(report)
+
+    async def _generate_order_status_report(
         self,
-        command: GenerateOrderStatusReport,
+        command: GenerateOrderStatusReport | ReportQuery,
     ) -> OrderStatusReport | None:
         order = (
             self._cache.order(command.client_order_id)
@@ -1789,7 +1903,7 @@ class RithmicExecutionClient(LiveExecutionClient):
             else None
         )
         if order is None and command.venue_order_id is not None:
-            mapped = self._cache.client_order_id(command.venue_order_id)
+            mapped = self._client_order_id_for_venue(command.venue_order_id.value)
             if mapped is not None:
                 order = self._cache.order(mapped)
         if order is None:
@@ -1838,7 +1952,7 @@ class RithmicExecutionClient(LiveExecutionClient):
         # Re-read the cached order: the live stream may have resolved it while
         # the drain was in flight (bound venue id and/or terminal state).
         order = self._cache.order(order.client_order_id) or order
-        if self._cache.venue_order_id(order.client_order_id) is not None:
+        if self._venue_order_id_for(order.client_order_id) is not None:
             # The live stream bound the venue id while we drained; it owns the
             # authoritative state now.
             return self._order_status_report_for(order, ts_init)
@@ -1947,9 +2061,9 @@ class RithmicExecutionClient(LiveExecutionClient):
             return True
         return want_exch == ev_exch
 
-    async def generate_order_status_reports(
+    async def _generate_order_status_reports(
         self,
-        command: GenerateOrderStatusReports,
+        command: GenerateOrderStatusReports | ReportQuery,
     ) -> list[OrderStatusReport]:
         # Venue recon touches the order plant (a trading capability); a read-only
         # client must not log the order plant in during reconciliation, and
@@ -1958,9 +2072,9 @@ class RithmicExecutionClient(LiveExecutionClient):
             return self._cache_backed_order_status_reports(command)
         return await drain_for(self).generate_order_status_reports(command)
 
-    async def generate_fill_reports(
+    async def _generate_fill_reports(
         self,
-        command: GenerateFillReports,
+        command: GenerateFillReports | ReportQuery,
     ) -> list[FillReport]:
         if not self.enable_trading:
             raise VenueQueryUnavailable(
@@ -1968,9 +2082,9 @@ class RithmicExecutionClient(LiveExecutionClient):
             )
         return await drain_for(self).generate_fill_reports(command)
 
-    async def generate_position_status_reports(
+    async def _generate_position_status_reports(
         self,
-        command: GeneratePositionStatusReports,
+        command: GeneratePositionStatusReports | ReportQuery,
     ) -> list[PositionStatusReport]:
         ts_init = self._clock.timestamp_ns()
         reports: list[PositionStatusReport] = []
@@ -2011,85 +2125,51 @@ class RithmicExecutionClient(LiveExecutionClient):
                 reports.append(report)
         return reports
 
-    async def generate_mass_status(
+    async def _generate_mass_status(
         self,
         lookback_mins: int | None = None,
     ) -> ExecutionMassStatus | None:
         """Startup mass status that survives empty/unavailable order drains.
 
-        Nautilus base ``generate_mass_status`` aborts the whole report (returns
-        ``None``) when any child generator raises. Rithmic's best-effort order
-        drain raises ``VenueQueryUnavailable`` on empty — that used to prevent
-        the TradingNode from ever starting (Aug-17 RC-5 → MY043 ``--no-recon``).
+        Overrides the NautilusTrader 2 default (native composition of the bulk
+        hooks, which fails startup on any raised report): Rithmic's best-effort
+        order drain raises ``VenueQueryUnavailable`` on empty — that used to
+        prevent the node from ever starting (Aug-17 RC-5 → MY043 ``--no-recon``).
 
         Soft-complete known-unavailable order/fill drains; unexpected errors
         abort (``None``). Continuous open-check stays fail-closed on empty drain.
 
         History contract (MY043 2026-09-02 / live proof 2026-09-03):
         Rithmic ``load_orders`` is a working-order drain, not a provably complete
-        fill window. Attaching those fills to ``ExecutionMassStatus`` feeds NT's
-        compatibility ``adjust_fills_for_partial_window`` /
-        ``AddSyntheticOpening`` path and invents ``S-…`` openings on warm Redis
-        restarts (``generate_missing_orders`` does **not** gate that path). Soft
-        mass-status therefore:
+        fill window. Attaching those fills to ``ExecutionMassStatus`` lets the
+        engine's partial-window fill adjustment invent ``S-…`` openings on warm
+        restarts. Soft mass-status therefore:
 
         - never attaches fill reports (position reports stay venue-qty authority);
         - clears order reports when the order drain soft-failed;
-        - declares ``lookback_start`` + ``reports_complete=False`` when the
-          installed NT exposes ``set_report_window`` (1.231 lacks it — fill
-          omission is the fail-closed defense on that line);
+        - declares the report window bounded and incomplete
+          (``lookback_start``, ``reports_complete=False``);
         - emits explicit FLAT position reports for cache-open instruments the
-          venue did not mention, and warns that NT will **not** clear Redis/OMS
-          ghosts when ``generate_missing_orders=False`` (2026-09-03: plant flat
-          + warm Redis left ``net_position=1``). Consumers must flush Redis when
-          plant is flat before recon-on.
+          venue did not mention, and warns when cache and venue disagree.
         """
         from datetime import timedelta
 
-        import pandas as pd
-
         self._log.info("Generating ExecutionMassStatus (Rithmic soft-complete)...")
-        self.reconciliation_active = True
-        mass_status = ExecutionMassStatus(
-            client_id=self.id,
-            account_id=self.account_id,
-            venue=self.venue,
-            report_id=UUID4(),
-            ts_init=self._clock.timestamp_ns(),
-        )
-        since: pd.Timestamp | None = None
+        ts_init = self._clock.timestamp_ns()
+        since_ns: int | None = None
         if lookback_mins is not None:
             since = self._clock.utc_now() - timedelta(minutes=lookback_mins)
+            since_ns = int(since.timestamp() * 1_000_000_000)
 
-        order_cmd = GenerateOrderStatusReports(
-            instrument_id=None,
-            start=since,
-            end=None,
-            open_only=False,
-            command_id=UUID4(),
-            ts_init=self._clock.timestamp_ns(),
-        )
-        fill_cmd = GenerateFillReports(
-            instrument_id=None,
-            venue_order_id=None,
-            start=since,
-            end=None,
-            command_id=UUID4(),
-            ts_init=self._clock.timestamp_ns(),
-        )
-        position_cmd = GeneratePositionStatusReports(
-            instrument_id=None,
-            start=None,
-            end=None,
-            command_id=UUID4(),
-            ts_init=self._clock.timestamp_ns(),
-        )
+        order_cmd = ReportQuery(start=since_ns, open_only=False)
+        fill_cmd = ReportQuery(start=since_ns)
+        position_cmd = ReportQuery()
 
         orders_incomplete = False
         fills_incomplete = False
 
         try:
-            orders = await self.generate_order_status_reports(order_cmd)
+            orders = await self._generate_order_status_reports(order_cmd)
         except (VenueQueryUnavailable, ReconciliationUnavailableError) as exc:
             self._log.warning(
                 f"mass status order reports unavailable ({exc}); "
@@ -2098,15 +2178,14 @@ class RithmicExecutionClient(LiveExecutionClient):
             orders = []
             orders_incomplete = True
         except Exception as exc:
-            self._log.exception("mass status order reports failed", exc)
-            self.reconciliation_active = False
+            self._log.exception(f"mass status order reports failed: {exc}")
             return None
 
         try:
             # Drain may succeed with working-order fills; soft mass-status still
             # omits them below. We still invoke the generator so unexpected
             # transport errors abort the mass status (fail closed).
-            await self.generate_fill_reports(fill_cmd)
+            await self._generate_fill_reports(fill_cmd)
         except (VenueQueryUnavailable, ReconciliationUnavailableError) as exc:
             self._log.warning(
                 f"mass status fill reports unavailable ({exc}); "
@@ -2114,15 +2193,13 @@ class RithmicExecutionClient(LiveExecutionClient):
             )
             fills_incomplete = True
         except Exception as exc:
-            self._log.exception("mass status fill reports failed", exc)
-            self.reconciliation_active = False
+            self._log.exception(f"mass status fill reports failed: {exc}")
             return None
 
         try:
-            positions = await self.generate_position_status_reports(position_cmd)
+            positions = await self._generate_position_status_reports(position_cmd)
         except Exception as exc:
-            self._log.exception("mass status position reports failed", exc)
-            self.reconciliation_active = False
+            self._log.exception(f"mass status position reports failed: {exc}")
             return None
 
         if orders_incomplete:
@@ -2130,33 +2207,28 @@ class RithmicExecutionClient(LiveExecutionClient):
         # Never feed best-effort fills into NT partial-window adjust (S- invent).
         fills: list[FillReport] = []
 
-        lookback_start_ns = (
-            int(since.timestamp() * 1_000_000_000)
-            if since is not None
-            else int(mass_status.ts_init)
+        mass_status = soft_mass_status(
+            client_id=self.client_id,
+            account_id=self.account_id,
+            venue=Venue(VENUE),
+            ts_init=ts_init,
+            lookback_start_ns=since_ns if since_ns is not None else ts_init,
         )
-        applied = self._apply_mass_status_report_window(
-            mass_status,
-            lookback_start_ns=lookback_start_ns,
-            reports_complete=False,
-        )
-        if orders_incomplete or fills_incomplete or not applied:
+        if orders_incomplete or fills_incomplete:
             self._log.info(
                 "soft mass-status history incomplete "
                 f"(orders_incomplete={orders_incomplete}, "
-                f"fills_incomplete={fills_incomplete}, "
-                f"report_window_applied={applied}); "
+                f"fills_incomplete={fills_incomplete}); "
                 "omitting fill reports so NT cannot invent S- openings"
             )
 
         # Cache-open instruments with no venue row → explicit FLAT so startup
-        # recon surfaces Redis ghosts (still will not clear them on NT 1.231
-        # when generate_missing_orders=False).
+        # recon surfaces cached ghosts.
         # Only when venue positions are known: with the PnL stream down an empty
         # venue set is not proof the cache's open positions are flat.
         augment = getattr(self, "_augment_soft_mass_flat_for_cache_opens", None)
         if callable(augment) and self._positions_known():
-            positions = augment(positions, ts_init=int(mass_status.ts_init))
+            positions = augment(positions, ts_init=ts_init)
         warn = getattr(self, "_warn_soft_mass_cache_vs_venue", None)
         if callable(warn):
             warn(positions)
@@ -2164,7 +2236,6 @@ class RithmicExecutionClient(LiveExecutionClient):
         mass_status.add_order_reports(reports=orders)
         mass_status.add_fill_reports(reports=fills)
         mass_status.add_position_reports(reports=positions)
-        self.reconciliation_active = False
         return mass_status
 
     def _augment_soft_mass_flat_for_cache_opens(
@@ -2183,17 +2254,3 @@ class RithmicExecutionClient(LiveExecutionClient):
     ) -> None:
         """Warn when cache and venue position qty disagree under soft mass-status."""
         drain_for(self).warn_soft_mass_cache_vs_venue(positions)
-
-    @staticmethod
-    def _apply_mass_status_report_window(
-        mass_status: Any,
-        *,
-        lookback_start_ns: int | None,
-        reports_complete: bool,
-    ) -> bool:
-        """Declare the NT mass-status history bound when reports are complete."""
-        return apply_mass_status_report_window(
-            mass_status,
-            lookback_start_ns=lookback_start_ns,
-            reports_complete=reports_complete,
-        )

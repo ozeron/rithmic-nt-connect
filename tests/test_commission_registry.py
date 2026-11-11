@@ -4,8 +4,7 @@ import asyncio
 from decimal import Decimal
 from unittest.mock import Mock
 
-from nautilus_trader.model.identifiers import InstrumentId
-from nautilus_trader.model.objects import Currency, Money
+from nautilus_trader.model import Currency, InstrumentId, Money
 from rithmic_nt_connect.commission import CommissionRegistry
 
 
@@ -34,15 +33,15 @@ def test_commission_registry_loading_and_fallbacks() -> None:
 
     # Product calculation
     mnq_fee = registry.commission_money("MNQ", qty=3)
-    assert mnq_fee == Money(Decimal("1.56"), Currency.from_str("USD"))
+    assert mnq_fee == Money.from_decimal(Decimal("1.56"), Currency.from_str("USD"))
 
     # Fallback to account default for unknown product
     unknown_fee = registry.commission_money("UNKNOWN", qty=2)
-    assert unknown_fee == Money(Decimal("4.10"), Currency.from_str("USD"))
+    assert unknown_fee == Money.from_decimal(Decimal("4.10"), Currency.from_str("USD"))
 
     # Fallback when no product code and no default
     empty_reg = CommissionRegistry()
-    assert empty_reg.commission_money("XYZ", qty=5) == Money(
+    assert empty_reg.commission_money("XYZ", qty=5) == Money.from_decimal(
         Decimal(0), Currency.from_str("USD")
     )
 

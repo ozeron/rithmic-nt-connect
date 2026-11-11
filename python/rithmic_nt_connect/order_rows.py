@@ -13,12 +13,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from nautilus_trader.model.enums import (
-    OrderStatus,
-    OrderType,
-    TimeInForce,
-    TriggerType,
-)
+from nautilus_trader.model import OrderStatus, OrderType, TimeInForce, TriggerType
 
 from rithmic_nt_connect import _lib
 from rithmic_nt_connect._orders import (
@@ -69,8 +64,11 @@ def tif_from_fields(fields: dict[str, Any]) -> TimeInForce:
         return TimeInForce.GTC
 
 
-def trigger_type_from_fields(fields: dict[str, Any]) -> TriggerType:
-    """Nautilus trigger type for a normalized notification row (pure)."""
+def trigger_type_from_fields(fields: dict[str, Any]) -> TriggerType | None:
+    """Nautilus trigger type for a normalized notification row (pure).
+
+    ``TriggerType.NO_TRIGGER`` is ``None`` on NautilusTrader 2.
+    """
     raw = fields.get("price_type")
     if raw is None:
         return TriggerType.NO_TRIGGER

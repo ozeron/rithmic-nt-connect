@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from nautilus_trader.model.objects import Price
+from nautilus_trader.model import Price
 
 from rithmic_nt_connect._convert import ConvertError, format_price_str
 

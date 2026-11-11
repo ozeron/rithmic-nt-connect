@@ -23,7 +23,7 @@ from datetime import UTC, datetime
 from typing import ClassVar
 
 import pytest
-from nautilus_trader.model.data import BarType
+from nautilus_trader.model import BarType
 from rithmic_nt_connect.data import payloads_to_bars
 from rithmic_nt_connect.historical import (
     load_time_bars,

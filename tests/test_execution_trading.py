@@ -1,13 +1,18 @@
-"""Exec-client order routing / report-policy tests (no Cython client construction)."""
+"""Exec-client order routing / report-policy tests (no native client construction)."""
 
 from __future__ import annotations
 
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from nautilus_trader.model.enums import OrderSide
-from nautilus_trader.model.identifiers import ClientOrderId, InstrumentId, StrategyId
-from nautilus_trader.model.objects import Price, Quantity
+from nautilus_trader.model import (
+    ClientOrderId,
+    InstrumentId,
+    OrderSide,
+    Price,
+    Quantity,
+    StrategyId,
+)
 from rithmic_nt_connect._order_plant import OrderPlantPolicy, OrderPlantState
 from rithmic_nt_connect._orders import (
     OrderAction,

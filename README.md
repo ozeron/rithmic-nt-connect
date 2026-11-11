@@ -13,7 +13,7 @@
 
 ## Status
 
-Out-of-tree adapter for NautilusTrader **1.231.x**: live ticks/quotes, history requests, futures instruments, read-only PnL, and **gated** order-plant submit/cancel/modify.
+Out-of-tree adapter for NautilusTrader **2.0.0rc9** (Python `LiveNode` clients; Python ≥ 3.13): live ticks/quotes, history requests, futures instruments, read-only PnL, and **gated** order-plant submit/cancel/modify.
 
 Trading is **off by default** (`enable_trading=False` / unset `RITHMIC_ENABLE_TRADING`). Live place is gated; use the dry-run harness first. Scope vs done: [`docs/STATUS.md`](docs/STATUS.md) — see the **At-a-glance** scoreboard there (currently **79% implemented**: done + half of partial; regenerated with `python scripts/status_progress.py`).
 
@@ -28,7 +28,7 @@ Prebuilt wheels, the way NautilusTrader ships: CI builds them on every push to `
 | Wheel | Carries |
 | --- | --- |
 | `rithmic-gateway` | the `rithmic-gateway` parent binary (installed into the venv's `bin/`) + the pure-Python `rithmic_gateway` client; depends only on `protobuf` |
-| `rithmic-nt-connect` | the Nautilus adapter + Rust extension (cp312–cp314); `rithmic-nt-connect[gateway]` adds the gateway wheel. On macOS it needs macOS 26, because that is the only macOS that `nautilus_trader` 1.231.0 ships wheels for |
+| `rithmic-nt-connect` | the Nautilus adapter + Rust extension (cp313–cp314); `rithmic-nt-connect[gateway]` adds the gateway wheel. `nautilus_trader` 2.0.0rc9 is a pre-release, hence `--prerelease allow` |
 
 ```toml
 # pyproject.toml of the consuming project
@@ -83,24 +83,37 @@ uv run python scripts/smoke_lucid_nq.py
 RITHMIC_TEST_DOTENV=.env uv run pytest tests/e2e -v
 ```
 
-Register on a `TradingNode`:
+Register on a `LiveNode` (NautilusTrader 2):
 
 ```python
-from nautilus_trader.live.node import TradingNode
+from nautilus_trader.config import LiveNodeConfig
+from nautilus_trader.live import LiveNode
+from nautilus_trader.model import TraderId
 from rithmic_nt_connect import (
-    RithmicDataClientConfig,
-    RithmicExecClientConfig,
+    ADAPTER_NAME,
+    RithmicLiveDataClientConfig,
     RithmicLiveDataClientFactory,
+    RithmicLiveExecClientConfig,
     RithmicLiveExecClientFactory,
     SessionConfig,
-    ADAPTER_NAME,
 )
 
 session = SessionConfig.from_env()  # requires RITHMIC_CONNECT_MODE=direct|gateway
-# node = TradingNode(config=...)
-# node.add_data_client_factory(ADAPTER_NAME, RithmicLiveDataClientFactory)
-# node.add_exec_client_factory(f"{ADAPTER_NAME}-EXEC", RithmicLiveExecClientFactory)
+node = LiveNode.build(
+    "RITHMIC",
+    LiveNodeConfig(
+        trader_id=TraderId("TRADER-001"),
+        data_clients={ADAPTER_NAME: RithmicLiveDataClientConfig(session=session)},
+        exec_clients={ADAPTER_NAME: RithmicLiveExecClientConfig(session=session)},
+    ),
+    data_factories={ADAPTER_NAME: RithmicLiveDataClientFactory},
+    exec_factories={ADAPTER_NAME: RithmicLiveExecClientFactory},
+)
+# node.add_strategy(...); await node.run_async()
 ```
+
+A 2.0 node, its strategies and its cache are bound to the thread that built
+them. Custom Python clients get no Redis/Postgres cache backing on 2.0.
 
 Wire smoke (no strategy): `python scripts/smoke_lucid_nq.py`.
 
@@ -114,7 +127,7 @@ bars stay INTERNAL from ticks.
 History for backtest / research (IB / Databento-style helper; windowing lives in Rust):
 
 ```python
-from nautilus_trader.model.data import BarType
+from nautilus_trader.model import BarType
 from rithmic_nt_connect import (
     connect_market_data_session,
     load_front_month_instrument,

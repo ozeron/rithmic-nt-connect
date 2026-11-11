@@ -63,7 +63,7 @@ def main() -> int:
     load_dotenv_files(ROOT / ".env")
     args = _parse_args()
 
-    from nautilus_trader.model.data import BarType
+    from nautilus_trader.model import BarType
 
     try:
         cfg = SessionConfig.from_env()

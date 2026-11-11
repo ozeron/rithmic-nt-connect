@@ -1,6 +1,6 @@
 """Live integration tests: Nautilus Execution Testing Spec (TC-E*) suite.
 
-Drives the **Rithmic execution client** through a real ``TradingNode`` using a
+Drives the **Rithmic execution client** through a real ``LiveNode`` using a
 minimal ``OrderDriver`` strategy. Maps 1:1 to
 ``docs/references/nautilus-exec-testing-matrix.md``; conversion/mapping
 assertions (TC-E72/E73, recon dedup) live in the unit suites.
@@ -19,24 +19,28 @@ Usage:
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import itertools
 import time
 import uuid
 
 import pytest
-from exec_harness import ExecHarness, OrderDriver, OrderDriverConfig
+from exec_harness import ExecHarness, RegisterClient, reporting_exec_factory
+from nautilus_trader.common import Logger, LogLevel
 from nautilus_trader.config import (
-    LiveDataEngineConfig,
-    LiveExecEngineConfig,
+    LiveExecutionEngineConfig,
+    LiveNodeConfig,
     LiveRiskEngineConfig,
-    LoggingConfig,
-    TradingNodeConfig,
+    LoggerConfig,
 )
-from nautilus_trader.live.node import TradingNode
-from nautilus_trader.model.enums import OrderSide, OrderStatus, TimeInForce
-from nautilus_trader.model.identifiers import ClientOrderId, TraderId
+from nautilus_trader.live import LiveNode, SubmissionRecoveryPolicy
+from nautilus_trader.model import (
+    ClientOrderId,
+    OrderSide,
+    OrderStatus,
+    TimeInForce,
+    TraderId,
+)
 from order_dsl import (
     above,
     below,
@@ -54,61 +58,53 @@ from rithmic_nt_connect import (
     RithmicLiveDataClientConfig,
     RithmicLiveDataClientFactory,
     RithmicLiveExecClientConfig,
-    RithmicLiveExecClientFactory,
     session_config_from_explicit_test_env,
 )
 
 
-def _make_live_exec(instrument, **logging_kwargs):
-    """TradingNode + OrderDriver harness; shared by ``live_exec`` and E89."""
+def _make_live_exec(instrument, stdout_level: LogLevel = LogLevel.WARNING):
+    """LiveNode + OrderDriver harness; shared by ``live_exec`` and E89."""
     test_session = session_config_from_explicit_test_env()
 
-    driver = OrderDriver(
-        OrderDriverConfig(instrument_id=str(instrument.id)), instrument
-    )
-    log_level = logging_kwargs.pop("log_level", "WARNING")
-    # A prior test disposed its loop; give the next node a fresh one so it does
-    # not bind to a closed loop ("Event loop is closed").
-    asyncio.set_event_loop(asyncio.new_event_loop())
-    node = TradingNode(
-        config=TradingNodeConfig(
-            trader_id=TraderId("TESTER-001"),
-            logging=LoggingConfig(
-                log_level=log_level, print_config=False, **logging_kwargs
+    def build(register: RegisterClient) -> LiveNode:
+        return LiveNode.build(
+            "RITHMIC-E2E",
+            LiveNodeConfig(
+                trader_id=TraderId("TESTER-001"),
+                logging=LoggerConfig(stdout_level=stdout_level, print_config=False),
+                exec_engine=LiveExecutionEngineConfig(
+                    reconciliation=True,
+                    reconciliation_startup_delay_secs=0.0,
+                    # The ``load_orders`` drain is best-effort and not provably
+                    # complete. ``open_check_open_only=True`` keeps a cached
+                    # order missing from an empty drain as an advisory log
+                    # instead of letting the engine cancel a tracked order.
+                    open_check_open_only=True,
+                    # A never-accepted order stays unresolved until the venue
+                    # answers; the default resolves it as INFLIGHT_TIMEOUT.
+                    submission_recovery_policy=SubmissionRecoveryPolicy.RETAIN_UNRESOLVED,
+                ),
+                risk_engine=LiveRiskEngineConfig(bypass=True),
+                data_clients={
+                    ADAPTER_NAME: RithmicLiveDataClientConfig(session=test_session)
+                },
+                exec_clients={
+                    VENUE: RithmicLiveExecClientConfig(
+                        session=test_session, enable_trading=True
+                    )
+                },
+                timeout_connection_secs=45,
+                timeout_reconciliation_secs=10,
+                timeout_portfolio_secs=10,
+                timeout_disconnection_secs=10,
+                # ``OrderDriver.on_stop`` cancels/flattens in this window.
+                delay_post_stop_secs=10,
             ),
-            data_engine=LiveDataEngineConfig(graceful_shutdown_on_exception=False),
-            exec_engine=LiveExecEngineConfig(
-                reconciliation=True,
-                reconciliation_startup_delay_secs=0.0,
-                # The ``load_orders`` drain is best-effort and not provably
-                # complete. ``open_check_open_only=True`` (the 1.231.x knob; the
-                # old ``death_policy=trust_stop`` no longer exists) keeps a
-                # cached order missing from an empty drain as an advisory log
-                # instead of letting the engine cancel a tracked working order.
-                open_check_open_only=True,
-            ),
-            risk_engine=LiveRiskEngineConfig(bypass=True),
-            data_clients={
-                ADAPTER_NAME: RithmicLiveDataClientConfig(session=test_session)
-            },
-            exec_clients={
-                VENUE: RithmicLiveExecClientConfig(
-                    session=test_session, enable_trading=True
-                )
-            },
-            timeout_connection=45.0,
-            timeout_reconciliation=10.0,
-            timeout_portfolio=10.0,
-            timeout_disconnection=10.0,
-            timeout_post_stop=10.0,
+            data_factories={ADAPTER_NAME: RithmicLiveDataClientFactory},
+            exec_factories={VENUE: reporting_exec_factory(register)},
         )
-    )
-    node.add_data_client_factory(ADAPTER_NAME, RithmicLiveDataClientFactory)
-    node.add_exec_client_factory(VENUE, RithmicLiveExecClientFactory)
-    node.trader.add_strategy(driver)
-    node.build()
 
-    harness = ExecHarness(node, driver, instrument)
+    harness = ExecHarness(build, instrument)
     try:
         yield harness
     finally:
@@ -121,27 +117,21 @@ def live_exec(exec_front_month_instrument):
 
 
 def test_tc_e89_logging_capture_mechanics(capfd):
-    """Offline pin: ``capfd`` captures Nautilus WARNING lines on stdout."""
-
-    from nautilus_trader.config import LoggingConfig, TradingNodeConfig
-    from nautilus_trader.live.node import TradingNode
-    from nautilus_trader.model.identifiers import TraderId
-
-    asyncio.set_event_loop(asyncio.new_event_loop())
-
-    node = TradingNode(
-        config=TradingNodeConfig(
+    """Offline pin: ``capfd`` captures node WARNING lines on stdout."""
+    node = LiveNode.build(
+        "RITHMIC-E2E",
+        LiveNodeConfig(
             trader_id=TraderId("TESTER-001"),
-            logging=LoggingConfig(log_level="WARNING", print_config=False),
-        )
+            logging=LoggerConfig(stdout_level=LogLevel.WARNING, print_config=False),
+        ),
     )
-    node.build()
+    Logger("RITHMIC").warning("TC-E89 capture pin")
     node.dispose()
     time.sleep(0.05)
     out, err = capfd.readouterr()
     combined = out + err
-    assert "No `data_clients` configuration found" in combined, (
-        f"Nautilus WARN lines not captured on stdout: {combined[-500:]}"
+    assert "RITHMIC: TC-E89 capture pin" in combined, (
+        f"node WARN lines not captured on stdout: {combined[-500:]}"
     )
 
 
@@ -187,7 +177,7 @@ class TestMarketOrders:
         ],
     )
     def test_tc_e0x_market_fill(self, live_exec, side, tif):
-        live_exec.driver.initial.append(market(side, tif=tif))
+        live_exec.initial.append(market(side, tif=tif))
         live_exec.start()
         live_exec.wait_for_venue_outcome("OrderFilled", timeout=40)
         assert "OrderSubmitted" in live_exec.event_types()
@@ -195,13 +185,14 @@ class TestMarketOrders:
 
     def test_tc_e06_close_position_on_stop(self, live_exec):
         """TC-E06 — close position on stop."""
-        live_exec.driver.initial.append(market(OrderSide.BUY))
+        live_exec.initial.append(market(OrderSide.BUY))
         live_exec.start()
         live_exec.wait_for_venue_outcome("OrderFilled", timeout=40)
         # Capture the driver-owned open positions (the ``on_stop`` predicate) —
         # not every position on the instrument (external residuals excluded).
         owned = live_exec.cache.positions_open(
-            instrument_id=live_exec.instrument.id, strategy_id=live_exec.driver.id
+            instrument_id=live_exec.instrument.id,
+            strategy_id=live_exec.driver.strategy_id,
         )
         assert owned, "market buy opened a driver-owned position"
         position_ids = {p.id for p in owned}
@@ -294,7 +285,7 @@ class TestLimitOrders:
         self, live_exec, side, price_fn, tif, cid, expected, expect_no_fill
     ):
         cid = _unique(cid)
-        live_exec.driver.initial.append(limit(side, price_fn, tif, client_order_id=cid))
+        live_exec.initial.append(limit(side, price_fn, tif, client_order_id=cid))
         live_exec.start()
         # Terminal-event wait; venue-conditional rejections skip, others fail.
         live_exec.wait_for_venue_outcome(
@@ -307,10 +298,10 @@ class TestLimitOrders:
         """TC-E12 — limit BUY+SELL pair resting simultaneously."""
         cid_b = ClientOrderId(_unique("L12B"))
         cid_s = ClientOrderId(_unique("L12S"))
-        live_exec.driver.initial.append(
+        live_exec.initial.append(
             limit(OrderSide.BUY, below, TimeInForce.GTC, client_order_id=cid_b.value)
         )
-        live_exec.driver.initial.append(
+        live_exec.initial.append(
             limit(OrderSide.SELL, above, TimeInForce.GTC, client_order_id=cid_s.value)
         )
         live_exec.start()
@@ -345,8 +336,8 @@ class TestStopConditionalOrders:
             spec = stop_market(side, trigger_fn, client_order_id=cid)
         else:
             spec = stop_limit(side, trigger_fn, limit_fn, client_order_id=cid)
-        live_exec.driver.initial.append(spec)
-        live_exec.driver.cancel_on_accept.add(ClientOrderId(cid))
+        live_exec.initial.append(spec)
+        live_exec.cancel_on_accept.add(ClientOrderId(cid))
         live_exec.start()
         # Accept or skip on venue-conditional rejection (wait_for_venue_outcome).
         live_exec.wait_for_venue_outcome(
@@ -367,10 +358,10 @@ class TestOrderCancellation:
     def test_tc_e40_cancel_single_limit(self, live_exec):
         """TC-E40 — cancel single limit on accept."""
         cid = _unique("C40")
-        live_exec.driver.initial.append(
+        live_exec.initial.append(
             limit(OrderSide.BUY, below, TimeInForce.GTC, client_order_id=cid)
         )
-        live_exec.driver.cancel_on_accept.add(ClientOrderId(cid))
+        live_exec.cancel_on_accept.add(ClientOrderId(cid))
         live_exec.start()
         live_exec.wait_for_venue_outcome(
             "OrderCanceled", timeout=40, client_order_id=ClientOrderId(cid)
@@ -381,10 +372,10 @@ class TestOrderCancellation:
         """TC-E42 — individual cancels on stop (on_stop cancels each resting order)."""
         cid_a = ClientOrderId(_unique("C42A"))
         cid_b = ClientOrderId(_unique("C42B"))
-        live_exec.driver.initial.append(
+        live_exec.initial.append(
             limit(OrderSide.BUY, below, TimeInForce.GTC, client_order_id=cid_a.value)
         )
-        live_exec.driver.initial.append(
+        live_exec.initial.append(
             limit(OrderSide.SELL, above, TimeInForce.GTC, client_order_id=cid_b.value)
         )
         live_exec.start()
@@ -412,7 +403,7 @@ class TestOrderCancellation:
     def test_tc_e44_cancel_already_canceled(self, live_exec):
         """TC-E44 — cancel already-canceled is a local no-op (no new events)."""
         cid = _unique("C44")
-        live_exec.driver.initial.append(
+        live_exec.initial.append(
             limit(OrderSide.BUY, below, TimeInForce.GTC, client_order_id=cid)
         )
         live_exec.start()
@@ -421,7 +412,7 @@ class TestOrderCancellation:
         )
         order = live_exec.cache.order(ClientOrderId(cid))
         assert order is not None
-        live_exec.driver.cancel_order(order)
+        live_exec.cancel(order.client_order_id)
         live_exec.wait_for_venue_outcome(
             "OrderCanceled", timeout=40, client_order_id=ClientOrderId(cid)
         )
@@ -429,9 +420,9 @@ class TestOrderCancellation:
         # Nautilus refuses the second cancel locally — no venue command/events.
         cursor = live_exec.event_cursor()
         order = live_exec.cache.order(ClientOrderId(cid))
-        live_exec.driver.cancel_order(order)
+        live_exec.cancel(order.client_order_id)
         time.sleep(1.0)
-        assert len(live_exec.driver.events) == cursor, (
+        assert len(live_exec.events) == cursor, (
             "second cancel of a canceled order must not emit events"
         )
         assert live_exec.cache.order(ClientOrderId(cid)).status == OrderStatus.CANCELED
@@ -456,7 +447,7 @@ def _venue_route_broken(live_exec) -> bool:
                 (getattr(evt, "info", {}) or {}).get("text", ""),
             )
         )
-        for evt in live_exec.driver.events
+        for evt in live_exec.events
     )
 
 
@@ -467,7 +458,7 @@ def _skip_if_route_broken(live_exec, detail: str) -> None:
 
 @contextlib.contextmanager
 def _info_live_exec(instrument):
-    gen = _make_live_exec(instrument, log_level="INFO")
+    gen = _make_live_exec(instrument, LogLevel.INFO)
     harness = next(gen)
     try:
         yield harness
@@ -487,7 +478,7 @@ class TestReconciliation:
         # Unique CID per run (venue replays stale working orders on reconnect).
         cid = ClientOrderId(_unique("S84"))
         # Resting stop far from market — survives reconciliation.
-        live_exec.driver.initial.append(
+        live_exec.initial.append(
             stop_market(OrderSide.BUY, far_above, client_order_id=cid.value)
         )
         live_exec.start()
@@ -498,7 +489,7 @@ class TestReconciliation:
         order = live_exec.cache.order(cid)
         assert order is not None, "stop order missing from cache after accept"
 
-        reports = live_exec.check_orders_consistency(timeout_secs=20.0)
+        reports = live_exec.drain_open_orders(timeout_secs=20.0)
 
         stop_reports = [
             r for r in reports if getattr(r, "client_order_id", None) == cid
@@ -519,11 +510,11 @@ class TestReconciliation:
 
         # Cancel, then prove the best-effort drain no longer reports it working
         # (at most a terminal CANCELED row); an empty drain is advisory.
-        live_exec.driver.cancel_order(order)
+        live_exec.cancel(order.client_order_id)
         live_exec.wait_order_status(cid, OrderStatus.CANCELED, timeout=20)
         post_cancel = [
             r
-            for r in live_exec.check_orders_consistency(timeout_secs=20.0)
+            for r in live_exec.drain_open_orders(timeout_secs=20.0)
             if getattr(r, "client_order_id", None) == cid
         ]
         assert not post_cancel or all(
@@ -537,7 +528,7 @@ class TestReconciliation:
         filled order through this exact pull path (QueryOrderStatus -> client
         -> cache-backed report), so the report must not drop the fill price.
         """
-        live_exec.driver.initial.append(market(OrderSide.BUY))
+        live_exec.initial.append(market(OrderSide.BUY))
         live_exec.start()
         fill = live_exec.wait_for_venue_outcome("OrderFilled", timeout=45)
         cid = fill.client_order_id
@@ -558,7 +549,7 @@ class TestReconciliation:
     def test_tc_e88_drain_reports_working_limit_by_identity(self, live_exec):
         """TC-E88 — drain returns resting LIMIT by CID; absent after cancel."""
         cid = ClientOrderId(_unique("E88"))
-        live_exec.driver.initial.append(
+        live_exec.initial.append(
             limit(OrderSide.BUY, below, TimeInForce.GTC, client_order_id=cid.value)
         )
         live_exec.start()
@@ -569,7 +560,7 @@ class TestReconciliation:
 
         working = [
             r
-            for r in live_exec.check_orders_consistency(timeout_secs=20.0)
+            for r in live_exec.drain_open_orders(timeout_secs=20.0)
             if getattr(r, "client_order_id", None) == cid
         ]
         assert working, "drain returned no row for the working far LIMIT"
@@ -581,12 +572,12 @@ class TestReconciliation:
                 f"identity mismatch on side: {r.order_side}"
             )
 
-        live_exec.driver.cancel_order(live_exec.cache.order(cid))
+        live_exec.cancel(cid)
         live_exec.wait_order_status(cid, OrderStatus.CANCELED, timeout=20)
 
         post_cancel = [
             r
-            for r in live_exec.check_orders_consistency(timeout_secs=20.0)
+            for r in live_exec.drain_open_orders(timeout_secs=20.0)
             if getattr(r, "client_order_id", None) == cid
         ]
         assert not post_cancel or all(
@@ -600,7 +591,7 @@ class TestReconciliation:
         cid = ClientOrderId(_unique("E89"))
 
         with _info_live_exec(exec_front_month_instrument) as live_exec:
-            live_exec.driver.initial.append(
+            live_exec.initial.append(
                 limit(OrderSide.BUY, below, TimeInForce.GTC, client_order_id=cid.value)
             )
             live_exec.start()
@@ -610,12 +601,12 @@ class TestReconciliation:
             _skip_if_route_broken(live_exec, "canary flow meaningless")
             report = live_exec.order_status_report(cid)
             assert report is not None, "no status report for the order query"
-            live_exec.driver.cancel_order(live_exec.cache.order(cid))
+            live_exec.cancel(cid)
             live_exec.wait_order_status(cid, OrderStatus.CANCELED, timeout=20)
-            live_exec.check_orders_consistency(timeout_secs=20.0)
+            live_exec.drain_open_orders(timeout_secs=20.0)
 
         captured = capfd.readouterr().out
-        assert cid.value in captured or "ExecClient-RITHMIC" in captured, (
+        assert cid.value in captured or "RITHMIC: " in captured, (
             f"positive control failed — node log not captured: {captured[-500:]}"
         )
         assert "avg_px was None" not in captured, (

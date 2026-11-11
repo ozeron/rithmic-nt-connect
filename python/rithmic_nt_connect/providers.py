@@ -7,12 +7,17 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-from nautilus_trader.common.providers import InstrumentProvider
 from nautilus_trader.config import InstrumentProviderConfig
-from nautilus_trader.model.enums import AssetClass
-from nautilus_trader.model.identifiers import InstrumentId, Symbol
-from nautilus_trader.model.instruments import FuturesContract
-from nautilus_trader.model.objects import Currency, Price, Quantity
+from nautilus_trader.live import InstrumentProvider
+from nautilus_trader.model import (
+    AssetClass,
+    Currency,
+    FuturesContract,
+    InstrumentId,
+    Price,
+    Quantity,
+    Symbol,
+)
 
 from rithmic_nt_connect.session import WireSession
 
@@ -151,7 +156,15 @@ class RithmicInstrumentProvider(InstrumentProvider):
         pairs: list[tuple[str, str]],
         config: InstrumentProviderConfig | None = None,
     ) -> None:
-        super().__init__(config=config)
+        # Pair-based: ``initialize`` loads the configured pairs unless a config
+        # says otherwise (the v2 default config loads nothing).
+        super().__init__(
+            config=(
+                config
+                if config is not None
+                else InstrumentProviderConfig(load_all=True)
+            )
+        )
         self._session = session
         self._pairs = list(pairs)
 

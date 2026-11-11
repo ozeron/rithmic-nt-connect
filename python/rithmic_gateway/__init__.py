@@ -7,10 +7,10 @@ spawns one and never holds the Rithmic password.
 
 ``GatewayClient`` is imported lazily so ``direct`` plant sessions can take
 the credential flock without loading the protobuf gencode at all. The
-bundled gencode carries the protobuf 5.29.6 marker — the exact version
-``nautilus_trader[ib]==1.231.0`` pins — so the wire client imports on that
-runtime (and any newer one). Regenerate it reproducibly from
-``proto/rithmic_gateway/v1/session.proto`` with the uv-pinned protoc:
+bundled gencode carries the protobuf 5.29.6 marker — the version
+``rithmic-nt-connect`` pins (first set by ``nautilus_trader[ib]==1.231.0``) — so
+the wire client imports on that runtime (and any newer one). Regenerate it
+reproducibly from ``proto/rithmic_gateway/v1/session.proto`` with the uv-pinned protoc:
 ``uv run python scripts/gen_gateway_proto.py`` (grpcio-tools in the dev
 dependency group bundles protoc 29.0; the script restores the 5.29.6 marker).
 """

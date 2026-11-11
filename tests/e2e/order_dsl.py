@@ -13,15 +13,13 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from nautilus_trader.model.enums import OrderSide, TimeInForce
-from nautilus_trader.model.identifiers import ClientOrderId
-from nautilus_trader.model.objects import Price, Quantity
+from nautilus_trader.model import ClientOrderId, OrderSide, Price, Quantity, TimeInForce
 
 
 def price(instrument, base: float, delta_ticks: int) -> Price:
     """``base`` plus ``delta_ticks`` at the instrument's tick increment."""
     inc = instrument.price_increment.as_double()
-    return Price(
+    return Price.from_decimal_dp(
         Decimal(str(base)) + Decimal(str(inc)) * Decimal(delta_ticks),
         instrument.price_precision,
     )

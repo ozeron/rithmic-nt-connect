@@ -9,8 +9,14 @@ from typing import Any
 
 import pytest
 from _stubs import WireSessionStub
-from nautilus_trader.model.enums import OrderSide, OrderType, TimeInForce
-from nautilus_trader.model.identifiers import ClientOrderId, InstrumentId, StrategyId
+from nautilus_trader.model import (
+    ClientOrderId,
+    InstrumentId,
+    OrderSide,
+    OrderType,
+    StrategyId,
+    TimeInForce,
+)
 from test_exec_transport_e2e import _trading_client
 
 NQ = InstrumentId.from_str("NQU6-CME.RITHMIC")
@@ -85,15 +91,20 @@ def _client(session: _BracketSession, monkeypatch: pytest.MonkeyPatch) -> Any:
         monkeypatch.setattr(
             client,
             f"generate_order_{name}",
-            lambda *a, _n=name: events.append((_n, str(a[2]))),
+            lambda *a, _n=name: events.append((_n, str(a[0].client_order_id))),
         )
     client.events = events
     return client
 
 
 def _submit(client: Any, orders: list[Any]) -> None:
+    # A v2 OrderList holds client order ids; the orders live in the cache.
+    for order in orders:
+        client._cache._orders[order.client_order_id.value] = order
     command = SimpleNamespace(
-        order_list=SimpleNamespace(orders=orders),
+        order_list=SimpleNamespace(
+            client_order_ids=lambda: [o.client_order_id for o in orders]
+        ),
         trader_id=None,
         strategy_id=StrategyId("S-001"),
     )

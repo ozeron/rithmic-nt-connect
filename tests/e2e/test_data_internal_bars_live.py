@@ -24,7 +24,7 @@ from collections import defaultdict
 from datetime import UTC, datetime
 
 import pytest
-from nautilus_trader.model.data import BarType
+from nautilus_trader.model import BarType
 from parity_helpers import NS_PER_MIN, open_minute, wait_for_external_bar
 from rithmic_nt_connect._convert import last_trade_to_fields
 from rithmic_nt_connect.historical import load_time_bars

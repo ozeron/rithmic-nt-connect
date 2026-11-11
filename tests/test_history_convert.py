@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from nautilus_trader.model.data import BarType
+from nautilus_trader.model import BarType
 from rithmic_nt_connect._convert import (
     ConvertError,
     last_trade_to_fields,

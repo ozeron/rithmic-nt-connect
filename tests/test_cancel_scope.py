@@ -7,16 +7,11 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 from _stubs import FaultInjectingSession, _Log, _TestClient
-from nautilus_trader.core.uuid import UUID4
-from nautilus_trader.execution.messages import (
-    BatchCancelOrders,
-    CancelAllOrders,
-    CancelOrder,
-)
-from nautilus_trader.model.enums import OrderSide
-from nautilus_trader.model.identifiers import (
+from nautilus_trader.core import UUID4
+from nautilus_trader.model import (
     ClientOrderId,
     InstrumentId,
+    OrderSide,
     StrategyId,
     TraderId,
     VenueOrderId,
@@ -68,7 +63,13 @@ def _client(cache: _Cache) -> tuple[_TestClient, FaultInjectingSession]:
 def test_cancel_all_is_scoped_and_never_plant_wide() -> None:
     cache = _Cache([_order("O-1", "B1"), _order("O-2", "B2")])
     client, session = _client(cache)
-    cmd = CancelAllOrders(TID, SID, IID, OrderSide.SELL, UUID4(), 0)
+    cmd: Any = SimpleNamespace(
+        trader_id=TID,
+        strategy_id=SID,
+        instrument_id=IID,
+        order_side=OrderSide.SELL,
+        command_id=UUID4(),
+    )
     asyncio.run(client._cancel_all_orders(cmd))
     # Scoped to this client's venue too: the node cache is shared across venues.
     assert cache.queries == [
@@ -87,11 +88,13 @@ def test_batch_cancel_cancels_each_order() -> None:
     cache = _Cache([])
     client, session = _client(cache)
     cancels = [
-        CancelOrder(
-            TID, SID, IID, ClientOrderId(f"O-{i}"), VenueOrderId(f"B{i}"), UUID4(), 0
+        SimpleNamespace(
+            client_order_id=ClientOrderId(f"O-{i}"),
+            venue_order_id=VenueOrderId(f"B{i}"),
+            command_id=UUID4(),
         )
         for i in (1, 2)
     ]
-    cmd = BatchCancelOrders(TID, SID, IID, cancels, UUID4(), 0)
+    cmd: Any = SimpleNamespace(cancels=cancels)
     asyncio.run(client._batch_cancel_orders(cmd))
     assert session.calls == ["cancel_order:B1", "cancel_order:B2"]

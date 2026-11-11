@@ -9,8 +9,7 @@ from __future__ import annotations
 import time
 from datetime import datetime
 
-from nautilus_trader.model.data import Bar, BarType, TradeTick
-from nautilus_trader.model.instruments import FuturesContract
+from nautilus_trader.model import Bar, BarType, FuturesContract, TradeTick
 
 from rithmic_nt_connect._convert import rithmic_route_from_info
 from rithmic_nt_connect.data import (
@@ -19,11 +18,8 @@ from rithmic_nt_connect.data import (
     payloads_to_trade_ticks,
 )
 from rithmic_nt_connect.front_month import resolve_front_month
-from rithmic_nt_connect.pandas_compat import patch_nautilus_pandas
 from rithmic_nt_connect.providers import future_from_reference
 from rithmic_nt_connect.session import WireSession
-
-patch_nautilus_pandas()
 
 
 def _unix_sec(value: datetime | int | float) -> int:

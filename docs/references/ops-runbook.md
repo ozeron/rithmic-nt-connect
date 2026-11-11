@@ -293,10 +293,9 @@ drain looks identical). The exec generators (`generate_order_status_reports` /
 
 ### Soft mass-status history contract (MY043 2026-09-02 / proof 2026-09-03)
 
-Startup `generate_mass_status` soft-completes empty/unavailable order drains so
-the TradingNode can start (RC-5). It must **not** feed that best-effort drain
-into Nautilus `LiveExecutionEngine._adjust_mass_status_fills` /
-`adjust_fills_for_partial_window`: that compatibility path invents synthetic
+Startup `_generate_mass_status` soft-completes empty/unavailable order drains so
+the node can start (RC-5). It must **not** feed that best-effort drain into the
+engine's mass-status fill adjustment: that path invents synthetic
 `OrderFilled` events with `venue_order_id=S-…` when fills do not explain the
 venue position, and `generate_missing_orders=False` does **not** gate it (only
 later position-report repair). Warm Redis + plant claim + S- fill double-counted
@@ -309,11 +308,14 @@ Adapter contract on soft mass-status:
   PnL map (so startup recon sees Redis ghosts).
 - Attach **order** reports only when the order drain succeeded.
 - **Never** attach fill reports (empty list), even when the fill drain returned rows.
-- Call `ExecutionMassStatus.set_report_window(lookback_start, reports_complete=False)`
-  when the installed NT exposes it. **NT 1.231.x has no setter / no
-  `lookback_start` field** — fill omission is the fail-closed defense against
-  S- invent on that line. Master / 2.0.x documents the bound; Python bindings
-  may still lack the setter (Rust in-tree adapters use `set_report_window`).
+- Declare the history window bounded and incomplete: `lookback_start` (the
+  lookback start, else the mass-status time) and `reports_complete=False`
+  (`recon.soft_mass_status`). The 2.0 Python binding has no
+  `set_report_window`; the adapter builds the mass status with
+  `ExecutionMassStatus.from_dict`, which carries both fields. The engine logs
+  `Received incomplete bounded reconciliation reports for RITHMIC` and keeps
+  unsupported fills from moving positions. Fill omission stays as a second
+  defense.
 
 #### Warm Redis + plant flat (live proof 2026-09-03 ~07:36Z)
 
@@ -325,9 +327,11 @@ With `QGW_LIVE_RECON=1`, plant flat (`working_orders=0 positions=0`), warm Redis
   closing fill when `generate_missing_orders=False`, so OMS stays wrong.
 - Strategy `trade recover freeze: orphan position` is the correct latch.
 
-**Incomplete / lookback marking does not clear Redis ghosts** on NT 1.231 with
-`generate_missing_orders=False`. Declaring `reports_complete=False` (when the
-API exists) only avoids the S- invent path; it does not wipe cache open qty.
+**Incomplete / lookback marking does not clear Redis ghosts** (proved on NT
+1.231 with `generate_missing_orders=False`). Declaring `reports_complete=False`
+only avoids the S- invent path; it does not wipe cache open qty. NautilusTrader
+2.0 has no Redis/Postgres cache backing for custom Python clients, so a 2.0 node
+running this adapter starts with an empty cache.
 
 **qgw_book / operator requirement before recon-on with warm Redis:**
 
@@ -343,7 +347,7 @@ Do not monkeypatch-drop S- fills in qgw_book.
 
 **Consumer requirement (important):** because an empty best-effort drain can
 look like "no orders", a trading consumer must run with `open_check_open_only=True`
-(the 1.231.x knob; `death_policy=trust_stop` was removed in this line) so a cached
+(`LiveExecutionEngineConfig.open_check_open_only`) so a cached
 open order missing from an empty recon is logged as advisory instead of being
 **canceled**. With `open_check_open_only=False` the engine would reconcile an
 empty result as "no working orders" and cancel tracked open orders. The adapter
@@ -357,11 +361,11 @@ with exhaustive enumeration) would remove the best-effort caveat.
 
 ## Engine in-flight checker fabricates a terminal UNKNOWN reject (operator knob)
 
-Nautilus 1.231.x's `ExecutionEngine._check_inflight_orders` re-queries an order
-that is still `SUBMITTED`/`PENDING_UPDATE`/`PENDING_CANCEL` after
-`inflight_check_threshold_ms` (default 5s), up to `inflight_check_retries`
-(default 5), then `_resolve_inflight_order` synthesizes
-`OrderRejected(reason="UNKNOWN")` (SUBMITTED) or `OrderCanceled` (PENDING_*).
+The engine's in-flight checker re-queries an order that is still
+`SUBMITTED`/`PENDING_UPDATE`/`PENDING_CANCEL` after `inflight_check_threshold_ms`
+(default 5s), up to `inflight_check_retries`, then resolves it locally:
+`OrderRejected` (`UNKNOWN` on 1.231, `INFLIGHT_TIMEOUT` on 2.0) for SUBMITTED, or
+`OrderCanceled` for PENDING_*.
 
 This happens **regardless of what the adapter does**: the engine increments
 `_recon_check_retries` per *issued* `QueryOrder` (the query runs in a task, so
@@ -376,11 +380,18 @@ drain, which is the recovery path).
 **Operator requirement for live trading:** the terminal UNKNOWN synthesis is
 exactly the fabricated state the adapter forbids, and the only reliable way to
 prevent it when the venue genuinely does not know the order is to disable the
-engine checker — set `inflight_check_interval_ms=0` on the
-`LiveExecEngineConfig` (via `TradingNodeConfig.exec_engine`; 1.231.x does not
-define this field on the base `ExecEngineConfig` — verified against the
-installed package). Interval `0` disables the check; verified `> 0` gate in
-`live/execution_engine.py`. Keep `open_check_open_only=True` for the
+engine's local resolution of submissions:
+
+- **NautilusTrader 2.0:** set
+  `LiveExecutionEngineConfig(submission_recovery_policy=SubmissionRecoveryPolicy.RETAIN_UNRESOLVED)`
+  (default `RESOLVE_LOCALLY`). A never-accepted order then stays unresolved
+  until venue evidence arrives instead of turning into `INFLIGHT_TIMEOUT`.
+  Pending cancel/update timeouts still resolve to `CANCELED`. Not yet proven on
+  a live plant.
+- **1.231.x:** set `inflight_check_interval_ms=0` on `LiveExecEngineConfig`
+  (via `TradingNodeConfig.exec_engine`); interval `0` disables the check.
+
+Keep `open_check_open_only=True` for the
 reconciliation path (see above). If the check is left enabled, the operator
 accepts that a genuinely-unknown in-flight order will be resolved as a terminal
 UNKNOWN reject by the engine after ~25s (5 retries × 5s threshold) — a strategy
@@ -500,7 +511,7 @@ assigns the state directly — every transition goes through the policy, and
 - **Wrong system looks like "permission denied".** A LucidTrading prop login fails on Rithmic Test (`rituz00100`); use system `LucidTrading` with `wss://rprotocol.rithmic.com:443`. Rithmic Test needs its own test credentials.
 - **Expired contract months have no history.** Rithmic history for expired contracts is empty; use another venue or the lake for deep history and Rithmic for the listed front month and live-adjacent checks.
 - **Continuous roots are front aliases.** `CME:NQ`-style roots behave like the front month, so roll days diverge from continuous research series (e.g. Databento `NQ.c.0`).
-- **Account state comes from the exec client.** On Nautilus 1.231.x account state is published by `ExecutionClient.generate_account_state`, not by a data client, so PnL / positions need the exec client even when trading is disabled (read-only exec client; it never submits).
+- **Account state comes from the exec client.** On NautilusTrader account state is published by `ExecutionClient.generate_account_state`, not by a data client, so PnL / positions need the exec client even when trading is disabled (read-only exec client; it never submits).
 - **Order-plant reachability is not submit authorization.** Logging in to the order plant works on a LucidTrading account; routing orders needs trading enabled and a conformance-issued `app_name` (see `AGENTS.md` Safety).
 - Do not redistribute gated Rithmic `.proto` sources; keep them out of public git.
 
