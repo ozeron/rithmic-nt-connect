@@ -1,4 +1,29 @@
-"""Live execution client for Rithmic (Phase 1 read-only + Phase 2 trading)."""
+"""Live execution client for Rithmic.
+
+Native bracket contract (trading enabled; no bracket feature flag): submit one
+3-order parent-linked list: MARKET or LIMIT entry, opposite STOP_MARKET stop,
+opposite LIMIT target; same instrument, strategy, positive integral quantity,
+and DAY/GTC duration. Stop and target must name the entry as parent; the entry
+links both exit ids. With rc9 ``OrderFactory.bracket``, explicitly set
+``tp_post_only=False``; its default is true and cannot be represented by the
+plant bracket. Use a DEFAULT stop trigger and matching durations on all legs.
+Other linked shapes and unsupported terms fail closed as a whole.
+
+MARKET entries require an entry tag ``rithmic:bracket_reference=<decimal>``.
+LIMIT entries default to their limit price and may supply the same tag (e.g.
+a marketable limit). Exit absolute prices specify exact signed whole-tick
+DISTANCES from that reference. The plant anchors those distances to the actual
+entry fill, so slippage shifts BOTH exits. These are not guaranteed absolute
+exit prices. Wrong-side, zero, fractional-tick, unsupported-type/terms lists
+are denied before submission. The book must accept fill-relative protection.
+
+Modify a stop's trigger_price or target's price to an absolute desired price;
+the connector derives signed ticks from the cached actual entry avg_px, with
+zero for breakeven. Unknown fill/parent or quantity changes are refused. Venue
+order notifications own fills, resizing and OCO cancellation. Bracket updates
+request a working-orders refresh; release counters never fabricate fills or
+cancels. Restart recovery needs the persisted parent-linked orders in cache.
+"""
 
 from __future__ import annotations
 
@@ -80,6 +105,7 @@ from rithmic_nt_connect._orders import (
     trailing_ticks_from_order,
 )
 from rithmic_nt_connect._prices import price_from_wire
+from rithmic_nt_connect.brackets import brackets_for, submission_ticks
 from rithmic_nt_connect.commission import CommissionRegistry
 from rithmic_nt_connect.config import (
     env_truthy,
@@ -390,6 +416,7 @@ class RithmicExecutionClient(ExecutionClient):
             raise
 
     async def _stop_background(self) -> None:
+        await brackets_for(self).close()
         """Cancel the poll tasks and drop the transport listener."""
         await self._recovery.detach()
         for task_attr in ("_order_poll_task", "_poll_task"):
@@ -893,13 +920,7 @@ class RithmicExecutionClient(ExecutionClient):
 
     def _dispatch_order_event(self, event: dict[str, Any]) -> None:
         if event.get("type") == "bracket_update":
-            # Plant bracket stop/target state; leg fills arrive as ordinary order
-            # notifications, so no Nautilus event is derived from it.
-            self._log.debug(
-                f"bracket update basket={event.get('basket_id')} "
-                f"stop_ticks={event.get('stop_ticks')} "
-                f"target_ticks={event.get('target_ticks')}"
-            )
+            brackets_for(self).update(event)
             return
         if event.get("type") != "order_notification":
             return
@@ -1225,6 +1246,18 @@ class RithmicExecutionClient(ExecutionClient):
         present in the cache — an unknown external tag therefore never
         resolves here and routes to the untracked path.
         """
+        linked = brackets_for(self).resolve(fields)
+        if linked is not None:
+            linked_order = self._cache.order(linked)
+            return (
+                linked
+                if linked_order is not None and not linked_order.is_closed
+                else None
+            )
+        if fields.get("original_basket_id") and fields.get(
+            "original_basket_id"
+        ) != fields.get("basket_id"):
+            return None
         basket = fields.get("basket_id")
         if basket:
             cached = self._client_order_id_for_venue(str(basket))
@@ -1245,6 +1278,8 @@ class RithmicExecutionClient(ExecutionClient):
             # (it would inherit its strategy/instrument/side and never reach the
             # untracked path).
             if cached_order is not None and not cached_order.is_closed:
+                if brackets_for(self).group_for_order(cached_order) is not None:
+                    return None
                 return ClientOrderId(str(tag))
         return None
 
@@ -1453,8 +1488,8 @@ class RithmicExecutionClient(ExecutionClient):
             ts_last=order.ts_last,
             ts_init=ts_init,
             client_order_id=order.client_order_id,
-            price=order.price if order.has_price else None,
-            trigger_price=order.trigger_price if order.has_trigger_price else None,
+            price=getattr(order, "price", None),
+            trigger_price=getattr(order, "trigger_price", None),
             # Only stop orders expose ``trigger_type``; limit/market orders have
             # none (``TriggerType.NO_TRIGGER`` is ``None`` on NautilusTrader 2).
             trigger_type=getattr(order, "trigger_type", TriggerType.NO_TRIGGER),
@@ -1590,22 +1625,18 @@ class RithmicExecutionClient(ExecutionClient):
         """A bracket is three orders linked to one another (an entry and two
         exits that name it as parent, or linked ids). Unlinked orders are never
         guessed into one, whatever their sides."""
-        if len(orders) != 3:
-            return False
-        cids = {str(o.client_order_id) for o in orders}
-        for o in orders:
-            parent = getattr(o, "parent_order_id", None)
-            if parent is not None and str(parent) in cids:
-                return True
-            linked = getattr(o, "linked_order_ids", None) or ()
-            if any(str(lid) in cids for lid in linked):
-                return True
-        return False
+        return any(
+            getattr(order, "parent_order_id", None) is not None
+            or bool(getattr(order, "linked_order_ids", None))
+            for order in orders
+        )
 
     def _bracket_legs(self, orders: list) -> tuple[Any, Any, Any] | None:
         """``(entry, stop, target)`` when the list has exactly that shape: one
         order without a parent, a stop exit and a target exit whose parent is it.
         """
+        if len(orders) != 3:
+            return None
         entries = [o for o in orders if getattr(o, "parent_order_id", None) is None]
         if len(entries) != 1:
             return None
@@ -1636,53 +1667,9 @@ class RithmicExecutionClient(ExecutionClient):
     def _bracket_ticks(
         self, entry: Any, stop: Any | None, target: Any | None
     ) -> tuple[int | None, int | None]:
-        # Compute stop/target ticks from absolute prices via tick_size.
-        # Rithmic bracket exits are ticks from fill; we derive from entry price.
         try:
-            instrument = self._cache.instrument(entry.instrument_id)
-            if instrument is None:
-                return None, None
-            tick_size = float(instrument.price_increment)
-            if tick_size <= 0:
-                return None, None
-            entry_price = (
-                float(entry.price)
-                if getattr(entry, "has_price", False) and entry.has_price
-                else None
-            )
-            if entry_price is None:
-                return None, None
-            stop_ticks = None
-            target_ticks = None
-            if (
-                stop is not None
-                and getattr(stop, "has_trigger_price", False)
-                and stop.has_trigger_price
-            ):
-                sp = float(stop.trigger_price)
-                stop_ticks = round(abs(entry_price - sp) / tick_size)
-                if stop_ticks <= 0:
-                    stop_ticks = None
-            elif (
-                stop is not None
-                and getattr(stop, "has_price", False)
-                and stop.has_price
-            ):
-                sp = float(stop.price)
-                stop_ticks = round(abs(entry_price - sp) / tick_size)
-                if stop_ticks <= 0:
-                    stop_ticks = None
-            if (
-                target is not None
-                and getattr(target, "has_price", False)
-                and target.has_price
-            ):
-                tp = float(target.price)
-                target_ticks = round(abs(tp - entry_price) / tick_size)
-                if target_ticks <= 0:
-                    target_ticks = None
-            return stop_ticks, target_ticks
-        except Exception:
+            return submission_ticks(self, entry, stop, target)
+        except (ValueError, TypeError, AttributeError, OverflowError):
             return None, None
 
     def _order_list_orders(self, command: SubmitOrderList) -> list[Order]:
@@ -1698,23 +1685,15 @@ class RithmicExecutionClient(ExecutionClient):
 
     async def _submit_order_list(self, command: SubmitOrderList) -> None:
         orders = self._order_list_orders(command)
+        if len(orders) != len(command.order_list.client_order_ids()):
+            self._deny_all(orders, "order list is incomplete in cache; nothing sent")
+            return
         if not self.enable_trading:
             self._log_trading_disabled("submit_order_list")
             self._deny_all(orders, _TRADING_DISABLED_REASON)
             return
         # Bracket path: try to map 3-leg OrderList to single plant bracket.
         if self._is_bracket_order_list(orders):
-            import os
-
-            if not os.environ.get("RITHMIC_BRACKETS") and not getattr(
-                self, "_allow_brackets", False
-            ):
-                # Brackets are spike-only (docs/STATUS.md); deny rather than
-                # silently decomposing into 3 independent orders.
-                self._deny_all(
-                    orders, "Rithmic brackets not enabled (RITHMIC_BRACKETS=1 required)"
-                )
-                return
             legs = self._bracket_legs(orders)
             if legs is None:
                 self._deny_all(
@@ -1731,8 +1710,8 @@ class RithmicExecutionClient(ExecutionClient):
                 self._deny_all(
                     orders,
                     "bracket not losslessly representable as stop_ticks/target_ticks "
-                    "(need entry limit price + stop/target absolute prices a whole "
-                    "number of ticks away)",
+                    "(need entry reference + correctly sided stop/target prices "
+                    "a whole number of ticks away; see execution module contract)",
                 )
                 return
             # Single plant bracket: localid = entry client_order_id
@@ -1741,9 +1720,15 @@ class RithmicExecutionClient(ExecutionClient):
                 side = nautilus_side_to_rithmic(entry.side)
                 price_type = nautilus_order_type_to_rithmic(entry.order_type)
                 duration = nautilus_tif_to_rithmic(entry.time_in_force)
-                price = float(entry.price) if entry.has_price else None
+                price = (
+                    float(entry.price)
+                    if getattr(entry, "price", None) is not None
+                    else None
+                )
                 trigger = (
-                    float(entry.trigger_price) if entry.has_trigger_price else None
+                    float(entry.trigger_price)
+                    if getattr(entry, "trigger_price", None) is not None
+                    else None
                 )
                 qty = int(entry.quantity)
                 localid = entry.client_order_id.value
@@ -1754,7 +1739,8 @@ class RithmicExecutionClient(ExecutionClient):
             if refused is not None:
                 self._deny_all(orders, refused)
                 return
-            # One plant bracket carries all three legs: they share its events.
+            brackets_for(self).register(entry, stop, target)
+            # Context precedes send: inbound child updates can arrive immediately.
             for order in orders:
                 self.generate_order_submitted(order)
             try:
@@ -1791,6 +1777,8 @@ class RithmicExecutionClient(ExecutionClient):
         order = self._cache.order(command.client_order_id)
         if order is None:
             self._modify_rejected(command, hint, "order not in cache")
+            return
+        if await brackets_for(self).modify(command, order):
             return
         venue_id = self._venue_id_for_order(order)
         if not venue_id:

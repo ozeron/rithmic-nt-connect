@@ -71,6 +71,10 @@ def test_trigger_type_from_price_type(price_type: Any, expected: TriggerType) ->
     ("fields", "expected"),
     [
         ({"kind": "filled"}, OrderStatus.FILLED),
+        (
+            {"kind": "filled", "quantity": 2, "total_fill_size": 1},
+            OrderStatus.PARTIALLY_FILLED,
+        ),
         ({"quantity": 2, "total_fill_size": 2}, OrderStatus.FILLED),
         ({"quantity": 2, "total_fill_size": 1}, OrderStatus.PARTIALLY_FILLED),
         ({"kind": "rejected"}, OrderStatus.REJECTED),

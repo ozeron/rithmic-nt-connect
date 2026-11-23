@@ -118,6 +118,8 @@ pub struct OrderNotificationDto {
     pub notify_type_name: Option<String>,
     pub status: Option<String>,
     pub basket_id: Option<String>,
+    pub original_basket_id: Option<String>,
+    pub linked_basket_ids: Option<String>,
     pub exchange_order_id: Option<String>,
     pub user_tag: Option<String>,
     pub account_id: Option<String>,

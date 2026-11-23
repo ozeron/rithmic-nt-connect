@@ -293,6 +293,8 @@ fn order_notification_dict(py: Python<'_>, n: OrderNotificationDto) -> PyResult<
     set_opt_str(&d, "notify_type_name", n.notify_type_name)?;
     set_opt_str(&d, "status", n.status)?;
     set_opt_str(&d, "basket_id", n.basket_id)?;
+    set_opt_str(&d, "original_basket_id", n.original_basket_id)?;
+    set_opt_str(&d, "linked_basket_ids", n.linked_basket_ids)?;
     set_opt_str(&d, "exchange_order_id", n.exchange_order_id)?;
     set_opt_str(&d, "user_tag", n.user_tag)?;
     set_opt_str(&d, "account_id", n.account_id)?;

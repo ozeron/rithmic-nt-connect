@@ -216,6 +216,8 @@ macro_rules! order_notification {
             notify_type_name,
             status: $n.status.clone(),
             basket_id: $n.basket_id.clone(),
+            original_basket_id: $n.original_basket_id.clone(),
+            linked_basket_ids: $n.linked_basket_ids.clone(),
             exchange_order_id: $n.exchange_order_id.clone(),
             user_tag: $n.user_tag.clone(),
             account_id: $n.account_id.clone(),

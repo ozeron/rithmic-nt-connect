@@ -94,7 +94,11 @@ def order_status_from_fields(fields: dict[str, Any]) -> OrderStatus:
         filled = int(fields.get("total_fill_size") or 0)
     except (TypeError, ValueError):
         qty = filled = 0
-    if kind == "filled" or (qty > 0 and filled >= qty):
+    if qty > 0 and filled >= qty:
+        return OrderStatus.FILLED
+    if kind == "filled":
+        if qty > 0 and 0 < filled < qty:
+            return OrderStatus.PARTIALLY_FILLED
         return OrderStatus.FILLED
     # PARTIALLY_FILLED when partial, else ACCEPTED (not PENDING_CANCEL:
     # recon would leave the OMS believing a cancel is in flight forever).

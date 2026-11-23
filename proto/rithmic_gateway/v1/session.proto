@@ -499,6 +499,8 @@ message OrderNotification {
   optional uint64 ts_event_ns = 28;
   optional bool is_snapshot = 29;
   optional int32 duration = 31;
+  optional string original_basket_id = 32;
+  optional string linked_basket_ids = 33;
 }
 
 message HistoryTick {

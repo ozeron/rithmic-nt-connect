@@ -112,6 +112,8 @@ pub fn order_notification(kind: &str, basket_id: &str, user_tag: &str, symbol: &
         notify_type_name: None,
         status: None,
         basket_id: Some(basket_id.into()),
+        original_basket_id: None,
+        linked_basket_ids: None,
         exchange_order_id: None,
         user_tag: Some(user_tag.into()),
         account_id: Some("ACCT".into()),
