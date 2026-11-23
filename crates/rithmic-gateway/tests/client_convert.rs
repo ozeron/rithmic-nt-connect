@@ -130,6 +130,8 @@ fn order_notification() -> pb::OrderNotification {
         usecs: Some(6),
         ts_event_ns: Some(1_700_000_006_000_006_000),
         is_snapshot: Some(true),
+        original_basket_id: None,
+        linked_basket_ids: None,
     }
 }
 
