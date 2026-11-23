@@ -27,6 +27,7 @@ from rithmic_nt_connect._orders import (
     slim_order_fields,
 )
 from rithmic_nt_connect._prices import price_from_wire
+from rithmic_nt_connect.brackets import brackets_for
 from rithmic_nt_connect.order_rows import TRIGGERABLE_ORDER_TYPES
 
 
@@ -67,6 +68,7 @@ class VenueNotificationIntake:
             return
         if action.kind == "accepted":
             self.emit_accepted(order, client_order_id, venue_order_id, ts_event)
+            self.publish_bracket_exit_terms(order, venue_order_id, fields, ts_event)
         elif action.kind == "rejected":
             host.generate_order_rejected(order, str(action.reason), ts_event, False)
         elif action.kind == "modify_rejected":
@@ -108,6 +110,48 @@ class VenueNotificationIntake:
             host._log.debug(
                 f"skipping late/duplicate OrderAccepted for {client_order_id}: "
                 f"local status={order.status}"
+            )
+
+    def publish_bracket_exit_terms(
+        self,
+        order: Any,
+        venue_order_id: VenueOrderId,
+        fields: dict[str, Any],
+        ts_event: int,
+    ) -> None:
+        """Publish a bracket exit's venue terms when Rithmic re-anchored them.
+
+        Rithmic places bracket exits at their tick distance from the actual
+        entry fill, so an accepted stop/target row can carry a price other than
+        the one submitted. Without an OrderUpdated the cache keeps the submitted
+        price, and a later absolute modify to that price looks like a no-op.
+        """
+        host = self._host
+        group = brackets_for(host).group_for_order(order)
+        if group is None or getattr(order, "is_closed", False):
+            return
+        if order.client_order_id == group.entry.client_order_id:
+            return
+        instrument = host._cache.instrument(order.instrument_id)
+        prec = getattr(instrument, "price_precision", None)
+        price, trigger = (
+            getattr(order, "price", None),
+            getattr(order, "trigger_price", None),
+        )
+        changed = False
+        raw_price = fields.get("price")
+        if getattr(order, "has_price", False) and raw_price is not None:
+            venue_price = price_from_wire(raw_price, prec)
+            changed |= price is None or float(venue_price) != float(price)
+            price = venue_price
+        raw_trigger = fields.get("trigger_price")
+        if getattr(order, "has_trigger_price", False) and raw_trigger is not None:
+            venue_trigger = price_from_wire(raw_trigger, prec)
+            changed |= trigger is None or float(venue_trigger) != float(trigger)
+            trigger = venue_trigger
+        if changed:
+            host.generate_order_updated(
+                order, venue_order_id, order.quantity, price, trigger, None, ts_event
             )
 
     def resolve_updated_terms(

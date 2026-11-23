@@ -118,6 +118,15 @@ def test_native_bracket_live_node(tmp_path: Any, exit_path: str) -> None:
                 ),
                 "all legs accepted",
             )
+            # Rithmic anchored the exits to the venue reference; the rc9 cache
+            # carries the venue terms (OrderUpdated), not the submitted ones.
+            await until(
+                lambda: (
+                    str(current(stop).trigger_price) == "20990.25"
+                    and str(current(target).price) == "21020.25"
+                ),
+                "venue-anchored exit terms",
+            )
             emit(
                 "filled",
                 0,
