@@ -475,6 +475,19 @@ def test_inherited_tag_without_parent_never_rebinds_entry(monkeypatch):
     assert report.client_order_id is None
 
 
+@pytest.mark.parametrize("kind", ["accepted", "modified"])
+def test_delayed_nonterminal_row_never_reopens_a_closed_leg(monkeypatch, kind):
+    client, _session, orders = _lifecycle_client(monkeypatch)
+    stop = orders[1]
+    stop.status = OrderStatus.CANCELED
+    stop.is_closed = True
+    fields = order_notification_to_fields(_notification("SL", kind))
+    assert client._drain_row_from_fields(fields, 1_000_000_000).report is None
+    canceled = order_notification_to_fields(_notification("SL", "canceled"))
+    report = client._drain_row_from_fields(canceled, 1_000_000_000).report
+    assert report is not None and str(report.client_order_id) == "SL"
+
+
 def test_partial_target_recon_keeps_partial_status(monkeypatch):
     client, _session, _orders = _lifecycle_client(monkeypatch)
     fields = order_notification_to_fields(

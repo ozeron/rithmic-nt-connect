@@ -249,6 +249,7 @@ class NativeBrackets:
             return {}
         return {
             "client_order_id": cid,
+            "closed": bool(getattr(order, "is_closed", False)),
             "parent_order_id": getattr(order, "parent_order_id", None),
             "linked_order_ids": getattr(order, "linked_order_ids", None),
             "contingency_type": getattr(order, "contingency_type", None),

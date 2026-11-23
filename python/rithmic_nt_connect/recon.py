@@ -184,6 +184,10 @@ class WorkingOrdersDrain:
             # order prerequisite). One policy for every report consumer.
             report_ts = ts_event or host._clock.timestamp_ns()
             linkage = brackets_for(host).report_linkage(fields)
+            if linkage.get("closed") and status not in TERMINAL_ORDER_STATUSES:
+                # A delayed accepted/updated row for a bracket leg that is
+                # already closed locally must not reopen it (terminal->working).
+                return None
             return OrderStatusReport(
                 account_id=host.account_id,
                 instrument_id=instrument_id,
