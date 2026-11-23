@@ -464,7 +464,20 @@ fn flatten_side(net: i64) -> &'static str {
     rithmic_exec::flatten_side(net)
 }
 
+#[pyfunction]
+fn bracket_ticks(
+    reference: i64,
+    exit: i64,
+    tick: i64,
+    buy: bool,
+    stop: bool,
+    initial: bool,
+) -> Option<i32> {
+    rithmic_exec::bracket::ticks(reference, exit, tick, buy, stop, initial)
+}
+
 pub(super) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(bracket_ticks, m)?)?;
     m.add_class::<PyOrderPlantPolicy>()?;
     m.add_class::<PyCommissionTable>()?;
     m.add_class::<PySeenKeyCache>()?;

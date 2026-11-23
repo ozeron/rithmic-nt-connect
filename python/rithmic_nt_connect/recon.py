@@ -37,6 +37,7 @@ from rithmic_nt_connect._orders import (
     slim_order_fields,
 )
 from rithmic_nt_connect._prices import price_from_wire
+from rithmic_nt_connect.brackets import brackets_for
 from rithmic_nt_connect.errors import VenueQueryUnavailable
 from rithmic_nt_connect.order_rows import (
     order_status_from_fields,
@@ -182,6 +183,7 @@ class WorkingOrdersDrain:
             # published with epoch 0 could be treated as stale (e.g. a fill's
             # order prerequisite). One policy for every report consumer.
             report_ts = ts_event or host._clock.timestamp_ns()
+            linkage = brackets_for(host).report_linkage(fields)
             return OrderStatusReport(
                 account_id=host.account_id,
                 instrument_id=instrument_id,
@@ -196,7 +198,18 @@ class WorkingOrdersDrain:
                 ts_accepted=report_ts,
                 ts_last=report_ts,
                 ts_init=host._clock.timestamp_ns(),
-                client_order_id=_client_order_id_for_tag(fields.get("user_tag")),
+                client_order_id=linkage.get(
+                    "client_order_id",
+                    (
+                        None
+                        if fields.get("original_basket_id")
+                        and fields.get("original_basket_id") != fields.get("basket_id")
+                        else _client_order_id_for_tag(fields.get("user_tag"))
+                    ),
+                ),
+                parent_order_id=linkage.get("parent_order_id"),
+                linked_order_ids=linkage.get("linked_order_ids"),
+                contingency_type=linkage.get("contingency_type"),
                 price=price,
                 trigger_price=trigger,
                 trigger_type=trigger_type_from_fields(fields),

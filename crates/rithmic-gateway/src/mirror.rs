@@ -183,6 +183,8 @@ mirror!(
         notify_type_name,
         status,
         basket_id,
+        original_basket_id,
+        linked_basket_ids,
         exchange_order_id,
         user_tag,
         account_id,

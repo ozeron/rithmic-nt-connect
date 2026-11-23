@@ -238,6 +238,8 @@ def order_notification_to_fields(d: Mapping[str, Any]) -> dict[str, Any]:
         "notify_type_name": d.get("notify_type_name"),
         "status": d.get("status"),
         "basket_id": d.get("basket_id"),
+        "original_basket_id": d.get("original_basket_id"),
+        "linked_basket_ids": d.get("linked_basket_ids"),
         "exchange_order_id": d.get("exchange_order_id"),
         "user_tag": d.get("user_tag"),
         "account_id": d.get("account_id"),

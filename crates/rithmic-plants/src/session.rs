@@ -1886,6 +1886,8 @@ mod drain_tests {
             notify_type_name: None,
             status: None,
             basket_id: Some("B1".into()),
+            original_basket_id: None,
+            linked_basket_ids: None,
             exchange_order_id: None,
             user_tag: None,
             account_id: None,

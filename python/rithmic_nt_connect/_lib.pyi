@@ -425,3 +425,7 @@ class Session:
 
     # -- account resolution -------------------------------------------------
     def resolved_account(self) -> dict[str, Any] | None: ...
+
+def bracket_ticks(
+    reference: int, exit: int, tick: int, buy: bool, stop: bool, initial: bool
+) -> int | None: ...

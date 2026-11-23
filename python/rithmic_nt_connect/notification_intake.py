@@ -119,16 +119,20 @@ class VenueNotificationIntake:
             if action.quantity is not None
             else order.quantity
         )
-        prec = int(order.price.precision) if order.has_price else None
-        if action.price is not None:
+        prec = (
+            int(order.price.precision)
+            if getattr(order, "price", None) is not None
+            else None
+        )
+        if action.price is not None and getattr(order, "has_price", False):
             price = price_from_wire(action.price, prec)
-        elif order.has_price:
+        elif getattr(order, "price", None) is not None:
             price = order.price
         else:
             price = None
-        if action.trigger is not None:
+        if action.trigger is not None and getattr(order, "has_trigger_price", False):
             trigger = price_from_wire(action.trigger, prec)
-        elif order.has_trigger_price:
+        elif getattr(order, "trigger_price", None) is not None:
             trigger = order.trigger_price
         else:
             trigger = None
