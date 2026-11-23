@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-23T13:25:04.499748+00:00",
+  "source_commit": "c1ec689023855fad8001752b85380288cbec2528",
+  "base_commit": "7c567b424997a149fad6349ca6620ed7b6870234",
+  "branch": "feat/nt2-brackets-live",
+  "result": "offline_verified_release_qualification_pending",
+  "runner": "owner-authorized sequential focused local Python tests; macOS sandbox denies network; credential env removed",
+  "artifacts": "/private/mnt/DATA/tmp/w20-brackets",
+  "test_total": 367,
+  "gates": [
+    {
+      "name": "w20-native-brackets",
+      "tests_passed": 35,
+      "exit_code": 0,
+      "receipt": "/private/mnt/DATA/tmp/w20-brackets/receipts/w20-native-brackets.json",
+      "receipt_sha256": "0f751884096d36a0551e7b1328696b24d4f26013b56c390997902918f09e6fd4",
+      "verification": "FRESH",
+      "duration_s": 1.1
+    },
+    {
+      "name": "w20-execution-regressions",
+      "tests_passed": 283,
+      "exit_code": 0,
+      "receipt": "/private/mnt/DATA/tmp/w20-brackets/receipts/w20-execution-regressions.json",
+      "receipt_sha256": "2ecab6449d7b65f330c84b83f7143b15a8256cccde732418ade6a9020d953679",
+      "verification": "FRESH",
+      "duration_s": 3.7
+    },
+    {
+      "name": "w20-wire-and-fake-session",
+      "tests_passed": 49,
+      "exit_code": 0,
+      "receipt": "/private/mnt/DATA/tmp/w20-brackets/receipts/w20-wire-and-fake-session.json",
+      "receipt_sha256": "101061d675ee0937b7e817d0c9a86d365fa59211dc4732c52b6b2eda4914b188",
+      "verification": "FRESH",
+      "duration_s": 1.4
+    }
+  ],
+  "checks": [
+    "ruff check passed",
+    "ruff format --check passed",
+    "ty check passed",
+    "STATUS scoreboard passed",
+    "wheel RECORD and all packaged Python sources match"
+  ],
+  "wheel": {
+    "path": "/private/mnt/DATA/tmp/w20-brackets/wheels/rithmic_nt_connect-0.1.0-cp313-cp313-macosx_11_0_arm64.whl",
+    "version": "0.1.0",
+    "sha256": "e89c43963884924d98ca9c3fd1f37bc565172e5a9aed1e32d535041231c60935",
+    "platform": "macosx_11_0_arm64 cp313",
+    "profile": "dev",
+    "features": [
+      "python",
+      "extension-module",
+      "testing"
+    ],
+    "build_job_id": "892ccb81fcf0498c",
+    "build_artifacts": "/private/mnt/DATA/tmp/central-run-1795439223845183000",
+    "native_extension_sha256": "a41ebb8bee8813b287294bb55b6008524eef87d52532f0789f39bcafa884f5fd",
+    "note": "Native extension built once; final Python sources repacked with regenerated RECORD. No further Cargo builds after owner restriction."
+  },
+  "native_source_sha256": {
+    "crates/rithmic-exec/src/bracket.rs": "dc223fbc184314b87b6910af7cf9b035b7739b44a515e5347d74bea5b363889d",
+    "crates/rithmic-exec/src/lib.rs": "996e4f9610791e91c0218c2e71a25fa01463a42da7f2dfc9834ad7e6850c9097",
+    "crates/rithmic-gateway/src/mirror.rs": "443347f378df3e3387e4d5046966d5f503dec9ff881bbbfae56e9ab6df6e4c84",
+    "crates/rithmic-gateway/src/testing.rs": "3be4af6da59e9b984e78348464b30d68c30fdab1e735ff57296f40d38b859fba",
+    "crates/rithmic-host/src/dto.rs": "809370a660e73e78288fb2d439292b3351653e24cd32dbba215db521a2c9fad5",
+    "crates/rithmic-nt-connect/src/python/exec.rs": "57a4bbfde3b8b8678fe704bc715ff466b90b7e0f2bd1f80e697559e010b8a794",
+    "crates/rithmic-nt-connect/src/python/mod.rs": "ba099a7c70d7c9be551319fffc7c71ee6e376f574f2a3929b746fd51cfaf086a",
+    "crates/rithmic-nt-connect/src/python/testing.rs": "33b7be6d2e5808c31a9c0e23b88c93f5617d777fbd1bda20b7c4ad63bf7d718e",
+    "crates/rithmic-plants/src/dto.rs": "f77e099c347602b74d5281b68f3fb513f8617ecd54552b6e6cd150409eb169e3",
+    "crates/rithmic-plants/src/session.rs": "dcb17a83b4a5d726b06c1fa65dec0ff8e2beefb4255febda7e5b88d45244882d",
+    "proto/rithmic_gateway/v1/session.proto": "2bf22c5a530ea4f5cb7fb8e56e43c90e211fec6a36e75b72baa2a3f558cfe199"
+  },
+  "limitations": [
+    "No Rithmic network, credentials, login or venue acceptance in this task.",
+    "Testing wheel is not a release artifact; parent must route release build and Rust Cargo tests.",
+    "Central runner job c56cad53a224474c failed exit 75: environment export assumes dev/live groups, connector has no live group. No central runner edits.",
+    "One stop/target venue basket each; multiple baskets for a logical exit latch the adapter. Restart requires persisted parent-linked NT orders."
+  ],
+  "pending_commands": [
+    "cargo test --locked -p rithmic-exec",
+    "cargo test --locked -p rithmic-host -p rithmic-plants -p rithmic-gateway --features rithmic-host/testing,rithmic-gateway/testing",
+    "maturin build --release -i python3.13 --out \"$OUT/wheels\""
+  ]
+}
