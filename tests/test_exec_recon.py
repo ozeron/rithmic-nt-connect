@@ -574,13 +574,29 @@ def _updated_action(
 @pytest.mark.parametrize(
     ("order", "action", "want_qty", "want_px", "want_trig"),
     [
-        # Action wins on every term.
+        # Action wins on every term the order can represent.
         (
-            _priced_order(qty=1, price="21000.0"),
+            _priced_order(qty=1, price="21000.0", trigger="20998.0"),
             _updated_action(qty=3, px=21001.0, trig=20999.0),
             3,
             "21001.0",
             "20999.0",
+        ),
+        # A stop-market cannot accept the wire's generic price field.
+        (
+            _priced_order(qty=2, price=None, trigger="20995.0"),
+            _updated_action(qty=1, px=21000.0, trig=20996.0),
+            1,
+            None,
+            "20996.0",
+        ),
+        # A plain limit cannot acquire a stop trigger from a generic row.
+        (
+            _priced_order(qty=1, price="21000.0"),
+            _updated_action(trig=20999.0),
+            1,
+            "21000.0",
+            None,
         ),
         # Order terms fill in where the notification is silent.
         (

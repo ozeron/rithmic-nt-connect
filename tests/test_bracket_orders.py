@@ -19,6 +19,7 @@ from nautilus_trader.model import (
     Quantity,
     StrategyId,
     TimeInForce,
+    VenueOrderId,
 )
 from rithmic_nt_connect._orders import order_notification_to_fields
 from rithmic_nt_connect.brackets import brackets_for
@@ -515,3 +516,29 @@ def test_tick_directions_are_lossless_for_both_sides(monkeypatch, entry_side):
         orders[2].price = 20980
     _submit(client, orders)
     assert session.placed[0][-2:] == (40, 80)
+
+
+def test_reconnect_drain_rebinds_both_legs_before_modify(monkeypatch):
+    client, session, orders = _lifecycle_client(monkeypatch)
+    del client._native_brackets
+    client._venue_ids.clear()
+    client._client_ids.clear()
+    reports = []
+    monkeypatch.setattr(client, "_send_order_status_report", reports.append)
+    client._apply_drain_rows(
+        [_notification("SL", "accepted"), _notification("TP", "accepted")]
+    )
+    assert {str(report.client_order_id) for report in reports} == {"SL", "TP"}
+    assert all(str(report.parent_order_id) == "E" for report in reports)
+    assert client._venue_id_for_order(orders[1]) == "BS"
+    assert client._venue_id_for_order(orders[2]) == "BT"
+    command = SimpleNamespace(
+        client_order_id=ClientOrderId("SL"),
+        venue_order_id=VenueOrderId("BS"),
+        instrument_id=NQ,
+        quantity=None,
+        price=None,
+        trigger_price=21000.25,
+    )
+    asyncio.run(client._modify_order(command))
+    assert session.adjusted == [("stop", "B", 0, None)]
