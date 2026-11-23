@@ -318,9 +318,14 @@ def _lifecycle_client(monkeypatch):
         order.is_closed = order.status == OrderStatus.FILLED
         client.events.append(("filled", str(order.client_order_id)))
 
+    def update(order, venue, qty, price, trigger, *args):
+        # Venue-anchored exit terms land on the cached order, as OrderUpdated would.
+        order.price, order.trigger_price = price, trigger
+
     monkeypatch.setattr(client, "generate_order_accepted", accept)
     monkeypatch.setattr(client, "generate_order_canceled", cancel)
     monkeypatch.setattr(client, "generate_order_filled", fill)
+    monkeypatch.setattr(client, "generate_order_updated", update)
     for cid in ["E", "SL", "TP"]:
         client._dispatch_order_event(_notification(cid, "accepted"))
     client._dispatch_order_event(
@@ -486,6 +491,31 @@ def test_delayed_nonterminal_row_never_reopens_a_closed_leg(monkeypatch, kind):
     canceled = order_notification_to_fields(_notification("SL", "canceled"))
     report = client._drain_row_from_fields(canceled, 1_000_000_000).report
     assert report is not None and str(report.client_order_id) == "SL"
+
+
+def test_accepted_exit_publishes_fill_anchored_venue_terms(monkeypatch):
+    """Rithmic re-anchors exits to the fill; the cache must learn the venue terms."""
+    session = _BracketSession()
+    client = _client(session, monkeypatch)
+    client.account_id = AccountId("RITHMIC-A")
+    orders = _bracket()
+    _submit(client, orders)
+    updates = []
+    monkeypatch.setattr(
+        client,
+        "generate_order_updated",
+        lambda order, venue, qty, price, trigger, *a: updates.append(
+            (str(order.client_order_id), price, trigger)
+        ),
+    )
+    monkeypatch.setattr(client, "generate_order_accepted", lambda *a: None)
+    for cid in ["E", "SL", "TP"]:
+        client._dispatch_order_event(_notification(cid, "accepted"))
+    # Entry and the unchanged target publish nothing; the re-anchored stop does.
+    assert [(cid, float(t)) for cid, _p, t in updates if t is not None] == [
+        ("SL", 20990.25)
+    ]
+    assert all(cid != "E" for cid, *_ in updates)
 
 
 def test_partial_target_recon_keeps_partial_status(monkeypatch):
